@@ -1,0 +1,18 @@
+[package]
+name = "kpa"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A small read-only KeePass agent"
+
+[dependencies]
+keepass = { version = "0.15.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+humantime-serde = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+uuid = "1"
+
+[dev-dependencies]

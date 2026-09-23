@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nix is the single source of truth for the toolchain (see
+      # flake.nix): cargo/rustc/clippy/rustfmt, plus keepassxc-cli and
+      # python3+pykeepass for tests/fixture.sh. Using `nix develop` here
+      # instead of a separate Rust-only action means CI runs the exact
+      # same versions as `nix develop -c cargo test` locally — nothing to
+      # keep in sync by hand.
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+
+      # Nix caches the toolchain itself; this caches cargo's own build
+      # artifacts (registry downloads + target/) across runs, keyed on
+      # Cargo.lock so a dependency bump invalidates it automatically.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        run: nix develop -c cargo fmt -- --check
+
+      - name: cargo clippy
+        run: nix develop -c cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: nix develop -c cargo test
+
+      - name: cargo build --release
+        run: nix develop -c cargo build --release
