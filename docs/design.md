@@ -142,8 +142,12 @@ The last one is the version-skew rejection: the client sent `"v":1`, the
 daemon is actually on `2`, and its own `v` in the response is what makes
 that visible — no extra `client_v`/`daemon_v` fields needed.
 
-**`list` never returns secrets** — it is an index. The launcher does its own
-fuzzy matching; kpa stays dumb and returns everything.
+**`list` never returns secrets** — it is an index. That holds for any field
+the user marked protected in their KeePass client, not just `Password`: a
+protected `Title`/`UserName`/`URL` is omitted, not de-protected — protection
+is a property of the field, not of which field name it happens to be. The
+launcher does its own fuzzy matching; kpa stays dumb and returns everything
+else.
 
 ## Concurrency and file freshness
 
@@ -200,7 +204,14 @@ strongest argument for owning it natively rather than shelling out.
 ## Lock policy
 
 Locking means: drop the `Database`, zeroize what can be zeroized, update the
-tray icon.
+tray icon. "What can be zeroized" is narrower than it sounds: key material
+and protected field values are handled by `zeroize`/`secrecy` types and are
+actually gone after the drop, but decrypted plaintext that passed through an
+ordinary `Vec<u8>`/`String` on the way there — most of it inside `keepass`
+itself, decrypting and decompressing the database payload — persists in
+freed heap pages until the allocator reuses them. Lock stops serving the
+database and clears what it can; it is not a guarantee that no trace of the
+plaintext remains in the process's memory.
 
 | Trigger      | Source                                                                        |
 | ------------ | ----------------------------------------------------------------------------- |
@@ -230,15 +241,20 @@ time, not caller identity — see `background.md` § "Security boundary".
 
 Held while unlocked:
 
-| Item               | Held?                                                   |
-| ------------------ | ------------------------------------------------------- |
-| Master password    | No — zeroize immediately after key derivation           |
-| Keyfile path       | Yes (a path; harmless)                                  |
-| Keyfile contents   | No — read at unlock, zeroize after                      |
-| Decrypted database | **Yes** — the real exposure, same as any KeePass client |
+| Item               | Held?                                                    |
+| ------------------ | --------------------------------------------------------- |
+| Master password    | No — zeroized by kpa immediately after key derivation¹    |
+| Keyfile path       | Yes (a path; harmless)                                     |
+| Keyfile contents   | No — read at unlock, zeroize after                         |
+| Decrypted database | **Yes** — the real exposure, same as any KeePass client    |
 
 `DatabaseKey` implements `Zeroize` and `Drop`, so the credential side is handled
-by the library.
+by the library. ¹This covers the copy kpa itself holds — the `String` the
+prompt returns — which it wraps in `Zeroizing` and never touches with a
+plain `&str`. It does not cover `rpassword`'s own internal read buffer,
+which accumulates the typed password character-by-character and is dropped
+unwiped regardless of what kpa does with its result; that residual copy is
+outside kpa's control.
 
 Two Linux properties that help here, worth verifying on the machine
 running kpa:
@@ -246,8 +262,11 @@ running kpa:
 - **`/proc/sys/kernel/yama/ptrace_scope` is `1`** on most modern distros —
   only a parent can ptrace a child, so a random same-uid process cannot
   attach to kpa.
-- **zram swap** (RAM-backed, compressed) means key material cannot be paged
-  to disk, and `mlock` buys nothing on top of that.
+- **zram swap** (RAM-backed, compressed) reduces the chance that key
+  material is paged to disk, but doesn't eliminate it — hibernation, a zram
+  writeback device, or any secondary disk-backed swap all defeat it. This is
+  a property of the machine's configuration, not one kpa's process can
+  guarantee about itself.
 
 `PR_SET_DUMPABLE=0` at startup prevents core dumps from capturing the
 decrypted database or key material.

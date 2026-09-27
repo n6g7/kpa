@@ -564,6 +564,7 @@ dependencies = [
  "thiserror",
  "toml",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

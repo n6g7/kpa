@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use kpa::vault;
+use zeroize::Zeroizing;
 
 #[derive(Parser)]
 #[command(name = "kpa", about = "A small read-only KeePass agent")]
@@ -60,7 +61,10 @@ fn run() -> Result<(), AppError> {
 }
 
 fn probe(path: &Path, keyfile: Option<&Path>) -> Result<(), AppError> {
-    let password = rpassword::prompt_password("Password: ")?;
+    // Zeroizing so this copy of the password is wiped on drop rather than
+    // left in freed heap — see the note on `vault::open` for what this
+    // does and doesn't cover.
+    let password = Zeroizing::new(rpassword::prompt_password("Password: ")?);
     // An empty response means "no password" rather than "password is the
     // empty string" — the only way to reach a keyfile-only database (the
     // fixture's `fixture-kf.kdbx`) from an interactive prompt that always
@@ -69,7 +73,7 @@ fn probe(path: &Path, keyfile: Option<&Path>) -> Result<(), AppError> {
     let password = if password.is_empty() {
         None
     } else {
-        Some(password.as_str())
+        Some(&password)
     };
 
     let db = vault::open(path, password, keyfile)?;

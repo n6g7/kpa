@@ -14,9 +14,7 @@
         pkgs = import nixpkgs { inherit system; };
       in
       {
-        # Just a devShell for now. `packages.default` (rustPlatform.buildRustPackage)
-        # comes in a later PR once there's something worth packaging — see
-        # docs/design.md's "Packaging" section and docs/plan.md.
+        # Just a devShell for now.
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             cargo

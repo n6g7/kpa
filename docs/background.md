@@ -140,8 +140,11 @@ confirming on the machine actually running kpa, rather than assumed:
 - **`/proc/sys/kernel/yama/ptrace_scope` is `1`** on most distros by
   default — only a parent process can `ptrace` a child, so a random
   same-uid process can't attach to an unlocked vault daemon.
-- **zram swap** (RAM-backed, compressed) means key material can't be paged
-  to disk, and `mlock` buys nothing on top of that.
+- **zram swap** (RAM-backed, compressed) reduces the chance that key
+  material is paged to disk, but doesn't eliminate it — hibernation, a zram
+  writeback device, or any secondary disk-backed swap all defeat it. This is
+  a property of the machine's configuration, not one kpa's process can
+  guarantee about itself.
 
 **Neither of these helps a TCP-RPC design like `keepmenu`'s** (#4). Its
 exposure is a pickle-based RPC reachable over a loopback socket — an

@@ -16,8 +16,10 @@ fn fixtures_dir() -> PathBuf {
 
 /// Build the fixtures (via `tests/fixture.sh`) on first use, once per test
 /// binary process. `fixture.sh` itself is idempotent (skips work if the
-/// files already exist), but `Once` also protects against two test
-/// binaries racing to create the same directory concurrently.
+/// files already exist). `Once` only dedupes calls within this one process
+/// — cargo runs test binaries as separate parallel processes, so it does
+/// not protect against two of them racing to create the same directory.
+/// Latent today because only one binary uses these fixtures.
 fn ensure_fixtures() -> PathBuf {
     let dir = fixtures_dir();
     FIXTURES_INIT.call_once(|| {

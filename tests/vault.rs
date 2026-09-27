@@ -9,10 +9,12 @@ mod common;
 use std::fs;
 
 use kpa::vault::{self, VaultError};
+use zeroize::Zeroizing;
 
 #[test]
 fn opens_with_the_right_password() {
-    let db = vault::open(&common::password_db(), Some(common::PASSWORD), None)
+    let password = Zeroizing::new(common::PASSWORD.to_string());
+    let db = vault::open(&common::password_db(), Some(&password), None)
         .expect("fixture should open with its real password");
 
     let entries = vault::list_entries(&db);
@@ -27,7 +29,8 @@ fn opens_with_the_right_password() {
 
 #[test]
 fn wrong_password_fails_cleanly() {
-    let result = vault::open(&common::password_db(), Some("definitely not it"), None);
+    let password = Zeroizing::new("definitely not it".to_string());
+    let result = vault::open(&common::password_db(), Some(&password), None);
 
     match result {
         Err(VaultError::WrongCredentials) => {}
@@ -46,7 +49,8 @@ fn opens_a_genuine_kdbx4_database() {
     // (built with pykeepass, since keepassxc-cli 2.7.12 can't produce one —
     // see tests/fixture.sh), and if `vault::open` ever regressed to only
     // handling KDBX3, this is what would catch it.
-    let db = vault::open(&common::kdbx4_db(), Some(common::PASSWORD), None)
+    let password = Zeroizing::new(common::PASSWORD.to_string());
+    let db = vault::open(&common::kdbx4_db(), Some(&password), None)
         .expect("a genuine KDBX4 fixture should open");
 
     let entries = vault::list_entries(&db);
@@ -69,8 +73,9 @@ fn keyfile_only_fixture_opens_via_keyfile() {
 #[test]
 fn missing_file_errors_cleanly() {
     let missing = common::password_db().with_file_name("does-not-exist.kdbx");
+    let password = Zeroizing::new(common::PASSWORD.to_string());
 
-    match vault::open(&missing, Some(common::PASSWORD), None) {
+    match vault::open(&missing, Some(&password), None) {
         Err(VaultError::NotFound(path)) => assert_eq!(path, missing),
         Err(other) => panic!("expected NotFound, got a different error: {other}"),
         Ok(_) => panic!("a nonexistent path should never open successfully"),
@@ -88,7 +93,8 @@ fn malformed_file_errors_without_panicking() {
     let truncated_bytes = &bytes[..bytes.len().min(24)];
     fs::write(&truncated, truncated_bytes).expect("failed to write truncated fixture");
 
-    let result = vault::open(&truncated, Some(common::PASSWORD), None);
+    let password = Zeroizing::new(common::PASSWORD.to_string());
+    let result = vault::open(&truncated, Some(&password), None);
 
     match result {
         Err(VaultError::Corrupt(_)) => {}
