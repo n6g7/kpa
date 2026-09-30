@@ -31,7 +31,7 @@ prompts, opens, and prints titles to stdout. Ships `tests/fixture.sh`.
 
 ## Step 2 — daemon and socket
 
-`proto.rs`, `server.rs`, `main.rs` dispatch. Ops: `status`, `unlock`, `lock`,
+`src/proto/`, `server.rs`, `main.rs` dispatch. Ops: `status`, `unlock`, `lock`,
 `list`. Socket at `$XDG_RUNTIME_DIR/kpa/sock`, mode `0600`, `v` field enforced
 with a clear error naming both versions. `probe` deleted.
 
@@ -83,8 +83,17 @@ submenu, Quit).
 `PR_SET_DUMPABLE=0` at startup, a zeroize audit, and `cargo-fuzz` against
 the JSON parser.
 
-- **Test:** fuzz `proto.rs` for a few minutes; malformed input must error,
-  never panic or hang the daemon.
+Partly pulled forward into step 2 after the September robustness and
+secret-hygiene reviews (`docs/review-2026-09-robustness.md`,
+`docs/review-2026-09-secrets.md`): `PR_SET_DUMPABLE=0`, the request-size
+cap, read/write timeouts, bounded connection handling, and a first zeroize
+pass already landed there. What remains for this step is `cargo-fuzz` and a
+repeat of the zeroize audit once `copy` and the clipboard exist.
+
+- **Test:** fuzz `src/proto/` for a few minutes; malformed input must
+  error, never panic or hang the daemon. (A million mutated requests
+  already produced no panics — see the robustness review — but that was a
+  one-off, not a harness in the tree.)
 - **After this:** done.
 
 ---

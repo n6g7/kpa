@@ -3,6 +3,12 @@
 //! `mod.rs` under `tests/common/` (rather than `tests/common.rs`) so cargo
 //! doesn't treat this as its own standalone test binary — it's a helper
 //! module, imported by the actual test files.
+//!
+//! Cargo compiles this module once per integration-test binary, so a
+//! helper only some binaries call (e.g. `tests/server.rs` doesn't need
+//! `keyfile_db`) shows up as dead code in the others. The allow is for that
+//! structural fact, not for genuinely unused fixtures.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -1,86 +1,254 @@
-//! CLI dispatch.
-//!
-//! Just `probe` for now — the real `serve`/client split (`docs/design.md`
-//! § Components) lands in step 2, at which point `probe` is deleted per the
-//! plan (`docs/plan.md` step 2: "`probe` deleted").
+//! CLI dispatch: `serve` runs the daemon; every other subcommand sends one
+//! request over the socket and prints the raw JSON response line
+//! (`docs/design.md`'s "hand-debuggable with socat" argument, applied to
+//! the CLI itself rather than just `socat`). `probe` is gone — the real
+//! serve/client split now exists, per `docs/plan.md` step 2.
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use kpa::vault;
-use zeroize::Zeroizing;
+use kpa::config::Config;
+use kpa::proto::{self, ListRequest, LockRequest, Op, Request, UnlockRequest};
+use kpa::server::{self, Server};
 
 #[derive(Parser)]
 #[command(name = "kpa", about = "A small read-only KeePass agent")]
 struct Cli {
+    /// Socket path. Defaults to `$XDG_RUNTIME_DIR/kpa/sock`.
+    #[arg(long, global = true)]
+    socket: Option<PathBuf>,
+
+    /// Config file path, `serve` only. Defaults to
+    /// `$XDG_CONFIG_HOME/kpa/config.toml`.
+    #[arg(short, long, global = true)]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Throwaway: open a .kdbx and print each entry's title, one per line.
-    /// Exists only to prove `keepass` opens a real database before the
-    /// socket protocol is built around it (docs/plan.md step 1).
-    Probe {
-        /// Path to the .kdbx file to open.
-        path: PathBuf,
-
-        /// Optional keyfile to unlock with, alongside (or instead of) the
-        /// password prompt.
-        #[arg(long)]
-        keyfile: Option<PathBuf>,
-    },
+    /// Run the daemon: bind the socket and serve requests until killed.
+    Serve,
+    /// Aggregate lock state of every configured database.
+    Status,
+    /// Unlock one database, prompting for its password.
+    Unlock { db: String },
+    /// Lock one database, or every database if none is given.
+    Lock { db: Option<String> },
+    /// List entries: every unlocked database, or just one.
+    #[command(visible_alias = "ls")]
+    List { db: Option<String> },
 }
 
-/// Errors `main` can print. A thin wrapper rather than `Box<dyn Error>` so
-/// the `?` operator stays usable in `run()` without losing the "why" —
-/// matches the "no `.unwrap()`/`.expect()`, use `Result` throughout" rule.
-#[derive(Debug, thiserror::Error)]
-enum AppError {
-    #[error("reading password: {0}")]
-    PasswordPrompt(#[from] std::io::Error),
-
-    #[error("{0}")]
-    Vault(#[from] vault::VaultError),
-}
-
-fn main() {
-    if let Err(err) = run() {
-        eprintln!("error: {err}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<(), AppError> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    let socket_path = match cli.socket {
+        Some(path) => path,
+        None => match default_socket_path() {
+            Ok(path) => path,
+            Err(err) => {
+                eprintln!("error: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
     match cli.command {
-        Command::Probe { path, keyfile } => probe(&path, keyfile.as_deref()),
+        Command::Serve => run_serve(&socket_path, cli.config),
+        Command::Status => run_client(&socket_path, Op::Status),
+        Command::Unlock { db } => run_client(&socket_path, Op::Unlock(UnlockRequest { db })),
+        Command::Lock { db } => run_client(&socket_path, Op::Lock(LockRequest { db })),
+        Command::List { db } => run_client(&socket_path, Op::List(ListRequest { db })),
     }
 }
 
-fn probe(path: &Path, keyfile: Option<&Path>) -> Result<(), AppError> {
-    // Zeroizing so this copy of the password is wiped on drop rather than
-    // left in freed heap — see the note on `vault::open` for what this
-    // does and doesn't cover.
-    let password = Zeroizing::new(rpassword::prompt_password("Password: ")?);
-    // An empty response means "no password" rather than "password is the
-    // empty string" — the only way to reach a keyfile-only database (the
-    // fixture's `fixture-kf.kdbx`) from an interactive prompt that always
-    // asks. `vault::open` still errors cleanly (EmptyKey, surfaced as
-    // `Corrupt`) if both password and keyfile end up absent.
-    let password = if password.is_empty() {
-        None
-    } else {
-        Some(&password)
-    };
+fn default_socket_path() -> Result<PathBuf, String> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|dir| PathBuf::from(dir).join("kpa").join("sock"))
+        .ok_or_else(|| "XDG_RUNTIME_DIR is not set; pass --socket explicitly".to_string())
+}
 
-    let db = vault::open(path, password, keyfile)?;
+fn default_config_path() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(dir).join("kpa/config.toml"));
+    }
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".config/kpa/config.toml"))
+        .ok_or_else(|| {
+            "neither XDG_CONFIG_HOME nor HOME is set; pass --config explicitly".to_string()
+        })
+}
 
-    for entry in vault::list_entries(&db) {
-        println!("{}", entry.title.as_deref().unwrap_or("(untitled)"));
+/// Mark this process non-dumpable (`PR_SET_DUMPABLE=0`), before anything
+/// secret is loaded. A crash then writes no core file readable by the
+/// user — with the decrypted vault in it — and, as a side effect, other
+/// processes running as the same user can no longer ptrace it or read its
+/// `/proc/<pid>/mem`, whatever the host's Yama setting.
+///
+/// That's kpa's claim only up to the host's `fs.suid_dumpable`: with it set
+/// to `2`, the kernel still writes a core for a non-dumpable process, just
+/// root-owned. Like the swap and ptrace notes in `docs/design.md`, that
+/// part is a property of the machine, not of kpa.
+fn forbid_core_dumps() -> rustix::io::Result<()> {
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+}
+
+fn run_serve(socket_path: &Path, config_path: Option<PathBuf>) -> ExitCode {
+    if let Err(err) = forbid_core_dumps() {
+        eprintln!("error: marking the daemon non-dumpable: {err}");
+        return ExitCode::FAILURE;
     }
 
-    Ok(())
+    let config_path = match config_path {
+        Some(path) => path,
+        None => match default_config_path() {
+            Ok(path) => path,
+            Err(err) => {
+                eprintln!("error: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    let config = match std::fs::read_to_string(&config_path) {
+        Ok(text) => match Config::parse(&text) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("error: parsing {}: {err}", config_path.display());
+                return ExitCode::FAILURE;
+            }
+        },
+        Err(err) => {
+            eprintln!("error: reading {}: {err}", config_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let listener = match server::bind_socket(socket_path) {
+        Ok(listener) => listener,
+        Err(err) => {
+            eprintln!("error: binding {}: {err}", socket_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // stdout, matching the operation log in `server::log_response` —
+    // errors still go to stderr. Rust line-buffers stdout even when it
+    // isn't a terminal, so lines reach a pipe as they happen. Written with
+    // the error ignored rather than `println!`, which panics if stdout has
+    // been closed: nobody reading the log is no reason to stop serving.
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "kpa: listening on {}",
+        socket_path.display()
+    );
+    server::serve(Arc::new(Server::new(config)), listener);
+    ExitCode::SUCCESS
+}
+
+fn run_client(socket_path: &Path, op: Op) -> ExitCode {
+    let request = Request {
+        v: proto::VERSION,
+        op,
+    };
+
+    match send_request(socket_path, &request) {
+        Ok(line) => {
+            print!("{line}");
+            // `Response` (server.rs's return type) deliberately has no
+            // generic `Deserialize` — a successful `Unlock` and a
+            // successful `Lock { db: Some(_) }` serialize identically, so
+            // decoding one back into that type isn't meaningful without
+            // already knowing which request produced it. All the client
+            // needs is the one shared `ok` field, read out of a bare
+            // `Value` instead.
+            let ok = serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .and_then(|value| value.get("ok").and_then(serde_json::Value::as_bool))
+                .unwrap_or(false);
+            if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        // Only a failed connect means the daemon may not be running. Once
+        // connected, a missing reply means it hit a problem with this
+        // request, and suggesting it's down would send someone looking in
+        // the wrong place.
+        Err(err @ ClientError::Connect(..)) => {
+            eprintln!("error: {err} (is `kpa serve` running?)");
+            ExitCode::FAILURE
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Errors sending one request and reading its response. A thin wrapper
+/// rather than `Box<dyn Error>` so `?` stays usable while keeping the
+/// "why" in each variant.
+#[derive(Debug, thiserror::Error)]
+enum ClientError {
+    #[error("connecting to {0}: {1}")]
+    Connect(PathBuf, std::io::Error),
+    #[error("encoding request: {0}")]
+    Encode(serde_json::Error),
+    #[error("sending request: {0}")]
+    Send(std::io::Error),
+    #[error("reading response: {0}")]
+    Read(std::io::Error),
+    #[error(
+        "the daemon accepted the request but closed the connection without \
+         responding; its log may say why"
+    )]
+    EmptyResponse,
+}
+
+/// Sends one request and returns the daemon's raw response line, newline
+/// included. Deliberately not decoded into a typed `Response` — see the
+/// comment in `run_client` on why that type has no generic `Deserialize`.
+fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|err| ClientError::Connect(socket_path.to_path_buf(), err))?;
+
+    let text = serde_json::to_string(request).map_err(ClientError::Encode)?;
+    writeln!(stream, "{text}").map_err(ClientError::Send)?;
+
+    let mut line = String::new();
+    let n = BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(ClientError::Read)?;
+    if n == 0 {
+        return Err(ClientError::EmptyResponse);
+    }
+
+    Ok(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use rustix::process::{DumpableBehavior, dumpable_behavior};
+
+    use super::forbid_core_dumps;
+
+    /// `docs/design.md` § Security promises the daemon is non-dumpable;
+    /// this is what makes that a fact about the code rather than the doc.
+    #[test]
+    fn the_daemon_marks_itself_non_dumpable() {
+        forbid_core_dumps().expect("prctl(PR_SET_DUMPABLE) should succeed");
+        assert_eq!(
+            dumpable_behavior().expect("prctl(PR_GET_DUMPABLE) should succeed"),
+            DumpableBehavior::NotDumpable
+        );
+    }
 }

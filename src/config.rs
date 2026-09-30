@@ -1,14 +1,7 @@
 //! TOML config parsing, matching the shape settled in `docs/design.md`
-//! § Configuration. Not wired to anything yet — `probe` takes a raw path
-//! instead of reading `[[database]]` entries, deliberately, so this module
-//! stays independently testable (see step 1's brief in `docs/plan.md`).
-//!
-//! Nothing in `main.rs` constructs a `Config` yet (that starts in step 2,
-//! once there's a daemon to configure), so the compiler sees this whole
-//! module as dead code from a binary-crate point of view. The module-level
-//! allow says so explicitly instead of leaving genuinely unused code as an
-//! unexplained warning suppression.
-#![allow(dead_code)]
+//! § Configuration. `main.rs`'s `serve` subcommand reads and parses this at
+//! startup; `server::Server` owns the resulting `Config` for the lifetime
+//! of the daemon.
 
 use std::path::PathBuf;
 use std::time::Duration;

@@ -102,3 +102,35 @@ fn malformed_file_errors_without_panicking() {
         Ok(_) => panic!("a truncated file should never open successfully"),
     }
 }
+
+/// A legacy KDB file whose header parses far enough to reach `keepass`'s
+/// short-field reads, which index past the end of the buffer and panic
+/// (docs/review-2026-09-robustness.md finding 8). `vault::open` must turn
+/// that into `Corrupt` rather than unwinding into its caller. Generated
+/// here, so no committed fixture: a 124-byte header (KDB signatures, flags
+/// = 2) plus 16 zero bytes, with a keyfile and no password.
+#[test]
+fn a_panicking_parse_is_reported_as_corrupt() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+
+    let mut kdb = Vec::with_capacity(140);
+    kdb.extend_from_slice(&0x9AA2_D903u32.to_le_bytes());
+    kdb.extend_from_slice(&0xB54B_FB65u32.to_le_bytes());
+    kdb.extend_from_slice(&2u32.to_le_bytes());
+    kdb.resize(140, 0);
+    let db_path = dir.path().join("legacy.kdb");
+    fs::write(&db_path, &kdb).expect("failed to write kdb");
+
+    let keyfile = dir.path().join("key.xml");
+    fs::write(
+        &keyfile,
+        "<KeyFile><Meta><Version>1.00</Version></Meta><Key><Data>AAAA</Data></Key></KeyFile>",
+    )
+    .expect("failed to write keyfile");
+
+    match vault::open(&db_path, None, Some(&keyfile)) {
+        Err(VaultError::Corrupt(_)) => {}
+        Err(other) => panic!("expected Corrupt, got a different error: {other}"),
+        Ok(_) => panic!("a 140-byte KDB should never open successfully"),
+    }
+}

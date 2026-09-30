@@ -20,9 +20,10 @@ over all entries, and a CLI that reuses an already-unlocked session.
 **Read-only is the defining property.** It is what makes this design safe to
 run alongside any KeePass client that already has write access to the same
 files (see `background.md` § Direction for why that guarantee matters). The
-guarantee is structural:
-`proto.rs`'s `Request` enum has no write variants, so there is no code path
-that can modify a database.
+guarantee is structural: the protocol's op enum (`Op`, in
+`src/proto/request.rs`) has no write variants, so there is no code path
+that can modify a database. `keepass` is also built without its
+`save_kdbx4` feature, which gives the claim a second leg.
 
 ## Settled decisions
 
@@ -133,6 +134,7 @@ custom-attribute dump in v1.
 {"ok":true,"v":1,"copied":"password","expires_in":30}
 
 {"ok":false,"v":1,"error":"locked","db":"personal"}
+{"ok":false,"v":1,"error":"unlock_in_progress","db":"personal"}
 {"ok":false,"v":1,"error":"stale","db":"personal","detail":"database changed on disk"}
 
 {"ok":false,"v":2,"error":"version_mismatch","detail":"client sent v1; restart the daemon or upgrade the client"}
@@ -141,6 +143,20 @@ custom-attribute dump in v1.
 The last one is the version-skew rejection: the client sent `"v":1`, the
 daemon is actually on `2`, and its own `v` in the response is what makes
 that visible — no extra `client_v`/`daemon_v` fields needed.
+
+Two `unlock` errors exist because unlocking is slow (it waits on a human
+and a KDF) and happens outside the vault mutex:
+
+- **`unlock_in_progress`** — an `unlock` for the same database is already
+  prompting. The second request is refused rather than opening a second
+  prompt; retry once the first resolves.
+- **`locked`** from `unlock` — a `lock` arrived while this `unlock` was
+  prompting or deriving. The lock wins: the database the unlock opened is
+  discarded rather than silently reopening a vault the user just locked.
+
+A request line is capped at 64 KiB and must arrive within 5 seconds; a
+line over the cap is answered `malformed_request`, and a connection that
+sends nothing is dropped.
 
 **`list` never returns secrets** — it is an index. That holds for any field
 the user marked protected in their KeePass client, not just `Password`: a
@@ -168,16 +184,24 @@ rename rather than an in-place write.
 Rules:
 
 1. **Never create a lock file. Never hold an fd.** Open, read whole file, close,
-   parse. A few MB, once per unlock.
-2. **Never write.** Guaranteed by `proto.rs`.
+   parse. A few MB, once per unlock. One known exception, upstream: a file
+   with pathological KDF parameters can make `keepass` hang mid-unlock, and
+   that unlock holds its fd (and a core) for as long as it hangs.
+2. **Never write.** Guaranteed by the `Op` enum in `src/proto/request.rs`.
 3. **Freshness guard:** record `(dev, ino, mtime, size)` at unlock; re-stat before
    serving. On change — another client saving, or a sync tool landing a new
    copy — drop the in-memory database and return `stale`, requiring re-unlock.
    Serving stale entries silently is the worse failure. Anyone syncing their
    vault across machines makes this a real case, not a theoretical one.
-4. **Concurrency:** accept connections concurrently, serialize vault access behind
-   a `Mutex`. Requests are sub-millisecond; parallelism is not needed and a single
-   state machine removes a class of bugs.
+4. **Concurrency:** accept connections concurrently (bounded — a flood is
+   refused rather than turned into unbounded threads, and a failed thread
+   spawn drops that one connection instead of the daemon), serialize vault
+   access behind a `Mutex`. Most requests are sub-millisecond. `unlock` is
+   the exception — milliseconds to seconds, waiting on the prompt and the
+   KDF — and it deliberately releases the mutex for that slow part so other
+   requests keep being answered. That window is what the per-database lock
+   epoch guards: every `lock` bumps it, and an `unlock` only installs its
+   database if the epoch is unchanged since it started.
 
 ## Clipboard
 
@@ -204,14 +228,22 @@ strongest argument for owning it natively rather than shelling out.
 ## Lock policy
 
 Locking means: drop the `Database`, zeroize what can be zeroized, update the
-tray icon. "What can be zeroized" is narrower than it sounds: key material
-and protected field values are handled by `zeroize`/`secrecy` types and are
-actually gone after the drop, but decrypted plaintext that passed through an
-ordinary `Vec<u8>`/`String` on the way there — most of it inside `keepass`
-itself, decrypting and decompressing the database payload — persists in
-freed heap pages until the allocator reuses them. Lock stops serving the
-database and clears what it can; it is not a guarantee that no trace of the
-plaintext remains in the process's memory.
+tray icon. A lock also cancels any `unlock` still in flight for that
+database (see § Protocol). "What can be zeroized" is narrower than it
+sounds:
+
+- **Cleared:** protected field values (`secrecy` types), `DatabaseKey`'s
+  own copies of the password and keyfile, and every copy kpa itself makes
+  — the prompt's output buffer, `list` entries, and the serialized
+  response buffer are all zeroized on drop.
+- **Not cleared, upstream:** unprotected field values (plain `String`s
+  inside `keepass`), the decrypted and decompressed payload buffers
+  `keepass` parses from, its key-derivation intermediates, and its XML
+  keyfile parser's working copies. These persist in freed heap pages until
+  the allocator reuses them.
+
+Lock stops serving the database and clears what kpa owns; it is not a
+guarantee that no trace of the plaintext remains in the process's memory.
 
 | Trigger      | Source                                                                        |
 | ------------ | ----------------------------------------------------------------------------- |
@@ -243,18 +275,22 @@ Held while unlocked:
 
 | Item               | Held?                                                    |
 | ------------------ | --------------------------------------------------------- |
-| Master password    | No — zeroized by kpa immediately after key derivation¹    |
+| Master password    | No — kpa's copies zeroized after key derivation¹          |
 | Keyfile path       | Yes (a path; harmless)                                     |
-| Keyfile contents   | No — read at unlock, zeroize after                         |
+| Keyfile contents   | No — kpa's buffer zeroized; `keepass`'s parse copies not²  |
 | Decrypted database | **Yes** — the real exposure, same as any KeePass client    |
 
-`DatabaseKey` implements `Zeroize` and `Drop`, so the credential side is handled
-by the library. ¹This covers the copy kpa itself holds — the `String` the
-prompt returns — which it wraps in `Zeroizing` and never touches with a
-plain `&str`. It does not cover `rpassword`'s own internal read buffer,
-which accumulates the typed password character-by-character and is dropped
-unwiped regardless of what kpa does with its result; that residual copy is
-outside kpa's control.
+¹The password arrives on the prompt command's stdout, which kpa reads into
+a fixed-size `Zeroizing` buffer that never grows (a growing buffer would
+leave unwiped copies behind each time it reallocates), then into a
+`Zeroizing<String>`. `DatabaseKey` zeroizes its own copy. Two copies are
+outside kpa's reach: whatever the prompt program itself held, and
+`keepass`'s key-derivation intermediates (e.g. the SHA-256 of the
+password, which is password-equivalent), which are not zeroized upstream.
+
+²`DatabaseKey`'s keyfile bytes are zeroized, but `keepass`'s XML keyfile
+parser makes several unzeroized intermediate copies, which together can
+cover the whole key and can survive a lock. Upstream.
 
 Two Linux properties that help here, worth verifying on the machine
 running kpa:
@@ -268,8 +304,12 @@ running kpa:
   a property of the machine's configuration, not one kpa's process can
   guarantee about itself.
 
-`PR_SET_DUMPABLE=0` at startup prevents core dumps from capturing the
-decrypted database or key material.
+`kpa serve` sets `PR_SET_DUMPABLE=0` at startup, before reading its config
+or unlocking anything. That keeps a crash from writing a user-readable core
+dump of the decrypted database, and also makes `/proc/<pid>/mem` root-owned,
+which blocks same-uid ptrace regardless of the Yama setting above. One host
+caveat, like the two bullets above: with `fs.suid_dumpable = 2` the kernel
+still writes a root-owned dump.
 
 **Non-goals, stated explicitly:** kpa does not defend against an attacker who
 already has code execution as the user running it. Nothing at this layer can. It reduces

@@ -1,11 +1,8 @@
 //! Thin wrapper around the `keepass` crate.
 //!
 //! Kept deliberately dumb: open a `.kdbx` given a password and/or keyfile,
-//! and list what's in it. No caching, no freshness guard, no locking — all
-//! of that is daemon state that belongs in a later step (`vault.rs` grows a
-//! `Vault` struct with that state once `server.rs` exists). For now this
-//! module just proves `keepass` can actually open real databases and gives
-//! `probe` something to call.
+//! and list or count what's in it. No caching, no freshness guard, no
+//! locking — that is daemon state, and it lives in `server.rs`.
 //!
 //! Every field/method name below was checked against the vendored source
 //! for `keepass` 0.15.0 (`~/.cargo/registry/src/*/keepass-0.15.0/src/`)
@@ -16,6 +13,7 @@
 //! needs none of them.
 
 use std::fs::File;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 use keepass::db::DatabaseOpenError;
@@ -130,26 +128,46 @@ pub struct EntrySummary {
 /// At least one of `password`/`keyfile` must be `Some` or `keepass` itself
 /// rejects the key as empty (`DatabaseKeyError::EmptyKey`, surfaced here as
 /// `Corrupt` since it's not really a credentials mistake so much as a
-/// caller bug — `probe`'s CLI always supplies a password).
+/// caller bug).
 ///
 /// `password` is `&Zeroizing<String>` rather than `&str` so callers are
-/// pushed into holding the prompt result in a wiped-on-drop buffer instead
-/// of a plain `String` — `&str` alone can't carry that guarantee. This
-/// only covers the copy this codebase is responsible for: `rpassword`
-/// accumulates the typed password in its own internal buffer first, and
-/// that buffer is not zeroized by `rpassword` 7.5.4 regardless of what we
-/// do with its result.
+/// pushed into holding it in a wiped-on-drop buffer instead of a plain
+/// `String` — `&str` alone can't carry that guarantee. The daemon reads it
+/// from its configured prompt command straight into `Zeroizing` buffers
+/// (`server.rs`). That covers the copies kpa holds; the ones it can't reach
+/// are inside the prompt program itself and inside `keepass`, whose
+/// key-derivation intermediates are not zeroized — half of
+/// `sha256(password)`, which is password-equivalent, survives a lock
+/// (`docs/review-2026-09-secrets.md` finding 4; fix is upstream).
 ///
-/// Note: a `.kdbx` with implausible KDF parameters (a corrupted
-/// `TransformRounds` or Argon2 `memory` field) can make this function hang
-/// indefinitely (KDBX3, AES-KDF has no rounds ceiling) or abort the process
-/// via allocation failure (KDBX4, Argon2's memory cost is applied before
-/// the HMAC that would otherwise reject the file) — see
-/// `docs/review-2026-09.md` finding 7. Ordinary file corruption is
-/// sufficient to hit this; there is no attacker required. The fix belongs
-/// upstream in `keepass` (ceilings on rounds/memory/parallelism before the
-/// KDF runs); revisit a partial header pre-check here only if this is hit
-/// in practice.
+/// **Never panics.** `keepass` indexes past the end of short header fields
+/// in several places and panics on them (`docs/review-2026-09-robustness.md`
+/// finding 8; fix is upstream), so the parse runs under `catch_unwind` and
+/// a panic comes back as `Corrupt`. See the comment at that call for when
+/// this stops holding.
+///
+/// Upstream hazards this cannot catch, all in `keepass` 0.15.0:
+///
+/// - **KDF parameters are unbounded.** A corrupted `TransformRounds` makes
+///   a KDBX3 open hang indefinitely (AES-KDF has no rounds ceiling), and an
+///   implausible Argon2 memory cost aborts the process on allocation
+///   failure — no unwind, so `catch_unwind` doesn't help. Random corruption
+///   reaches this for KDBX3 only; KDBX4's header HMAC rejected every
+///   mutation tried (robustness finding 6). In the daemon the stakes are
+///   higher than in a one-shot CLI: a hung unlock keeps its core busy and
+///   its file descriptor open after the client gives up, each retry stacks
+///   another, and an abort ends every unlocked session at once. Rust
+///   threads can't be cancelled, so a timeout here would not help either.
+///   The fix is ceilings in `keepass` before the KDF runs; a header
+///   pre-check in this repo is the fallback if upstream hasn't moved by
+///   the time the daemon is meant to run unattended (`docs/plan.md` step 5).
+/// - **KDBX3's header hash is never checked.** `keepass` doesn't verify
+///   `Meta/HeaderHash`, so some corrupt KDBX3 headers open "successfully"
+///   with garbage in their *protected* fields (robustness finding 5). `list`
+///   omits protected fields, so nothing reads them today — but `copy`
+///   (`docs/plan.md` step 3) must not ship until this is fixed upstream or
+///   worked around, or it will put a wrong password on the clipboard with
+///   no error.
 pub fn open(
     path: &Path,
     password: Option<&Zeroizing<String>>,
@@ -165,10 +183,31 @@ pub fn open(
         let mut keyfile_handle = open_file(keyfile_path, VaultError::KeyfileNotFound)?;
         // io::Error here (e.g. a permissions error mid-read) maps to
         // VaultError::Io via the #[from] impl above.
+        //
+        // Upstream leak: `keepass` zeroizes its own copy of the raw keyfile,
+        // but its XML keyfile parser makes about six unzeroized
+        // intermediate copies of the key material, which together cover
+        // the whole 32-byte key and survive a lock
+        // (`docs/review-2026-09-secrets.md` finding 2). Pre-parsing the
+        // keyfile here would remove most of those at the cost of
+        // duplicating `keepass`'s format detection; the fix belongs
+        // upstream.
         key = key.with_keyfile(&mut keyfile_handle)?;
     }
 
-    Ok(Database::open(&mut file, key)?)
+    // Sound because `Database::open` touches no state shared with anything
+    // else — it reads `file` and consumes `key` — so nothing is left half
+    // updated if it unwinds, and `DatabaseKey`'s `ZeroizeOnDrop` still runs
+    // during the unwind. The panic payload is dropped rather than put in
+    // the error: it's `keepass`'s text, which is never forwarded (see
+    // `VaultError::Corrupt`).
+    //
+    // This only works while panics unwind. Setting `panic = "abort"` in a
+    // Cargo profile silently turns every one of these back into a process
+    // abort that takes all unlocked databases with it.
+    std::panic::catch_unwind(AssertUnwindSafe(|| Database::open(&mut file, key)))
+        .map_err(|_| VaultError::Corrupt("keepass panicked while parsing".to_string()))?
+        .map_err(VaultError::from)
 }
 
 /// `File::open` with the not-found case mapped to a caller-supplied
@@ -194,6 +233,23 @@ pub fn list_entries(db: &Database) -> Vec<EntrySummary> {
     let mut out = Vec::new();
     collect_entries(db, &mut out);
     out
+}
+
+/// How many entries the database holds, across every group. Walks the
+/// tree the same way `collect_entries` does but copies nothing out of it —
+/// `status` only needs the number, so it has no reason to make a copy of
+/// every title, username and URL just to call `.len()` on them.
+pub fn entry_count(db: &Database) -> usize {
+    let mut count = 0;
+    let mut stack = vec![db.root().id()];
+    while let Some(id) = stack.pop() {
+        let Some(group) = db.group(id) else {
+            continue;
+        };
+        count += group.entries().count();
+        stack.extend(group.groups().map(|child| child.id()));
+    }
+    count
 }
 
 /// A field's value, unless the user marked it protected in their KeePass
@@ -243,10 +299,33 @@ fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
 
 #[cfg(test)]
 mod tests {
-    use keepass::db::fields;
     use keepass::Database;
+    use keepass::db::fields;
 
-    use super::list_entries;
+    use super::{entry_count, list_entries};
+
+    /// `entry_count` must agree with `list_entries` everywhere, including
+    /// in nested groups and when fields are protected — it's what `status`
+    /// reports, so a disagreement would show up as a wrong count.
+    #[test]
+    fn entry_count_matches_list_entries() {
+        let mut db = Database::new();
+        assert_eq!(entry_count(&db), 0);
+
+        {
+            let mut root = db.root_mut();
+            root.add_entry().set_unprotected(fields::TITLE, "top");
+            let mut child = root.add_group();
+            child.add_entry().set_protected(fields::TITLE, "hidden");
+            child
+                .add_group()
+                .add_entry()
+                .set_unprotected(fields::TITLE, "deep");
+        }
+
+        assert_eq!(entry_count(&db), 3);
+        assert_eq!(entry_count(&db), list_entries(&db).len());
+    }
 
     /// Regression for `docs/review-2026-09.md` finding 1: a field the user
     /// marked protected must not come back as plaintext from `list`, for

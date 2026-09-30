@@ -31,12 +31,50 @@ nix develop -c cargo test
 `direnv allow` drops the `nix develop -c` prefix. CI
 (`.github/workflows/ci.yml`) runs the same commands on every push and PR.
 
-## Try the probe command
+## Try it
+
+[`config.example.toml`](./config.example.toml) points at the throwaway test
+fixtures instead of a real vault, and its password prompt is a scripted
+one-liner, so this needs no GUI and nothing to type. Build the fixtures
+first — they're generated, not committed:
 
 ```sh
-nix develop -c cargo run -- probe path/to/some.kdbx
+sh tests/fixture.sh
 ```
 
-Prompts for a password (hidden input) and an optional `--keyfile`, then
-prints each entry's title. Temporary scaffolding, removed once the real
-socket protocol lands (`docs/plan.md`, step 2).
+(These assume the dev shell, via `direnv allow` or `nix develop`; otherwise
+prefix each command with `nix develop -c` as above.)
+
+Then start the daemon in one terminal:
+
+```sh
+cargo run -- serve --config config.example.toml
+```
+
+and drive it from another:
+
+```sh
+cargo run -- status            # lock state of every configured database
+cargo run -- unlock personal   # runs the configured prompt for a password
+cargo run -- list              # every entry in every unlocked database (alias: ls)
+cargo run -- list personal     # just the one
+cargo run -- lock personal     # lock one
+cargo run -- lock              # lock all of them
+```
+
+Each client subcommand prints the daemon's raw JSON response and exits
+non-zero when `ok` is `false`. The socket defaults to
+`$XDG_RUNTIME_DIR/kpa/sock`; pass `--socket <path>` to both sides to use a
+different one.
+
+The protocol is line-delimited JSON, one request and one response per
+connection, so it's typeable by hand:
+
+```sh
+echo '{"v":1,"op":"status"}' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/kpa/sock"
+```
+
+`serve` logs each unlock and lock to stdout, successes and failures alike.
+Reads (`status`, `list`) are deliberately not logged: they change nothing,
+and `list` carries entry titles and usernames, which shouldn't accumulate
+in a log.

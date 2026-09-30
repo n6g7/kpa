@@ -1,0 +1,51 @@
+# Example kpa config, pointed at the throwaway test fixtures rather than a
+# real vault — safe to run as-is.
+#
+# Build the fixtures first (they are generated, not committed):
+#
+#     sh tests/fixture.sh
+#
+# Then, from the repository root:
+#
+#     cargo run -- serve --config config.example.toml     # one terminal
+#     cargo run -- status                                 # another
+#     cargo run -- unlock personal
+#     cargo run -- list
+#     cargo run -- lock
+#
+# The socket defaults to $XDG_RUNTIME_DIR/kpa/sock, so the client
+# subcommands find the daemon with no extra flags. Add `--socket <path>` to
+# both sides to run against a scratch socket instead.
+#
+# Database paths are resolved relative to the daemon's working directory,
+# so run `serve` from the repository root. Note that `~` is NOT expanded —
+# an absolute path is required to point this at anything outside the repo.
+
+# Parsed today, but nothing acts on them yet: the idle timer lands in step
+# 5 and the clipboard in step 3 (docs/plan.md).
+idle_timeout = "30m"
+clipboard_timeout = "30s"
+
+# How the daemon asks for a master password. It runs this command and reads
+# the password from stdout, so the scripted version below unlocks the
+# fixture with no GUI and nothing to type. Swap in the commented line for a
+# real dmenu-style prompt.
+#
+# An empty stdout means "no password" — which is how a keyfile-only
+# database (tests/fixtures/fixture-kf.kdbx) gets unlocked. `prompt` is a
+# single global setting, so one prompt can't serve both that and a
+# password database at once.
+prompt = ["/bin/sh", "-c", "printf %s testpass123"]
+# prompt = ["fuzzel", "--dmenu", "--password", "--prompt"]
+
+# Both entries deliberately point at the same fixture: two names is what
+# makes the multi-database behaviour testable — `status` listing two rows,
+# `list` tagging each entry with the database it came from, and `lock`
+# with no argument locking both at once.
+[[database]]
+name = "personal"
+path = "tests/fixtures/fixture.kdbx"
+
+[[database]]
+name = "work"
+path = "tests/fixtures/fixture.kdbx"
