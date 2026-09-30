@@ -74,17 +74,6 @@ fn default_socket_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "XDG_RUNTIME_DIR is not set; pass --socket explicitly".to_string())
 }
 
-fn default_config_path() -> Result<PathBuf, String> {
-    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(dir).join("kpa/config.toml"));
-    }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".config/kpa/config.toml"))
-        .ok_or_else(|| {
-            "neither XDG_CONFIG_HOME nor HOME is set; pass --config explicitly".to_string()
-        })
-}
-
 /// Mark this process non-dumpable (`PR_SET_DUMPABLE=0`), before anything
 /// secret is loaded. A crash then writes no core file readable by the
 /// user — with the decrypted vault in it — and, as a side effect, other
@@ -105,27 +94,10 @@ fn run_serve(socket_path: &Path, config_path: Option<PathBuf>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let config_path = match config_path {
-        Some(path) => path,
-        None => match default_config_path() {
-            Ok(path) => path,
-            Err(err) => {
-                eprintln!("error: {err}");
-                return ExitCode::FAILURE;
-            }
-        },
-    };
-
-    let config = match std::fs::read_to_string(&config_path) {
-        Ok(text) => match Config::parse(&text) {
-            Ok(config) => config,
-            Err(err) => {
-                eprintln!("error: parsing {}: {err}", config_path.display());
-                return ExitCode::FAILURE;
-            }
-        },
+    let config = match Config::load(config_path.as_deref()) {
+        Ok(config) => config,
         Err(err) => {
-            eprintln!("error: reading {}: {err}", config_path.display());
+            eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
     };

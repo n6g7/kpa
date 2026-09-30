@@ -36,21 +36,33 @@ impl Daemon {
     }
 
     fn spawn(prompt_script: &str, stdout: Stdio) -> Daemon {
+        let config = config_toml(prompt_script, &common::password_db().display().to_string());
+        Daemon::spawn_config(&config, None, stdout)
+    }
+
+    /// Starts `kpa serve` on `config`. `home`, if given, becomes the
+    /// daemon's `$HOME` — set on the child process, which has its own
+    /// environment, rather than on this test process, where changing it
+    /// would race every other test thread.
+    fn spawn_config(config: &str, home: Option<&std::path::Path>, stdout: Stdio) -> Daemon {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let socket = dir.path().join("sock");
         let config_path = dir.path().join("config.toml");
-        std::fs::write(&config_path, config_toml(prompt_script)).expect("failed to write config");
+        std::fs::write(&config_path, config).expect("failed to write config");
 
-        let child = Command::new(env!("CARGO_BIN_EXE_kpa"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kpa"));
+        command
             .arg("serve")
             .arg("--socket")
             .arg(&socket)
             .arg("--config")
             .arg(&config_path)
             .stdout(stdout)
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("failed to spawn kpa serve");
+            .stderr(Stdio::null());
+        if let Some(home) = home {
+            command.env("HOME", home);
+        }
+        let child = command.spawn().expect("failed to spawn kpa serve");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() {
@@ -91,16 +103,15 @@ impl Drop for Daemon {
     }
 }
 
-/// A config whose one database is `common::password_db()` under the name
-/// `"personal"`, and whose `prompt` runs `prompt_script` under `sh -c` —
-/// standing in for a real dmenu-style prompt.
-fn config_toml(prompt_script: &str) -> String {
+/// A config whose one database is `db_path` under the name `"personal"`,
+/// and whose `prompt` runs `prompt_script` under `sh -c` — standing in for
+/// a real dmenu-style prompt.
+fn config_toml(prompt_script: &str, db_path: &str) -> String {
     format!(
         "prompt = [\"/bin/sh\", \"-c\", \"{prompt_script}\"]\n\n\
          [[database]]\n\
          name = \"personal\"\n\
-         path = \"{}\"\n",
-        common::password_db().display(),
+         path = \"{db_path}\"\n",
     )
 }
 
@@ -316,4 +327,25 @@ fn a_closed_stdout_does_not_take_the_daemon_down() {
         daemon.child.try_wait().expect("try_wait").is_none(),
         "the daemon exited"
     );
+}
+
+/// A `~/` database path resolves against the daemon's own `$HOME`.
+#[test]
+fn a_tilde_path_resolves_against_home() {
+    let home = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(home.path().join("vault")).expect("mkdir");
+    std::fs::copy(
+        common::password_db(),
+        home.path().join("vault/personal.kdbx"),
+    )
+    .expect("copy fixture");
+
+    let config = config_toml(
+        &format!("printf %s '{}'", common::PASSWORD),
+        "~/vault/personal.kdbx",
+    );
+    let daemon = Daemon::spawn_config(&config, Some(home.path()), Stdio::null());
+
+    let unlocked = daemon.run(&["unlock", "personal"]);
+    assert_eq!(unlocked["ok"], true, "{unlocked}");
 }

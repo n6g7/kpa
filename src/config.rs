@@ -1,9 +1,9 @@
-//! TOML config parsing, matching the shape settled in `docs/design.md`
-//! § Configuration. `main.rs`'s `serve` subcommand reads and parses this at
-//! startup; `server::Server` owns the resulting `Config` for the lifetime
-//! of the daemon.
+//! The config file, matching the shape settled in `docs/design.md`
+//! § Configuration. `Config::load` does everything from finding the file to
+//! expanding `~` in its paths; `main.rs`'s `serve` calls it once at startup,
+//! and `server::Server` owns the result for the life of the daemon.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -71,10 +71,113 @@ fn default_prompt() -> Vec<String> {
 }
 
 impl Config {
-    /// Parse a config from a TOML string. Takes `&str` rather than a path —
-    /// reading the file is main.rs's job, this is the pure parsing half.
+    /// Find, read, parse and resolve the config: `path` if given (from
+    /// `--config`), otherwise `$XDG_CONFIG_HOME/kpa/config.toml`, falling
+    /// back to `~/.config/kpa/config.toml`.
+    ///
+    /// A leading `~/` in any database or keyfile path is expanded to
+    /// `$HOME`. `~user/...` is an error rather than a literal directory
+    /// name: nobody means a directory called `~user`, and silently looking
+    /// for one is exactly the failure expansion exists to prevent. Other
+    /// relative paths are left as written, and resolve against the
+    /// daemon's working directory.
+    pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
+        let path = match path {
+            Some(path) => path.to_path_buf(),
+            None => default_path()?,
+        };
+        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let config = Config::parse(&text).map_err(|source| ConfigError::Parse {
+            path: path.clone(),
+            source,
+        })?;
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        config.expand_home(home.as_deref(), &path)
+    }
+
+    /// Parse a config from a TOML string, paths exactly as written — the
+    /// pure half of `load`, and what tests use to build a `Config`.
     pub fn parse(input: &str) -> Result<Config, toml::de::Error> {
         toml::from_str(input)
+    }
+
+    /// `home` is a parameter, not read here, so this can be tested without
+    /// touching the process environment (`set_var` is `unsafe` in Rust
+    /// 2024 for good reason, with tests on parallel threads). `load` is
+    /// the only caller, and passes the real `$HOME`.
+    fn expand_home(mut self, home: Option<&Path>, config: &Path) -> Result<Config, ConfigError> {
+        let expand = |path: &Path| {
+            expand(path, home).map_err(|kind| ConfigError::Path {
+                config: config.to_path_buf(),
+                path: path.to_path_buf(),
+                kind,
+            })
+        };
+        for db in &mut self.databases {
+            db.path = expand(&db.path)?;
+            if let Some(keyfile) = &db.keyfile {
+                db.keyfile = Some(expand(keyfile)?);
+            }
+        }
+        Ok(self)
+    }
+}
+
+fn default_path() -> Result<PathBuf, ConfigError> {
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(dir).join("kpa/config.toml"));
+    }
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".config/kpa/config.toml"))
+        .ok_or(ConfigError::NoDefaultPath)
+}
+
+/// Everything `Config::load` can fail with. Each names the file involved.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("no config path given, and neither XDG_CONFIG_HOME nor HOME is set")]
+    NoDefaultPath,
+    #[error("reading {}: {source}", path.display())]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("parsing {}: {source}", path.display())]
+    Parse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    #[error("in {}: {}: {kind}", config.display(), path.display())]
+    Path {
+        config: PathBuf,
+        path: PathBuf,
+        kind: TildeError,
+    },
+}
+
+/// Why a `~` path couldn't be expanded.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TildeError {
+    #[error("`~` needs $HOME, which is not set")]
+    NoHome,
+    #[error("`~user` paths are not supported; use an absolute path")]
+    OtherUser,
+}
+
+fn expand(path: &Path, home: Option<&Path>) -> Result<PathBuf, TildeError> {
+    let mut components = path.components();
+    let Some(Component::Normal(first)) = components.next() else {
+        return Ok(path.to_path_buf());
+    };
+    if first == "~" {
+        Ok(home.ok_or(TildeError::NoHome)?.join(components.as_path()))
+    } else if first.as_encoded_bytes().starts_with(b"~") {
+        Err(TildeError::OtherUser)
+    } else {
+        Ok(path.to_path_buf())
     }
 }
 
@@ -161,5 +264,125 @@ mod tests {
         "#;
 
         assert!(Config::parse(input).is_err());
+    }
+
+    fn one_database(path: &str, keyfile: Option<&str>) -> Config {
+        let keyfile = keyfile
+            .map(|k| format!("keyfile = \"{k}\"\n"))
+            .unwrap_or_default();
+        Config::parse(&format!(
+            "[[database]]\nname = \"personal\"\npath = \"{path}\"\n{keyfile}"
+        ))
+        .expect("valid config should parse")
+    }
+
+    fn expanded(path: &str, home: Option<&str>) -> Result<PathBuf, TildeError> {
+        expand(Path::new(path), home.map(Path::new))
+    }
+
+    #[test]
+    fn a_leading_tilde_expands_to_home() {
+        assert_eq!(
+            expanded("~/vault/personal.kdbx", Some("/home/alice")),
+            Ok(PathBuf::from("/home/alice/vault/personal.kdbx"))
+        );
+        assert_eq!(
+            expanded("~", Some("/home/alice")),
+            Ok(PathBuf::from("/home/alice"))
+        );
+    }
+
+    #[test]
+    fn paths_without_a_leading_tilde_are_untouched() {
+        for path in [
+            "/abs/vault.kdbx",
+            "relative/vault.kdbx",
+            "vault~.kdbx",
+            "dir/~/vault.kdbx",
+        ] {
+            assert_eq!(expanded(path, Some("/home/alice")), Ok(PathBuf::from(path)));
+        }
+    }
+
+    /// Without `$HOME`, only a path that actually needs it is an error.
+    #[test]
+    fn a_missing_home_only_matters_when_a_path_needs_it() {
+        assert_eq!(
+            expanded("/abs/vault.kdbx", None),
+            Ok(PathBuf::from("/abs/vault.kdbx"))
+        );
+        assert_eq!(expanded("~/vault.kdbx", None), Err(TildeError::NoHome));
+    }
+
+    #[test]
+    fn another_users_home_is_refused_not_taken_literally() {
+        assert_eq!(
+            expanded("~bob/vault.kdbx", Some("/home/alice")),
+            Err(TildeError::OtherUser)
+        );
+    }
+
+    #[test]
+    fn keyfiles_expand_too() {
+        let config = one_database("/vault.kdbx", Some("~/.keys/personal.key"))
+            .expand_home(Some(Path::new("/home/alice")), Path::new("config.toml"))
+            .expect("should expand");
+        assert_eq!(
+            config.databases[0].keyfile,
+            Some(PathBuf::from("/home/alice/.keys/personal.key"))
+        );
+    }
+
+    /// `load` end to end on a real file. Absolute paths only, so the
+    /// result doesn't depend on this process's `$HOME`; `~` through `load`
+    /// is covered by spawning the daemon with its own `HOME`, in
+    /// `tests/server.rs`.
+    #[test]
+    fn load_reads_and_parses_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "idle_timeout = \"10s\"\n[[database]]\nname = \"p\"\npath = \"/v.kdbx\"\n",
+        )
+        .expect("write");
+
+        let config = Config::load(Some(&path)).expect("should load");
+        assert_eq!(config.idle_timeout, Duration::from_secs(10));
+        assert_eq!(config.databases[0].path, PathBuf::from("/v.kdbx"));
+    }
+
+    /// Every failure names the file, so the daemon's startup error says
+    /// where to look.
+    #[test]
+    fn load_errors_name_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let missing = dir.path().join("missing.toml");
+        let err = Config::load(Some(&missing)).expect_err("a missing file should fail");
+        assert!(matches!(err, ConfigError::Read { .. }));
+        assert!(err.to_string().contains("missing.toml"), "{err}");
+
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, "idle_timeout = [").expect("write");
+        let err = Config::load(Some(&bad)).expect_err("bad TOML should fail");
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        assert!(err.to_string().contains("bad.toml"), "{err}");
+
+        let tilde = dir.path().join("tilde.toml");
+        std::fs::write(
+            &tilde,
+            "[[database]]\nname = \"p\"\npath = \"~bob/v.kdbx\"\n",
+        )
+        .expect("write");
+        let err = Config::load(Some(&tilde)).expect_err("~user should fail");
+        assert!(matches!(
+            err,
+            ConfigError::Path {
+                kind: TildeError::OtherUser,
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("tilde.toml"), "{err}");
     }
 }

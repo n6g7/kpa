@@ -17,9 +17,9 @@
 # subcommands find the daemon with no extra flags. Add `--socket <path>` to
 # both sides to run against a scratch socket instead.
 #
-# Database paths are resolved relative to the daemon's working directory,
-# so run `serve` from the repository root. Note that `~` is NOT expanded —
-# an absolute path is required to point this at anything outside the repo.
+# Relative database paths are resolved against the daemon's working
+# directory, so run `serve` from the repository root. A leading `~/`
+# expands to $HOME (`~user/` is refused).
 
 # Parsed today, but nothing acts on them yet: the idle timer lands in step
 # 5 and the clipboard in step 3 (docs/plan.md).

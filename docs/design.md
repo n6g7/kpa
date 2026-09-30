@@ -81,6 +81,10 @@ name = "work"
 path = "~/vault/work.kdbx"
 ```
 
+A leading `~/` in `path` or `keyfile` expands to `$HOME` when the daemon
+starts; `~user/` is refused rather than taken literally, and other relative
+paths resolve against the daemon's working directory.
+
 If you manage your system declaratively (Nix, Ansible, whatever), this shape
 is meant to be generated rather than hand-edited — every setting is a plain
 TOML value, nothing requires clicking through a GUI.
