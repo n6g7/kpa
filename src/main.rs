@@ -1,8 +1,7 @@
 //! CLI dispatch: `serve` runs the daemon; every other subcommand sends one
 //! request over the socket and prints the raw JSON response line
 //! (`docs/design.md`'s "hand-debuggable with socat" argument, applied to
-//! the CLI itself rather than just `socat`). `probe` is gone — the real
-//! serve/client split now exists, per `docs/plan.md` step 2.
+//! the CLI itself rather than just `socat`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -162,13 +161,12 @@ fn run_client(socket_path: &Path, op: Op) -> ExitCode {
     match send_request(socket_path, &request) {
         Ok(line) => {
             print!("{line}");
-            // `Response` (server.rs's return type) deliberately has no
-            // generic `Deserialize` — a successful `Unlock` and a
-            // successful `Lock { db: Some(_) }` serialize identically, so
-            // decoding one back into that type isn't meaningful without
-            // already knowing which request produced it. All the client
-            // needs is the one shared `ok` field, read out of a bare
-            // `Value` instead.
+            // `Response` deliberately has no generic `Deserialize` — a
+            // successful `Unlock` and a successful `Lock { db: Some(_) }`
+            // serialize identically, so decoding one back into that type
+            // isn't meaningful without already knowing which request
+            // produced it. All the client needs is the one shared `ok`
+            // field, read out of a bare `Value` instead.
             let ok = serde_json::from_str::<serde_json::Value>(&line)
                 .ok()
                 .and_then(|value| value.get("ok").and_then(serde_json::Value::as_bool))

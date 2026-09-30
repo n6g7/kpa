@@ -13,32 +13,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use kpa::proto::{DatabaseStatus, ErrorCode, WireEntry};
-use serde::Deserialize;
-
-/// A response, read back generically rather than through `kpa::proto::Response`
-/// — that type is `Serialize`-only (see its doc comment: a successful
-/// `Unlock` and a successful `Lock { db: Some(_) }` are wire-identical, so
-/// decoding one back into a specific variant isn't meaningful without
-/// already knowing the request). Tests, unlike `server.rs`, don't have that
-/// context baked into a type — they just want to read whichever fields the
-/// response happens to carry, which is exactly what this loose struct is
-/// for.
-#[derive(Debug, Deserialize)]
-struct RawResponse {
-    v: u32,
-    ok: bool,
-    #[serde(default)]
-    error: Option<ErrorCode>,
-    #[serde(default)]
-    db: Option<String>,
-    #[serde(default)]
-    detail: Option<String>,
-    #[serde(default)]
-    databases: Option<Vec<DatabaseStatus>>,
-    #[serde(default)]
-    entries: Option<Vec<WireEntry>>,
-}
+use serde_json::Value;
 
 struct Daemon {
     child: Child,
@@ -93,9 +68,10 @@ impl Daemon {
         }
     }
 
-    /// Runs `kpa <args> --socket <socket>` and decodes its printed response
-    /// line.
-    fn run(&self, args: &[&str]) -> RawResponse {
+    /// Runs `kpa <args> --socket <socket>` and parses its printed response
+    /// line. Read as plain JSON on purpose: these tests check what goes over
+    /// the wire, literally, rather than what a typed client makes of it.
+    fn run(&self, args: &[&str]) -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_kpa"))
             .arg("--socket")
             .arg(&self.socket)
@@ -134,67 +110,60 @@ fn full_lifecycle() {
 
     // Starts locked.
     let status = daemon.run(&["status"]);
-    assert!(status.ok);
-    let databases = status.databases.expect("status should list databases");
-    assert_eq!(databases.len(), 1);
-    assert!(databases[0].locked);
-    assert_eq!(databases[0].entries, None);
+    assert_eq!(status["ok"], true);
+    assert_eq!(status["databases"].as_array().map(Vec::len), Some(1));
+    assert_eq!(status["databases"][0]["locked"], true);
+    assert!(status["databases"][0].get("entries").is_none());
 
     // list on a locked db, named explicitly, is an error.
     let listed = daemon.run(&["list", "personal"]);
-    assert!(!listed.ok);
-    assert_eq!(listed.error, Some(ErrorCode::Locked));
+    assert_eq!(listed["ok"], false);
+    assert_eq!(listed["error"], "locked");
 
     // list with no db named is not an error — just nothing yet, since
     // nothing is unlocked.
     let listed_all = daemon.run(&["list"]);
-    assert!(listed_all.ok);
-    assert!(
-        listed_all
-            .entries
-            .expect("list should return entries")
-            .is_empty()
-    );
+    assert_eq!(listed_all["ok"], true);
+    assert_eq!(listed_all["entries"], serde_json::json!([]));
 
     // An unconfigured database name is its own error, distinct from Locked.
     let unknown = daemon.run(&["list", "does-not-exist"]);
-    assert!(!unknown.ok);
-    assert_eq!(unknown.error, Some(ErrorCode::UnknownDb));
+    assert_eq!(unknown["ok"], false);
+    assert_eq!(unknown["error"], "unknown_db");
 
     // Unlock.
     let unlocked = daemon.run(&["unlock", "personal"]);
-    assert!(unlocked.ok, "unlock failed: {unlocked:?}");
-    assert_eq!(unlocked.db.as_deref(), Some("personal"));
+    assert_eq!(unlocked["ok"], true, "unlock failed: {unlocked}");
+    assert_eq!(unlocked["db"], "personal");
 
     // Unlocking again while already unlocked is a no-op success, not a
     // second prompt.
     let unlocked_again = daemon.run(&["unlock", "personal"]);
-    assert!(unlocked_again.ok);
+    assert_eq!(unlocked_again["ok"], true);
 
     let status = daemon.run(&["status"]);
-    let databases = status.databases.expect("status should list databases");
-    assert!(!databases[0].locked);
-    assert_eq!(databases[0].entries, Some(1));
+    assert_eq!(status["databases"][0]["locked"], false);
+    assert_eq!(status["databases"][0]["entries"], 1);
 
     // list now returns the fixture's one entry.
     let listed = daemon.run(&["list"]);
-    let entries = listed.entries.expect("list should return entries");
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].db, "personal");
-    assert_eq!(entries[0].title.as_deref(), Some("Example"));
-    assert_eq!(entries[0].username.as_deref(), Some("alice"));
-    assert_eq!(entries[0].group, "Web");
+    let entries = &listed["entries"];
+    assert_eq!(entries.as_array().map(Vec::len), Some(1));
+    assert_eq!(entries[0]["db"], "personal");
+    assert_eq!(entries[0]["title"], "Example");
+    assert_eq!(entries[0]["username"], "alice");
+    assert_eq!(entries[0]["group"], "Web");
 
     // Naming the db explicitly gives the same one entry.
     let listed_named = daemon.run(&["list", "personal"]);
-    assert_eq!(listed_named.entries.expect("entries").len(), 1);
+    assert_eq!(listed_named["entries"].as_array().map(Vec::len), Some(1));
 
     // Lock, then confirm list on it errors again.
     let locked = daemon.run(&["lock", "personal"]);
-    assert!(locked.ok);
+    assert_eq!(locked["ok"], true);
     let listed = daemon.run(&["list", "personal"]);
-    assert!(!listed.ok);
-    assert_eq!(listed.error, Some(ErrorCode::Locked));
+    assert_eq!(listed["ok"], false);
+    assert_eq!(listed["error"], "locked");
 }
 
 #[test]
@@ -202,13 +171,12 @@ fn wrong_password_is_reported_and_leaves_the_database_locked() {
     let daemon = Daemon::start("not-the-real-password");
 
     let unlocked = daemon.run(&["unlock", "personal"]);
-    assert!(!unlocked.ok);
-    assert_eq!(unlocked.error, Some(ErrorCode::WrongCredentials));
+    assert_eq!(unlocked["ok"], false);
+    assert_eq!(unlocked["error"], "wrong_credentials");
 
     let status = daemon.run(&["status"]);
-    let databases = status.databases.expect("status should list databases");
-    assert!(
-        databases[0].locked,
+    assert_eq!(
+        status["databases"][0]["locked"], true,
         "a failed unlock must not leave it unlocked"
     );
 }
@@ -216,13 +184,13 @@ fn wrong_password_is_reported_and_leaves_the_database_locked() {
 #[test]
 fn lock_all_locks_every_database() {
     let daemon = Daemon::start(common::PASSWORD);
-    assert!(daemon.run(&["unlock", "personal"]).ok);
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
 
     let locked = daemon.run(&["lock"]); // no db named = lock all
-    assert!(locked.ok);
+    assert_eq!(locked["ok"], true);
 
     let status = daemon.run(&["status"]);
-    assert!(status.databases.expect("databases")[0].locked);
+    assert_eq!(status["databases"][0]["locked"], true);
 }
 
 /// The one test that talks to the socket directly rather than through a
@@ -241,16 +209,15 @@ fn version_mismatch_is_rejected() {
         .read_line(&mut line)
         .expect("failed to read response");
 
-    let response: RawResponse =
-        serde_json::from_str(line.trim()).expect("failed to decode response");
-    assert!(!response.ok);
-    assert_eq!(response.error, Some(ErrorCode::VersionMismatch));
+    let response: Value = serde_json::from_str(line.trim()).expect("failed to decode response");
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"], "version_mismatch");
     // The response always carries the daemon's own version, not the
     // client's claimed one — that's the whole point (docs/design.md).
-    assert_eq!(response.v, kpa::proto::VERSION);
+    assert_eq!(response["v"], kpa::proto::VERSION);
     // `docs/plan.md` step 2 asks for "a clear error naming both versions".
-    let detail = response
-        .detail
+    let detail = response["detail"]
+        .as_str()
         .expect("version mismatch should explain itself");
     assert!(
         detail.contains('1'),
@@ -279,13 +246,12 @@ fn malformed_request_is_rejected_without_crashing_the_daemon() {
         .read_line(&mut line)
         .expect("failed to read response");
 
-    let response: RawResponse =
-        serde_json::from_str(line.trim()).expect("failed to decode response");
-    assert!(!response.ok);
-    assert_eq!(response.error, Some(ErrorCode::MalformedRequest));
+    let response: Value = serde_json::from_str(line.trim()).expect("failed to decode response");
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"], "malformed_request");
 
     // The daemon is still alive and serving normally.
-    assert!(daemon.run(&["status"]).ok);
+    assert_eq!(daemon.run(&["status"])["ok"], true);
 }
 
 /// A `lock` issued while an `unlock` is still prompting wins: the unlock
@@ -300,18 +266,18 @@ fn a_lock_during_an_unlock_is_not_undone() {
         let unlocking = scope.spawn(|| daemon.run(&["unlock", "personal"]));
         std::thread::sleep(Duration::from_millis(300));
 
-        assert!(daemon.run(&["lock", "personal"]).ok);
+        assert_eq!(daemon.run(&["lock", "personal"])["ok"], true);
 
         let unlocked = unlocking.join().expect("unlock thread panicked");
-        assert!(
-            !unlocked.ok,
-            "the unlock should report the lock: {unlocked:?}"
+        assert_eq!(
+            unlocked["ok"], false,
+            "the unlock should report the lock: {unlocked}"
         );
-        assert_eq!(unlocked.error, Some(ErrorCode::Locked));
+        assert_eq!(unlocked["error"], "locked");
     });
 
     let status = daemon.run(&["status"]);
-    assert!(status.databases.expect("databases")[0].locked);
+    assert_eq!(status["databases"][0]["locked"], true);
 }
 
 /// A second `unlock` while the first is prompting is refused rather than
@@ -325,13 +291,14 @@ fn a_second_unlock_does_not_open_a_second_prompt() {
         std::thread::sleep(Duration::from_millis(300));
 
         let second = daemon.run(&["unlock", "personal"]);
-        assert_eq!(second.error, Some(ErrorCode::UnlockInProgress));
+        assert_eq!(second["error"], "unlock_in_progress");
 
-        assert!(first.join().expect("unlock thread panicked").ok);
+        assert_eq!(first.join().expect("unlock thread panicked")["ok"], true);
     });
 
-    assert!(
-        daemon.run(&["unlock", "personal"]).ok,
+    assert_eq!(
+        daemon.run(&["unlock", "personal"])["ok"],
+        true,
         "unlocked, so this is a no-op"
     );
 }
@@ -343,8 +310,8 @@ fn a_closed_stdout_does_not_take_the_daemon_down() {
     let mut daemon = Daemon::spawn(&format!("printf %s '{}'", common::PASSWORD), Stdio::piped());
     drop(daemon.child.stdout.take());
 
-    assert!(daemon.run(&["unlock", "personal"]).ok);
-    assert!(daemon.run(&["lock"]).ok);
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    assert_eq!(daemon.run(&["lock"])["ok"], true);
     assert!(
         daemon.child.try_wait().expect("try_wait").is_none(),
         "the daemon exited"

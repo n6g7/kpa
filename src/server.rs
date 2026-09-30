@@ -602,6 +602,18 @@ fn handle_connection(server: &Server, mut stream: UnixStream) {
 mod tests {
     use super::*;
 
+    /// Held by every test here that spawns a process, and by the one that
+    /// needs a socket to be genuinely dead. Spawning a child briefly
+    /// duplicates every open file descriptor into it until it execs; if a
+    /// prompt test forks at the wrong moment, the "stale" socket below is
+    /// still held open by that child, and `bind_socket` rightly refuses to
+    /// delete a socket that's still live.
+    static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+    fn spawn_lock() -> MutexGuard<'static, ()> {
+        SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn empty_server() -> Server {
         Server::new(Config::parse("").expect("an empty config is valid"))
     }
@@ -648,6 +660,7 @@ mod tests {
 
     #[test]
     fn prompt_output_has_its_line_ending_stripped() {
+        let _spawning = spawn_lock();
         let Ok(PromptOutcome::Password(password)) = prompt_password(&sh("printf 'hunter2\\r\\n'"))
         else {
             panic!("expected a password");
@@ -657,6 +670,7 @@ mod tests {
 
     #[test]
     fn a_failing_prompt_is_a_cancellation() {
+        let _spawning = spawn_lock();
         assert!(matches!(
             prompt_password(&sh("exit 1")),
             Ok(PromptOutcome::Cancelled)
@@ -667,6 +681,7 @@ mod tests {
     /// a reallocation that would strand an unwiped copy.
     #[test]
     fn over_long_prompt_output_is_refused() {
+        let _spawning = spawn_lock();
         let script = format!("head -c {} /dev/zero | tr '\\0' a", MAX_PASSWORD_LEN + 1);
         assert!(prompt_password(&sh(&script)).is_err());
     }
@@ -705,10 +720,13 @@ mod tests {
 
     #[test]
     fn bind_replaces_a_stale_socket() {
+        let _spawning = spawn_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("sock");
         drop(UnixListener::bind(&path).expect("first bind"));
 
-        assert!(bind_socket(&path).is_ok());
+        if let Err(err) = bind_socket(&path) {
+            panic!("bind_socket failed: {err:?}");
+        }
     }
 }
