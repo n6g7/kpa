@@ -13,12 +13,17 @@
 //! needs none of them.
 
 use std::fs::File;
+use std::io::{Cursor, Read};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use keepass::config::DatabaseVersion;
 use keepass::db::DatabaseOpenError;
 use keepass::error::{CryptographyError, DatabaseKeyError};
 use keepass::{Database, DatabaseKey};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -161,42 +166,57 @@ pub struct EntrySummary {
 ///   The fix is ceilings in `keepass` before the KDF runs; a header
 ///   pre-check in this repo is the fallback if upstream hasn't moved by
 ///   the time the daemon is meant to run unattended (`docs/plan.md` step 5).
-/// - **KDBX3's header hash is never checked.** `keepass` doesn't verify
-///   `Meta/HeaderHash`, so some corrupt KDBX3 headers open "successfully"
-///   with garbage in their *protected* fields (robustness finding 5). `list`
-///   omits protected fields, so nothing reads them today — but `copy`
-///   (`docs/plan.md` step 3) must not ship until this is fixed upstream or
-///   worked around, or it will put a wrong password on the clipboard with
-///   no error.
+/// - **KDBX3's header hash is checked here, not by `keepass`.** KDBX3
+///   authenticates its outer header only through `Meta/HeaderHash` inside
+///   the encrypted payload, and `keepass` 0.15 never compares it. `open`
+///   verifies it (see `verify_kdbx3_header`) before returning the database,
+///   so a file whose header was altered without the key is rejected rather
+///   than served with wrong protected values. That check needs the KDF to
+///   run twice for a KDBX3 file (once to decrypt the payload for the hash,
+///   once more inside `keepass` to get the entries), so KDBX3 unlocks cost
+///   about twice as much as they did.
 pub fn open(
     path: &Path,
     password: Option<&Zeroizing<String>>,
     keyfile: Option<&Path>,
 ) -> Result<Database, VaultError> {
     let mut file = open_file(path, VaultError::NotFound)?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
 
-    let mut key = DatabaseKey::new();
-    if let Some(password) = password {
-        key = key.with_password(password);
-    }
-    if let Some(keyfile_path) = keyfile {
-        let mut keyfile_handle = open_file(keyfile_path, VaultError::KeyfileNotFound)?;
-        // io::Error here (e.g. a permissions error mid-read) maps to
-        // VaultError::Io via the #[from] impl above.
-        //
-        // Upstream leak: `keepass` zeroizes its own copy of the raw keyfile,
-        // but its XML keyfile parser makes about six unzeroized
-        // intermediate copies of the key material, which together cover
-        // the whole 32-byte key and survive a lock
-        // (`docs/review-2026-09-secrets.md` finding 2). Pre-parsing the
-        // keyfile here would remove most of those at the cost of
-        // duplicating `keepass`'s format detection; the fix belongs
-        // upstream.
-        key = key.with_keyfile(&mut keyfile_handle)?;
+    // A fresh key per use: `DatabaseKey` is consumed by each parse, and the
+    // KDBX3 check below parses the same file a second time.
+    let make_key = || -> Result<DatabaseKey, VaultError> {
+        let mut key = DatabaseKey::new();
+        if let Some(password) = password {
+            key = key.with_password(password);
+        }
+        if let Some(keyfile_path) = keyfile {
+            let mut keyfile_handle = open_file(keyfile_path, VaultError::KeyfileNotFound)?;
+            // io::Error here (e.g. a permissions error mid-read) maps to
+            // VaultError::Io via the #[from] impl above.
+            //
+            // Upstream leak: `keepass` zeroizes its own copy of the raw keyfile,
+            // but its XML keyfile parser makes about six unzeroized
+            // intermediate copies of the key material, which together cover
+            // the whole 32-byte key and survive a lock
+            // (`docs/review-2026-09-secrets.md` finding 2). Pre-parsing the
+            // keyfile here would remove most of those at the cost of
+            // duplicating `keepass`'s format detection; the fix belongs
+            // upstream.
+            key = key.with_keyfile(&mut keyfile_handle)?;
+        }
+        Ok(key)
+    };
+
+    let version =
+        DatabaseVersion::parse(&data).map_err(|err| VaultError::Corrupt(err.to_string()))?;
+    if let DatabaseVersion::KDB3(_) = version {
+        verify_kdbx3_header(&data, make_key()?)?;
     }
 
     // Sound because `Database::open` touches no state shared with anything
-    // else — it reads `file` and consumes `key` — so nothing is left half
+    // else — it reads `data` and consumes `key` — so nothing is left half
     // updated if it unwinds, and `DatabaseKey`'s `ZeroizeOnDrop` still runs
     // during the unwind. The panic payload is dropped rather than put in
     // the error: it's `keepass`'s text, which is never forwarded (see
@@ -205,9 +225,80 @@ pub fn open(
     // This only works while panics unwind. Setting `panic = "abort"` in a
     // Cargo profile silently turns every one of these back into a process
     // abort that takes all unlocked databases with it.
-    std::panic::catch_unwind(AssertUnwindSafe(|| Database::open(&mut file, key)))
-        .map_err(|_| VaultError::Corrupt("keepass panicked while parsing".to_string()))?
-        .map_err(VaultError::from)
+    let key = make_key()?;
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        Database::open(&mut Cursor::new(&data), key)
+    }))
+    .map_err(|_| VaultError::Corrupt("keepass panicked while parsing".to_string()))?
+    .map_err(VaultError::from)
+}
+
+/// Checks a KDBX3 file's `Meta/HeaderHash` against the outer header bytes as
+/// they sit in the file (from offset 0 through the end-of-header entry, not
+/// a re-serialization). The hash is stored inside the encrypted payload, so
+/// the payload has to be decrypted first. The check is the gate: nothing
+/// from the decrypted file is served unless it returns `Ok`.
+fn verify_kdbx3_header(data: &[u8], key: DatabaseKey) -> Result<(), VaultError> {
+    let header_len = kdbx3_outer_header_len(data)
+        .ok_or_else(|| VaultError::Corrupt("KDBX3 outer header is truncated".to_string()))?;
+
+    let xml = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        Database::get_xml(&mut Cursor::new(data), key)
+    }))
+    .map_err(|_| VaultError::Corrupt("keepass panicked while parsing".to_string()))?
+    .map_err(VaultError::from)?;
+    let xml = Zeroizing::new(xml);
+
+    let stored = kdbx3_header_hash(&xml)
+        .ok_or_else(|| VaultError::Corrupt("KDBX3 file has no header hash".to_string()))?;
+    let actual = Sha256::digest(&data[..header_len]);
+    if stored.as_slice() != actual.as_slice() {
+        return Err(VaultError::Corrupt(
+            "KDBX3 header hash mismatch".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Byte length of a KDBX3 outer header: the 12-byte version header, then
+/// `(type: u8, len: u16 LE, data)` entries up to and including the
+/// end-of-header entry (type 0). `None` if an entry runs past the end of
+/// the file.
+fn kdbx3_outer_header_len(data: &[u8]) -> Option<usize> {
+    const VERSION_HEADER_LEN: usize = 12;
+    let mut pos = VERSION_HEADER_LEN;
+    loop {
+        let entry_type = *data.get(pos)?;
+        let entry_len = u16::from_le_bytes([*data.get(pos + 1)?, *data.get(pos + 2)?]) as usize;
+        let end = pos.checked_add(3 + entry_len)?;
+        if end > data.len() {
+            return None;
+        }
+        if entry_type == 0 {
+            return Some(end);
+        }
+        pos = end;
+    }
+}
+
+/// The decoded `Meta/HeaderHash` value from a decrypted KDBX3 payload, or
+/// `None` if it is absent or not valid base64. Only the first `<Meta>`
+/// block is searched, so a same-named element elsewhere in the document
+/// is ignored.
+fn kdbx3_header_hash(xml: &[u8]) -> Option<Vec<u8>> {
+    let meta = between(xml, b"<Meta>", b"</Meta>")?;
+    let encoded = between(meta, b"<HeaderHash>", b"</HeaderHash>")?;
+    let encoded = std::str::from_utf8(encoded).ok()?.trim();
+    STANDARD.decode(encoded).ok()
+}
+
+/// The bytes strictly between the first `open` and the next `close` after
+/// it.
+fn between<'a>(haystack: &'a [u8], open: &[u8], close: &[u8]) -> Option<&'a [u8]> {
+    let start = haystack.windows(open.len()).position(|w| w == open)? + open.len();
+    let rest = &haystack[start..];
+    let len = rest.windows(close.len()).position(|w| w == close)?;
+    Some(&rest[..len])
 }
 
 /// `File::open` with the not-found case mapped to a caller-supplied

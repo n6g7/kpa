@@ -134,3 +134,44 @@ fn a_panicking_parse_is_reported_as_corrupt() {
         Ok(_) => panic!("a 140-byte KDB should never open successfully"),
     }
 }
+
+/// Copies the password fixture into `dir` with one bit flipped in the
+/// outer header's ProtectedStreamKey (field 8). That field doesn't feed the
+/// master key, so the file still decrypts; only the protected values are
+/// decoded under the wrong keystream. The KDBX3 header has no checksum of
+/// its own, so nothing else needs fixing up.
+fn kdbx3_with_flipped_protected_stream_key(dir: &std::path::Path) -> std::path::PathBuf {
+    let mut data = fs::read(common::password_db()).expect("fixture should be readable");
+    // Outer header fields start after the 12-byte version header; each is
+    // `type: u8, len: u16 LE, data`, ended by type 0.
+    let mut pos = 12;
+    loop {
+        let ty = data[pos];
+        let len = u16::from_le_bytes([data[pos + 1], data[pos + 2]]) as usize;
+        assert_ne!(ty, 0, "fixture has no ProtectedStreamKey field");
+        if ty == 8 {
+            data[pos + 3] ^= 0x01;
+            break;
+        }
+        pos += 3 + len;
+    }
+    let path = dir.join("tampered.kdbx");
+    fs::write(&path, &data).expect("failed to write tampered copy");
+    path
+}
+
+/// A KDBX3 header altered without the key must not open: KDBX3's only
+/// authentication of the outer header is `Meta/HeaderHash`, and `keepass`
+/// doesn't check it, so kpa has to.
+#[test]
+fn tampered_kdbx3_header_is_rejected() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let path = kdbx3_with_flipped_protected_stream_key(dir.path());
+    let password = Zeroizing::new(common::PASSWORD.to_string());
+
+    match vault::open(&path, Some(&password), None) {
+        Err(VaultError::Corrupt(_)) => {}
+        Err(other) => panic!("expected Corrupt, got a different error: {other}"),
+        Ok(_) => panic!("a KDBX3 file with an altered header opened"),
+    }
+}

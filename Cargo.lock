@@ -584,12 +584,14 @@ dependencies = [
 name = "kpa"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "humantime-serde",
  "keepass",
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "toml",
