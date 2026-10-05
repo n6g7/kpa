@@ -37,9 +37,29 @@ impl PrivateBus {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("bus");
         let stderr_path = dir.path().join("dbus-daemon.stderr");
+        // A self-contained bus config, so the daemon does not pick up the
+        // host's session.conf or user config (the CI runner's dbus setup
+        // differs from a developer's machine).
+        let config_path = dir.path().join("bus.conf");
+        std::fs::write(
+            &config_path,
+            format!(
+                "<busconfig>\
+                 <type>session</type>\
+                 <listen>unix:path={}</listen>\
+                 <policy context=\"default\">\
+                 <allow send_destination=\"*\" eavesdrop=\"true\"/>\
+                 <allow eavesdrop=\"true\"/>\
+                 <allow own=\"*\"/>\
+                 </policy>\
+                 </busconfig>",
+                socket.display()
+            ),
+        )
+        .unwrap();
         let mut child = Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--print-address=1"])
-            .arg(format!("--address=unix:path={}", socket.display()))
+            .args(["--nofork", "--print-address=1"])
+            .arg(format!("--config-file={}", config_path.display()))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()))
