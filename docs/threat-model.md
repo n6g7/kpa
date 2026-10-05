@@ -130,9 +130,10 @@ failing for an in-scope actor.
   and carries on.
 - **G-5 Bounded exposure time.** A database locks on screen lock, on
   suspend (before the machine sleeps), after `idle_timeout` without a
-  request that reads or unlocks a database, on explicit request, and when
-  its file changes. `status`, `lock`, and refused or malformed requests
-  are not activity. Locked means kpa has dropped that database and serves
+  successful `list` of that database and without an unlock that installed
+  it (each database has its own idle timer, so using one does not keep
+  another unlocked), on explicit request, and when its file changes.
+  `status`, `lock`, and refused or malformed requests are not activity. Locked means kpa has dropped that database and serves
   nothing from it. A lock that races an unlock wins. A copied secret
   expires after `clipboard_timeout`.
 - **G-6 Lock clears what kpa owns.** On lock, every copy of A-1/A-2 that kpa
@@ -212,14 +213,16 @@ Response: expiry drops kpa's own source; if replaced, it's a no-op.
 Response: logind `Lock` (and `LockedHint` becoming true) on the user's
 graphical session, resolved through the user object rather than the
 daemon's own session; `PrepareForSleep` with a delay inhibitor held while
-any database is unlocked, released only after the lock; an idle timer
-reset only by requests that read or unlock a database (`list`, `copy`, a
-successful `unlock`); a per-database lock epoch so a lock beats an
+any database is unlocked, released only after the lock; a per-database
+idle timer, reset only by a successful `list` of that database or an
+unlock that installs it (`list`, `copy`, a successful `unlock`); a
+per-database lock epoch so a lock beats an
 in-flight unlock. In scope: a missed or dropped signal subscription
 (including after a D-Bus reconnect); subscribing to a session other than
 the user's graphical one; suspending before the lock completes; an idle
 timer reset by `status`, `lock`, a refused or malformed request, or
-anything other than a request; a request served after lock; an unlock
+anything other than a request; a database's idle timer reset by activity
+on a different database; a request served after lock; an unlock
 that installs after a lock; a clipboard offer outliving its database's
 lock.
 

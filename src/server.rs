@@ -27,7 +27,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use keepass::Database;
 use zeroize::Zeroizing;
@@ -60,9 +60,12 @@ const MAX_CONNECTIONS: usize = 64;
 const MAX_PASSWORD_LEN: usize = 4096;
 
 /// One configured database's state.
-#[derive(Default)]
 struct Slot {
     db: Option<Database>,
+    /// When this database was last read by a successful `list` or installed
+    /// by an `unlock`. Its idle timer runs from here, independently of every
+    /// other database. Only meaningful while `db` is `Some`.
+    last_activity: Instant,
     /// Bumped by every `lock` that covers this database. An `unlock` reads
     /// it before prompting and only stores what it opened if it is still
     /// the same afterwards, so a lock issued mid-unlock can't be undone by
@@ -71,6 +74,42 @@ struct Slot {
     /// An unlock is prompting or deriving the key right now. A second one
     /// is refused rather than opening a second prompt.
     unlocking: bool,
+}
+
+impl Slot {
+    /// Drops the database, if any, and bumps the epoch so an unlock that is
+    /// still prompting for it cannot install what it opened.
+    fn lock(&mut self) {
+        self.db = None;
+        self.lock_epoch = self.lock_epoch.wrapping_add(1);
+    }
+
+    /// Installs a freshly opened database and starts its idle timer.
+    fn install(&mut self, db: Database) {
+        self.db = Some(db);
+        self.touch();
+    }
+
+    /// Resets this database's idle timer to now.
+    fn touch(&mut self) {
+        self.last_activity = Instant::now();
+    }
+
+    /// This database's entries, or `None` if it is locked.
+    fn entries(&self, name: &str) -> Option<Vec<WireEntry>> {
+        self.db.as_ref().map(|db| wire_entries(name, db))
+    }
+}
+
+impl Default for Slot {
+    fn default() -> Slot {
+        Slot {
+            db: None,
+            last_activity: Instant::now(),
+            lock_epoch: 0,
+            unlocking: false,
+        }
+    }
 }
 
 /// Daemon state. `dbs` keys on the configured database name; a key's
@@ -96,6 +135,35 @@ impl Server {
             config,
             dbs: Mutex::new(dbs),
         }
+    }
+
+    /// Lock each unlocked database that has had no successful `list` and no
+    /// unlock for `idle_timeout` as of `now`, judged per database. Returns
+    /// the names it locked.
+    ///
+    /// Only databases that are unlocked get their epoch bumped: an unlock
+    /// still prompting for a locked database is not idle-locked out from
+    /// under the user, and with nothing unlocked there is nothing to do.
+    pub fn expire_idle(&self, now: Instant) -> Vec<String> {
+        let locked = {
+            let mut dbs = slots(&self.dbs);
+            let mut locked = Vec::new();
+            for (name, slot) in dbs.iter_mut() {
+                let idle =
+                    now.saturating_duration_since(slot.last_activity) >= self.config.idle_timeout;
+                if slot.db.is_some() && idle {
+                    slot.lock();
+                    locked.push(name.clone());
+                }
+            }
+            locked
+        };
+        // Logged after the guard is released: a stalled stdout must not
+        // hold up every other request.
+        for name in &locked {
+            log(format_args!("locked {name:?} after idle timeout"));
+        }
+        locked
     }
 }
 
@@ -207,7 +275,7 @@ impl Unlock for Server {
             // that stays true.
             return Err(UnlockError::LockedDuringUnlock { db: db() });
         }
-        slot.db = Some(opened);
+        slot.install(opened);
         Ok(db())
     }
 }
@@ -215,10 +283,7 @@ impl Unlock for Server {
 impl Lock for Server {
     fn lock(&self, request: &LockRequest) -> Result<Option<String>, LockError> {
         let mut dbs = slots(&self.dbs);
-        let lock_slot = |slot: &mut Slot| {
-            slot.db = None;
-            slot.lock_epoch = slot.lock_epoch.wrapping_add(1);
-        };
+        let lock_slot = |slot: &mut Slot| slot.lock();
         match request.db.as_deref() {
             Some(name) => {
                 let Some(slot) = dbs.get_mut(name) else {
@@ -239,23 +304,31 @@ impl Lock for Server {
 
 impl List for Server {
     fn list(&self, request: &ListRequest) -> Result<Vec<WireEntry>, ListError> {
-        let dbs = slots(&self.dbs);
+        let mut dbs = slots(&self.dbs);
 
+        // Each database a successful list reads gets its own timer reset;
+        // the others keep running.
         match request.db.as_deref() {
-            Some(name) => match dbs.get(name).map(|slot| slot.db.as_ref()) {
+            Some(name) => match dbs.get_mut(name) {
                 None => Err(ListError::UnknownDb {
                     db: name.to_string(),
                 }),
-                Some(None) => Err(ListError::Locked {
-                    db: name.to_string(),
-                }),
-                Some(Some(db)) => Ok(wire_entries(name, db)),
+                Some(slot) => match slot.entries(name) {
+                    None => Err(ListError::Locked {
+                        db: name.to_string(),
+                    }),
+                    Some(entries) => {
+                        slot.touch();
+                        Ok(entries)
+                    }
+                },
             },
             None => {
                 let mut entries = Vec::new();
-                for (db_name, slot) in dbs.iter() {
-                    if let Some(db) = &slot.db {
-                        entries.extend(wire_entries(db_name, db));
+                for (db_name, slot) in dbs.iter_mut() {
+                    if let Some(read) = slot.entries(db_name) {
+                        entries.extend(read);
+                        slot.touch();
                     }
                 }
                 Ok(entries)
@@ -464,6 +537,9 @@ impl Drop for ConnectionSlot {
 /// over `MAX_CONNECTIONS`, or one the host won't spawn a thread for, is
 /// dropped — the client sees it closed — and the loop carries on.
 pub fn serve(server: Arc<Server>, listener: UnixListener) {
+    let watcher = Arc::clone(&server);
+    let _ = thread::Builder::new().spawn(move || watch_idle(&watcher));
+
     let active = Arc::new(AtomicUsize::new(0));
     for conn in listener.incoming() {
         let stream = match conn {
@@ -488,6 +564,18 @@ pub fn serve(server: Arc<Server>, listener: UnixListener) {
             let _slot = slot;
             handle_connection(&server, stream);
         });
+    }
+}
+
+/// Check the idle timer on a fixed tick for as long as the daemon runs.
+/// The tick is a tenth of `idle_timeout`, clamped to between 10 ms and
+/// 1 s, so a lock lands within about a tenth of the timeout after expiry.
+fn watch_idle(server: &Server) {
+    let tick =
+        (server.config.idle_timeout / 10).clamp(Duration::from_millis(10), Duration::from_secs(1));
+    loop {
+        thread::sleep(tick);
+        server.expire_idle(Instant::now());
     }
 }
 
@@ -728,5 +816,175 @@ mod tests {
         if let Err(err) = bind_socket(&path) {
             panic!("bind_socket failed: {err:?}");
         }
+    }
+
+    /// Two configured databases, both locked, with the given idle timeout.
+    fn idle_server(timeout: &str) -> Server {
+        let config = format!(
+            "idle_timeout = \"{timeout}\"\n\
+             [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
+             [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n"
+        );
+        Server::new(Config::parse(&config).expect("valid config"))
+    }
+
+    /// Stands in for a successful unlock without a file or a prompt. Does not
+    /// touch the timer, so each test controls it directly.
+    fn unlock_directly(server: &Server, name: &str) {
+        slots(&server.dbs).get_mut(name).expect("configured").db = Some(Database::new());
+    }
+
+    fn is_unlocked(server: &Server, name: &str) -> bool {
+        slots(&server.dbs)[name].db.is_some()
+    }
+
+    /// Makes the named database's last activity look `by` ago, so the next
+    /// check sees its timeout as already spent. Leaves every other database's
+    /// timer alone.
+    fn age_activity(server: &Server, name: &str, by: Duration) {
+        slots(&server.dbs)
+            .get_mut(name)
+            .expect("configured")
+            .last_activity = Instant::now() - by;
+    }
+
+    /// Whether the timer locks anything at the real current time. A touch
+    /// made by the request under test moves that database's activity to now,
+    /// and then nothing is idle.
+    fn idle_lock_fires(server: &Server) -> bool {
+        !server.expire_idle(Instant::now()).is_empty()
+    }
+
+    #[test]
+    fn nothing_locks_before_the_timeout() {
+        let server = idle_server("30m");
+        unlock_directly(&server, "personal");
+        assert!(server.expire_idle(Instant::now()).is_empty());
+        assert!(is_unlocked(&server, "personal"));
+    }
+
+    #[test]
+    fn idle_timeout_locks_every_idle_unlocked_database() {
+        let server = idle_server("1s");
+        unlock_directly(&server, "personal");
+        unlock_directly(&server, "work");
+        age_activity(&server, "personal", Duration::from_secs(5));
+        age_activity(&server, "work", Duration::from_secs(5));
+
+        let mut locked = server.expire_idle(Instant::now());
+        locked.sort();
+        assert_eq!(locked, ["personal", "work"]);
+        assert!(!is_unlocked(&server, "personal"));
+        assert!(!is_unlocked(&server, "work"));
+    }
+
+    /// The reset rule: `status` is not activity, so a poller can't keep a
+    /// database unlocked.
+    #[test]
+    fn status_does_not_extend_the_timeout() {
+        let server = idle_server("1s");
+        unlock_directly(&server, "personal");
+        age_activity(&server, "personal", Duration::from_secs(5));
+
+        let _ = Status::status(&server);
+        assert!(idle_lock_fires(&server));
+        assert!(!is_unlocked(&server, "personal"));
+    }
+
+    /// `lock` is not activity, even when it names a database that is locked
+    /// already.
+    #[test]
+    fn lock_does_not_extend_the_timeout() {
+        let server = idle_server("1s");
+        unlock_directly(&server, "personal");
+        age_activity(&server, "personal", Duration::from_secs(5));
+
+        let _ = Lock::lock(
+            &server,
+            &LockRequest {
+                db: Some("work".into()),
+            },
+        );
+        assert!(idle_lock_fires(&server));
+        assert!(!is_unlocked(&server, "personal"));
+    }
+
+    /// A refused `list` reads nothing, so it is not activity either.
+    #[test]
+    fn a_refused_list_does_not_extend_the_timeout() {
+        let server = idle_server("1s");
+        unlock_directly(&server, "personal");
+        age_activity(&server, "personal", Duration::from_secs(5));
+
+        let refused = List::list(
+            &server,
+            &ListRequest {
+                db: Some("work".into()),
+            },
+        );
+        assert!(refused.is_err());
+        assert!(idle_lock_fires(&server));
+    }
+
+    #[test]
+    fn a_successful_list_extends_the_timeout() {
+        let server = idle_server("1s");
+        unlock_directly(&server, "personal");
+        age_activity(&server, "personal", Duration::from_secs(5));
+
+        assert!(List::list(&server, &ListRequest { db: None }).is_ok());
+        assert!(!idle_lock_fires(&server));
+        assert!(is_unlocked(&server, "personal"));
+    }
+
+    /// The timers are per database: a successful `list` of A does not keep
+    /// an idle B unlocked, and B locks on its own schedule.
+    #[test]
+    fn using_one_database_does_not_keep_another_unlocked() {
+        let server = idle_server("1s");
+        unlock_directly(&server, "personal");
+        unlock_directly(&server, "work");
+        age_activity(&server, "personal", Duration::from_secs(5));
+        age_activity(&server, "work", Duration::from_secs(5));
+
+        assert!(
+            List::list(
+                &server,
+                &ListRequest {
+                    db: Some("personal".into())
+                }
+            )
+            .is_ok()
+        );
+        assert_eq!(server.expire_idle(Instant::now()), ["work"]);
+        assert!(is_unlocked(&server, "personal"));
+        assert!(!is_unlocked(&server, "work"));
+    }
+
+    /// A list of everything resets only the databases it actually read: an
+    /// unlocked one is refreshed, a locked one has no timer to refresh.
+    #[test]
+    fn a_list_of_all_resets_each_unlocked_database_it_reads() {
+        let server = idle_server("1s");
+        unlock_directly(&server, "personal");
+        age_activity(&server, "personal", Duration::from_secs(5));
+
+        assert!(List::list(&server, &ListRequest { db: None }).is_ok());
+        assert!(!idle_lock_fires(&server));
+        assert!(is_unlocked(&server, "personal"));
+        assert!(!is_unlocked(&server, "work"));
+    }
+
+    /// Only unlocked databases are touched by the timer: a locked one keeps
+    /// its epoch, so an unlock still prompting for it is not cancelled.
+    #[test]
+    fn an_idle_lock_leaves_locked_databases_and_their_epochs_alone() {
+        let server = idle_server("1s");
+        unlock_directly(&server, "personal");
+        age_activity(&server, "personal", Duration::from_secs(5));
+        let epoch_before = slots(&server.dbs)["work"].lock_epoch;
+
+        assert_eq!(server.expire_idle(Instant::now()), ["personal"]);
+        assert_eq!(slots(&server.dbs)["work"].lock_epoch, epoch_before);
     }
 }
