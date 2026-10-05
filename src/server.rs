@@ -87,17 +87,17 @@ impl Slot {
     /// Installs a freshly opened database and starts its idle timer.
     fn install(&mut self, db: Database) {
         self.db = Some(db);
-        self.last_activity = Instant::now();
+        self.touch(Instant::now());
     }
 
-    /// Lists this database's entries as a successful `list` read, and resets
-    /// its idle timer to `now`. `None` if the database is locked, in which
-    /// case nothing is read and the timer is untouched.
-    fn read_entries(&mut self, name: &str, now: Instant) -> Option<Vec<WireEntry>> {
-        let db = self.db.as_ref()?;
-        let entries = wire_entries(name, db);
+    /// Resets this database's idle timer to `now`.
+    fn touch(&mut self, now: Instant) {
         self.last_activity = now;
-        Some(entries)
+    }
+
+    /// This database's entries, or `None` if it is locked.
+    fn entries(&self, name: &str) -> Option<Vec<WireEntry>> {
+        self.db.as_ref().map(|db| wire_entries(name, db))
     }
 }
 
@@ -314,17 +314,22 @@ impl List for Server {
                 None => Err(ListError::UnknownDb {
                     db: name.to_string(),
                 }),
-                Some(slot) => slot
-                    .read_entries(name, now)
-                    .ok_or_else(|| ListError::Locked {
+                Some(slot) => match slot.entries(name) {
+                    None => Err(ListError::Locked {
                         db: name.to_string(),
                     }),
+                    Some(entries) => {
+                        slot.touch(now);
+                        Ok(entries)
+                    }
+                },
             },
             None => {
                 let mut entries = Vec::new();
                 for (db_name, slot) in dbs.iter_mut() {
-                    if let Some(read) = slot.read_entries(db_name, now) {
+                    if let Some(read) = slot.entries(db_name) {
                         entries.extend(read);
+                        slot.touch(now);
                     }
                 }
                 Ok(entries)
