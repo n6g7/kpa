@@ -64,3 +64,9 @@ pub fn keyfile() -> PathBuf {
 pub fn kdbx4_db() -> PathBuf {
     ensure_fixtures().join("fixture-kdbx4.kdbx")
 }
+
+/// A database whose entry text is full of characters a terminal acts on
+/// (`tests/fixture.sh`).
+pub fn hostile_db() -> PathBuf {
+    ensure_fixtures().join("fixture-hostile.kdbx")
+}

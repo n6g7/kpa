@@ -177,6 +177,55 @@ fn full_lifecycle() {
     assert_eq!(listed["error"], "locked");
 }
 
+/// `list` output is what the terminal receives. Entry text full of
+/// characters a terminal acts on must reach stdout with none of them raw,
+/// and the line must still decode to the text the database holds.
+#[test]
+fn list_output_has_no_raw_terminal_controls_from_entry_content() {
+    let config = config_toml(
+        &format!("printf %s {}", common::PASSWORD),
+        &common::hostile_db().display().to_string(),
+    );
+    let daemon = Daemon::spawn_config(&config, None, Stdio::null());
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kpa"))
+        .arg("--socket")
+        .arg(&daemon.socket)
+        .arg("list")
+        .output()
+        .expect("failed to spawn kpa client");
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).expect("client stdout is not valid UTF-8");
+
+    let body = text
+        .strip_suffix('\n')
+        .expect("one line, newline-terminated");
+    let raw_control = |c: char| {
+        matches!(
+            c,
+            '\u{0}'..='\u{1f}'
+                | '\u{7f}'..='\u{9f}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
+    };
+    assert!(
+        !body.chars().any(raw_control),
+        "raw terminal control reached stdout: {text:?}"
+    );
+
+    let value: Value = serde_json::from_str(&text).expect("list output is valid JSON");
+    let entry = &value["entries"][0];
+    assert_eq!(
+        entry["title"],
+        "A\u{9d}0;PWNED\u{9c}B\u{7f}C\u{202e}DCBA\u{202c}\u{2067}E\u{2069}\u{200b}\u{2028}\u{2029}\u{85}"
+    );
+    assert_eq!(entry["username"], "alice\u{202e}");
+    assert_eq!(entry["group"], "Web\u{9b}0m");
+}
+
 #[test]
 fn wrong_password_is_reported_and_leaves_the_database_locked() {
     let daemon = Daemon::start("not-the-real-password");

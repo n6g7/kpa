@@ -16,10 +16,15 @@ PASSWORD_DB="$OUT/fixture.kdbx"
 KEYFILE_DB="$OUT/fixture-kf.kdbx"
 KEYFILE="$OUT/fixture-kf.keyx"
 KDBX4_DB="$OUT/fixture-kdbx4.kdbx"
+HOSTILE_DB="$OUT/fixture-hostile.kdbx"
 
-if [ -f "$PASSWORD_DB" ] && [ -f "$KEYFILE_DB" ] && [ -f "$KEYFILE" ] && [ -f "$KDBX4_DB" ]; then
+if [ -f "$PASSWORD_DB" ] && [ -f "$KEYFILE_DB" ] && [ -f "$KEYFILE" ] && [ -f "$KDBX4_DB" ] && [ -f "$HOSTILE_DB" ]; then
     exit 0
 fi
+
+# Some fixture is missing, so rebuild all of them: keepassxc-cli's db-create
+# refuses to overwrite an existing file, so a partial set can't be topped up.
+rm -f "$PASSWORD_DB" "$KEYFILE_DB" "$KEYFILE" "$KDBX4_DB" "$HOSTILE_DB"
 
 # Password-only db with one group and one entry. The exact incantations
 # below are verbatim from docs/plan.md step 1 — keepassxc-cli's interactive
@@ -49,5 +54,25 @@ path = sys.argv[1]
 kp = create_database(path, password="testpass123")
 group = kp.add_group(kp.root_group, "Web")
 kp.add_entry(group, "Example", "alice", "entrypass1", url="https://example.com")
+kp.save()
+PYEOF
+
+# Entry text that a terminal would act on: C1 controls (CSI, OSC, ST),
+# DEL, and bidi overrides and isolates. XML 1.0 allows these, so they
+# survive into the file. C0 controls don't, which is why none appear here.
+python3 - "$HOSTILE_DB" <<'PYEOF'
+import sys
+from pykeepass import create_database
+
+path = sys.argv[1]
+kp = create_database(path, password="testpass123")
+group = kp.add_group(kp.root_group, "Web\u009b0m")
+kp.add_entry(
+    group,
+    "A\u009d0;PWNED\u009cB\u007fC‮DCBA‬⁧E⁩​  \u0085",
+    "alice‮",
+    "entrypass1",
+    url="https://example.com",
+)
 kp.save()
 PYEOF
