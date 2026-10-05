@@ -36,19 +36,32 @@ impl PrivateBus {
     fn start() -> PrivateBus {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("bus");
+        let stderr_path = dir.path().join("dbus-daemon.stderr");
         let mut child = Command::new("dbus-daemon")
             .args(["--session", "--nofork", "--print-address=1"])
             .arg(format!("--address=unix:path={}", socket.display()))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(std::fs::File::create(&stderr_path).unwrap()))
             .spawn()
             .expect("dbus-daemon not found on PATH; run inside `nix develop`");
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut line)
             .unwrap();
-        let address = line.trim().split(',').next().unwrap().to_string();
+        let address = line
+            .trim()
+            .split(',')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        if !address.starts_with("unix:") {
+            // The daemon never announced a bus. Reap it and show why.
+            let _ = child.kill();
+            let status = child.wait().ok();
+            let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            panic!("dbus-daemon printed no bus address (status {status:?}); stderr:\n{stderr}");
+        }
         PrivateBus {
             child,
             address,
