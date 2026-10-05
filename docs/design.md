@@ -201,7 +201,8 @@ Rules:
    on the fd that was read. Take it before the read and again after it; if the
    two differ, the unlock fails with `stale`. Before each use of an unlocked
    database, re-check by `stat` on the path. Any difference drops the in-memory
-   database and returns `stale`, requiring re-unlock. Another client saving, or
+   database and returns `stale`, requiring re-unlock (`list` of all databases
+   fails naming the stale one; `status` reports it as locked). Another client saving, or
    a sync tool landing a new copy, both cause this. Serving stale entries
    silently is the worse failure. Anyone syncing their vault across machines
    makes this a real case, not a theoretical one.

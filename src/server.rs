@@ -7,8 +7,8 @@
 //! answers into responses. So nothing here builds a `Response` except the
 //! pre-dispatch failures, which by definition never reach an op.
 //!
-//! No idle timeout, tray, or clipboard yet — those are later steps. Unlocking still needs a password from somewhere, so this
-//! step already runs the configured `prompt` command (`docs/design.md`
+//! No tray or clipboard yet — those are later steps. Unlocking still needs a
+//! password from somewhere, so this step already runs the configured `prompt` command (`docs/design.md`
 //! decision #9) to get one; nothing about that requires the later pieces.
 //!
 //! The limits below (request size, I/O timeouts, concurrent connections)
@@ -854,7 +854,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::write(&path, b"").expect("temp file");
-        let stamp = vault::fingerprint_path(&path).expect("stat temp file");
+        let stamp = vault::Fingerprint::from_file(&path).expect("stat temp file");
         let mut dbs = slots(&server.dbs);
         let slot = dbs.get_mut(name).expect("configured");
         slot.path = path;

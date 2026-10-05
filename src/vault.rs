@@ -114,18 +114,23 @@ impl Fingerprint {
             ctime_nsec: meta.ctime_nsec(),
         }
     }
-}
 
-/// Fingerprint of the file behind `path`, by `stat`. Follows symlinks, the
-/// same way `open` does.
-pub fn fingerprint_path(path: &Path) -> std::io::Result<Fingerprint> {
-    std::fs::metadata(path).map(|meta| Fingerprint::from_metadata(&meta))
+    /// Fingerprint of the file behind `path`, by `stat`. Follows symlinks,
+    /// the same way `open` does.
+    pub fn from_file(path: &Path) -> std::io::Result<Fingerprint> {
+        std::fs::metadata(path).map(|meta| Fingerprint::from_metadata(&meta))
+    }
+
+    /// Whether `self` and `other` describe the same file identity.
+    pub fn matches(self, other: Fingerprint) -> bool {
+        self == other
+    }
 }
 
 /// Whether the file at `path` is still the one `expected` was taken from.
 /// A file that can no longer be stat'd counts as changed.
 pub fn is_unchanged(path: &Path, expected: &Fingerprint) -> bool {
-    fingerprint_path(path).is_ok_and(|now| now == *expected)
+    Fingerprint::from_file(path).is_ok_and(|now| now.matches(*expected))
 }
 
 impl From<DatabaseOpenError> for VaultError {
@@ -243,7 +248,7 @@ pub fn open(
     file.read_to_end(&mut data)?;
     let after = Fingerprint::from_metadata(&file.metadata()?);
     drop(file);
-    if before != after {
+    if !before.matches(after) {
         return Err(VaultError::Changed);
     }
 

@@ -8,7 +8,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use kpa::vault::{self, Fingerprint, fingerprint_path, is_unchanged};
+use kpa::vault::{self, Fingerprint, is_unchanged};
 use zeroize::Zeroizing;
 
 mod common;
@@ -54,7 +54,7 @@ fn baseline() -> (tempfile::TempDir, PathBuf, Fingerprint, SystemTime) {
     let dir = tempfile::tempdir().expect("failed to create tempdir");
     let path = dir.path().join("vault.kdbx");
     fs::write(&path, BYTES).expect("failed to write file");
-    let fp = fingerprint_path(&path).expect("failed to stat file");
+    let fp = Fingerprint::from_file(&path).expect("failed to stat file");
     let mtime = fs::metadata(&path).unwrap().modified().unwrap();
     assert!(
         is_unchanged(&path, &fp),
@@ -68,7 +68,7 @@ fn size_change_is_detected() {
     let (_dir, path, fp, _) = baseline();
     fs::write(&path, b"0123456789abc").unwrap();
 
-    let now = fingerprint_path(&path).unwrap();
+    let now = Fingerprint::from_file(&path).unwrap();
     assert_ne!(now.size, fp.size);
     assert!(!is_unchanged(&path, &fp));
 }
@@ -78,7 +78,7 @@ fn mtime_change_is_detected() {
     let (_dir, path, fp, mtime) = baseline();
     set_mtime(&path, mtime + Duration::from_secs(3600));
 
-    let now = fingerprint_path(&path).unwrap();
+    let now = Fingerprint::from_file(&path).unwrap();
     assert_ne!(
         (now.mtime_sec, now.mtime_nsec),
         (fp.mtime_sec, fp.mtime_nsec)
@@ -98,7 +98,7 @@ fn restored_mtime_is_caught_by_ctime() {
     tick();
     set_mtime(&path, mtime);
 
-    let now = fingerprint_path(&path).unwrap();
+    let now = Fingerprint::from_file(&path).unwrap();
     assert_eq!(now.dev, fp.dev);
     assert_eq!(now.ino, fp.ino);
     assert_eq!(now.size, fp.size);
@@ -127,7 +127,7 @@ fn replaced_inode_is_detected() {
     set_mtime(&replacement, mtime);
     fs::rename(&replacement, &path).unwrap();
 
-    let now = fingerprint_path(&path).unwrap();
+    let now = Fingerprint::from_file(&path).unwrap();
     assert_ne!(now.ino, fp.ino);
     assert!(!is_unchanged(&path, &fp));
 }
