@@ -87,12 +87,12 @@ impl Slot {
     /// Installs a freshly opened database and starts its idle timer.
     fn install(&mut self, db: Database) {
         self.db = Some(db);
-        self.touch(Instant::now());
+        self.touch();
     }
 
-    /// Resets this database's idle timer to `now`.
-    fn touch(&mut self, now: Instant) {
-        self.last_activity = now;
+    /// Resets this database's idle timer to now.
+    fn touch(&mut self) {
+        self.last_activity = Instant::now();
     }
 
     /// This database's entries, or `None` if it is locked.
@@ -305,7 +305,6 @@ impl Lock for Server {
 impl List for Server {
     fn list(&self, request: &ListRequest) -> Result<Vec<WireEntry>, ListError> {
         let mut dbs = slots(&self.dbs);
-        let now = Instant::now();
 
         // Each database a successful list reads gets its own timer reset;
         // the others keep running.
@@ -319,7 +318,7 @@ impl List for Server {
                         db: name.to_string(),
                     }),
                     Some(entries) => {
-                        slot.touch(now);
+                        slot.touch();
                         Ok(entries)
                     }
                 },
@@ -329,7 +328,7 @@ impl List for Server {
                 for (db_name, slot) in dbs.iter_mut() {
                     if let Some(read) = slot.entries(db_name) {
                         entries.extend(read);
-                        slot.touch(now);
+                        slot.touch();
                     }
                 }
                 Ok(entries)
