@@ -76,6 +76,21 @@ struct Slot {
     unlocking: bool,
 }
 
+impl Slot {
+    /// Drops the database, if any, and bumps the epoch so an unlock that is
+    /// still prompting for it cannot install what it opened.
+    fn lock(&mut self) {
+        self.db = None;
+        self.lock_epoch = self.lock_epoch.wrapping_add(1);
+    }
+
+    /// Installs a freshly opened database and starts its idle timer.
+    fn install(&mut self, db: Database) {
+        self.db = Some(db);
+        self.last_activity = Instant::now();
+    }
+}
+
 impl Default for Slot {
     fn default() -> Slot {
         Slot {
@@ -127,8 +142,7 @@ impl Server {
                 let idle =
                     now.saturating_duration_since(slot.last_activity) >= self.config.idle_timeout;
                 if slot.db.is_some() && idle {
-                    slot.db = None;
-                    slot.lock_epoch = slot.lock_epoch.wrapping_add(1);
+                    slot.lock();
                     locked.push(name.clone());
                 }
             }
@@ -251,8 +265,7 @@ impl Unlock for Server {
             // that stays true.
             return Err(UnlockError::LockedDuringUnlock { db: db() });
         }
-        slot.db = Some(opened);
-        slot.last_activity = Instant::now();
+        slot.install(opened);
         Ok(db())
     }
 }
@@ -260,10 +273,7 @@ impl Unlock for Server {
 impl Lock for Server {
     fn lock(&self, request: &LockRequest) -> Result<Option<String>, LockError> {
         let mut dbs = slots(&self.dbs);
-        let lock_slot = |slot: &mut Slot| {
-            slot.db = None;
-            slot.lock_epoch = slot.lock_epoch.wrapping_add(1);
-        };
+        let lock_slot = |slot: &mut Slot| slot.lock();
         match request.db.as_deref() {
             Some(name) => {
                 let Some(slot) = dbs.get_mut(name) else {
