@@ -196,11 +196,35 @@ Rules:
    with pathological KDF parameters can make `keepass` hang mid-unlock, and
    that unlock holds its fd (and a core) for as long as it hangs.
 2. **Never write.** Guaranteed by the `Op` enum in `src/proto/request.rs`.
-3. **Freshness guard:** record `(dev, ino, mtime, size)` at unlock; re-stat before
-   serving. On change — another client saving, or a sync tool landing a new
-   copy — drop the in-memory database and return `stale`, requiring re-unlock.
-   Serving stale entries silently is the worse failure. Anyone syncing their
-   vault across machines makes this a real case, not a theoretical one.
+3. **Freshness guard** (`docs/threat-model.md` T-12): record
+   `(dev, ino, size, mtime, ctime)`, with nanoseconds on both times, by `fstat`
+   on the fd that was read. Take it before the read and again after it; if the
+   two differ, the unlock fails with `stale`. Before each use of an unlocked
+   database, re-check by `stat` on the path. Any difference drops the in-memory
+   database and returns `stale`, requiring re-unlock. Another client saving, or
+   a sync tool landing a new copy, both cause this. Serving stale entries
+   silently is the worse failure. Anyone syncing their vault across machines
+   makes this a real case, not a theoretical one.
+
+   ctime catches a restored mtime, since user space cannot set ctime. The
+   `fstat` on the read fd, rather than a `stat` by path, closes the window
+   between the read and the stat. ctime is only as reliable as the filesystem
+   reports it. On coarse-timestamp, FUSE or network mounts the guard is best
+   effort. A chmod, a link change, or a backup tool that hard-links the file
+   also moves ctime and causes a spurious `stale`, which fails safe.
+
+   **Not caught:**
+   - A same-size write that leaves mtime and ctime equal to the recorded values.
+     A tool that sets times cannot set ctime, and ctime moves on every write
+     and every time change. So the tuple misses such a write only if the
+     kernel's timestamp for that write equals the recorded one. That needs a
+     filesystem with coarse timestamps, where the write lands in the same tick
+     as the recorded one, or a writer that sets the system clock back, which
+     requires root.
+   - Substitution or rollback while the database is locked. The tuple is taken
+     at unlock, so a file replaced with an older copy of the same vault, or
+     with another vault sharing the password, before the next unlock is never
+     compared against anything. This is T-17, and it is not addressed.
 4. **Concurrency:** accept connections concurrently (bounded — a flood is
    refused rather than turned into unbounded threads, and a failed thread
    spawn drops that one connection instead of the daemon), serialize vault

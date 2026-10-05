@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 #[test]
 fn opens_with_the_right_password() {
     let password = Zeroizing::new(common::PASSWORD.to_string());
-    let db = vault::open(&common::password_db(), Some(&password), None)
+    let (db, _) = vault::open(&common::password_db(), Some(&password), None)
         .expect("fixture should open with its real password");
 
     let entries = vault::list_entries(&db);
@@ -50,7 +50,7 @@ fn opens_a_genuine_kdbx4_database() {
     // see tests/fixture.sh), and if `vault::open` ever regressed to only
     // handling KDBX3, this is what would catch it.
     let password = Zeroizing::new(common::PASSWORD.to_string());
-    let db = vault::open(&common::kdbx4_db(), Some(&password), None)
+    let (db, _) = vault::open(&common::kdbx4_db(), Some(&password), None)
         .expect("a genuine KDBX4 fixture should open");
 
     let entries = vault::list_entries(&db);
@@ -62,7 +62,7 @@ fn opens_a_genuine_kdbx4_database() {
 
 #[test]
 fn keyfile_only_fixture_opens_via_keyfile() {
-    let db = vault::open(&common::keyfile_db(), None, Some(&common::keyfile()))
+    let (db, _) = vault::open(&common::keyfile_db(), None, Some(&common::keyfile()))
         .expect("keyfile-only fixture should open with just its keyfile");
 
     // This fixture has no groups or entries seeded — opening cleanly with

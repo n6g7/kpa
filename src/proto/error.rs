@@ -29,6 +29,9 @@ pub enum ErrorCode {
     Io,
     /// Another unlock of the same database is already prompting.
     UnlockInProgress,
+    /// The database's file changed on disk after it was unlocked (or while
+    /// it was being read). The database has been dropped; unlock again.
+    Stale,
 }
 
 /// What an error response puts on the wire, however it arose. Each op
@@ -123,6 +126,7 @@ mod tests {
             (ErrorCode::Corrupt, "corrupt"),
             (ErrorCode::Io, "io"),
             (ErrorCode::UnlockInProgress, "unlock_in_progress"),
+            (ErrorCode::Stale, "stale"),
         ];
 
         for (code, expected) in cases {

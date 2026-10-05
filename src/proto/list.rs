@@ -54,6 +54,11 @@ pub enum ListError {
     Locked {
         db: String,
     },
+    /// The database's file changed on disk since it was unlocked. The
+    /// database is dropped by the time this is returned.
+    Stale {
+        db: String,
+    },
 }
 
 impl ListError {
@@ -61,6 +66,9 @@ impl ListError {
         match self {
             ListError::UnknownDb { db } => ErrorFields::new(ErrorCode::UnknownDb).db(db),
             ListError::Locked { db } => ErrorFields::new(ErrorCode::Locked).db(db),
+            ListError::Stale { db } => ErrorFields::new(ErrorCode::Stale)
+                .db(db)
+                .detail("database changed on disk"),
         }
     }
 }

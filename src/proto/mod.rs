@@ -280,12 +280,24 @@ mod tests {
         let owned = || db.to_string();
 
         // (response, expected code, expected `db`, expected `detail`)
-        let cases: [(Response, &str, Option<&str>, Option<&str>); 13] = [
+        let cases: [(Response, &str, Option<&str>, Option<&str>); 15] = [
             (
                 Response::Unlock(Err(UnlockError::InProgress { db: owned() })),
                 "unlock_in_progress",
                 Some(db),
                 None,
+            ),
+            (
+                Response::Unlock(Err(UnlockError::Stale { db: owned() })),
+                "stale",
+                Some(db),
+                Some("database changed on disk"),
+            ),
+            (
+                Response::List(Err(ListError::Stale { db: owned() })),
+                "stale",
+                Some(db),
+                Some("database changed on disk"),
             ),
             // Deliberately the same code as `list` on a locked database:
             // it names the state the unlock left behind.

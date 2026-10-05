@@ -462,3 +462,116 @@ fn a_successful_unlock_resets_the_timer() {
     std::thread::sleep(Duration::from_secs(1));
     assert!(!is_locked(&daemon), "unlock did not reset the idle timer");
 }
+
+/// A daemon serving a temp copy of the fixture, already unlocked. The copy
+/// is what each freshness test changes.
+fn unlocked_copy(dir: &tempfile::TempDir) -> (Daemon, PathBuf) {
+    let copy = dir.path().join("vault.kdbx");
+    std::fs::copy(common::password_db(), &copy).expect("copy fixture");
+    let config = config_toml(
+        &format!("printf %s '{}'", common::PASSWORD),
+        &copy.display().to_string(),
+    );
+    let daemon = Daemon::spawn_config(&config, None, Stdio::null());
+    let unlocked = daemon.run(&["unlock", "personal"]);
+    assert_eq!(unlocked["ok"], true, "{unlocked}");
+    (daemon, copy)
+}
+
+/// After a change, `list` answers `stale` and drops the database, so
+/// `status` reports it locked and a second `list` says `locked`.
+fn assert_stale(daemon: &Daemon, change: &str) {
+    let listed = daemon.run(&["list", "personal"]);
+    assert_eq!(listed["ok"], false, "{change}: list still served: {listed}");
+    assert_eq!(listed["error"], "stale", "{change}: {listed}");
+    assert_eq!(listed["db"], "personal");
+
+    let status = daemon.run(&["status"]);
+    assert_eq!(status["databases"][0]["locked"], true, "{change}: {status}");
+
+    let relisted = daemon.run(&["list", "personal"]);
+    assert_eq!(relisted["error"], "locked", "{change}: {relisted}");
+}
+
+#[test]
+fn an_unchanged_vault_keeps_serving() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (daemon, _copy) = unlocked_copy(&dir);
+
+    let listed = daemon.run(&["list", "personal"]);
+    assert_eq!(listed["ok"], true, "{listed}");
+    assert_eq!(listed["entries"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn a_changed_size_makes_the_database_stale() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (daemon, copy) = unlocked_copy(&dir);
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&copy)
+        .and_then(|mut file| file.write_all(b"x"))
+        .expect("append to copy");
+    assert_stale(&daemon, "size");
+}
+
+#[test]
+fn a_changed_mtime_makes_the_database_stale() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (daemon, copy) = unlocked_copy(&dir);
+
+    let later = std::fs::metadata(&copy).unwrap().modified().unwrap() + Duration::from_secs(3600);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&copy)
+        .and_then(|file| file.set_modified(later))
+        .expect("set mtime");
+    assert_stale(&daemon, "mtime");
+}
+
+/// Same size and inode, content changed, and the mtime put back to its
+/// unlock-time value. Only ctime is left to show the change.
+#[test]
+fn a_restored_mtime_makes_the_database_stale_through_ctime() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (daemon, copy) = unlocked_copy(&dir);
+    let original_mtime = std::fs::metadata(&copy).unwrap().modified().unwrap();
+
+    // Ticks of the kernel's coarse clock, so ctime moves on each step.
+    std::thread::sleep(Duration::from_millis(20));
+    let mut bytes = std::fs::read(&copy).unwrap();
+    *bytes.last_mut().unwrap() ^= 0xff;
+    std::fs::write(&copy, &bytes).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&copy)
+        .and_then(|file| file.set_modified(original_mtime))
+        .expect("restore mtime");
+
+    assert_stale(&daemon, "ctime");
+}
+
+/// The file is replaced by a copy with the same size and content and the
+/// original mtime, so only the inode number reveals it. The old inode is
+/// held open so the new file cannot reuse its number.
+#[test]
+fn a_replaced_inode_makes_the_database_stale() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (daemon, copy) = unlocked_copy(&dir);
+    let original_mtime = std::fs::metadata(&copy).unwrap().modified().unwrap();
+    let _old_inode_held_open = std::fs::File::open(&copy).unwrap();
+
+    let replacement = dir.path().join("vault.kdbx.new");
+    std::fs::copy(&copy, &replacement).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&replacement)
+        .and_then(|file| file.set_modified(original_mtime))
+        .expect("restore mtime");
+    std::fs::rename(&replacement, &copy).unwrap();
+
+    assert_stale(&daemon, "inode");
+}
