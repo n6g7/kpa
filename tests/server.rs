@@ -349,3 +349,67 @@ fn a_tilde_path_resolves_against_home() {
     let unlocked = daemon.run(&["unlock", "personal"]);
     assert_eq!(unlocked["ok"], true, "{unlocked}");
 }
+
+/// A daemon whose idle timeout is `idle`, with the fixture unlockable.
+fn idle_daemon(idle: &str) -> Daemon {
+    let config = format!(
+        "idle_timeout = \"{idle}\"\n{}",
+        config_toml(
+            &format!("printf %s '{}'", common::PASSWORD),
+            &common::password_db().display().to_string(),
+        )
+    );
+    Daemon::spawn_config(&config, None, Stdio::null())
+}
+
+fn is_locked(daemon: &Daemon) -> bool {
+    daemon.run(&["status"])["databases"][0]["locked"] == true
+}
+
+/// `status` polled faster than the timeout must not keep the database
+/// unlocked: the idle lock still fires.
+#[test]
+fn status_polling_does_not_keep_a_database_unlocked() {
+    let daemon = idle_daemon("300ms");
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < deadline {
+        daemon.run(&["status"]);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(is_locked(&daemon), "idle lock never fired");
+}
+
+/// `list` is activity: polled faster than the timeout, the database stays
+/// unlocked for as long as the polling lasts, then locks once it stops.
+#[test]
+fn list_polling_keeps_a_database_unlocked_until_it_stops() {
+    let daemon = idle_daemon("1s");
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < deadline {
+        assert_eq!(daemon.run(&["list"])["ok"], true, "locked too early");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let give_up = Instant::now() + Duration::from_secs(5);
+    while !is_locked(&daemon) {
+        assert!(Instant::now() < give_up, "idle lock never fired");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A successful unlock starts the timer. The daemon's clock starts at
+/// launch, so without that reset a 1.5 s timeout would lock at about 1.5 s,
+/// well before the check at about 2 s.
+#[test]
+fn a_successful_unlock_resets_the_timer() {
+    let daemon = idle_daemon("1500ms");
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(!is_locked(&daemon), "unlock did not reset the idle timer");
+}

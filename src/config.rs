@@ -11,8 +11,11 @@ use serde::Deserialize;
 /// Top-level config, `$XDG_CONFIG_HOME/kpa/config.toml`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Config {
-    /// Lock all databases after this much time with no requests. Defaults
-    /// match `docs/design.md`'s settled decision #7 (30 minutes) — logind's
+    /// Lock all databases after this much time with no request that reads
+    /// or unlocks one (`list`, `copy`, a successful `unlock`); `status`,
+    /// `lock` and refused requests don't count (`docs/threat-model.md`
+    /// G-5). The timer is global, one for all databases. Defaults to 30
+    /// minutes, matching `docs/design.md`'s settled decision #7 — logind's
     /// `Lock` signal already covers screen-lock, this only catches walking
     /// away without locking.
     #[serde(with = "humantime_serde", default = "default_idle_timeout")]
