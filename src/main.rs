@@ -13,6 +13,7 @@ use clap::{Parser, Subcommand};
 use kpa::config::Config;
 use kpa::proto::{self, ListRequest, LockRequest, Op, Request, UnlockRequest};
 use kpa::server::{self, Server};
+use kpa::socket;
 
 #[derive(Parser)]
 #[command(name = "kpa", about = "A small read-only KeePass agent")]
@@ -102,7 +103,7 @@ fn run_serve(socket_path: &Path, config_path: Option<PathBuf>) -> ExitCode {
         }
     };
 
-    let listener = match server::bind_socket(socket_path) {
+    let listener = match socket::bind_socket(socket_path) {
         Ok(listener) => listener,
         Err(err) => {
             eprintln!("error: binding {}: {err}", socket_path.display());

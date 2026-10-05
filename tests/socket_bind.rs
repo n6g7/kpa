@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
 
-use kpa::server::bind_socket;
+use kpa::socket::bind_socket;
 use rustix::fs::Mode;
 
 static SERIAL: Mutex<()> = Mutex::new(());
