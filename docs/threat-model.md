@@ -102,9 +102,20 @@ kpa (see §9).
   claims.
 - **ASM-6** — Host hardening is the user's: hibernation, zram writeback,
   `kernel.yama.ptrace_scope`, `fs.suid_dumpable`, full-disk encryption.
-- **ASM-7** — The user's screen locker goes through logind (`loginctl
-  lock-session` or equivalent) or sets the session's `LockedHint`. A
-  locker that does neither is invisible to kpa.
+- **ASM-7** — logind sees the user's screen lock in one of two ways, and
+  kpa relies on both properties:
+  (a) the locker asks logind to lock, through `Manager.LockSession`,
+  `Manager.LockSessions` or `Session.Lock` (what `loginctl lock-session`
+  and `loginctl lock-sessions` call, and what logind's own
+  `IdleAction=lock` does). logind then emits the session's `Lock` signal;
+  or (b) the desktop environment sets the session's `LockedHint` property
+  through `Session.SetLockedHint`, which logind emits as a
+  `PropertiesChanged` change. logind never sets `LockedHint` itself. A
+  locker that does neither, including one started directly without calling
+  logind, is invisible to kpa, and so is the screen lock it draws. kpa
+  also relies on logind's `PrepareForSleep(true)` being emitted before the
+  machine sleeps, and on logind's delay inhibitors holding sleep for at most
+  `InhibitDelayMaxUSec` (5 s by default).
 
 ## 6. Security goals
 
@@ -222,13 +233,20 @@ after the offer is dropped.
 Response: expiry drops kpa's own source; if replaced, it's a no-op.
 
 **T-8 · Lock doesn't happen, or doesn't hold** (E, I) — ACT-7, ACT-5 · TB-6 · A-2, A-3 → G-5  
-Response: logind `Lock` (and `LockedHint` becoming true) on the user's
-graphical session, resolved through the user object rather than the
-daemon's own session; `PrepareForSleep` with a delay inhibitor held while
-any database is unlocked, released only after the lock; a per-database
-idle timer, reset only by a successful `list` of that database or an
-unlock that installs it (`list`, `copy`, a successful `unlock`); a
-per-database lock epoch so a lock beats an
+Response: logind's session `Lock` signal, and `LockedHint` becoming true
+(ASM-7), on the user's graphical session. That session is `User.Display`
+on the user object `Manager.GetUser(uid)`, re-read when its
+`PropertiesChanged` says it changed. The daemon never resolves its own
+session by PID, which fails for a daemon that is in no session. Whenever
+the session's `LockedHint` is already true at subscription time, lock
+at once. `PrepareForSleep(true)` locks every database, then releases a
+`delay` sleep inhibitor. kpa holds that inhibitor while any database is
+unlocked, takes it again on each successful unlock and after
+`PrepareForSleep(false)`, and does not hold it while sleeping. If the
+signal subscription drops, every database locks, and the subscription is
+re-established with backoff. A per-database idle timer, reset only by a
+successful `list` of that database or an unlock that installs it (`list`,
+`copy`, a successful `unlock`); a per-database lock epoch so a lock beats an
 in-flight unlock. In scope: a missed or dropped signal subscription
 (including after a D-Bus reconnect); subscribing to a session other than
 the user's graphical one; suspending before the lock completes; an idle

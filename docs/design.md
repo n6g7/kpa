@@ -280,8 +280,9 @@ guarantee that no trace of the plaintext remains in the process's memory.
 
 | Trigger      | Source                                                                        |
 | ------------ | ----------------------------------------------------------------------------- |
-| Screen lock  | logind `Lock` signal via `zbus` (however `loginctl lock-session` is triggered) |
-| Suspend      | logind `PrepareForSleep`                                                      |
+| Screen lock  | logind session `Lock` signal, or `LockedHint` becoming true, on the user's display session (`User.Display` of `Manager.GetUser(uid)`), via `zbus`. Covers `loginctl lock-session` and `IdleAction=lock`; a locker that calls neither is invisible (threat model ASM-7) |
+| Suspend      | logind `PrepareForSleep(true)`: lock everything, then release the `delay` sleep inhibitor. kpa holds it while anything is unlocked. Logind allows `InhibitDelayMaxUSec` (5 s default) before sleeping regardless |
+| Bus loss     | every database locks; the subscription is re-established with backoff        |
 | Idle         | per database: no successful `list` of it (`list` of all counts for each database it reads), and no `copy` or unlock that installs it, for `idle_timeout` (default 30m); `status` and `lock` don't count |
 | Explicit     | `kpa lock`, or the tray menu                                                  |
 | File changed | freshness guard (above)                                                       |
