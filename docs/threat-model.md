@@ -123,6 +123,18 @@ failing for an in-scope actor.
   only in the clipboard offer, after a `copy` naming that exact field.
   `list` omits every protected field and Notes rather than de-protecting
   them.
+
+  **Known gap (keepass 0.15.0).** The `ProtectInMemory="True"` marker is
+  part of A-2, but the pinned `keepass` crate cannot see it. Its XML
+  string-value deserializer (`src/format/xml_db/entry.rs`, `StringValue`)
+  reads only `@Protected`, so a value marked only with `ProtectInMemory`
+  becomes an unprotected `Value`, `Value::is_protected()` is false, and
+  `list` returns it. The crate's `format` module is `pub(crate)`, so kpa
+  cannot reach the decrypted XML to check the attribute itself, and no
+  in-repo change can make `list` honour the marker without reimplementing
+  the KDBX decryption. The full fix is upstream: `StringValue` must
+  deserialize `@ProtectInMemory` into `Value::protected`. Until then, a
+  `list` that returns such a field violates G-3 and T-4 as written.
 - **G-4 Nothing persisted.** kpa itself never writes A-1–A-3 to disk or to
   its own stdout/stderr, and prevents its own core dumps. Memory holding
   A-1 and A-2 is locked against swap, best effort: if the locked-memory
