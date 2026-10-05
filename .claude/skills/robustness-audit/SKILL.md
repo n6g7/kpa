@@ -1,12 +1,13 @@
 ---
 name: robustness-audit
-description: Adversarial hunt for crashes, hangs, aborts and unsound assumptions in this Rust codebase — stack overflows, unbounded loops and allocations driven by file input, panics reachable from untrusted data, and comments or docs that claim a property the code does not have. Use when asked to audit stability, look for crashes or memory-corruption risk, check what a malformed or corrupt .kdbx can do, or review robustness as the codebase grows. Pairs with secret-hygiene-audit, which covers leaks rather than crashes.
+description: Adversarial hunt for crashes, hangs, aborts and unsound assumptions in this Rust codebase — stack overflows, unbounded loops and allocations driven by file input, panics reachable from untrusted data, and comments or docs that claim a property the code does not have. Use when asked to audit stability, look for crashes or memory-corruption risk, check what a malformed or corrupt .kdbx can do, or review robustness as the codebase grows. security-audit runs the full threat-model audit and uses this skill's method for file input.
 ---
 
 # Robustness audit
 
 Hunt for ways this process can die, wedge, or silently misbehave on input it
-does not control. Leaks are the other skill's job.
+does not control. Leaks, and everything else in the threat model, belong to
+`security-audit`.
 
 ## The rule that makes this worth doing
 

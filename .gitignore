@@ -14,3 +14,7 @@
 # real vault. The example is committed; anything naming an actual database
 # path is not.
 /config.toml
+
+# Security audit reports (the security-audit skill). Kept out of the public
+# repo while they describe unfixed findings.
+/docs/audits/

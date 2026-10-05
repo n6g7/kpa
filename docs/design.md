@@ -253,7 +253,7 @@ guarantee that no trace of the plaintext remains in the process's memory.
 | ------------ | ----------------------------------------------------------------------------- |
 | Screen lock  | logind `Lock` signal via `zbus` (however `loginctl lock-session` is triggered) |
 | Suspend      | logind `PrepareForSleep`                                                      |
-| Idle         | no requests for `idle_timeout` (default 30m)                                  |
+| Idle         | no `list`, `copy` or successful `unlock` for `idle_timeout` (default 30m); `status` and `lock` don't count |
 | Explicit     | `kpa lock`, or the tray menu                                                  |
 | File changed | freshness guard (above)                                                       |
 
