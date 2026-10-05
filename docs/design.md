@@ -165,9 +165,13 @@ sends nothing is dropped.
 **`list` never returns secrets** — it is an index. That holds for any field
 the user marked protected in their KeePass client, not just `Password`: a
 protected `Title`/`UserName`/`URL` is omitted, not de-protected — protection
-is a property of the field, not of which field name it happens to be. The
-launcher does its own fuzzy matching; kpa stays dumb and returns everything
-else.
+is a property of the field, not of which field name it happens to be. A
+field counts as protected when its XML carries `Protected="True"` or
+`ProtectInMemory="True"`, matching KeePassXC. The pinned `keepass` crate
+(0.15.0) reads only `Protected`, so until it reads `ProtectInMemory` too,
+`list` can return a field that carries only that marker; the threat model
+(A-2, G-3) records this as a known gap. The launcher does its own fuzzy
+matching; kpa stays dumb and returns everything else.
 
 ## Concurrency and file freshness
 
