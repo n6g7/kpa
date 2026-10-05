@@ -5,6 +5,7 @@
 //! against. `main.rs` uses these same modules for the actual CLI.
 
 pub mod config;
+pub mod output;
 pub mod proto;
 pub mod server;
 pub mod socket;

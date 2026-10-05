@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use kpa::config::Config;
+use kpa::output::{escape_for_terminal, print_escaped, report_error};
 use kpa::proto::{self, ListRequest, LockRequest, Op, Request, UnlockRequest};
 use kpa::server::{self, Server};
 use kpa::socket;
@@ -54,7 +55,7 @@ fn main() -> ExitCode {
         None => match default_socket_path() {
             Ok(path) => path,
             Err(err) => {
-                eprintln!("error: {err}");
+                report_error(err);
                 return ExitCode::FAILURE;
             }
         },
@@ -91,14 +92,14 @@ fn forbid_core_dumps() -> rustix::io::Result<()> {
 
 fn run_serve(socket_path: &Path, config_path: Option<PathBuf>) -> ExitCode {
     if let Err(err) = forbid_core_dumps() {
-        eprintln!("error: marking the daemon non-dumpable: {err}");
+        report_error(format_args!("marking the daemon non-dumpable: {err}"));
         return ExitCode::FAILURE;
     }
 
     let config = match Config::load(config_path.as_deref()) {
         Ok(config) => config,
         Err(err) => {
-            eprintln!("error: {err}");
+            report_error(err);
             return ExitCode::FAILURE;
         }
     };
@@ -106,7 +107,7 @@ fn run_serve(socket_path: &Path, config_path: Option<PathBuf>) -> ExitCode {
     let listener = match socket::bind_socket(socket_path) {
         Ok(listener) => listener,
         Err(err) => {
-            eprintln!("error: binding {}: {err}", socket_path.display());
+            report_error(format_args!("binding {}: {err}", socket_path.display()));
             return ExitCode::FAILURE;
         }
     };
@@ -119,7 +120,7 @@ fn run_serve(socket_path: &Path, config_path: Option<PathBuf>) -> ExitCode {
     let _ = writeln!(
         std::io::stdout().lock(),
         "kpa: listening on {}",
-        socket_path.display()
+        escape_for_terminal(&socket_path.display().to_string())
     );
     server::serve(Arc::new(Server::new(config)), listener);
     ExitCode::SUCCESS
@@ -133,7 +134,7 @@ fn run_client(socket_path: &Path, op: Op) -> ExitCode {
 
     match send_request(socket_path, &request) {
         Ok(line) => {
-            print!("{line}");
+            print_escaped(&line);
             // `Response` deliberately has no generic `Deserialize` — a
             // successful `Unlock` and a successful `Lock { db: Some(_) }`
             // serialize identically, so decoding one back into that type
@@ -155,11 +156,11 @@ fn run_client(socket_path: &Path, op: Op) -> ExitCode {
         // request, and suggesting it's down would send someone looking in
         // the wrong place.
         Err(err @ ClientError::Connect(..)) => {
-            eprintln!("error: {err} (is `kpa serve` running?)");
+            report_error(format_args!("{err} (is `kpa serve` running?)"));
             ExitCode::FAILURE
         }
         Err(err) => {
-            eprintln!("error: {err}");
+            report_error(err);
             ExitCode::FAILURE
         }
     }
