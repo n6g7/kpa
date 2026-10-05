@@ -18,11 +18,8 @@
 //! take it down. See `docs/review-2026-09-robustness.md` findings 1–4, 7, 9.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -37,6 +34,7 @@ use crate::proto::{
     self, DatabaseStatus, DecodeError, List, ListError, ListRequest, Lock, LockError, LockRequest,
     ProtocolError, Response, Status, Unlock, UnlockError, UnlockRequest, WireEntry,
 };
+use crate::socket;
 use crate::vault::{self, VaultError};
 
 /// Longest request line accepted. The largest legitimate request is well
@@ -461,55 +459,6 @@ fn read_prompt(child: &mut Child, buf: &mut [u8]) -> std::io::Result<usize> {
     }
 }
 
-/// Bind the daemon's Unix socket at `path`, mode `0600` (`docs/design.md`
-/// § Protocol).
-///
-/// A missing parent directory is created with mode `0700`. An existing one
-/// is left exactly as it is — `--socket ~/kpa.sock` must not change a home
-/// directory's permissions, and `--socket /tmp/kpa.sock` must not try to
-/// change `/tmp`'s.
-///
-/// Handles the stale-socket case: a previous `kpa serve` that didn't shut
-/// down cleanly leaves its socket behind, and `bind` fails on an existing
-/// path whether or not anything still listens there. Only a *socket* that
-/// refuses connections is removed; anything else at the path — a live
-/// daemon, a regular file — is an error, never silently deleted.
-pub fn bind_socket(path: &Path) -> std::io::Result<UnixListener> {
-    let parent = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    if !parent.exists() {
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)?;
-    }
-
-    match UnixListener::bind(path) {
-        Ok(listener) => {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-            Ok(listener)
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
-            if !fs::symlink_metadata(path)?.file_type().is_socket() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!("{} exists and is not a socket", path.display()),
-                ));
-            }
-            if UnixStream::connect(path).is_ok() {
-                return Err(err);
-            }
-            fs::remove_file(path)?;
-            let listener = UnixListener::bind(path)?;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-            Ok(listener)
-        }
-        Err(err) => Err(err),
-    }
-}
-
 /// Holds one of the `MAX_CONNECTIONS` slots; releases it when dropped,
 /// including when the thread it was moved into never gets to run.
 struct ConnectionSlot(Arc<AtomicUsize>);
@@ -541,6 +490,7 @@ pub fn serve(server: Arc<Server>, listener: UnixListener) {
     let _ = thread::Builder::new().spawn(move || watch_idle(&watcher));
 
     let active = Arc::new(AtomicUsize::new(0));
+    let owner = rustix::process::geteuid().as_raw();
     for conn in listener.incoming() {
         let stream = match conn {
             Ok(stream) => stream,
@@ -562,7 +512,7 @@ pub fn serve(server: Arc<Server>, listener: UnixListener) {
         // which closes the connection and releases the slot.
         let _ = thread::Builder::new().spawn(move || {
             let _slot = slot;
-            handle_connection(&server, stream);
+            handle_connection(&server, stream, owner);
         });
     }
 }
@@ -662,7 +612,26 @@ fn write_response(stream: &mut UnixStream, response: &Response) {
 /// connection; there's no one left to tell. The reply is written before
 /// the event is logged, so a slow or broken stdout can't cost the client
 /// its answer.
-fn handle_connection(server: &Server, mut stream: UnixStream) {
+///
+/// A peer whose uid isn't `owner` (or whose credentials can't be read) is
+/// dropped without a reply and without being read from. The socket's mode
+/// already keeps other users out; this check covers a mode that ever
+/// came out wrong.
+fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
+    match socket::peer_uid(&stream) {
+        Ok(uid) if uid == owner => {}
+        Ok(uid) => {
+            log(format_args!("rejected connection from uid {uid}"));
+            return;
+        }
+        Err(err) => {
+            log(format_args!(
+                "rejected connection: peer credentials unavailable: {err}"
+            ));
+            return;
+        }
+    }
+
     let mut line = Vec::new();
     let read = BufReader::new((&stream).take(MAX_REQUEST_LEN)).read_until(b'\n', &mut line);
 
@@ -694,7 +663,7 @@ mod tests {
     /// needs a socket to be genuinely dead. Spawning a child briefly
     /// duplicates every open file descriptor into it until it execs; if a
     /// prompt test forks at the wrong moment, the "stale" socket below is
-    /// still held open by that child, and `bind_socket` rightly refuses to
+    /// still held open by that child, and `socket::bind_socket` rightly refuses to
     /// delete a socket that's still live.
     static SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
@@ -710,9 +679,10 @@ mod tests {
     /// return whatever it replies.
     fn exchange(request: &[u8]) -> String {
         let server = empty_server();
+        let owner = rustix::process::geteuid().as_raw();
         let (ours, theirs) = UnixStream::pair().expect("socket pair");
         thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&server, theirs));
+            scope.spawn(|| handle_connection(&server, theirs, owner));
             let mut ours = ours;
             // The handler may stop reading early (at the size cap) and
             // reply; a write error from that is expected, not a failure.
@@ -775,47 +745,38 @@ mod tests {
     }
 
     #[test]
-    fn bind_refuses_to_replace_a_regular_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("sock");
-        fs::write(&path, "precious").expect("write");
+    fn handle_connection_drops_a_peer_of_another_uid() {
+        let server = empty_server();
+        let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
+        ours.write_all(b"{\"v\":1,\"op\":\"status\"}\n")
+            .expect("write");
+        // Any uid other than ours stands in for a peer we must refuse.
+        let other = rustix::process::geteuid().as_raw().wrapping_add(1);
 
-        assert!(bind_socket(&path).is_err());
-        assert_eq!(fs::read_to_string(&path).expect("read"), "precious");
+        thread::scope(|scope| {
+            scope.spawn(|| handle_connection(&server, theirs, other));
+        });
+        // The server closes with the request still unread, so the kernel may
+        // reset the connection instead of ending it. Either way, no reply.
+        let mut reply = Vec::new();
+        let _ = ours.read_to_end(&mut reply);
+        assert!(reply.is_empty(), "a refused peer got {reply:?}");
     }
 
     #[test]
-    fn bind_leaves_an_existing_parent_directory_alone() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).expect("chmod");
+    fn handle_connection_answers_a_peer_of_our_uid() {
+        let server = empty_server();
+        let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
+        ours.write_all(b"{\"v\":1,\"op\":\"status\"}\n")
+            .expect("write");
+        let owner = rustix::process::geteuid().as_raw();
 
-        let _listener = bind_socket(&dir.path().join("sock")).expect("bind");
-
-        let mode = fs::metadata(dir.path()).expect("stat").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755);
-    }
-
-    #[test]
-    fn bind_creates_a_missing_parent_private() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let parent = dir.path().join("kpa");
-
-        let _listener = bind_socket(&parent.join("sock")).expect("bind");
-
-        let mode = fs::metadata(&parent).expect("stat").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700);
-    }
-
-    #[test]
-    fn bind_replaces_a_stale_socket() {
-        let _spawning = spawn_lock();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("sock");
-        drop(UnixListener::bind(&path).expect("first bind"));
-
-        if let Err(err) = bind_socket(&path) {
-            panic!("bind_socket failed: {err:?}");
-        }
+        thread::scope(|scope| {
+            scope.spawn(|| handle_connection(&server, theirs, owner));
+        });
+        let mut reply = String::new();
+        ours.read_to_string(&mut reply).expect("read");
+        assert!(reply.starts_with('{'), "expected a reply, got {reply:?}");
     }
 
     /// Two configured databases, both locked, with the given idle timeout.

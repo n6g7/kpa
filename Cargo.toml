@@ -13,7 +13,7 @@ toml = "1"
 humantime-serde = "1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "net", "process"] }
 uuid = { version = "1", features = ["serde"] }
 zeroize = { version = "1", features = ["derive"] }
 
