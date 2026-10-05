@@ -209,7 +209,8 @@ pub fn open(
         Ok(key)
     };
 
-    let version = DatabaseVersion::parse(&data).map_err(|err| VaultError::Corrupt(err.to_string()))?;
+    let version =
+        DatabaseVersion::parse(&data).map_err(|err| VaultError::Corrupt(err.to_string()))?;
     if let DatabaseVersion::KDB3(_) = version {
         verify_kdbx3_header(&data, make_key()?)?;
     }
@@ -225,9 +226,11 @@ pub fn open(
     // Cargo profile silently turns every one of these back into a process
     // abort that takes all unlocked databases with it.
     let key = make_key()?;
-    std::panic::catch_unwind(AssertUnwindSafe(|| Database::open(&mut Cursor::new(&data), key)))
-        .map_err(|_| VaultError::Corrupt("keepass panicked while parsing".to_string()))?
-        .map_err(VaultError::from)
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        Database::open(&mut Cursor::new(&data), key)
+    }))
+    .map_err(|_| VaultError::Corrupt("keepass panicked while parsing".to_string()))?
+    .map_err(VaultError::from)
 }
 
 /// Checks a KDBX3 file's `Meta/HeaderHash` against the outer header bytes as
@@ -250,7 +253,9 @@ fn verify_kdbx3_header(data: &[u8], key: DatabaseKey) -> Result<(), VaultError> 
         .ok_or_else(|| VaultError::Corrupt("KDBX3 file has no header hash".to_string()))?;
     let actual = Sha256::digest(&data[..header_len]);
     if stored.as_slice() != actual.as_slice() {
-        return Err(VaultError::Corrupt("KDBX3 header hash mismatch".to_string()));
+        return Err(VaultError::Corrupt(
+            "KDBX3 header hash mismatch".to_string(),
+        ));
     }
     Ok(())
 }
