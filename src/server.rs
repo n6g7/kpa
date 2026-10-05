@@ -89,6 +89,16 @@ impl Slot {
         self.db = Some(db);
         self.last_activity = Instant::now();
     }
+
+    /// Lists this database's entries as a successful `list` read, and resets
+    /// its idle timer to `now`. `None` if the database is locked, in which
+    /// case nothing is read and the timer is untouched.
+    fn read_entries(&mut self, name: &str, now: Instant) -> Option<Vec<WireEntry>> {
+        let db = self.db.as_ref()?;
+        let entries = wire_entries(name, db);
+        self.last_activity = now;
+        Some(entries)
+    }
 }
 
 impl Default for Slot {
@@ -304,23 +314,17 @@ impl List for Server {
                 None => Err(ListError::UnknownDb {
                     db: name.to_string(),
                 }),
-                Some(slot) => match &slot.db {
-                    None => Err(ListError::Locked {
+                Some(slot) => slot
+                    .read_entries(name, now)
+                    .ok_or_else(|| ListError::Locked {
                         db: name.to_string(),
                     }),
-                    Some(db) => {
-                        let entries = wire_entries(name, db);
-                        slot.last_activity = now;
-                        Ok(entries)
-                    }
-                },
             },
             None => {
                 let mut entries = Vec::new();
                 for (db_name, slot) in dbs.iter_mut() {
-                    if let Some(db) = &slot.db {
-                        entries.extend(wire_entries(db_name, db));
-                        slot.last_activity = now;
+                    if let Some(read) = slot.read_entries(db_name, now) {
+                        entries.extend(read);
                     }
                 }
                 Ok(entries)
