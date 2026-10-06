@@ -159,7 +159,10 @@ impl Server {
         // Logged after the guard is released: a stalled stdout must not
         // hold up every other request.
         for name in &locked {
-            log(format_args!("locked {name:?} after idle timeout"));
+            log(format_args!(
+                "locked {name:?} after idle timeout ({:?})",
+                self.config.idle_timeout
+            ));
         }
         locked
     }
