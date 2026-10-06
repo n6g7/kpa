@@ -201,8 +201,7 @@ fn drop_if_stale(slot: &mut Slot) -> bool {
         (None, _) => false,
     };
     if stale {
-        slot.db = None;
-        slot.stamp = None;
+        slot.lock();
     }
     stale
 }
