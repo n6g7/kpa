@@ -1,8 +1,9 @@
 //! Thin wrapper around the `keepass` crate.
 //!
 //! Kept deliberately dumb: open a `.kdbx` given a password and/or keyfile,
-//! and list or count what's in it. No caching, no freshness guard, no
-//! locking — that is daemon state, and it lives in `server.rs`.
+//! and list or count what's in it. No caching and no locking — that is
+//! daemon state, and it lives in `server.rs`. The freshness fingerprint is
+//! taken here, because it has to bracket the read.
 //!
 //! Every field/method name below was checked against the vendored source
 //! for `keepass` 0.15.0 (`~/.cargo/registry/src/*/keepass-0.15.0/src/`)
@@ -14,6 +15,7 @@
 
 use std::fs::File;
 use std::io::{Cursor, Read};
+use std::os::unix::fs::MetadataExt;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
@@ -76,6 +78,59 @@ pub enum VaultError {
     /// creating the file" vs. a generic failure.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// The database's file changed while it was being read, so the bytes
+    /// that were read may not match the fingerprint taken around them.
+    #[error("database file changed while it was being read")]
+    Changed,
+}
+
+/// The file identity the freshness guard compares.
+///
+/// `(dev, ino, size, mtime, ctime)`, with nanosecond precision on both
+/// times. `open` takes one with `fstat` on the fd it reads, before and
+/// after the read; `is_unchanged` takes one with `stat` on the path. Any
+/// difference means the file is no longer the one that was opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fingerprint {
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    pub mtime_sec: i64,
+    pub mtime_nsec: i64,
+    pub ctime_sec: i64,
+    pub ctime_nsec: i64,
+}
+
+impl Fingerprint {
+    fn from_metadata(meta: &std::fs::Metadata) -> Fingerprint {
+        Fingerprint {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            size: meta.size(),
+            mtime_sec: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+            ctime_sec: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+        }
+    }
+
+    /// Fingerprint of the file behind `path`, by `stat`. Follows symlinks,
+    /// the same way `open` does.
+    pub fn from_file(path: &Path) -> std::io::Result<Fingerprint> {
+        std::fs::metadata(path).map(|meta| Fingerprint::from_metadata(&meta))
+    }
+
+    /// Whether `self` and `other` describe the same file identity.
+    pub fn matches(self, other: Fingerprint) -> bool {
+        self == other
+    }
+}
+
+/// Whether the file at `path` is still the one `expected` was taken from.
+/// A file that can no longer be stat'd counts as changed.
+pub fn is_unchanged(path: &Path, expected: &Fingerprint) -> bool {
+    Fingerprint::from_file(path).is_ok_and(|now| now.matches(*expected))
 }
 
 impl From<DatabaseOpenError> for VaultError {
@@ -130,6 +185,11 @@ pub struct EntrySummary {
 
 /// Open a `.kdbx` file with a password and/or a keyfile.
 ///
+/// Also returns the file's `Fingerprint`, taken by `fstat` on the fd that
+/// was read, before and after the read. If the two differ, the file changed
+/// under the read and this fails with `VaultError::Changed`. Keep the
+/// returned fingerprint and compare it later with `is_unchanged`.
+///
 /// At least one of `password`/`keyfile` must be `Some` or `keepass` itself
 /// rejects the key as empty (`DatabaseKeyError::EmptyKey`, surfaced here as
 /// `Corrupt` since it's not really a credentials mistake so much as a
@@ -179,10 +239,18 @@ pub fn open(
     path: &Path,
     password: Option<&Zeroizing<String>>,
     keyfile: Option<&Path>,
-) -> Result<Database, VaultError> {
+) -> Result<(Database, Fingerprint), VaultError> {
     let mut file = open_file(path, VaultError::NotFound)?;
+    // The whole file is read here, not inside `keepass`, so the fstat calls
+    // can bracket the read. The fd is closed before key derivation.
+    let before = Fingerprint::from_metadata(&file.metadata()?);
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
+    let after = Fingerprint::from_metadata(&file.metadata()?);
+    drop(file);
+    if !before.matches(after) {
+        return Err(VaultError::Changed);
+    }
 
     // A fresh key per use: `DatabaseKey` is consumed by each parse, and the
     // KDBX3 check below parses the same file a second time.
@@ -230,6 +298,7 @@ pub fn open(
         Database::open(&mut Cursor::new(&data), key)
     }))
     .map_err(|_| VaultError::Corrupt("keepass panicked while parsing".to_string()))?
+    .map(|db| (db, before))
     .map_err(VaultError::from)
 }
 

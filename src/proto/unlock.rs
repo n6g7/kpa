@@ -55,6 +55,11 @@ pub enum UnlockError {
     LockedDuringUnlock {
         db: String,
     },
+    /// The database file changed while it was being read, so the read
+    /// can't be trusted. Nothing was unlocked; try again.
+    Stale {
+        db: String,
+    },
 }
 
 impl UnlockError {
@@ -79,6 +84,9 @@ impl UnlockError {
             UnlockError::Io { db } => ErrorFields::new(ErrorCode::Io).db(db),
             UnlockError::InProgress { db } => ErrorFields::new(ErrorCode::UnlockInProgress).db(db),
             UnlockError::LockedDuringUnlock { db } => ErrorFields::new(ErrorCode::Locked).db(db),
+            UnlockError::Stale { db } => ErrorFields::new(ErrorCode::Stale)
+                .db(db)
+                .detail("database changed on disk"),
         }
     }
 }

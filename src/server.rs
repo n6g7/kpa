@@ -7,9 +7,8 @@
 //! answers into responses. So nothing here builds a `Response` except the
 //! pre-dispatch failures, which by definition never reach an op.
 //!
-//! No freshness guard, idle timeout, tray, or clipboard yet — those are
-//! later steps. Unlocking still needs a password from somewhere, so this
-//! step already runs the configured `prompt` command (`docs/design.md`
+//! No tray or clipboard yet — those are later steps. Unlocking still needs a
+//! password from somewhere, so this step already runs the configured `prompt` command (`docs/design.md`
 //! decision #9) to get one; nothing about that requires the later pieces.
 //!
 //! The limits below (request size, I/O timeouts, concurrent connections)
@@ -20,6 +19,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -35,7 +35,7 @@ use crate::proto::{
     ProtocolError, Response, Status, Unlock, UnlockError, UnlockRequest, WireEntry,
 };
 use crate::socket;
-use crate::vault::{self, VaultError};
+use crate::vault::{self, Fingerprint, VaultError};
 
 /// Longest request line accepted. The largest legitimate request is well
 /// under 200 bytes; this only exists so that a line with no newline can't
@@ -60,6 +60,10 @@ const MAX_PASSWORD_LEN: usize = 4096;
 /// One configured database's state.
 struct Slot {
     db: Option<Database>,
+    /// The configured path, and the fingerprint of the file `db` was opened
+    /// from. `drop_if_stale` checks the path against it before each use.
+    path: PathBuf,
+    stamp: Option<Fingerprint>,
     /// When this database was last read by a successful `list` or installed
     /// by an `unlock`. Its idle timer runs from here, independently of every
     /// other database. Only meaningful while `db` is `Some`.
@@ -79,12 +83,15 @@ impl Slot {
     /// still prompting for it cannot install what it opened.
     fn lock(&mut self) {
         self.db = None;
+        self.stamp = None;
         self.lock_epoch = self.lock_epoch.wrapping_add(1);
     }
 
-    /// Installs a freshly opened database and starts its idle timer.
-    fn install(&mut self, db: Database) {
+    /// Installs a freshly opened database, with the fingerprint it was opened
+    /// from, and starts its idle timer.
+    fn install(&mut self, db: Database, stamp: Fingerprint) {
         self.db = Some(db);
+        self.stamp = Some(stamp);
         self.touch();
     }
 
@@ -103,6 +110,8 @@ impl Default for Slot {
     fn default() -> Slot {
         Slot {
             db: None,
+            path: PathBuf::new(),
+            stamp: None,
             last_activity: Instant::now(),
             lock_epoch: 0,
             unlocking: false,
@@ -127,7 +136,13 @@ impl Server {
         let dbs = config
             .databases
             .iter()
-            .map(|db| (db.name.clone(), Slot::default()))
+            .map(|db| {
+                let slot = Slot {
+                    path: db.path.clone(),
+                    ..Slot::default()
+                };
+                (db.name.clone(), slot)
+            })
             .collect();
         Server {
             config,
@@ -174,26 +189,45 @@ fn slots(dbs: &Mutex<HashMap<String, Slot>>) -> MutexGuard<'_, HashMap<String, S
     dbs.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Freshness guard (`docs/threat-model.md` T-12): if the file behind `slot`
+/// is no longer the one its database was opened from, drops the database
+/// and returns `true`. Called before every use of an unlocked database.
+///
+/// The stat runs under the slots mutex. That is one `stat` call, cheap enough
+/// to keep the check and the drop atomic with respect to other requests.
+fn drop_if_stale(slot: &mut Slot) -> bool {
+    let stale = match (&slot.db, &slot.stamp) {
+        (Some(_), Some(stamp)) => !vault::is_unchanged(&slot.path, stamp),
+        // A database without its fingerprint cannot be checked, so it is
+        // dropped rather than trusted.
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    if stale {
+        slot.lock();
+    }
+    stale
+}
+
 impl Status for Server {
     fn status(&self) -> Vec<DatabaseStatus> {
-        let dbs = slots(&self.dbs);
+        let mut dbs = slots(&self.dbs);
         self.config
             .databases
             .iter()
-            .map(
-                |cfg| match dbs.get(&cfg.name).and_then(|slot| slot.db.as_ref()) {
-                    Some(db) => DatabaseStatus {
-                        name: cfg.name.clone(),
-                        locked: false,
-                        entries: Some(vault::entry_count(db)),
-                    },
-                    None => DatabaseStatus {
-                        name: cfg.name.clone(),
-                        locked: true,
-                        entries: None,
-                    },
-                },
-            )
+            .map(|cfg| {
+                // A stale database is dropped by `drop_if_stale`, so it is
+                // reported as locked. `status` has no error to return.
+                let entries = dbs.get_mut(&cfg.name).and_then(|slot| {
+                    drop_if_stale(slot);
+                    slot.db.as_ref().map(vault::entry_count)
+                });
+                DatabaseStatus {
+                    name: cfg.name.clone(),
+                    locked: entries.is_none(),
+                    entries,
+                }
+            })
             .collect()
     }
 }
@@ -228,8 +262,10 @@ impl Unlock for Server {
             let Some(slot) = dbs.get_mut(name) else {
                 return Err(UnlockError::UnknownDb { db: db() });
             };
-            if slot.db.is_some() {
-                // Already unlocked: succeed without re-prompting.
+            // Already unlocked and the file is unchanged: succeed without
+            // re-prompting. If the file changed, the database is dropped
+            // and this unlock continues to a fresh prompt.
+            if slot.db.is_some() && !drop_if_stale(slot) {
                 return Ok(db());
             }
             if slot.unlocking {
@@ -263,7 +299,7 @@ impl Unlock for Server {
         // indefinitely or abort the process — upstream in `keepass`, which
         // applies no ceilings; see the note on `vault::open`. The unlocking
         // flag at least bounds it to one stuck thread per database.
-        let opened = vault::open(&cfg.path, password.as_ref(), cfg.keyfile.as_deref())
+        let (opened, stamp) = vault::open(&cfg.path, password.as_ref(), cfg.keyfile.as_deref())
             .map_err(|err| unlock_error(name, err))?;
 
         let mut dbs = slots(&self.dbs);
@@ -276,7 +312,7 @@ impl Unlock for Server {
             // that stays true.
             return Err(UnlockError::LockedDuringUnlock { db: db() });
         }
-        slot.install(opened);
+        slot.install(opened, stamp);
         Ok(db())
     }
 }
@@ -314,19 +350,34 @@ impl List for Server {
                 None => Err(ListError::UnknownDb {
                     db: name.to_string(),
                 }),
-                Some(slot) => match slot.entries(name) {
-                    None => Err(ListError::Locked {
-                        db: name.to_string(),
-                    }),
-                    Some(entries) => {
-                        slot.touch();
-                        Ok(entries)
+                Some(slot) => {
+                    if drop_if_stale(slot) {
+                        return Err(ListError::Stale {
+                            db: name.to_string(),
+                        });
                     }
-                },
+                    match slot.entries(name) {
+                        None => Err(ListError::Locked {
+                            db: name.to_string(),
+                        }),
+                        Some(entries) => {
+                            slot.touch();
+                            Ok(entries)
+                        }
+                    }
+                }
             },
             None => {
+                // A stale database fails the whole listing, naming it, rather
+                // than being skipped as if it were locked. Once dropped it is
+                // skipped by later listings.
                 let mut entries = Vec::new();
                 for (db_name, slot) in dbs.iter_mut() {
+                    if drop_if_stale(slot) {
+                        return Err(ListError::Stale {
+                            db: db_name.clone(),
+                        });
+                    }
                     if let Some(read) = slot.entries(db_name) {
                         entries.extend(read);
                         slot.touch();
@@ -370,6 +421,7 @@ fn unlock_error(name: &str, err: VaultError) -> UnlockError {
         VaultError::WrongCredentials => UnlockError::WrongCredentials { db },
         VaultError::Corrupt(_) => UnlockError::Corrupt { db },
         VaultError::Io(_) => UnlockError::Io { db },
+        VaultError::Changed => UnlockError::Stale { db },
     }
 }
 
@@ -794,8 +846,22 @@ mod tests {
 
     /// Stands in for a successful unlock without a file or a prompt. Does not
     /// touch the timer, so each test controls it directly.
+    /// The database is stamped from a fresh empty file, so the freshness
+    /// check passes until a test changes that file.
     fn unlock_directly(server: &Server, name: &str) {
-        slots(&server.dbs).get_mut(name).expect("configured").db = Some(Database::new());
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "kpa-unit-{}-{}-{name}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, b"").expect("temp file");
+        let stamp = vault::Fingerprint::from_file(&path).expect("stat temp file");
+        let mut dbs = slots(&server.dbs);
+        let slot = dbs.get_mut(name).expect("configured");
+        slot.path = path;
+        slot.stamp = Some(stamp);
+        slot.db = Some(Database::new());
     }
 
     fn is_unlocked(server: &Server, name: &str) -> bool {
