@@ -12,6 +12,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use kpa::config::Config;
 use kpa::output::{escape_for_terminal, print_escaped, report_error};
+use kpa::policy;
 use kpa::proto::{self, ListRequest, LockRequest, Op, Request, UnlockRequest};
 use kpa::server::{self, Server};
 use kpa::socket;
@@ -122,7 +123,11 @@ fn run_serve(socket_path: &Path, config_path: Option<PathBuf>) -> ExitCode {
         "kpa: listening on {}",
         escape_for_terminal(&socket_path.display().to_string())
     );
-    server::serve(Arc::new(Server::new(config)), listener);
+    let server = Arc::new(Server::new(config));
+    // Before serving, so no unlock can happen without the policy hearing of it.
+    let events = policy::start(server.clone(), policy::Bus::System);
+    server.set_policy_events(events);
+    server::serve(server, listener);
     ExitCode::SUCCESS
 }
 

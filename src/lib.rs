@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod output;
+pub mod policy;
 pub mod proto;
 pub mod server;
 pub mod socket;

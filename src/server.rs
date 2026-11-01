@@ -22,7 +22,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,7 @@ use keepass::Database;
 use zeroize::Zeroizing;
 
 use crate::config::Config;
+use crate::policy;
 use crate::proto::{
     self, DatabaseStatus, DecodeError, List, ListError, ListRequest, Lock, LockError, LockRequest,
     ProtocolError, Response, Status, Unlock, UnlockError, UnlockRequest, WireEntry,
@@ -129,6 +131,9 @@ impl Default for Slot {
 pub struct Server {
     config: Config,
     dbs: Mutex<HashMap<String, Slot>>,
+    /// Told about each successful unlock, so the lock policy can take its
+    /// sleep inhibitor. Set once by `set_policy_events`; absent in tests.
+    policy_events: OnceLock<Sender<policy::Event>>,
 }
 
 impl Server {
@@ -147,6 +152,7 @@ impl Server {
         Server {
             config,
             dbs: Mutex::new(dbs),
+            policy_events: OnceLock::new(),
         }
     }
 
@@ -180,6 +186,43 @@ impl Server {
             ));
         }
         locked
+    }
+
+    /// Where to report unlocks. Called once, before the server takes requests.
+    pub fn set_policy_events(&self, events: Sender<policy::Event>) {
+        let _ = self.policy_events.set(events);
+    }
+
+    /// Whether any database is unlocked right now.
+    pub fn any_unlocked(&self) -> bool {
+        slots(&self.dbs).values().any(|slot| slot.db.is_some())
+    }
+
+    fn notify_unlocked(&self) {
+        if let Some(events) = self.policy_events.get() {
+            let _ = events.send(policy::Event::Unlocked);
+        }
+    }
+
+    /// Told about every explicit `lock`, so the policy can release its
+    /// sleep inhibitor if that was the last unlocked database. Without
+    /// this, manually locking the last database leaves the inhibitor held
+    /// until some unrelated event (a screen lock, a sleep attempt, or an
+    /// unlock) happens to run `Policy::reconcile` again.
+    fn notify_locked(&self) {
+        if let Some(events) = self.policy_events.get() {
+            let _ = events.send(policy::Event::Locked);
+        }
+    }
+}
+
+impl policy::Locks for Server {
+    fn lock_all(&self) {
+        slots(&self.dbs).values_mut().for_each(Slot::lock);
+    }
+
+    fn any_unlocked(&self) -> bool {
+        Server::any_unlocked(self)
     }
 }
 
@@ -313,6 +356,8 @@ impl Unlock for Server {
             return Err(UnlockError::LockedDuringUnlock { db: db() });
         }
         slot.install(opened, stamp);
+        drop(dbs);
+        self.notify_unlocked();
         Ok(db())
     }
 }
@@ -320,22 +365,24 @@ impl Unlock for Server {
 impl Lock for Server {
     fn lock(&self, request: &LockRequest) -> Result<Option<String>, LockError> {
         let mut dbs = slots(&self.dbs);
-        let lock_slot = |slot: &mut Slot| slot.lock();
-        match request.db.as_deref() {
+        let result = match request.db.as_deref() {
             Some(name) => {
                 let Some(slot) = dbs.get_mut(name) else {
                     return Err(LockError::UnknownDb {
                         db: name.to_string(),
                     });
                 };
-                lock_slot(slot);
+                slot.lock();
                 Ok(Some(name.to_string()))
             }
             None => {
-                dbs.values_mut().for_each(lock_slot);
+                dbs.values_mut().for_each(Slot::lock);
                 Ok(None)
             }
-        }
+        };
+        drop(dbs);
+        self.notify_locked();
+        result
     }
 }
 
@@ -586,7 +633,7 @@ fn watch_idle(server: &Server) {
 
 /// One line on stdout. Never panics, unlike `println!`: a closed or broken
 /// stdout must not take the daemon down with it.
-fn log(args: std::fmt::Arguments<'_>) {
+pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     let _ = writeln!(std::io::stdout().lock(), "kpa: {args}");
 }
 

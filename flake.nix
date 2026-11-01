@@ -31,6 +31,8 @@
             # support are actually exercised by the test suite.
             keepassxc
             (python3.withPackages (ps: [ ps.pykeepass ]))
+            # tests/logind.rs starts a private dbus-daemon for its mock logind.
+            dbus
           ];
 
           # rust-analyzer and clippy both want to find the sysroot's source;

@@ -17,6 +17,13 @@ client that already has write access to the same files.
 See [`docs/design.md`](./docs/design.md) for the design and
 [`docs/plan.md`](./docs/plan.md) for what's built versus planned.
 
+## Platform
+
+Linux only. Locking on screen-lock and suspend needs systemd-logind
+reachable on the session/system bus. Without it, kpa still runs and the
+per-database idle timer still locks databases — screen-lock and suspend
+just never trigger a lock, silently.
+
 ## Build & test
 
 A Nix flake provides the whole toolchain (`cargo`, `rustc`, `clippy`,
