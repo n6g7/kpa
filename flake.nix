@@ -33,6 +33,10 @@
             (python3.withPackages (ps: [ ps.pykeepass ]))
             # tests/logind.rs starts a private dbus-daemon for its mock logind.
             dbus
+            # wl-copy/wl-paste, for driving docs/plan.md step 3's manual
+            # clipboard test by hand — not a Rust dependency (that's
+            # wl-clipboard-rs, in Cargo.toml).
+            wl-clipboard
           ];
 
           # rust-analyzer and clippy both want to find the sysroot's source;

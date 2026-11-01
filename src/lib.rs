@@ -4,6 +4,7 @@
 //! `use kpa::...` — a binary-only crate has nothing for them to link
 //! against. `main.rs` uses these same modules for the actual CLI.
 
+pub mod clip;
 pub mod config;
 pub mod output;
 pub mod policy;

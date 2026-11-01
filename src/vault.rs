@@ -424,6 +424,47 @@ fn unprotected_field<'a>(entry: &'a keepass::db::Entry, key: &str) -> Option<&'a
     }
 }
 
+/// Look up one entry by uuid and read one field's raw value off it — even
+/// if the user marked that field protected in their KeePass client.
+///
+/// This is deliberately different from `unprotected_field`: that one exists
+/// because `list` is an index dump, where "protected" has to mean "omit it"
+/// or protection would be pointless. `copy` is not a dump — it's a request
+/// for exactly one named field of exactly one named entry, which the caller
+/// already identified by uuid. There is nothing left for protection to
+/// guard against here that the request itself didn't already ask for, so
+/// `copy` reads straight through `Value::get()` instead of filtering
+/// through `unprotected_field`.
+///
+/// Returns `None` if no entry with that uuid exists. Returns `Some(None)`
+/// if the entry exists but the field is absent or empty — both count as
+/// nothing to copy. Same explicit-worklist traversal as
+/// `collect_entries`/`entry_count`, for the same reason: a deeply nested
+/// `.kdbx` must not recurse.
+pub fn entry_field(db: &Database, uuid: Uuid, key: &str) -> Option<Option<Zeroizing<String>>> {
+    let mut stack = vec![db.root().id()];
+    while let Some(id) = stack.pop() {
+        let Some(group) = db.group(id) else {
+            continue;
+        };
+
+        for entry in group.entries() {
+            if entry.id().uuid() != uuid {
+                continue;
+            }
+            let value = entry
+                .fields
+                .get(key)
+                .map(|v| v.get().as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| Zeroizing::new(s.to_string()));
+            return Some(value);
+        }
+        stack.extend(group.groups().map(|child| child.id()));
+    }
+    None
+}
+
 fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
     use keepass::db::fields;
 
@@ -461,8 +502,9 @@ fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
 mod tests {
     use keepass::Database;
     use keepass::db::fields;
+    use uuid::Uuid;
 
-    use super::{entry_count, list_entries};
+    use super::{entry_count, entry_field, list_entries};
 
     /// `entry_count` must agree with `list_entries` everywhere, including
     /// in nested groups and when fields are protected — it's what `status`
@@ -535,5 +577,79 @@ mod tests {
         let entries = list_entries(&db);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title.as_deref(), Some("deep"));
+    }
+
+    /// `entry_field` reads a protected field through, unlike
+    /// `unprotected_field` — this is the whole reason `copy` has its own
+    /// lookup rather than reusing `list`'s.
+    #[test]
+    fn entry_field_reads_through_protection() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_protected(fields::PASSWORD, "hunter2");
+            entry.id().uuid()
+        };
+
+        assert_eq!(
+            entry_field(&db, uuid, fields::PASSWORD)
+                .expect("entry exists")
+                .as_deref()
+                .map(String::as_str),
+            Some("hunter2")
+        );
+    }
+
+    /// An unknown uuid is `None`, distinct from a known entry with an
+    /// absent field — `server.rs` maps these to different wire errors.
+    #[test]
+    fn entry_field_distinguishes_unknown_uuid_from_empty_field() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            root.add_entry().set_unprotected(fields::TITLE, "top");
+            db.root().entries().next().expect("one entry").id().uuid()
+        };
+
+        assert_eq!(entry_field(&db, Uuid::new_v4(), fields::PASSWORD), None);
+        assert_eq!(entry_field(&db, uuid, fields::PASSWORD), Some(None));
+    }
+
+    /// A field set to the empty string counts the same as absent — there is
+    /// nothing to copy either way.
+    #[test]
+    fn entry_field_treats_an_empty_value_as_absent() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::URL, "");
+            entry.id().uuid()
+        };
+
+        assert_eq!(entry_field(&db, uuid, fields::URL), Some(None));
+    }
+
+    /// Nested groups, same stack-based traversal as `collect_entries` — so
+    /// this doesn't overflow on a deeply nested tree either.
+    #[test]
+    fn entry_field_finds_entries_in_nested_groups() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut child = root.add_group();
+            let mut entry = child.add_entry();
+            entry.set_unprotected(fields::NOTES, "deep notes");
+            entry.id().uuid()
+        };
+
+        assert_eq!(
+            entry_field(&db, uuid, fields::NOTES)
+                .expect("entry exists")
+                .as_deref()
+                .map(String::as_str),
+            Some("deep notes")
+        );
     }
 }
