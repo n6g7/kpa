@@ -49,6 +49,7 @@ enum Command {
     List { db: Option<String> },
     /// Copy one field of one entry to the clipboard; the daemon drops it
     /// again after `clipboard_timeout`.
+    #[command(visible_alias = "cp")]
     Copy {
         db: String,
         uuid: Uuid,
