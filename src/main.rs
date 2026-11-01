@@ -55,6 +55,8 @@ enum Command {
         uuid: Uuid,
         field: FieldArg,
     },
+    /// Print the version this binary was built from.
+    Version,
 }
 
 /// `clap::ValueEnum` for `copy`'s `field` argument. A separate type from
@@ -83,6 +85,13 @@ impl From<FieldArg> for Field {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    // Doesn't touch the socket, so it works even without `$XDG_RUNTIME_DIR`
+    // set or a daemon running — handle it before resolving `socket_path`.
+    if let Command::Version = cli.command {
+        println!("{}", kpa::VERSION);
+        return ExitCode::SUCCESS;
+    }
+
     let socket_path = match cli.socket {
         Some(path) => path,
         None => match default_socket_path() {
@@ -108,6 +117,7 @@ fn main() -> ExitCode {
                 field: field.into(),
             }),
         ),
+        Command::Version => unreachable!("handled above, before socket_path is resolved"),
     }
 }
 
