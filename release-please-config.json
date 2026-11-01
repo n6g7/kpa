@@ -3,7 +3,8 @@
   "packages": {
     ".": {
       "release-type": "rust",
-      "package-name": "kpa"
+      "package-name": "kpa",
+      "include-component-in-tag": false
     }
   }
 }
