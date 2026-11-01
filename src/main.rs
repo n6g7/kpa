@@ -229,6 +229,27 @@ enum ClientError {
          responding; its log may say why"
     )]
     EmptyResponse,
+    #[error("refusing to talk to {0}: it belongs to uid {1}, not us")]
+    WrongPeer(PathBuf, u32),
+}
+
+/// Refuses to go on talking to `stream` unless its peer is `expected`,
+/// mirroring `handle_connection`'s server-side check
+/// (`src/server.rs:722-735`) on the other end of the same socket. An
+/// unreadable credential is treated the same as a mismatch: a socket
+/// where `SO_PEERCRED` can't be read is not one to trust with a request.
+/// A separate function, rather than inlined in `send_request`, so a test
+/// can inject a mismatched `expected` without needing a second real uid.
+fn check_peer_uid(
+    socket_path: &Path,
+    stream: &UnixStream,
+    expected: u32,
+) -> Result<(), ClientError> {
+    match socket::peer_uid(stream) {
+        Ok(uid) if uid == expected => Ok(()),
+        Ok(uid) => Err(ClientError::WrongPeer(socket_path.to_path_buf(), uid)),
+        Err(err) => Err(ClientError::Connect(socket_path.to_path_buf(), err)),
+    }
 }
 
 /// Sends one request and returns the daemon's raw response line, newline
@@ -237,6 +258,7 @@ enum ClientError {
 fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|err| ClientError::Connect(socket_path.to_path_buf(), err))?;
+    check_peer_uid(socket_path, &stream, rustix::process::geteuid().as_raw())?;
 
     let text = serde_json::to_string(request).map_err(ClientError::Encode)?;
     writeln!(stream, "{text}").map_err(ClientError::Send)?;
@@ -254,9 +276,11 @@ fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientE
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use rustix::process::{DumpableBehavior, dumpable_behavior};
 
-    use super::forbid_core_dumps;
+    use super::{ClientError, check_peer_uid, forbid_core_dumps};
 
     /// `docs/design.md` § Security promises the daemon is non-dumpable;
     /// this is what makes that a fact about the code rather than the doc.
@@ -267,5 +291,29 @@ mod tests {
             dumpable_behavior().expect("prctl(PR_GET_DUMPABLE) should succeed"),
             DumpableBehavior::NotDumpable
         );
+    }
+
+    /// `UnixStream::pair()` gives both ends our own real uid, so the
+    /// mismatch is simulated the same way `server.rs`'s
+    /// `handle_connection_drops_a_peer_of_another_uid` does: not by
+    /// faking the peer's credential, but by giving `check_peer_uid` a
+    /// different `expected` uid to compare it against.
+    #[test]
+    fn refuses_a_socket_belonging_to_another_uid() {
+        let (_ours, theirs) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let other = rustix::process::geteuid().as_raw().wrapping_add(1);
+
+        let err = check_peer_uid(Path::new("/dev/null"), &theirs, other)
+            .expect_err("a uid mismatch must be refused");
+        assert!(matches!(err, ClientError::WrongPeer(..)), "{err:?}");
+    }
+
+    #[test]
+    fn accepts_a_socket_belonging_to_our_own_uid() {
+        let (_ours, theirs) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let our_uid = rustix::process::geteuid().as_raw();
+
+        check_peer_uid(Path::new("/dev/null"), &theirs, our_uid)
+            .expect("our own uid must be accepted");
     }
 }
