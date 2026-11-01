@@ -12,3 +12,7 @@ pub mod proto;
 pub mod server;
 pub mod socket;
 pub mod vault;
+
+/// `v{tag}` when built from an exact release tag, `dev-{short hash}`
+/// otherwise. Set by `build.rs`.
+pub const VERSION: &str = env!("KPA_VERSION");
