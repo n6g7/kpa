@@ -24,6 +24,34 @@ reachable on the session/system bus. Without it, kpa still runs and the
 per-database idle timer still locks databases — screen-lock and suspend
 just never trigger a lock, silently.
 
+## Install
+
+The flake exposes a package (`nix build`, or `nix profile install
+github:n6g7/kpa`) and a home-manager module:
+
+```nix
+{
+  inputs.kpa.url = "github:n6g7/kpa";
+
+  # In your home-manager configuration:
+  imports = [ kpa.homeManagerModules.default ];
+  services.kpa = {
+    enable = true;
+    settings = {
+      idle_timeout = "30m";
+      prompt = [ "fuzzel" "--dmenu" "--password" "--prompt" ];
+      database = [
+        { name = "personal"; path = "/home/you/passwords.kdbx"; }
+      ];
+    };
+  };
+}
+```
+
+`settings` is written to `~/.config/kpa/config.toml` in the shape
+documented by [`config.example.toml`](./config.example.toml). The module
+runs `kpa serve` as a user systemd service (`systemctl --user status kpa`).
+
 ## Build & test
 
 A Nix flake provides the whole toolchain (`cargo`, `rustc`, `clippy`,

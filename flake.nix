@@ -14,7 +14,8 @@
         pkgs = import nixpkgs { inherit system; };
       in
       {
-        # Just a devShell for now.
+        packages.default = pkgs.callPackage ./nix/package.nix { };
+
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             cargo
@@ -44,5 +45,10 @@
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };
       }
-    );
+    )
+    // {
+      # Not per-system: home-manager evaluates this against whichever
+      # system the caller's own `pkgs` already is.
+      homeManagerModules.default = import ./nix/hm-module.nix self;
+    };
 }
