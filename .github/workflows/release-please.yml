@@ -16,3 +16,9 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          # The default GITHUB_TOKEN can create the release PR/tag, but
+          # GitHub won't let events it authors trigger other workflows —
+          # so ci.yml's checks would never run on the release PR, and a
+          # tag it pushes couldn't kick off a publish workflow later. A PAT
+          # sidesteps that restriction.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
