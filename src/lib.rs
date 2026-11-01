@@ -11,6 +11,7 @@ pub mod policy;
 pub mod proto;
 pub mod server;
 pub mod socket;
+pub mod tray;
 pub mod vault;
 
 /// `v{tag}` when built from an exact release tag, `dev-{short hash}`

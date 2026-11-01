@@ -16,6 +16,7 @@ use kpa::policy;
 use kpa::proto::{self, CopyRequest, Field, ListRequest, LockRequest, Op, Request, UnlockRequest};
 use kpa::server::{self, Server};
 use kpa::socket;
+use kpa::tray;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -177,6 +178,7 @@ fn run_serve(socket_path: &Path, config_path: Option<PathBuf>) -> ExitCode {
     // Before serving, so no unlock can happen without the policy hearing of it.
     let events = policy::start(server.clone(), policy::Bus::System);
     server.set_policy_events(events);
+    tray::start(server.clone());
     server::serve(server, listener);
     ExitCode::SUCCESS
 }
