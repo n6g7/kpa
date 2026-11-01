@@ -14,6 +14,15 @@
 //!
 //! The server reports successful unlocks on the same channel, so the
 //! inhibitor is taken as soon as something is unlocked.
+//!
+//! This module needs systemd-logind reachable on the bus it's given
+//! (`Bus::System` in production), which means a systemd Linux host. It
+//! works unmodified on any such host. On a Linux host without systemd, or
+//! on a non-Linux platform such as macOS, there's no logind to connect
+//! to: [`watch_forever`] retries forever and [`LogindInhibitor::hold`]
+//! always fails, so screen-lock and suspend never produce an event and no
+//! inhibitor is ever held. None of that panics or stops the server —
+//! databases still lock on their own idle timer, the only trigger left.
 
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
@@ -54,6 +63,9 @@ pub enum Event {
     Sleeping(bool),
     /// A database was unlocked; the inhibitor may need to be taken.
     Unlocked,
+    /// A database was locked (explicitly, via the `lock` op); the
+    /// inhibitor may need to be released, if that was the last one.
+    Locked,
     /// A subscription that had been working has dropped.
     WatchLost,
 }
@@ -121,7 +133,10 @@ impl<L: Locks, I: SleepInhibitor> Policy<L, I> {
                 crate::server::log(format_args!("locked all databases (suspending)"));
             }
             Event::Sleeping(false) => self.sleeping = false,
-            Event::Unlocked => {}
+            // Both just change what's unlocked; `reconcile` below, run
+            // unconditionally, is what reads that and takes or releases
+            // the inhibitor.
+            Event::Unlocked | Event::Locked => {}
         }
         self.reconcile();
     }
@@ -511,6 +526,15 @@ mod tests {
             self.policy.handle(Event::Unlocked);
         }
 
+        /// Simulate an explicit `lock` (of the last unlocked database),
+        /// then the server's notification. Unlike `ScreenLocked` or
+        /// `WatchLost`, this doesn't go through `Locks::lock_all` — the
+        /// server already locked the one database itself.
+        fn lock(&mut self) {
+            self.locks.unlocked.store(false, Ordering::SeqCst);
+            self.policy.handle(Event::Locked);
+        }
+
         fn log(&self) -> Vec<&'static str> {
             self.log.lock().unwrap().clone()
         }
@@ -577,6 +601,20 @@ mod tests {
         h.policy.handle(Event::Sleeping(true));
         h.policy.handle(Event::Sleeping(false));
         assert!(!h.held());
+    }
+
+    #[test]
+    fn locking_the_last_database_directly_releases_the_inhibitor() {
+        // Regression test: an explicit `lock` of the last unlocked
+        // database (not a screen lock or a sleep) must still run
+        // `reconcile`, or the inhibitor stays held until some unrelated
+        // event happens to trigger it.
+        let mut h = Harness::new();
+        h.unlock();
+        assert!(h.held());
+        h.lock();
+        assert!(!h.held());
+        assert_eq!(h.log(), vec!["hold", "release"]);
     }
 
     #[test]

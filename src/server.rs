@@ -203,6 +203,17 @@ impl Server {
             let _ = events.send(policy::Event::Unlocked);
         }
     }
+
+    /// Told about every explicit `lock`, so the policy can release its
+    /// sleep inhibitor if that was the last unlocked database. Without
+    /// this, manually locking the last database leaves the inhibitor held
+    /// until some unrelated event (a screen lock, a sleep attempt, or an
+    /// unlock) happens to run `Policy::reconcile` again.
+    fn notify_locked(&self) {
+        if let Some(events) = self.policy_events.get() {
+            let _ = events.send(policy::Event::Locked);
+        }
+    }
 }
 
 impl policy::Locks for Server {
@@ -354,7 +365,7 @@ impl Unlock for Server {
 impl Lock for Server {
     fn lock(&self, request: &LockRequest) -> Result<Option<String>, LockError> {
         let mut dbs = slots(&self.dbs);
-        match request.db.as_deref() {
+        let result = match request.db.as_deref() {
             Some(name) => {
                 let Some(slot) = dbs.get_mut(name) else {
                     return Err(LockError::UnknownDb {
@@ -368,7 +379,10 @@ impl Lock for Server {
                 dbs.values_mut().for_each(Slot::lock);
                 Ok(None)
             }
-        }
+        };
+        drop(dbs);
+        self.notify_locked();
+        result
     }
 }
 
