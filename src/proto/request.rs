@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::VERSION;
+use super::copy::CopyRequest;
 use super::error::{ErrorCode, ErrorFields};
 use super::list::ListRequest;
 use super::lock::LockRequest;
@@ -37,6 +38,7 @@ pub enum Op {
     Unlock(UnlockRequest),
     Lock(LockRequest),
     List(ListRequest),
+    Copy(CopyRequest),
 }
 
 /// Why `decode_request` gave up. Deliberately one bucket for every JSON/shape
@@ -104,8 +106,16 @@ impl ProtocolError {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use uuid::Uuid;
 
+    use super::super::copy::Field;
     use super::*;
+
+    /// The nil uuid, used everywhere below a request needs one — these
+    /// tests are about wire shape, not about which entry.
+    fn uuid() -> Uuid {
+        Uuid::nil()
+    }
 
     /// Every request shape from `docs/design.md` § Requests, and the one
     /// each `kpa` subcommand sends. Worth pinning because `Op`'s variants
@@ -142,6 +152,20 @@ mod tests {
             (
                 Op::List(ListRequest { db: None }),
                 json!({"v": 1, "op": "list"}),
+            ),
+            (
+                Op::Copy(CopyRequest {
+                    db: "personal".to_string(),
+                    uuid: uuid(),
+                    field: Field::Password,
+                }),
+                json!({
+                    "v": 1,
+                    "op": "copy",
+                    "db": "personal",
+                    "uuid": uuid(),
+                    "field": "password",
+                }),
             ),
         ];
 
@@ -189,6 +213,14 @@ mod tests {
                 }),
             ),
             (r#"{"v":1,"op":"list"}"#, Op::List(ListRequest { db: None })),
+            (
+                r#"{"v":1,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"password"}"#,
+                Op::Copy(CopyRequest {
+                    db: "personal".to_string(),
+                    uuid: uuid(),
+                    field: Field::Password,
+                }),
+            ),
         ];
 
         for (line, expected) in cases {
@@ -213,6 +245,11 @@ mod tests {
             Op::List(ListRequest { db: None }),
             Op::List(ListRequest {
                 db: Some("work".to_string()),
+            }),
+            Op::Copy(CopyRequest {
+                db: "personal".to_string(),
+                uuid: uuid(),
+                field: Field::Notes,
             }),
         ];
 
@@ -239,10 +276,12 @@ mod tests {
             "not json",
             "",
             "{}",
-            r#"{"op":"status"}"#,         // no `v`
-            r#"{"v":"1","op":"status"}"#, // `v` not a number
-            r#"{"v":1,"op":"teleport"}"#, // unknown op
-            r#"{"v":1,"op":"unlock"}"#,   // `unlock` needs a `db`
+            r#"{"op":"status"}"#,                     // no `v`
+            r#"{"v":"1","op":"status"}"#,             // `v` not a number
+            r#"{"v":1,"op":"teleport"}"#,             // unknown op
+            r#"{"v":1,"op":"unlock"}"#,               // `unlock` needs a `db`
+            r#"{"v":1,"op":"copy","db":"personal"}"#, // `copy` needs a `uuid` and `field`
+            r#"{"v":1,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"notes_dump"}"#, // not on the allow-list
         ] {
             assert!(
                 matches!(decode_request(line), Err(DecodeError::MalformedRequest)),

@@ -9,13 +9,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use kpa::config::Config;
 use kpa::output::{escape_for_terminal, print_escaped, report_error};
 use kpa::policy;
-use kpa::proto::{self, ListRequest, LockRequest, Op, Request, UnlockRequest};
+use kpa::proto::{self, CopyRequest, Field, ListRequest, LockRequest, Op, Request, UnlockRequest};
 use kpa::server::{self, Server};
 use kpa::socket;
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "kpa", about = "A small read-only KeePass agent")]
@@ -46,6 +47,37 @@ enum Command {
     /// List entries: every unlocked database, or just one.
     #[command(visible_alias = "ls")]
     List { db: Option<String> },
+    /// Copy one field of one entry to the clipboard; the daemon drops it
+    /// again after `clipboard_timeout`.
+    #[command(visible_alias = "cp")]
+    Copy {
+        db: String,
+        uuid: Uuid,
+        field: FieldArg,
+    },
+}
+
+/// `clap::ValueEnum` for `copy`'s `field` argument. A separate type from
+/// `proto::Field` rather than deriving `ValueEnum` on it there: the
+/// protocol module has no reason to depend on `clap`, same reasoning as
+/// `LockRequest`/`UnlockRequest` not deriving it either.
+#[derive(Clone, Copy, ValueEnum)]
+enum FieldArg {
+    Password,
+    Username,
+    Url,
+    Notes,
+}
+
+impl From<FieldArg> for Field {
+    fn from(arg: FieldArg) -> Field {
+        match arg {
+            FieldArg::Password => Field::Password,
+            FieldArg::Username => Field::Username,
+            FieldArg::Url => Field::Url,
+            FieldArg::Notes => Field::Notes,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -68,6 +100,14 @@ fn main() -> ExitCode {
         Command::Unlock { db } => run_client(&socket_path, Op::Unlock(UnlockRequest { db })),
         Command::Lock { db } => run_client(&socket_path, Op::Lock(LockRequest { db })),
         Command::List { db } => run_client(&socket_path, Op::List(ListRequest { db })),
+        Command::Copy { db, uuid, field } => run_client(
+            &socket_path,
+            Op::Copy(CopyRequest {
+                db,
+                uuid,
+                field: field.into(),
+            }),
+        ),
     }
 }
 

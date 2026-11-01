@@ -32,6 +32,11 @@ pub enum ErrorCode {
     /// The database's file changed on disk after it was unlocked (or while
     /// it was being read). The database has been dropped; unlock again.
     Stale,
+    /// `copy`'s uuid doesn't name an entry in the database.
+    UnknownUuid,
+    /// `copy`'s uuid names a real entry, but the requested field is absent
+    /// or empty on it — there is nothing to put on the clipboard.
+    FieldEmpty,
 }
 
 /// What an error response puts on the wire, however it arose. Each op
@@ -127,6 +132,8 @@ mod tests {
             (ErrorCode::Io, "io"),
             (ErrorCode::UnlockInProgress, "unlock_in_progress"),
             (ErrorCode::Stale, "stale"),
+            (ErrorCode::UnknownUuid, "unknown_uuid"),
+            (ErrorCode::FieldEmpty, "field_empty"),
         ];
 
         for (code, expected) in cases {

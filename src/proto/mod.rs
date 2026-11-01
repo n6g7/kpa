@@ -3,14 +3,15 @@
 //!
 //! One module per op, since an op's payload type and its error type belong
 //! together and nothing outside that op needs either: [`status`],
-//! [`unlock`], [`lock`], [`list`]. [`request`] holds the request half plus
-//! the failures that precede dispatch, and [`error`] the wire vocabulary
-//! all of them share.
+//! [`unlock`], [`lock`], [`list`], [`copy`]. [`request`] holds the request
+//! half plus the failures that precede dispatch, and [`error`] the wire
+//! vocabulary all of them share.
 //!
 //! [`Response`] itself stays here rather than being split up: it's the one
 //! place the whole wire shape is visible as a single match, which is worth
-//! more than spreading four arms across four files.
+//! more than spreading five arms across five files.
 
+mod copy;
 mod error;
 mod list;
 mod lock;
@@ -18,6 +19,7 @@ mod request;
 mod status;
 mod unlock;
 
+pub use copy::{CopyEntry, CopyError, CopyOutcome, CopyRequest, Field};
 pub use error::ErrorCode;
 pub use list::{List, ListError, ListRequest, WireEntry};
 pub use lock::{Lock, LockError, LockRequest};
@@ -40,11 +42,11 @@ pub const VERSION: u32 = 1;
 /// `dispatch` takes one bound instead of four and `server::Server` has one
 /// thing to satisfy.
 ///
-/// The blanket impl means implementing the four op traits is all it takes —
+/// The blanket impl means implementing the five op traits is all it takes —
 /// there is nothing extra to write.
-pub trait Handler: Status + Unlock + Lock + List {}
+pub trait Handler: Status + Unlock + Lock + List + CopyEntry {}
 
-impl<T: Status + Unlock + Lock + List> Handler for T {}
+impl<T: Status + Unlock + Lock + List + CopyEntry> Handler for T {}
 
 /// Turn one decoded request into the response for it.
 ///
@@ -63,6 +65,7 @@ where
         Op::Unlock(request) => Response::Unlock(handler.unlock(request)),
         Op::Lock(request) => Response::Lock(handler.lock(request)),
         Op::List(request) => Response::List(handler.list(request)),
+        Op::Copy(request) => Response::Copy(handler.copy(request)),
     }
 }
 
@@ -97,6 +100,9 @@ pub enum Response {
     Lock(Result<Option<String>, LockError>),
     /// `Ok` carries the entries of every database the request covered.
     List(Result<Vec<WireEntry>, ListError>),
+    /// `Ok` names which field was copied and for how long it will stay on
+    /// the clipboard — never the value itself (see `copy`'s module doc).
+    Copy(Result<CopyOutcome, CopyError>),
     /// Rejected before the daemon knew which op was even being asked for,
     /// so it belongs to no op's `Result`.
     Protocol(ProtocolError),
@@ -133,6 +139,12 @@ impl Serialize for Response {
                 map.serialize_entry("entries", entries)?;
             }
             Response::List(Err(err)) => serialize_error(&mut map, &err.fields())?,
+            Response::Copy(Ok(outcome)) => {
+                map.serialize_entry("ok", &true)?;
+                map.serialize_entry("copied", &outcome.field)?;
+                map.serialize_entry("expires_in", &outcome.expires_in)?;
+            }
+            Response::Copy(Err(err)) => serialize_error(&mut map, &err.fields())?,
             Response::Protocol(err) => serialize_error(&mut map, &err.fields())?,
         }
         map.end()
@@ -203,6 +215,18 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Response::Lock(Ok(None))).expect("lock should serialize"),
             json!({"v": 1, "ok": true})
+        );
+
+        // `copy`'s success carries no secret and no `db` — just which field,
+        // and for how long.
+        let copy = Response::Copy(Ok(CopyOutcome {
+            db: "personal".to_string(),
+            field: Field::Password,
+            expires_in: 30,
+        }));
+        assert_eq!(
+            serde_json::to_value(&copy).expect("copy should serialize"),
+            json!({"v": 1, "ok": true, "copied": "password", "expires_in": 30})
         );
     }
 
@@ -280,7 +304,7 @@ mod tests {
         let owned = || db.to_string();
 
         // (response, expected code, expected `db`, expected `detail`)
-        let cases: [(Response, &str, Option<&str>, Option<&str>); 15] = [
+        let cases: [(Response, &str, Option<&str>, Option<&str>); 21] = [
             (
                 Response::Unlock(Err(UnlockError::InProgress { db: owned() })),
                 "unlock_in_progress",
@@ -375,6 +399,45 @@ mod tests {
                 "malformed_request",
                 None,
                 None,
+            ),
+            (
+                Response::Copy(Err(CopyError::UnknownDb { db: owned() })),
+                "unknown_db",
+                Some(db),
+                None,
+            ),
+            (
+                Response::Copy(Err(CopyError::Locked { db: owned() })),
+                "locked",
+                Some(db),
+                None,
+            ),
+            (
+                Response::Copy(Err(CopyError::Stale { db: owned() })),
+                "stale",
+                Some(db),
+                Some("database changed on disk"),
+            ),
+            (
+                Response::Copy(Err(CopyError::UnknownUuid { db: owned() })),
+                "unknown_uuid",
+                Some(db),
+                None,
+            ),
+            (
+                Response::Copy(Err(CopyError::FieldEmpty { db: owned() })),
+                "field_empty",
+                Some(db),
+                None,
+            ),
+            (
+                Response::Copy(Err(CopyError::Clipboard {
+                    db: owned(),
+                    detail: "no reachable Wayland compositor".to_string(),
+                })),
+                "io",
+                Some(db),
+                Some("no reachable Wayland compositor"),
             ),
         ];
 

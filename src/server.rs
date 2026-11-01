@@ -30,11 +30,13 @@ use std::time::{Duration, Instant};
 use keepass::Database;
 use zeroize::Zeroizing;
 
+use crate::clip::{self, Clipboard};
 use crate::config::Config;
 use crate::policy;
 use crate::proto::{
-    self, DatabaseStatus, DecodeError, List, ListError, ListRequest, Lock, LockError, LockRequest,
-    ProtocolError, Response, Status, Unlock, UnlockError, UnlockRequest, WireEntry,
+    self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
+    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
+    UnlockError, UnlockRequest, WireEntry,
 };
 use crate::socket;
 use crate::vault::{self, Fingerprint, VaultError};
@@ -134,10 +136,21 @@ pub struct Server {
     /// Told about each successful unlock, so the lock policy can take its
     /// sleep inhibitor. Set once by `set_policy_events`; absent in tests.
     policy_events: OnceLock<Sender<policy::Event>>,
+    /// The clipboard `copy` hands secrets to. `Arc` so the thread that
+    /// schedules an offer's expiry (spawned by `copy`, below) can outlive
+    /// the request that started it.
+    clip: Arc<Clipboard>,
 }
 
 impl Server {
     pub fn new(config: Config) -> Server {
+        Server::with_clipboard(config, clip::WaylandBackend)
+    }
+
+    /// Like `new`, but with an injected clipboard backend — real tests use
+    /// `new`; unit tests that need to control the clipboard without a
+    /// Wayland connection use this with a fake `clip::Backend`.
+    pub fn with_clipboard(config: Config, backend: impl clip::Backend + 'static) -> Server {
         let dbs = config
             .databases
             .iter()
@@ -153,6 +166,7 @@ impl Server {
             config,
             dbs: Mutex::new(dbs),
             policy_events: OnceLock::new(),
+            clip: Arc::new(Clipboard::new(backend)),
         }
     }
 
@@ -436,6 +450,76 @@ impl List for Server {
     }
 }
 
+impl CopyEntry for Server {
+    fn copy(&self, request: &CopyRequest) -> Result<CopyOutcome, CopyError> {
+        let name = request.db.as_str();
+        let db = || name.to_string();
+
+        // The lookup happens with the mutex held — it's an in-memory read,
+        // sub-millisecond like `list` — but the clipboard handoff below
+        // does not: offering to the backend is a Wayland round trip,
+        // which must not stall every other request behind it, the same
+        // reasoning that keeps `unlock`'s prompt-and-KDF step outside the
+        // mutex too.
+        let value = {
+            let mut dbs = slots(&self.dbs);
+            let Some(slot) = dbs.get_mut(name) else {
+                return Err(CopyError::UnknownDb { db: db() });
+            };
+            if drop_if_stale(slot) {
+                return Err(CopyError::Stale { db: db() });
+            }
+            let Some(database) = slot.db.as_ref() else {
+                return Err(CopyError::Locked { db: db() });
+            };
+            match vault::entry_field(database, request.uuid, field_key(request.field)) {
+                None => return Err(CopyError::UnknownUuid { db: db() }),
+                Some(None) => return Err(CopyError::FieldEmpty { db: db() }),
+                Some(Some(value)) => value,
+            }
+        };
+
+        let offer = self.clip.offer(value).map_err(|err| CopyError::Clipboard {
+            db: db(),
+            detail: err.to_string(),
+        })?;
+
+        // Only a successful handoff counts as activity — a failed one read
+        // nothing the user didn't already have, the same rule `list`
+        // applies to a refused read.
+        if let Some(slot) = slots(&self.dbs).get_mut(name) {
+            slot.touch();
+        }
+
+        let timeout = self.config.clipboard_timeout;
+        let clip = Arc::clone(&self.clip);
+        let _ = thread::Builder::new().spawn(move || {
+            thread::sleep(timeout);
+            clip.expire(&offer);
+        });
+
+        Ok(CopyOutcome {
+            db: db(),
+            field: request.field,
+            expires_in: timeout.as_secs(),
+        })
+    }
+}
+
+/// `copy`'s wire `Field` to the `keepass` field key it reads. Kept in
+/// `server.rs` rather than `proto::copy`, so the protocol module stays free
+/// of a `keepass` dependency.
+fn field_key(field: Field) -> &'static str {
+    use keepass::db::fields;
+
+    match field {
+        Field::Password => fields::PASSWORD,
+        Field::Username => fields::USERNAME,
+        Field::Url => fields::URL,
+        Field::Notes => fields::NOTES,
+    }
+}
+
 /// `EntrySummary` implements `Drop` (via `ZeroizeOnDrop`), which forbids
 /// moving individual fields out of it — hence `.clone()` here. Both it and
 /// `WireEntry` zeroize on drop, so neither copy outlives the response.
@@ -662,10 +746,20 @@ fn log_response(response: &Response) {
 
         Response::Protocol(err) => log(format_args!("rejected request: {err:?}")),
 
+        // `copy` is an access worth recording, same reasoning as `unlock`
+        // and `lock` above — unlike `list`/`status`, which stay silent
+        // (see the note on `Response::Status { .. } | Response::List(_)`
+        // below). Only the field name and database are logged, never the
+        // secret.
+        Response::Copy(Ok(outcome)) => log(format_args!(
+            "copied {:?} from {:?}",
+            outcome.field, outcome.db
+        )),
+        Response::Copy(Err(err)) => log(format_args!("copy failed: {err:?}")),
+
         // Listed above rather than caught by a `_` arm on purpose: adding
         // an op should be a decision about whether it belongs in the log,
-        // not something a wildcard answers silently. `copy` (step 3) is
-        // the next one, and it *is* an access worth recording.
+        // not something a wildcard answers silently.
         Response::Status { .. } | Response::List(_) => {}
     }
 }
@@ -891,6 +985,18 @@ mod tests {
         Server::new(Config::parse(&config).expect("valid config"))
     }
 
+    /// Like `idle_server`, but with a recording clipboard backend instead
+    /// of the real `WaylandBackend` — for idle-timer tests that need
+    /// `copy` to succeed with no Wayland connection available.
+    fn copy_idle_server(timeout: &str) -> Server {
+        let config = format!(
+            "idle_timeout = \"{timeout}\"\n\
+             [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n"
+        );
+        let (backend, _offered) = clip::RecordingBackend::new();
+        Server::with_clipboard(Config::parse(&config).expect("valid config"), backend)
+    }
+
     /// Stands in for a successful unlock without a file or a prompt. Does not
     /// touch the timer, so each test controls it directly.
     /// The database is stamped from a fresh empty file, so the freshness
@@ -913,6 +1019,205 @@ mod tests {
 
     fn is_unlocked(server: &Server, name: &str) -> bool {
         slots(&server.dbs)[name].db.is_some()
+    }
+
+    /// Like `unlock_directly`, but the installed database holds one entry
+    /// with a password set, so `copy` has something to find. Returns the
+    /// entry's uuid.
+    fn unlock_with_entry(server: &Server, name: &str) -> uuid::Uuid {
+        use keepass::db::fields;
+
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_protected(fields::PASSWORD, "entrypass1");
+            entry.id().uuid()
+        };
+
+        // A distinct prefix from `unlock_directly`'s own counter below:
+        // two independent function-local `static`s both starting at 0
+        // could otherwise race to the same path when tests run in
+        // parallel, and the loser's write would make the other's
+        // freshness check see a changed file.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "kpa-unit-copy-{}-{}-{name}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, b"").expect("temp file");
+        let stamp = vault::Fingerprint::from_file(&path).expect("stat temp file");
+        let mut dbs = slots(&server.dbs);
+        let slot = dbs.get_mut(name).expect("configured");
+        slot.path = path;
+        slot.stamp = Some(stamp);
+        slot.db = Some(db);
+        uuid
+    }
+
+    /// A server with one configured, locked database and a recording
+    /// clipboard backend — no real Wayland connection anywhere in this
+    /// test module. The returned handle is what the backend recorded.
+    fn copy_server() -> (Server, Arc<Mutex<Vec<String>>>) {
+        let (backend, offered) = clip::RecordingBackend::new();
+        let server = Server::with_clipboard(
+            Config::parse("[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n")
+                .expect("valid config"),
+            backend,
+        );
+        (server, offered)
+    }
+
+    #[test]
+    fn copy_of_an_unknown_db_is_unknown_db() {
+        let (server, _offered) = copy_server();
+        let err = CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "nope".to_string(),
+                uuid: uuid::Uuid::nil(),
+                field: Field::Password,
+            },
+        )
+        .expect_err("no such database");
+        assert_eq!(
+            err,
+            CopyError::UnknownDb {
+                db: "nope".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn copy_of_a_locked_db_is_locked() {
+        let (server, _offered) = copy_server();
+        let err = CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid: uuid::Uuid::nil(),
+                field: Field::Password,
+            },
+        )
+        .expect_err("database is locked");
+        assert_eq!(
+            err,
+            CopyError::Locked {
+                db: "personal".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn copy_of_an_unknown_uuid_is_unknown_uuid() {
+        let (server, _offered) = copy_server();
+        unlock_with_entry(&server, "personal");
+
+        let err = CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid: uuid::Uuid::new_v4(),
+                field: Field::Password,
+            },
+        )
+        .expect_err("no such entry");
+        assert_eq!(
+            err,
+            CopyError::UnknownUuid {
+                db: "personal".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn copy_of_an_absent_field_is_field_empty() {
+        let (server, _offered) = copy_server();
+        let uuid = unlock_with_entry(&server, "personal");
+
+        let err = CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid,
+                field: Field::Url,
+            },
+        )
+        .expect_err("url was never set");
+        assert_eq!(
+            err,
+            CopyError::FieldEmpty {
+                db: "personal".to_string()
+            }
+        );
+    }
+
+    /// The field the request asked for reaches the clipboard backend
+    /// verbatim — including when `list` would have withheld it for being
+    /// protected, which `copy` must not do (see `vault::entry_field`'s
+    /// doc).
+    #[test]
+    fn a_successful_copy_reaches_the_clipboard() {
+        let (server, offered) = copy_server();
+        let uuid = unlock_with_entry(&server, "personal");
+
+        let outcome = CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid,
+                field: Field::Password,
+            },
+        )
+        .expect("entry and field exist");
+
+        assert_eq!(outcome.field, Field::Password);
+        assert_eq!(outcome.db, "personal");
+        assert_eq!(*offered.lock().unwrap(), vec!["entrypass1".to_string()]);
+    }
+
+    /// A successful `copy` resets the idle timer, the same rule `list`
+    /// follows for a successful read.
+    #[test]
+    fn a_successful_copy_extends_the_timeout() {
+        let server = copy_idle_server("1s");
+        let uuid = unlock_with_entry(&server, "personal");
+        age_activity(&server, "personal", Duration::from_secs(5));
+
+        assert!(
+            CopyEntry::copy(
+                &server,
+                &CopyRequest {
+                    db: "personal".to_string(),
+                    uuid,
+                    field: Field::Password,
+                },
+            )
+            .is_ok()
+        );
+        assert!(!idle_lock_fires(&server));
+        assert!(is_unlocked(&server, "personal"));
+    }
+
+    /// A refused `copy` (unknown uuid) is not activity, the same rule a
+    /// refused `list` follows.
+    #[test]
+    fn a_refused_copy_does_not_extend_the_timeout() {
+        let server = copy_idle_server("1s");
+        unlock_with_entry(&server, "personal");
+        age_activity(&server, "personal", Duration::from_secs(5));
+
+        let refused = CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid: uuid::Uuid::new_v4(),
+                field: Field::Password,
+            },
+        );
+        assert!(refused.is_err());
+        assert!(idle_lock_fires(&server));
     }
 
     /// Makes the named database's last activity look `by` ago, so the next
