@@ -5,10 +5,10 @@
 //! actually hard to test here. `policy.rs` splits into a pure core
 //! (`Policy`) tested against the `Locks`/`SleepInhibitor` traits, and a
 //! D-Bus half (`watch_forever`) that can't be exercised without a bus. The
-//! tray's equivalent split is [`icon_name`]/[`fallback_icon`]/
+//! tray's equivalent split is [`aggregate_color`]/[`fallback_icon`]/
 //! [`item_status`]/[`tool_tip`]/[`build_menu`] — pure functions of a
-//! `DatabaseStatus` snapshot, tested
-//! below with no `ksni`, no D-Bus, and no `Server` at all — versus [`run`],
+//! `DatabaseStatus` snapshot, tested below with no `ksni`, no D-Bus, and
+//! no `Server` at all — versus [`run`],
 //! which owns the one thing that can't be faked that way: `ksni`'s own
 //! service loop. There's no tray-side equivalent of `Locks`/`SleepInhibitor`
 //! because `ksni` itself is already the abstraction boundary to the bus;
@@ -59,34 +59,45 @@
 //! (lock, or a finished unlock) also pokes `ksni` right away, so those feel
 //! instant rather than waiting for the next tick.
 //!
-//! **Two host-compatibility fixes, found by trying a second host.** The
-//! first manual test (`docs/plan.md` step 4) ran against whatever
-//! StatusNotifierItem host happened to already be on the session bus;
-//! trying a second, more common one surfaced two problems invisible
-//! against the first:
+//! **Host-compatibility fixes, found by testing against more than one
+//! host.** The first manual test (`docs/plan.md` step 4) only read back
+//! this module's own D-Bus properties and menu layout with `busctl` —
+//! which confirms the wiring, but not that anything legible actually gets
+//! drawn. Watching a second, more common host's own traffic (`busctl
+//! monitor` around registration, then reading that host's own source for
+//! how it turns the properties it fetched into pixels) found real gaps:
 //!
-//! - [`fallback_icon`] exists because `icon_name` alone isn't enough: a
-//!   host can only resolve `security-high`/`security-medium`/`dialog-error`
-//!   through its *current* icon theme, and not every theme ships every
-//!   freedesktop-spec name (some ship none of these three) — the visible
-//!   failure is a host-drawn "broken icon" placeholder, not a blank space.
-//!   `icon_pixmap` is the documented fallback for exactly this case: raw
-//!   ARGB32 bytes the host can show with no theme lookup at all. Both are
-//!   set; a host that resolves the name is free to prefer it.
+//! - `icon_name` is deliberately left unset (empty string, the default).
+//!   Some hosts' icon-pixmap fallback only ever triggers when `icon_name`
+//!   is empty to begin with — not when it's set but fails to resolve
+//!   through the current icon theme — so a host like that, given a
+//!   non-empty name it can't resolve, shows its own "broken icon"
+//!   placeholder and never looks at `icon_pixmap` at all. An empty name
+//!   is also the one choice that can't go stale if the chosen names
+//!   (`security-high`/`security-medium`/`dialog-error`) turn out to be
+//!   missing from a given icon theme — observed firsthand here: the
+//!   machine this was tested on has no icon theme that ships any of the
+//!   three. [`fallback_icon`]'s raw ARGB32 bytes are what every host is
+//!   expected to render instead.
 //! - `Tray::MENU_ON_ACTIVATE` is *not* set. It looked like a nice touch —
 //!   left-click opens the menu, since there's no single primary action —
 //!   but `ksni`'s own source documents it as needing host-specific
 //!   workarounds for GNOME's appindicator extension and for KDE Plasma
 //!   (versions on either side of 6.4 disagree about whether `Activate`
 //!   gets called at all once `ItemIsMenu` is true). That's exactly the kind
-//!   of per-host special-casing `docs/design.md` § Tray rules out, and on
-//!   a host that doesn't match whichever version `ksni` coded around, the
-//!   result is "no menu, and no left-click either." Left at the default
-//!   (`false`), `Tray::activate` stays a no-op (there isn't a window to
-//!   raise) and the menu opens the ordinary dbusmenu way — a secondary
-//!   click querying the `Menu` object path — which every host that
-//!   advertises `org.kde.StatusNotifierWatcher` is expected to support
-//!   without needing `ItemIsMenu` at all.
+//!   of per-host special-casing `docs/design.md` § Tray rules out. Left at
+//!   the default (`false`), `Tray::activate` stays a no-op (there isn't a
+//!   window to raise) and the menu is reachable the ordinary dbusmenu way
+//!   — a secondary click querying the `Menu` object path — which this
+//!   module's own side of the protocol answers correctly regardless (its
+//!   `GetLayout` response and the handlers behind each item were checked
+//!   directly, by calling them over the bus the same way a host would).
+//!   Whether a given host's *own* click handling ever reaches that call
+//!   is the host's own capability — some D-Bus-level toolkits expose the
+//!   StatusNotifierItem/dbusmenu protocol as a library primitive that the
+//!   surrounding shell configuration must still wire up to something that
+//!   displays a menu, which is a capability gap this module cannot see or
+//!   fix from here.
 
 use std::sync::Arc;
 use std::thread;
@@ -184,16 +195,15 @@ impl ksni::Tray for TrayItem {
         "kpa".to_string()
     }
 
+    // `icon_name` is deliberately not overridden — see this module's doc
+    // for why an unset name, not a freedesktop-spec name this build picked,
+    // is the one choice that reaches every host's `icon_pixmap` fallback.
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         fallback_icon(&self.server.snapshot(), self.last_error.is_some())
     }
 
     fn status(&self) -> ksni::Status {
         item_status(&self.server.snapshot(), self.last_error.is_some())
-    }
-
-    fn icon_name(&self) -> String {
-        icon_name(&self.server.snapshot(), self.last_error.is_some()).to_string()
     }
 
     fn tool_tip(&self) -> ToolTip {
@@ -268,24 +278,9 @@ fn unlock_error_code(err: &UnlockError) -> &'static str {
 }
 
 /// Whether at least one configured database is unlocked right now. The one
-/// fact `icon_name`/`item_status`/`tool_tip` all start from.
+/// fact `aggregate_color`/`item_status`/`tool_tip` all start from.
 fn any_unlocked(databases: &[DatabaseStatus]) -> bool {
     databases.iter().any(|db| !db.locked)
-}
-
-/// `docs/design.md` § Tray: "Icon reflects aggregate state: all locked /
-/// some unlocked / error." All three names are from the freedesktop icon
-/// naming spec's own "Status" and "Dialog" categories, so any icon theme
-/// that follows the spec has them — no bundled icon file, no
-/// desktop-specific name.
-fn icon_name(databases: &[DatabaseStatus], has_error: bool) -> &'static str {
-    if has_error {
-        "dialog-error"
-    } else if any_unlocked(databases) {
-        "security-medium"
-    } else {
-        "security-high"
-    }
 }
 
 /// The StatusNotifierItem `Status` property (not to be confused with this
@@ -320,15 +315,20 @@ fn tool_tip(databases: &[DatabaseStatus], last_error: Option<&(String, &'static 
         lines.push(format!("{name}: unlock failed ({code})"));
     }
     ToolTip {
-        icon_name: icon_name(databases, last_error.is_some()).to_string(),
+        // Empty, not a named icon — same reasoning as `Tray::icon_name`,
+        // see this module's doc.
+        icon_name: String::new(),
         icon_pixmap: fallback_icon(databases, last_error.is_some()),
         title: "kpa".to_string(),
         description: lines.join("\n"),
     }
 }
 
-/// The same tri-state as `icon_name`, as a color — all locked / some
-/// unlocked / error, in that priority.
+/// `docs/design.md` § Tray: "Icon reflects aggregate state: all locked /
+/// some unlocked / error," as a color, in that priority. `fallback_icon`
+/// is what actually turns this into something a host can draw — see this
+/// module's doc for why that's a generated bitmap rather than a named
+/// freedesktop icon.
 fn aggregate_color(databases: &[DatabaseStatus], has_error: bool) -> (u8, u8, u8) {
     if has_error {
         (0xd6, 0x33, 0x3b) // red
@@ -472,20 +472,38 @@ mod tests {
     #[test]
     fn the_icon_is_secure_when_every_database_is_locked() {
         let databases = [locked("personal"), locked("work")];
-        assert_eq!(icon_name(&databases, false), "security-high");
+        assert_eq!(aggregate_color(&databases, false), (0x6b, 0x7b, 0x8c));
         assert_eq!(item_status(&databases, false), ksni::Status::Passive);
     }
 
     #[test]
     fn the_icon_is_less_secure_once_anything_is_unlocked() {
         let databases = [locked("personal"), unlocked("work", 3)];
-        assert_eq!(icon_name(&databases, false), "security-medium");
+        assert_eq!(aggregate_color(&databases, false), (0xe6, 0xa8, 0x17));
         assert_eq!(item_status(&databases, false), ksni::Status::Active);
     }
 
     #[test]
     fn no_configured_databases_reads_as_all_locked() {
-        assert_eq!(icon_name(&[], false), "security-high");
+        assert_eq!(aggregate_color(&[], false), (0x6b, 0x7b, 0x8c));
+    }
+
+    /// `Tray::icon_name` stays empty regardless of state — see this
+    /// module's doc for why a host's `icon_pixmap` fallback is the one
+    /// `TrayItem` relies on, never a named icon.
+    #[test]
+    fn tray_never_advertises_a_named_icon() {
+        use crate::config::Config;
+
+        let item = TrayItem {
+            server: Arc::new(Server::new(
+                Config::parse("").expect("empty config is valid"),
+            )),
+            handle: None,
+            last_error: None,
+        };
+        assert_eq!(ksni::Tray::icon_name(&item), "");
+        assert_eq!(tool_tip(&[], None).icon_name, "");
     }
 
     /// The fallback icon is never empty, is the size it claims, has an
@@ -519,7 +537,7 @@ mod tests {
         // Even with everything unlocked, an unresolved error still wins —
         // it's the thing most worth the user's attention.
         let databases = [unlocked("personal", 3)];
-        assert_eq!(icon_name(&databases, true), "dialog-error");
+        assert_eq!(aggregate_color(&databases, true), (0xd6, 0x33, 0x3b));
         assert_eq!(item_status(&databases, true), ksni::Status::NeedsAttention);
     }
 
@@ -712,7 +730,8 @@ mod tests {
             last_error: None,
         };
 
-        assert_eq!(ksni::Tray::icon_name(&item), "security-high");
+        assert_eq!(ksni::Tray::icon_name(&item), "");
+        assert_eq!(ksni::Tray::icon_pixmap(&item)[0].width, 22);
         assert_eq!(ksni::Tray::tool_tip(&item).description, "personal: locked");
         assert_eq!(
             labels(&ksni::Tray::menu(&item)),
@@ -731,6 +750,9 @@ mod tests {
             last_error: Some(("personal".to_string(), "wrong_credentials")),
         };
 
-        assert_eq!(ksni::Tray::icon_name(&item), "dialog-error");
+        assert_eq!(
+            ksni::Tray::icon_pixmap(&item)[0].data,
+            fallback_icon(&[], true)[0].data
+        );
     }
 }
