@@ -5,8 +5,9 @@
 //! actually hard to test here. `policy.rs` splits into a pure core
 //! (`Policy`) tested against the `Locks`/`SleepInhibitor` traits, and a
 //! D-Bus half (`watch_forever`) that can't be exercised without a bus. The
-//! tray's equivalent split is [`icon_name`]/[`item_status`]/[`tool_tip`]/
-//! [`build_menu`] — pure functions of a `DatabaseStatus` snapshot, tested
+//! tray's equivalent split is [`icon_name`]/[`fallback_icon`]/
+//! [`item_status`]/[`tool_tip`]/[`build_menu`] — pure functions of a
+//! `DatabaseStatus` snapshot, tested
 //! below with no `ksni`, no D-Bus, and no `Server` at all — versus [`run`],
 //! which owns the one thing that can't be faked that way: `ksni`'s own
 //! service loop. There's no tray-side equivalent of `Locks`/`SleepInhibitor`
@@ -57,6 +58,35 @@
 //! each of the several places a database can lock. A direct menu action
 //! (lock, or a finished unlock) also pokes `ksni` right away, so those feel
 //! instant rather than waiting for the next tick.
+//!
+//! **Two host-compatibility fixes, found by trying a second host.** The
+//! first manual test (`docs/plan.md` step 4) ran against whatever
+//! StatusNotifierItem host happened to already be on the session bus;
+//! trying a second, more common one surfaced two problems invisible
+//! against the first:
+//!
+//! - [`fallback_icon`] exists because `icon_name` alone isn't enough: a
+//!   host can only resolve `security-high`/`security-medium`/`dialog-error`
+//!   through its *current* icon theme, and not every theme ships every
+//!   freedesktop-spec name (some ship none of these three) — the visible
+//!   failure is a host-drawn "broken icon" placeholder, not a blank space.
+//!   `icon_pixmap` is the documented fallback for exactly this case: raw
+//!   ARGB32 bytes the host can show with no theme lookup at all. Both are
+//!   set; a host that resolves the name is free to prefer it.
+//! - `Tray::MENU_ON_ACTIVATE` is *not* set. It looked like a nice touch —
+//!   left-click opens the menu, since there's no single primary action —
+//!   but `ksni`'s own source documents it as needing host-specific
+//!   workarounds for GNOME's appindicator extension and for KDE Plasma
+//!   (versions on either side of 6.4 disagree about whether `Activate`
+//!   gets called at all once `ItemIsMenu` is true). That's exactly the kind
+//!   of per-host special-casing `docs/design.md` § Tray rules out, and on
+//!   a host that doesn't match whichever version `ksni` coded around, the
+//!   result is "no menu, and no left-click either." Left at the default
+//!   (`false`), `Tray::activate` stays a no-op (there isn't a window to
+//!   raise) and the menu opens the ordinary dbusmenu way — a secondary
+//!   click querying the `Menu` object path — which every host that
+//!   advertises `org.kde.StatusNotifierWatcher` is expected to support
+//!   without needing `ItemIsMenu` at all.
 
 use std::sync::Arc;
 use std::thread;
@@ -142,11 +172,9 @@ struct TrayItem {
 }
 
 impl ksni::Tray for TrayItem {
-    // A left click opens the menu rather than calling `activate` (which
-    // this never overrides, so it would otherwise do nothing) — there's no
-    // single primary action for a tray that watches several databases at
-    // once, so the menu is it.
-    const MENU_ON_ACTIVATE: bool = true;
+    // Left at the default (`false`) rather than set — see this module's
+    // doc for why `Tray::MENU_ON_ACTIVATE` turned out not to be the
+    // portable choice it looked like.
 
     fn id(&self) -> String {
         "kpa".to_string()
@@ -154,6 +182,10 @@ impl ksni::Tray for TrayItem {
 
     fn title(&self) -> String {
         "kpa".to_string()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        fallback_icon(&self.server.snapshot(), self.last_error.is_some())
     }
 
     fn status(&self) -> ksni::Status {
@@ -289,10 +321,52 @@ fn tool_tip(databases: &[DatabaseStatus], last_error: Option<&(String, &'static 
     }
     ToolTip {
         icon_name: icon_name(databases, last_error.is_some()).to_string(),
+        icon_pixmap: fallback_icon(databases, last_error.is_some()),
         title: "kpa".to_string(),
         description: lines.join("\n"),
-        ..Default::default()
     }
+}
+
+/// The same tri-state as `icon_name`, as a color — all locked / some
+/// unlocked / error, in that priority.
+fn aggregate_color(databases: &[DatabaseStatus], has_error: bool) -> (u8, u8, u8) {
+    if has_error {
+        (0xd6, 0x33, 0x3b) // red
+    } else if any_unlocked(databases) {
+        (0xe6, 0xa8, 0x17) // amber
+    } else {
+        (0x6b, 0x7b, 0x8c) // slate blue
+    }
+}
+
+/// A filled circle in `aggregate_color`'s color, for `Tray::icon_pixmap`
+/// and `ToolTip::icon_pixmap` — see this module's doc for why `icon_name`
+/// alone isn't enough. Generated rather than loaded from a file: a 22×22
+/// ARGB32 bitmap is a few hundred bytes of arithmetic, which costs less
+/// than shipping and loading an asset file for three fixed colors.
+fn fallback_icon(databases: &[DatabaseStatus], has_error: bool) -> Vec<ksni::Icon> {
+    const SIZE: i32 = 22;
+    let (r, g, b) = aggregate_color(databases, has_error);
+    let center = (SIZE - 1) as f32 / 2.0;
+
+    let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (dx, dy) = (x as f32 - center, y as f32 - center);
+            if dx.hypot(dy) <= center {
+                // ARGB32, network byte order (`ksni::Icon`'s own doc):
+                // opaque alpha, then the color.
+                data.extend_from_slice(&[0xff, r, g, b]);
+            } else {
+                data.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+    }
+    vec![ksni::Icon {
+        width: SIZE,
+        height: SIZE,
+        data,
+    }]
 }
 
 /// `docs/design.md` § Tray: "Menu: Unlock…, Lock all, a per-database
@@ -412,6 +486,32 @@ mod tests {
     #[test]
     fn no_configured_databases_reads_as_all_locked() {
         assert_eq!(icon_name(&[], false), "security-high");
+    }
+
+    /// The fallback icon is never empty, is the size it claims, has an
+    /// opaque center and a transparent corner (so it reads as a filled
+    /// circle, not a filled square), and changes with aggregate state —
+    /// the whole reason it exists is to be visible without relying on a
+    /// host's icon theme at all.
+    #[test]
+    fn the_fallback_icon_is_a_colored_circle_that_tracks_state() {
+        let locked_icon = &fallback_icon(&[locked("personal")], false)[0];
+        assert_eq!((locked_icon.width, locked_icon.height), (22, 22));
+        assert_eq!(locked_icon.data.len(), 22 * 22 * 4);
+
+        let center = (22 * 11 + 11) * 4; // pixel (11, 11), 4 bytes each
+        assert_eq!(locked_icon.data[center], 0xff, "center should be opaque");
+        let corner = 0; // pixel (0, 0)
+        assert_eq!(
+            locked_icon.data[corner], 0,
+            "a corner should be transparent, outside the circle"
+        );
+
+        let unlocked_icon = &fallback_icon(&[unlocked("personal", 1)], false)[0];
+        let error_icon = &fallback_icon(&[locked("personal")], true)[0];
+        assert_ne!(locked_icon.data, unlocked_icon.data);
+        assert_ne!(locked_icon.data, error_icon.data);
+        assert_ne!(unlocked_icon.data, error_icon.data);
     }
 
     #[test]
