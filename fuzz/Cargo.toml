@@ -1,0 +1,27 @@
+[package]
+name = "kpa-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Own workspace of one: keeps this crate (and its nightly-only
+# `libfuzzer-sys` dependency) out of the root `kpa` workspace entirely, so
+# `cargo build`/`cargo test` at the repo root never sees it.
+[workspace]
+members = ["."]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.kpa]
+path = ".."
+
+[[bin]]
+name = "decode_request"
+path = "fuzz_targets/decode_request.rs"
+test = false
+doc = false
+bench = false

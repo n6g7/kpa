@@ -4,14 +4,26 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    # Pinned nightly rustc for fuzz/ (docs/plan.md step 6): cargo-fuzz's
+    # instrumentation flags (`-Cinstrument-coverage`, `-Zsanitizer=...`) are
+    # nightly-only, and nixpkgs itself only packages stable. Only
+    # `devShells.fuzz` below pulls this in.
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs, flake-utils }:
+    { self, nixpkgs, flake-utils, rust-overlay }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
+        fuzzPkgs = import nixpkgs {
+          inherit system;
+          overlays = [ rust-overlay.overlays.default ];
+        };
       in
       {
         packages.default = pkgs.callPackage ./nix/package.nix { };
@@ -53,6 +65,18 @@
           # rust-analyzer and clippy both want to find the sysroot's source;
           # RUST_SRC_PATH keeps that working without a separate rustup install.
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+        };
+
+        # fuzz/ (docs/plan.md step 6): `nix develop .#fuzz -c cargo fuzz run
+        # decode_request -- -max_total_time=180`, from the repo root. Kept
+        # separate from `devShells.default` so the nightly toolchain and
+        # `cargo-fuzz` never show up in, or affect, a normal `cargo
+        # build`/`cargo test`/`cargo clippy`.
+        devShells.fuzz = pkgs.mkShell {
+          packages = [
+            (fuzzPkgs.rust-bin.nightly.latest.default)
+            pkgs.cargo-fuzz
+          ];
         };
       }
     )
