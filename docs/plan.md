@@ -90,8 +90,10 @@ Partly pulled forward into step 2 after the September robustness and
 secret-hygiene reviews (`docs/review-2026-09-robustness.md`,
 `docs/review-2026-09-secrets.md`): `PR_SET_DUMPABLE=0`, the request-size
 cap, read/write timeouts, bounded connection handling, and a first zeroize
-pass already landed there. What remains for this step is a repeat of the
-zeroize audit once `copy` and the clipboard exist.
+pass already landed there. The zeroize audit was repeated with `copy` and
+the clipboard in place; its one kpa-owned
+finding — `lock` left a still-served clipboard offer outliving
+the lock it was supposed to be covered by — is fixed.
 
 `fuzz/` is a checked-in `cargo-fuzz` harness: its one target,
 `decode_request`, runs arbitrary bytes through the exact same UTF-8-check-

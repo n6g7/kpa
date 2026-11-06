@@ -140,6 +140,19 @@ pub struct Server {
     /// schedules an offer's expiry (spawned by `copy`, below) can outlive
     /// the request that started it.
     clip: Arc<Clipboard>,
+    /// Which database the clipboard's current offer, if any, was copied
+    /// from — `None` once nothing is offered. `copy` sets this on a
+    /// successful handoff; every lock path (`Lock::lock`,
+    /// `policy::Locks::lock_all`, `expire_idle`) reads it to decide
+    /// whether the database it's locking is the one holding the
+    /// clipboard, in which case `docs/threat-model.md` G-6 ("lock clears
+    /// what kpa owns") says the offer must end too, not just outlive its
+    /// own `clipboard_timeout`. `Clipboard` itself stays database-agnostic
+    /// (see `clip.rs`'s doc comment) — this is the one place that
+    /// association is tracked. `Arc` so `copy`'s own expiry thread (which
+    /// outlives the request, same as `clip` above) can clear it too, once
+    /// its natural timeout fires with nothing newer having replaced it.
+    clip_db: Arc<Mutex<Option<String>>>,
 }
 
 impl Server {
@@ -167,6 +180,7 @@ impl Server {
             dbs: Mutex::new(dbs),
             policy_events: OnceLock::new(),
             clip: Arc::new(Clipboard::new(backend)),
+            clip_db: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -191,6 +205,11 @@ impl Server {
             }
             locked
         };
+        // Outside the `dbs` guard, same reasoning as `Lock::lock`: ending
+        // a clipboard offer is a round trip to the backend, not bookkeeping.
+        for name in &locked {
+            self.end_clipboard_for(name);
+        }
         // Logged after the guard is released: a stalled stdout must not
         // hold up every other request.
         for name in &locked {
@@ -200,6 +219,29 @@ impl Server {
             ));
         }
         locked
+    }
+
+    /// Ends the clipboard's current offer if (and only if) it was copied
+    /// from database `name` — see `clip_db`'s doc. A lock of some other
+    /// database, or a lock while the clipboard holds nothing, is a no-op.
+    fn end_clipboard_for(&self, name: &str) {
+        let mut clip_db = self.clip_db.lock().unwrap_or_else(|e| e.into_inner());
+        if clip_db.as_deref() == Some(name) {
+            *clip_db = None;
+            drop(clip_db);
+            self.clip.end_now();
+        }
+    }
+
+    /// Ends the clipboard's current offer unconditionally, whichever
+    /// database it came from — for the "every database locks" paths
+    /// (`Lock::lock`'s bare `lock` form, and `policy::Locks::lock_all`,
+    /// which screen lock, suspend and bus loss all go through), where
+    /// nothing stays unlocked for a copied secret to legitimately belong
+    /// to anymore.
+    fn end_clipboard_all(&self) {
+        *self.clip_db.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.clip.end_now();
     }
 
     /// Where to report unlocks. Called once, before the server takes requests.
@@ -268,6 +310,7 @@ impl Server {
 impl policy::Locks for Server {
     fn lock_all(&self) {
         slots(&self.dbs).values_mut().for_each(Slot::lock);
+        self.end_clipboard_all();
     }
 
     fn any_unlocked(&self) -> bool {
@@ -422,14 +465,17 @@ impl Lock for Server {
                     });
                 };
                 slot.lock();
+                drop(dbs);
+                self.end_clipboard_for(name);
                 Ok(Some(name.to_string()))
             }
             None => {
                 dbs.values_mut().for_each(Slot::lock);
+                drop(dbs);
+                self.end_clipboard_all();
                 Ok(None)
             }
         };
-        drop(dbs);
         self.notify_locked();
         result
     }
@@ -518,6 +564,19 @@ impl CopyEntry for Server {
             db: db(),
             detail: err.to_string(),
         })?;
+        // Recorded immediately after a successful handoff, so `lock`
+        // (`end_clipboard_for`) knows which database's lock should end
+        // this offer early. A narrow window remains between the offer
+        // actually becoming current (inside `self.clip.offer`, just
+        // above) and this line — a `lock` of `name` landing in between
+        // would see the old `clip_db` value and miss ending this offer,
+        // which then only expires via its own `clipboard_timeout`. Same
+        // shape as the two-round-trip race `clip.rs` already documents
+        // for `WaylandOffer::end`, not closed for the same reason: doing
+        // so needs the bookkeeping and the backend handoff to be one
+        // atomic step, which `Clipboard`'s backend-agnostic design (see
+        // its doc comment) deliberately doesn't expose.
+        *self.clip_db.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_string());
 
         // Only a successful handoff counts as activity — a failed one read
         // nothing the user didn't already have, the same rule `list`
@@ -528,9 +587,18 @@ impl CopyEntry for Server {
 
         let timeout = self.config.clipboard_timeout;
         let clip = Arc::clone(&self.clip);
+        let clip_db = Arc::clone(&self.clip_db);
+        let db_name = name.to_string();
         let _ = thread::Builder::new().spawn(move || {
             thread::sleep(timeout);
             clip.expire(&offer);
+            // Best-effort bookkeeping: if nothing newer has claimed the
+            // clipboard since, there is nothing left to end early on a
+            // future lock either.
+            let mut guard = clip_db.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.as_deref() == Some(db_name.as_str()) {
+                *guard = None;
+            }
         });
 
         Ok(CopyOutcome {
@@ -895,6 +963,7 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clip::Offer as _;
 
     /// Held by every test here that spawns a process, and by the one that
     /// needs a socket to be genuinely dead. Spawning a child briefly
@@ -1216,6 +1285,180 @@ mod tests {
         assert_eq!(outcome.field, Field::Password);
         assert_eq!(outcome.db, "personal");
         assert_eq!(*offered.lock().unwrap(), vec!["entrypass1".to_string()]);
+    }
+
+    /// A server with two configured, locked databases and a recording
+    /// clipboard backend that tracks per-offer liveness — for the
+    /// lock-clears-clipboard tests below, which need to tell whether
+    /// `lock` actually ended the offer `copy` started.
+    fn copy_server_two_dbs_tracking() -> (Server, Arc<Mutex<Vec<Arc<clip::RecordedOffer>>>>) {
+        let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
+        let server = Server::with_clipboard(
+            Config::parse(
+                "[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
+                 [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n",
+            )
+            .expect("valid config"),
+            backend,
+        );
+        (server, offers)
+    }
+
+    /// `docs/threat-model.md` G-6 ("lock clears what kpa owns"): locking
+    /// the very database a secret was just `copy`'d from must end that
+    /// clipboard offer immediately, not leave it being served until its
+    /// own `clipboard_timeout` — otherwise a copied password outlives the
+    /// lock the user just asked for.
+    #[test]
+    fn locking_the_db_a_copy_came_from_ends_the_clipboard_offer() {
+        let (server, offers) = copy_server_two_dbs_tracking();
+        let uuid = unlock_with_entry(&server, "personal");
+        CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid,
+                field: Field::Password,
+            },
+        )
+        .expect("entry and field exist");
+        let offer = offers.lock().unwrap()[0].clone();
+        assert!(offer.is_live(), "sanity: nothing has ended it yet");
+
+        Lock::lock(
+            &server,
+            &LockRequest {
+                db: Some("personal".to_string()),
+            },
+        )
+        .expect("personal is configured");
+
+        assert!(
+            !offer.is_live(),
+            "locking the database the clipboard content came from must end the offer"
+        );
+    }
+
+    /// The flip side: locking an *unrelated* database must leave an
+    /// active clipboard offer alone — `copy` and `lock` not naming the
+    /// same database is not a reason to clear what's still a legitimately
+    /// unexpired secret from a database that's still unlocked.
+    #[test]
+    fn locking_an_unrelated_db_does_not_end_the_clipboard_offer() {
+        let (server, offers) = copy_server_two_dbs_tracking();
+        let uuid = unlock_with_entry(&server, "personal");
+        unlock_directly(&server, "work");
+        CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid,
+                field: Field::Password,
+            },
+        )
+        .expect("entry and field exist");
+        let offer = offers.lock().unwrap()[0].clone();
+
+        Lock::lock(
+            &server,
+            &LockRequest {
+                db: Some("work".to_string()),
+            },
+        )
+        .expect("work is configured");
+
+        assert!(
+            offer.is_live(),
+            "locking a different database must not touch the clipboard"
+        );
+    }
+
+    /// `Lock::lock` with no `db` locks every database — and with nothing
+    /// left unlocked for a copied secret to legitimately belong to, the
+    /// clipboard offer must end too.
+    #[test]
+    fn locking_every_database_ends_the_clipboard_offer() {
+        let (server, offers) = copy_server_two_dbs_tracking();
+        let uuid = unlock_with_entry(&server, "personal");
+        CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid,
+                field: Field::Password,
+            },
+        )
+        .expect("entry and field exist");
+        let offer = offers.lock().unwrap()[0].clone();
+
+        Lock::lock(&server, &LockRequest { db: None }).expect("locking everything always succeeds");
+
+        assert!(
+            !offer.is_live(),
+            "locking every database must end an outstanding clipboard offer"
+        );
+    }
+
+    /// Screen lock, suspend and bus loss all go through
+    /// `policy::Locks::lock_all` directly, bypassing `Lock::lock` — this
+    /// path needs the same clipboard-clearing behavior.
+    #[test]
+    fn policy_lock_all_ends_the_clipboard_offer() {
+        let (server, offers) = copy_server_two_dbs_tracking();
+        let uuid = unlock_with_entry(&server, "personal");
+        CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid,
+                field: Field::Password,
+            },
+        )
+        .expect("entry and field exist");
+        let offer = offers.lock().unwrap()[0].clone();
+
+        policy::Locks::lock_all(&server);
+
+        assert!(
+            !offer.is_live(),
+            "policy::Locks::lock_all must end an outstanding clipboard offer"
+        );
+    }
+
+    /// The idle timer locking a database on its own (`watch_idle` /
+    /// `expire_idle`, no client request involved) must end that
+    /// database's clipboard offer too, the same as an explicit `lock`.
+    #[test]
+    fn idle_lock_ends_the_clipboard_offer_for_that_db() {
+        let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
+        let server = Server::with_clipboard(
+            Config::parse(
+                "idle_timeout = \"1s\"\n\
+                 [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n",
+            )
+            .expect("valid config"),
+            backend,
+        );
+        let uuid = unlock_with_entry(&server, "personal");
+        CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid,
+                field: Field::Password,
+            },
+        )
+        .expect("entry and field exist");
+        let offer = offers.lock().unwrap()[0].clone();
+        age_activity(&server, "personal", Duration::from_secs(5));
+
+        let locked = server.expire_idle(Instant::now());
+
+        assert_eq!(locked, ["personal"]);
+        assert!(
+            !offer.is_live(),
+            "an idle-timeout lock must end that database's clipboard offer"
+        );
     }
 
     /// A successful `copy` resets the idle timer, the same rule `list`

@@ -146,6 +146,27 @@ impl Clipboard {
             *current = None;
         }
     }
+
+    /// Ends whatever offer is current right now, unconditionally — unlike
+    /// [`expire`](Self::expire), this isn't told which offer it means, so
+    /// it ends the current one regardless of which `copy` started it.
+    /// Called on `lock` (`server.rs`'s `Lock`/`policy::Locks::lock_all`
+    /// impls and the idle timer): a database locking is exactly the
+    /// moment `docs/threat-model.md` G-6 ("lock clears what kpa owns")
+    /// says a copied secret kpa still owns should stop being served. A
+    /// `current` that is `None`, or already not live (already superseded
+    /// by something else taking the clipboard), is a no-op — the same
+    /// "nothing to do" cases `expire` already handles.
+    pub fn end_now(&self) {
+        let mut current = lock(&self.current);
+        // `current.take()` always runs, live or not — only `end()` is
+        // conditional on `is_live()`.
+        if let Some(offer) = current.take()
+            && offer.is_live()
+        {
+            offer.end();
+        }
+    }
 }
 
 fn lock(mutex: &Mutex<Option<Arc<dyn Offer>>>) -> MutexGuard<'_, Option<Arc<dyn Offer>>> {
@@ -241,28 +262,45 @@ impl Offer for WaylandOffer {
 /// A backend with no Wayland connection, for tests elsewhere in the crate
 /// that need a `Server` with a working `Clipboard` but have nothing to do
 /// with this module's own state-machine tests (`tests::FakeBackend`,
-/// below, is the richer fake those use). Every offer stays "live" forever
-/// and `end` is a no-op — enough for `server.rs`'s tests to check that
-/// `copy` reaches the clipboard with the right secret, without caring
-/// about expiry.
+/// below, is the richer fake those use). Every offer starts "live"; `end`
+/// clears it, same as a real offer — enough for `server.rs`'s tests to
+/// check both that `copy` reaches the clipboard with the right secret,
+/// and that a `lock` actually ends an outstanding offer rather than
+/// leaving it served.
 ///
 /// `new` hands back a second, shared handle to what was offered — the
 /// backend itself ends up owned by a `Clipboard`, so a test needs that
 /// handle to see what it recorded, the same shape as `tests::FakeBackend`.
 #[cfg(test)]
+type OfferHandles = Arc<Mutex<Vec<Arc<RecordedOffer>>>>;
+
+#[cfg(test)]
 pub(crate) struct RecordingBackend {
     offered: Arc<Mutex<Vec<String>>>,
+    offers: OfferHandles,
 }
 
 #[cfg(test)]
 impl RecordingBackend {
     pub(crate) fn new() -> (RecordingBackend, Arc<Mutex<Vec<String>>>) {
+        let (backend, offered, _offers) = RecordingBackend::new_tracking();
+        (backend, offered)
+    }
+
+    /// Like `new`, but also hands back a handle to every offer this
+    /// backend has started (oldest first), so a test can check `is_live`
+    /// on a specific one after some later action (e.g. a `lock`) that
+    /// should have ended it.
+    pub(crate) fn new_tracking() -> (RecordingBackend, Arc<Mutex<Vec<String>>>, OfferHandles) {
         let offered = Arc::new(Mutex::new(Vec::new()));
+        let offers = Arc::new(Mutex::new(Vec::new()));
         (
             RecordingBackend {
                 offered: Arc::clone(&offered),
+                offers: Arc::clone(&offers),
             },
             offered,
+            offers,
         )
     }
 }
@@ -274,20 +312,41 @@ impl Backend for RecordingBackend {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(secret.to_string());
-        Ok(Arc::new(AlwaysLive))
+        let offer = Arc::new(RecordedOffer::new());
+        self.offers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Arc::clone(&offer));
+        Ok(offer)
+    }
+}
+
+/// An offer that actually tracks liveness, unlike a plain no-op stand-in —
+/// so a test can assert that a `lock` (via `Clipboard::end_now`) really
+/// ended a `RecordingBackend` offer, not just that nothing panicked.
+#[cfg(test)]
+pub(crate) struct RecordedOffer {
+    live: AtomicBool,
+}
+
+#[cfg(test)]
+impl RecordedOffer {
+    fn new() -> RecordedOffer {
+        RecordedOffer {
+            live: AtomicBool::new(true),
+        }
     }
 }
 
 #[cfg(test)]
-struct AlwaysLive;
-
-#[cfg(test)]
-impl Offer for AlwaysLive {
+impl Offer for RecordedOffer {
     fn is_live(&self) -> bool {
-        true
+        self.live.load(Ordering::SeqCst)
     }
 
-    fn end(&self) {}
+    fn end(&self) {
+        self.live.store(false, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -460,5 +519,47 @@ mod tests {
         let clip = Clipboard::new(backend);
 
         assert!(clip.offer(secret("hunter2")).is_err());
+    }
+
+    /// `end_now` is `lock`'s hook (`docs/threat-model.md` G-6): it ends
+    /// the current offer without being told which one it is, unlike
+    /// `expire`.
+    #[test]
+    fn end_now_drops_a_live_current_offer() {
+        let (backend, offers) = FakeBackend::new();
+        let clip = Clipboard::new(backend);
+        let offer = clip.offer(secret("hunter2")).expect("fake backend accepts");
+
+        clip.end_now();
+
+        assert!(!offer.is_live(), "end_now should have ended it");
+        assert_eq!(nth_offer(&offers, 0).end_count(), 1);
+    }
+
+    /// Nothing offered yet: `end_now` has nothing to do and must not panic.
+    #[test]
+    fn end_now_on_an_empty_clipboard_does_nothing() {
+        let (backend, _offers) = FakeBackend::new();
+        let clip = Clipboard::new(backend);
+
+        clip.end_now();
+    }
+
+    /// Already superseded by something else: `end_now` must not call
+    /// `end` on an offer it no longer owns, same rule `expire` follows.
+    #[test]
+    fn end_now_does_nothing_once_superseded() {
+        let (backend, offers) = FakeBackend::new();
+        let clip = Clipboard::new(backend);
+        let _offer = clip.offer(secret("hunter2")).expect("fake backend accepts");
+
+        nth_offer(&offers, 0).supersede();
+        clip.end_now();
+
+        assert_eq!(
+            nth_offer(&offers, 0).end_count(),
+            0,
+            "end_now must not call end() once already superseded"
+        );
     }
 }

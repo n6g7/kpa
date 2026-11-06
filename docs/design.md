@@ -260,20 +260,26 @@ strongest argument for owning it natively rather than shelling out.
 
 ## Lock policy
 
-Locking means: drop the `Database`, zeroize what can be zeroized, update the
-tray icon. A lock also cancels any `unlock` still in flight for that
-database (see § Protocol). "What can be zeroized" is narrower than it
-sounds:
+Locking means: drop the `Database`, zeroize what can be zeroized, end any
+clipboard offer that database's `copy` started, and update the tray icon.
+A lock also cancels any `unlock` still in flight for that database (see §
+Protocol). "What can be zeroized" is narrower than it sounds:
 
 - **Cleared:** protected field values (`secrecy` types), `DatabaseKey`'s
   own copies of the password and keyfile, and every copy kpa itself makes
   — the prompt's output buffer, `list` entries, and the serialized
-  response buffer are all zeroized on drop.
+  response buffer are all zeroized on drop. A clipboard offer still being
+  served by the database being locked is ended immediately rather than
+  left to its own `clipboard_timeout`; a lock of a different database, or
+  of none while nothing is on the clipboard, leaves the clipboard alone.
 - **Not cleared, upstream:** unprotected field values (plain `String`s
   inside `keepass`), the decrypted and decompressed payload buffers
-  `keepass` parses from, its key-derivation intermediates, and its XML
-  keyfile parser's working copies. These persist in freed heap pages until
-  the allocator reuses them.
+  `keepass` parses from, its key-derivation intermediates, its XML
+  keyfile parser's working copies, and the clipboard backend's own
+  `Box<[u8]>` copy of whatever was last offered (`wl-clipboard-rs` takes
+  ownership of it; kpa has no way to reach in and zero it, only to ask the
+  backend to stop serving it). These persist in freed heap pages until the
+  allocator reuses them.
 
 Lock stops serving the database and clears what kpa owns; it is not a
 guarantee that no trace of the plaintext remains in the process's memory.
