@@ -93,10 +93,11 @@ zeroize audit once `copy` and the clipboard exist.
 `fuzz/` is a checked-in `cargo-fuzz` harness: its one target,
 `decode_request`, runs arbitrary bytes through the exact same UTF-8-check-
 then-`decode_request` path `src/server.rs`'s `handle_connection` runs on a
-request line. It's its own Cargo workspace (`fuzz/Cargo.toml`), so it never
-touches `cargo build`/`cargo test` at the repo root. See README.md § Build
-& test for the exact command, including the one-time nightly toolchain it
-needs (`cargo-fuzz`'s instrumentation flags are nightly-only).
+request line. It's its own Cargo workspace (`fuzz/Cargo.toml`) and its own
+Nix dev shell (`devShells.fuzz`, with the nightly rustc `cargo-fuzz`
+needs), so neither ever touches `cargo build`/`cargo test`/`cargo clippy`
+or the default dev shell. See README.md § Build & test for the exact
+command.
 
 - **Test:** `fuzz/`'s `decode_request` target for a few minutes; malformed
   input must error, never panic or hang. A run of ten million+ mutated

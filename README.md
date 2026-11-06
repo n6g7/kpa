@@ -68,29 +68,29 @@ nix develop -c cargo test
 
 [`fuzz/`](./fuzz) fuzzes request decoding (`src/proto/`) with `cargo-fuzz`,
 in its own Cargo workspace so it's not part of the commands above.
-`cargo-fuzz` needs a nightly rustc for its instrumentation flags; the dev
-shell's own `cargo`/`rustc` stay on stable, so fetch a nightly toolchain
-with `rustup` (also in the dev shell) once:
+`cargo-fuzz` needs a nightly rustc, which lives in its own `fuzz` dev shell
+(`devShells.fuzz` in `flake.nix`) rather than the default one, so it never
+touches `cargo build`/`cargo test`/`cargo clippy`:
 
 ```sh
-nix develop -c rustup toolchain install nightly --profile minimal
+nix develop .#fuzz -c cargo fuzz run decode_request -- -max_total_time=180
 ```
 
-That installs to `~/.rustup`, independent of the dev shell's stable
-toolchain. Put it ahead of the dev shell's `cargo`/`rustc` on `PATH` and run
-the fuzz target for a few minutes:
+The target feeds random bytes through the same two steps the server runs
+on a request line: a UTF-8 check, then `kpa::proto::decode_request`. The
+property it checks is that every input returns `Ok` or `Err` — a panic, a
+hang, or a timeout/out-of-memory kill is a failure. It does not check that
+*valid* requests get handled correctly (no server, no vaults involved), and
+it doesn't exercise the socket's own request-size cap.
 
-```sh
-cd fuzz
-nix develop .. -c bash -c '
-  PATH="$HOME/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin:$PATH" \
-    cargo fuzz run decode_request -- -max_total_time=180
-'
-```
-
-A crash leaves a reproducing input under `fuzz/artifacts/decode_request/`;
-rerun with that path as an extra argument to the same command to reproduce
-it outside libFuzzer's loop.
+Reading the output: a `#N NEW cov: ... ft: ... corp: ...` line means input
+`N` reached new code (`cov`/`ft` are coverage counters, `corp` is the
+growing set of saved interesting inputs); `pulse` lines are just progress
+pings. `Done N runs in Ns` with no `ERROR`/`SUMMARY: ... Sanitizer` line or
+panic above it means the run found nothing. A crash prints the panic and
+saves the input to `fuzz/artifacts/decode_request/crash-*`; rerun the same
+command with that path appended to reproduce it outside libFuzzer's loop.
+`fuzz/corpus/` (the saved inputs) is git-ignored and grows across runs.
 
 ## Try it
 
