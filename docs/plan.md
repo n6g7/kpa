@@ -91,8 +91,8 @@ secret-hygiene reviews (`docs/review-2026-09-robustness.md`,
 `docs/review-2026-09-secrets.md`): `PR_SET_DUMPABLE=0`, the request-size
 cap, read/write timeouts, bounded connection handling, and a first zeroize
 pass already landed there. The zeroize audit was repeated with `copy` and
-the clipboard in place (`docs/review-2026-11-secrets.md`); its one
-kpa-owned finding — `lock` left a still-served clipboard offer outliving
+the clipboard in place; its one kpa-owned
+finding — `lock` left a still-served clipboard offer outliving
 the lock it was supposed to be covered by — is fixed.
 
 `fuzz/` is a checked-in `cargo-fuzz` harness: its one target,
