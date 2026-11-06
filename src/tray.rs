@@ -1,99 +1,20 @@
 //! The tray icon (`docs/plan.md` step 4, `docs/design.md` § Tray): a
 //! StatusNotifierItem over D-Bus, via `ksni`.
 //!
-//! Follows the same two-part shape as `policy.rs`, adapted to what's
-//! actually hard to test here. `policy.rs` splits into a pure core
-//! (`Policy`) tested against the `Locks`/`SleepInhibitor` traits, and a
-//! D-Bus half (`watch_forever`) that can't be exercised without a bus. The
-//! tray's equivalent split is [`lock_shape`]/[`fallback_icon`]/
-//! [`item_status`]/[`tool_tip`]/[`build_menu`] — pure functions of a
-//! `DatabaseStatus` snapshot, tested below with no `ksni`, no D-Bus, and
-//! no `Server` at all — versus [`run`],
-//! which owns the one thing that can't be faked that way: `ksni`'s own
-//! service loop. There's no tray-side equivalent of `Locks`/`SleepInhibitor`
-//! because `ksni` itself is already the abstraction boundary to the bus;
-//! inventing a second trait in front of it would just be a passthrough.
+//! [`lock_shape`], [`fallback_icon`], [`item_status`], [`tool_tip`] and
+//! [`build_menu`] are pure functions of a `DatabaseStatus` snapshot,
+//! tested below with no bus; [`run`] owns `ksni`'s service loop and the
+//! once-a-second poll that catches locks nothing told it about directly.
 //!
-//! **How the tray reaches `Server`.** [`TrayItem`] holds the same
-//! `Arc<Server>` `run_serve` already has and calls `Server::snapshot`,
-//! `Unlock::unlock`, `Lock::lock` on it directly — `unlock`/`lock` are the
-//! exact calls `proto::dispatch` makes for the socket protocol's own
-//! `unlock`/`lock` ops. That makes the tray and the socket two *callers* of
-//! one locking implementation, not two implementations of it. The
-//! alternative the task considered — the tray as its own client of the Unix
-//! socket, reusing `main.rs`'s request-sending code — was rejected: the
-//! tray runs inside `kpa serve`'s own process (`run_serve` starts it the
-//! same way it starts `policy::start`), so going back out through a socket
-//! to reach state already in the same address space would add a
-//! serialization round trip for no isolation benefit, and a second way to
-//! reach `Server` alongside the wire protocol where the design only needs
-//! one.
+//! [`TrayItem`] calls `Server`/`Lock`/`Unlock` directly, as a second
+//! caller of the socket protocol's own locking code. It holds only what
+//! `Server::snapshot` returns, plus the last failed unlock's error code.
 //!
-//! `Server::snapshot`, not the `status` op's own `Status::status`, is what
-//! the tray reads its display from — see that method's doc for why: the
-//! wire `status` op deliberately runs the freshness guard as a side
-//! effect, and running that from an autonomous background poll rather than
-//! in response to a real client request turned out to have a real cost
-//! (below).
-//!
-//! **What the tray ever holds.** Only what `Server::snapshot` returns — a
-//! database's configured name, whether it's locked, and its entry count —
-//! plus the *code* of the most recent failed `unlock` (never `detail`,
-//! which can carry a prompt's I/O error text; see `UnlockError::fields`).
-//! No password, no protected field, nothing `list` would withhold reaches
-//! this module (`docs/threat-model.md` G-3, T-4). The menu triggers
-//! `Lock`/`Unlock` the same way any other same-session D-Bus client
-//! reaching the tray's menu could (`docs/threat-model.md` T-15) — that
-//! residual is already accepted there, and nothing here widens it:
-//! activating a menu item can lock a database or raise an unlock prompt,
-//! never read one.
-//!
-//! **Why polling.** Locks can happen with nobody touching the tray at all —
-//! a screen lock, `idle_timeout`, the freshness guard — so something has to
-//! notice and tell `ksni` to refresh. [`run`] does that on a fixed tick,
-//! the same shape as `server::watch_idle`'s own tick: cheap, because
-//! `Server::snapshot` is an in-memory read, not a vault read or even a
-//! `stat`, and simple, because it means every state change reaches the
-//! tray the same way instead of needing a bespoke notification path for
-//! each of the several places a database can lock. A direct menu action
-//! (lock, or a finished unlock) also pokes `ksni` right away, so those feel
-//! instant rather than waiting for the next tick.
-//!
-//! **Host-compatibility notes, from testing against more than one host.**
-//! The first manual test (`docs/plan.md` step 4) only read back this
-//! module's own D-Bus properties and menu layout with `busctl` — which
-//! confirms the wiring, but not that anything legible actually gets drawn.
-//! Watching a second, more common host's own traffic (`busctl monitor`
-//! around registration, then reading that host's own source for how it
-//! turns the properties it fetched into pixels) found real gaps:
-//!
-//! - `icon_name` is deliberately left unset (empty string, the default) on
-//!   both the item itself and every menu item ([`build_menu`]'s doc has
-//!   more on the latter). Some hosts' icon-pixmap fallback only ever
-//!   triggers when `icon_name` is empty to begin with — not when it's set
-//!   but fails to resolve through the current icon theme — so a host like
-//!   that, given a non-empty name it can't resolve, shows its own "broken
-//!   icon" placeholder (a checkerboard, on at least one host observed)
-//!   and never looks at `icon_pixmap` at all. An empty name is also the
-//!   one choice that can't go stale if a given icon theme turns out to be
-//!   missing whatever freedesktop names this build might otherwise pick.
-//!   [`fallback_icon`] decodes a padlock PNG — rasterized ahead of time by
-//!   `assets/tray/render.sh` from the SVGs beside it, embedded with
-//!   `include_bytes!` — at several sizes, so every host renders the same
-//!   recognizable shape regardless of which icon theme it has installed.
-//! - `Tray::MENU_ON_ACTIVATE` is left at the default (`false`): a host
-//!   decides on its own terms when to show this module's menu — on a
-//!   left click, a right click, both, or neither — never on a signal from
-//!   kpa. What this module controls is answering the dbusmenu protocol
-//!   correctly once asked: a correct `GetLayout` response and a working
-//!   handler behind each item, on the `/MenuBar` object path, regardless
-//!   of how or whether a given host ever asks.
-//! - [`item_status`] never returns `ksni::Status::Passive` for any state,
-//!   including "all locked" (the state the icon starts in, and spends
-//!   most of its time in): `docs/plan.md` step 4 asks for lock state to
-//!   be "visible at a glance" in every state, which rules out `Passive`
-//!   — that value's own doc says a host is likely to hide an item
-//!   entirely in that state — for any of them.
+//! `icon_name` stays empty everywhere (item, tooltip, menu items);
+//! [`fallback_icon`] decodes PNGs rasterized ahead of time from
+//! `assets/tray/*.svg` by `assets/tray/render.sh`. `MENU_ON_ACTIVATE`
+//! stays unset — the host shows the menu on its own terms — and
+//! [`item_status`] never returns `Passive`, which real hosts hide or dim.
 
 use std::sync::Arc;
 use std::thread;
@@ -108,15 +29,10 @@ use crate::proto::{
 };
 use crate::server::{self, Server};
 
-/// How often the tray re-checks `Server::snapshot` for a change nothing
-/// told it about directly — see this module's doc for why polling at all.
-/// Matches the lower end of `server::watch_idle`'s own tick, which is
-/// already the project's answer to "how often is it fine to notice a lock
-/// state change a tick late."
+/// How often [`run`] re-checks `Server::snapshot`.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Start the tray service. Like `policy::start`, this runs for the life of
-/// the daemon and has nothing for `run_serve` to join.
+/// Starts the tray service; runs for the daemon's life.
 pub fn start(server: Arc<Server>) {
     thread::spawn(move || run(server));
 }
@@ -129,60 +45,41 @@ fn run(server: Arc<Server>) {
     };
     let handle = match item.spawn() {
         Ok(handle) => handle,
-        // No `org.kde.StatusNotifierWatcher` on the session bus (no tray
-        // host running), or no session bus at all. Not fatal: kpa's
-        // availability isn't a security goal (`docs/threat-model.md` § 2),
-        // and every other op already works with no tray in the picture.
+        // No StatusNotifierWatcher / no session bus. Not fatal: the tray
+        // isn't a security goal (`docs/threat-model.md` § 2).
         Err(err) => {
             server::log(format_args!("tray not started: {err}"));
             return;
         }
     };
 
-    // `TrayItem` needs its own handle to refresh itself once a background
-    // `unlock` finishes (see `TrayItem::start_unlock`) — but that handle
-    // doesn't exist until `spawn` has already consumed the item that would
-    // hold it. Set once, from the outside, through the handle itself.
+    // Give the item its own handle, so a finished background unlock
+    // (`TrayItem::start_unlock`) can tell `ksni` to refresh.
     let for_item = handle.clone();
     handle.update(move |item| item.handle = Some(for_item));
 
     loop {
         thread::sleep(POLL_INTERVAL);
-        // `None` means the service has shut down (`Tray::watcher_offline`
-        // returning `false`, or the process exiting through the "Quit"
-        // menu item below) — nothing left to poll.
+        // `None` means the service shut down (watcher gone, or "Quit").
         if handle.update(|_| {}).is_none() {
             return;
         }
     }
 }
 
-/// The `ksni::Tray` implementor. Plain fields, no internal locking: every
-/// method `ksni::Tray` calls, and every `Handle::update` closure, runs
-/// under `ksni`'s own lock on this value — see `docs/design.md`'s "Threads
-/// over async" note; this is the one place that choice shows up in the
-/// code, as "no extra `Mutex` needed" rather than as async/await.
+/// The `ksni::Tray` implementor. No internal locking: `ksni` already
+/// serializes every call and `Handle::update` closure on this value.
 struct TrayItem {
     server: Arc<Server>,
-    /// Set once, right after `spawn` (see `run`). `None` only in the brief
-    /// window before that, since nothing can reach `TrayItem::start_unlock`
-    /// before `ksni` itself is driving this value.
+    /// Set once, right after `spawn`.
     handle: Option<Handle<TrayItem>>,
     /// The database and wire error code of the most recent failed
-    /// `unlock`, cleared by the next successful `unlock` or explicit
-    /// `lock` of any database. Drives the "error" icon state
-    /// `docs/design.md` § Tray asks for — there's no such notion on
-    /// `DatabaseStatus` itself, since it describes current state, not
-    /// history. A cancelled prompt (the user declining, not a failure)
-    /// does not set this.
+    /// `unlock`, cleared by the next `lock`/`unlock`. Never `detail`
+    /// (`UnlockError::fields`) and never set by a cancelled prompt.
     last_error: Option<(String, &'static str)>,
 }
 
 impl ksni::Tray for TrayItem {
-    // Left at the default (`false`) — see this module's doc for why
-    // `Tray::MENU_ON_ACTIVATE` isn't the right lever here: the host, not
-    // kpa, decides when to show the menu.
-
     fn id(&self) -> String {
         "kpa".to_string()
     }
@@ -191,9 +88,6 @@ impl ksni::Tray for TrayItem {
         "kpa".to_string()
     }
 
-    // `icon_name` is deliberately not overridden — see this module's doc
-    // for why an unset name, not a freedesktop-spec name this build picked,
-    // is the one choice that reaches every host's `icon_pixmap` fallback.
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         fallback_icon(&self.server.snapshot(), self.last_error.is_some())
     }
@@ -212,12 +106,8 @@ impl ksni::Tray for TrayItem {
 }
 
 impl TrayItem {
-    /// "Lock all" and each per-database "Lock" item. Fast — `Lock::lock`
-    /// only ever holds `Server`'s bookkeeping mutex — so this runs straight
-    /// in the menu callback; `ksni` refreshes the displayed menu once it
-    /// returns, with no need to call `Handle::update` here (unlike
-    /// `start_unlock`, below, whose slow part happens well after its own
-    /// callback has already returned).
+    /// "Lock all" and "Lock". Runs inline: `Lock::lock` only holds
+    /// `Server`'s bookkeeping mutex, so `ksni` can refresh right after.
     fn trigger_lock(&mut self, db: Option<&str>) {
         let request = LockRequest {
             db: db.map(str::to_string),
@@ -227,15 +117,8 @@ impl TrayItem {
         self.last_error = None;
     }
 
-    /// Each per-database submenu's "Unlock" item. Unlocking waits on a
-    /// human and a KDF (`docs/design.md` § Protocol) — seconds, not
-    /// milliseconds — so
-    /// it runs on its own thread rather than the menu callback, matching
-    /// the advice on `ksni::menu::StandardItem::activate`. The clone of
-    /// `self.handle` is what lets that thread tell `ksni` to refresh once
-    /// it's done; everything it touches afterwards (`Arc<Server>`, the
-    /// cloned `Handle`) is `Send` on its own, so none of `TrayItem` itself
-    /// needs to cross the thread boundary.
+    /// "Unlock". Runs on its own thread, since it waits on a human and a
+    /// KDF; the cloned handle lets that thread refresh `ksni` once done.
     fn start_unlock(&mut self, name: &str) {
         let server = Arc::clone(&self.server);
         let handle = self.handle.clone();
@@ -254,11 +137,8 @@ impl TrayItem {
     }
 }
 
-/// A short, stable label for `TrayItem::last_error` — deliberately not
-/// `UnlockError`'s `Debug` output, which would also print `detail` for
-/// `PromptFailed` (a prompt's own I/O error text; harmless, but this way
-/// the tray carries nothing beyond what a client could already read off
-/// the wire via `UnlockError::fields`'s `ErrorCode`).
+/// A stable label for `TrayItem::last_error` — never `Debug`, which could
+/// leak `PromptFailed`'s `detail`.
 fn unlock_error_code(err: &UnlockError) -> &'static str {
     match err {
         UnlockError::UnknownDb { .. } => "unknown_db",
@@ -274,25 +154,13 @@ fn unlock_error_code(err: &UnlockError) -> &'static str {
     }
 }
 
-/// Whether at least one configured database is unlocked right now. The one
-/// fact `lock_shape`/`item_status`/`tool_tip` all start from.
 fn any_unlocked(databases: &[DatabaseStatus]) -> bool {
     databases.iter().any(|db| !db.locked)
 }
 
-/// The StatusNotifierItem `Status` property (not to be confused with this
-/// crate's own `proto::Status`): how urgently a host should surface the
-/// item. An error is `NeedsAttention` — its own documented use is exactly
-/// this, "wants to incentive the direct user intervention." Every other
-/// state is `Active`, deliberately never `Passive`: that value's own
-/// documented meaning is "it is likely that visualizations will choose to
-/// hide it" — the opposite of `docs/plan.md` step 4's "lock state is
-/// visible at a glance," which has to hold for "all locked" too, since
-/// that's the state the daemon starts in and spends most of its time in.
+/// Error → `NeedsAttention`; otherwise always `Active`, never `Passive`
+/// (which real hosts hide or dim — see this module's doc).
 fn item_status(_databases: &[DatabaseStatus], has_error: bool) -> ksni::Status {
-    // The parameter stays, unused, so every state-to-display function in
-    // this module takes the same `(databases, has_error)` shape at its
-    // call sites, rather than this one alone dropping it.
     if has_error {
         ksni::Status::NeedsAttention
     } else {
@@ -300,10 +168,7 @@ fn item_status(_databases: &[DatabaseStatus], has_error: bool) -> ksni::Status {
     }
 }
 
-/// `docs/design.md` § Tray: "Tooltip lists each configured database and
-/// its state." One line per database, plus a trailing line naming the
-/// most recent unlock failure, if any — never anything beyond the name and
-/// the wire error code already covered by `TrayItem::last_error`'s doc.
+/// One line per database, plus a trailing line for the last failed unlock.
 fn tool_tip(databases: &[DatabaseStatus], last_error: Option<&(String, &'static str)>) -> ToolTip {
     let mut lines: Vec<String> = databases
         .iter()
@@ -316,8 +181,6 @@ fn tool_tip(databases: &[DatabaseStatus], last_error: Option<&(String, &'static 
         lines.push(format!("{name}: unlock failed ({code})"));
     }
     ToolTip {
-        // Empty, not a named icon — same reasoning as `Tray::icon_name`,
-        // see this module's doc.
         icon_name: String::new(),
         icon_pixmap: fallback_icon(databases, last_error.is_some()),
         title: "kpa".to_string(),
@@ -325,10 +188,8 @@ fn tool_tip(databases: &[DatabaseStatus], last_error: Option<&(String, &'static 
     }
 }
 
-/// Which embedded padlock PNG [`fallback_icon`] decodes, chosen from
-/// aggregate state: an error always wins, then any database being
-/// unlocked, then all-locked as the remaining case. Each variant names
-/// the `assets/tray/<name>.svg` it comes from.
+/// Which embedded padlock PNG [`fallback_icon`] decodes, named after the
+/// `assets/tray/<name>.svg` it comes from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LockShape {
     Locked,
@@ -346,9 +207,7 @@ fn lock_shape(databases: &[DatabaseStatus], has_error: bool) -> LockShape {
     }
 }
 
-/// The embedded PNGs for each [`LockShape`], smallest size first — see
-/// `assets/tray/render.sh` for how they're rasterized from the matching
-/// SVG in the same directory.
+/// Embedded PNGs per state, smallest size first — see `assets/tray/render.sh`.
 const LOCKED_PNGS: [&[u8]; 3] = [
     include_bytes!("../assets/tray/locked-22.png"),
     include_bytes!("../assets/tray/locked-32.png"),
@@ -365,12 +224,9 @@ const ERROR_PNGS: [&[u8]; 3] = [
     include_bytes!("../assets/tray/error-44.png"),
 ];
 
-/// Decodes one embedded PNG into the ARGB32 `ksni::Icon` the
-/// StatusNotifierItem protocol wants: alpha first, network byte order
-/// (`ksni::Icon`'s own doc). `assets/tray/render.sh` always produces
-/// RGBA8 (`resvg`'s own default), so that's the only input this handles —
-/// anything else means a `.png` was replaced by hand rather than
-/// regenerated from its `.svg`, which the `expect`s below catch.
+/// Decodes one embedded PNG into the ARGB32 `ksni::Icon` StatusNotifierItem
+/// wants (alpha first, network byte order). Always RGBA8 — `render.sh`'s
+/// own output — so a decode or color-type failure means a stale `.png`.
 fn decode_icon(png: &[u8]) -> ksni::Icon {
     let mut reader = png::Decoder::new(png)
         .read_info()
@@ -396,13 +252,8 @@ fn decode_icon(png: &[u8]) -> ksni::Icon {
     }
 }
 
-/// The tray's padlock glyph, in [`lock_shape`]'s state, for
-/// `Tray::icon_pixmap` and `ToolTip::icon_pixmap` — see this module's doc
-/// for why these come from embedded PNGs rather than a named freedesktop
-/// icon or runtime drawing. Three sizes, smallest first, covering the
-/// common StatusNotifierItem panel sizes, so a host that wants a sharper
-/// image at a larger panel size has one without upscaling a smaller
-/// bitmap.
+/// The tray's padlock glyph, in [`lock_shape`]'s state, at three sizes
+/// (smallest first) for `Tray::icon_pixmap` and `ToolTip::icon_pixmap`.
 fn fallback_icon(databases: &[DatabaseStatus], has_error: bool) -> Vec<ksni::Icon> {
     let pngs = match lock_shape(databases, has_error) {
         LockShape::Locked => &LOCKED_PNGS,
@@ -412,18 +263,9 @@ fn fallback_icon(databases: &[DatabaseStatus], has_error: bool) -> Vec<ksni::Ico
     pngs.iter().map(|png| decode_icon(png)).collect()
 }
 
-/// `docs/design.md` § Tray: "Menu: a per-database submenu (Lock, Unlock),
-/// then Lock all, then Quit." A free function, not a `TrayItem` method, so
-/// it can be exercised in tests against a plain `&[DatabaseStatus]` — the
-/// closures it builds take `&mut TrayItem` as
-/// `ksni::menu::StandardItem::activate` requires, but building them needs
-/// no live `TrayItem` to close over, just the database's name.
-///
-/// No item here sets `icon_name`: a menu item's icon goes through the same
-/// icon-theme lookup as `Tray::icon_name` (see this module's doc), so a
-/// freedesktop name here would hit the same missing-theme checkerboard
-/// `fallback_icon` exists to avoid. A failed unlock is surfaced as a label
-/// suffix instead of an icon, for the same reason.
+/// `docs/design.md` § Tray: one submenu per database (Lock, Unlock —
+/// only the applicable one enabled), then Lock all, then Quit. A free
+/// function so it's testable against a plain `&[DatabaseStatus]`.
 fn build_menu(
     databases: &[DatabaseStatus],
     last_error: Option<&(String, &'static str)>,
@@ -463,8 +305,6 @@ fn build_menu(
         })
         .collect();
 
-    // No separator (and no empty gap) when there are no configured
-    // databases to list.
     if !databases.is_empty() {
         items.push(MenuItem::Separator);
     }
@@ -477,11 +317,6 @@ fn build_menu(
     items.push(MenuItem::Separator);
     items.push(MenuItem::Standard(StandardItem {
         label: "Quit".to_string(),
-        // The daemon's own exit, not a database lock: a tray app's "Quit"
-        // ends the application. Each database's own `Drop` (nothing
-        // currently implements one, matching `docs/design.md` § Lock
-        // policy's list of what's zeroized) runs no differently than it
-        // would for `kill`, which is already how `kpa serve` stops today.
         activate: Box::new(|_: &mut TrayItem| std::process::exit(0)),
         ..Default::default()
     }));
@@ -513,8 +348,6 @@ mod tests {
     fn the_icon_is_locked_when_every_database_is_locked() {
         let databases = [locked("personal"), locked("work")];
         assert_eq!(lock_shape(&databases, false), LockShape::Locked);
-        // Never `Passive` — see `item_status`'s doc for why "all locked"
-        // must stay as visible as every other state.
         assert_eq!(item_status(&databases, false), ksni::Status::Active);
     }
 
@@ -530,9 +363,6 @@ mod tests {
         assert_eq!(lock_shape(&[], false), LockShape::Locked);
     }
 
-    /// `Tray::icon_name` stays empty regardless of state — see this
-    /// module's doc for why a host's `icon_pixmap` fallback is the one
-    /// `TrayItem` relies on, never a named icon.
     #[test]
     fn tray_never_advertises_a_named_icon() {
         use crate::config::Config;
@@ -548,26 +378,16 @@ mod tests {
         assert_eq!(tool_tip(&[], None).icon_name, "");
     }
 
-    /// The fallback icon is never empty, is the size it claims, has an
-    /// opaque body and a transparent corner, and changes with aggregate
-    /// state — the whole reason it exists is to be visible without
-    /// relying on a host's icon theme at all.
     #[test]
     fn the_fallback_icon_is_a_padlock_that_tracks_state() {
         let locked_icon = &fallback_icon(&[locked("personal")], false)[0];
         assert_eq!((locked_icon.width, locked_icon.height), (22, 22));
         assert_eq!(locked_icon.data.len(), 22 * 22 * 4);
 
-        let corner = 0; // pixel (0, 0)
-        assert_eq!(
-            locked_icon.data[corner], 0,
-            "a corner should be transparent, outside the padlock"
-        );
-        let body = (22 * 16 + 11) * 4; // pixel (11, 16), inside the body
-        assert_eq!(
-            locked_icon.data[body], 0xff,
-            "the lock body should be opaque"
-        );
+        let corner = 0; // pixel (0, 0): transparent, outside the padlock.
+        assert_eq!(locked_icon.data[corner], 0);
+        let body = (22 * 16 + 11) * 4; // pixel (11, 16): inside the body.
+        assert_eq!(locked_icon.data[body], 0xff);
 
         let unlocked_icon = &fallback_icon(&[unlocked("personal", 1)], false)[0];
         let error_icon = &fallback_icon(&[locked("personal")], true)[0];
@@ -576,8 +396,6 @@ mod tests {
         assert_ne!(unlocked_icon.data, error_icon.data);
     }
 
-    /// `fallback_icon` returns the three embedded sizes, for a host that
-    /// wants a sharper image at a larger panel size.
     #[test]
     fn the_fallback_icon_includes_larger_sizes() {
         let sizes: Vec<(i32, i32)> = fallback_icon(&[locked("personal")], false)
@@ -587,10 +405,6 @@ mod tests {
         assert_eq!(sizes, vec![(22, 22), (32, 32), (44, 44)]);
     }
 
-    /// `decode_icon` reads every embedded size of every state without
-    /// panicking (the `expect`s in its body are the only thing that could
-    /// fail here, since `assets/tray/render.sh`'s own output is what's
-    /// embedded) and always returns the size its own PNG header claims.
     #[test]
     fn every_embedded_png_decodes_to_its_own_size() {
         for pngs in [&LOCKED_PNGS, &UNLOCKED_PNGS, &ERROR_PNGS] {
@@ -616,9 +430,6 @@ mod tests {
         );
     }
 
-    /// `Status::Passive` means "likely to be hidden" per its own doc — the
-    /// opposite of always being visible at a glance, so no state this
-    /// module can be in should ever produce it.
     #[test]
     fn no_state_is_ever_passive() {
         for databases in [
@@ -635,8 +446,6 @@ mod tests {
 
     #[test]
     fn an_error_overrides_the_lock_state_in_the_icon() {
-        // Even with everything unlocked, an unresolved error still wins —
-        // it's the thing most worth the user's attention.
         let databases = [unlocked("personal", 3)];
         assert_eq!(lock_shape(&databases, true), LockShape::Error);
         assert_eq!(item_status(&databases, true), ksni::Status::NeedsAttention);
@@ -664,8 +473,7 @@ mod tests {
         );
     }
 
-    /// Every `UnlockError` variant maps to a code, and never to `Debug`
-    /// output that could carry `PromptFailed`'s `detail`.
+    /// Never `Debug`, which could leak `PromptFailed`'s `detail`.
     #[test]
     fn every_unlock_error_variant_has_a_short_code() {
         let db = || "personal".to_string();
@@ -696,10 +504,7 @@ mod tests {
         for (err, code) in cases {
             let got = unlock_error_code(&err);
             assert_eq!(got, code, "{err:?}");
-            assert!(
-                !got.contains("secret"),
-                "a code must never carry an error's own detail text"
-            );
+            assert!(!got.contains("secret"));
         }
     }
 
@@ -802,9 +607,6 @@ mod tests {
         assert_eq!(labels(&menu), vec!["Lock all", "---", "Quit"]);
     }
 
-    /// `TrayItem` itself answers `ksni::Tray`'s queries by calling into a
-    /// real (if fixture-free) `Server` — the one piece of wiring the pure
-    /// functions above don't cover on their own.
     #[test]
     fn tray_item_reflects_a_real_servers_status() {
         use crate::config::Config;
