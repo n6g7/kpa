@@ -59,13 +59,13 @@
 //! (lock, or a finished unlock) also pokes `ksni` right away, so those feel
 //! instant rather than waiting for the next tick.
 //!
-//! **Host-compatibility fixes, found by testing against more than one
-//! host.** The first manual test (`docs/plan.md` step 4) only read back
-//! this module's own D-Bus properties and menu layout with `busctl` —
-//! which confirms the wiring, but not that anything legible actually gets
-//! drawn. Watching a second, more common host's own traffic (`busctl
-//! monitor` around registration, then reading that host's own source for
-//! how it turns the properties it fetched into pixels) found real gaps:
+//! **Host-compatibility notes, from testing against more than one host.**
+//! The first manual test (`docs/plan.md` step 4) only read back this
+//! module's own D-Bus properties and menu layout with `busctl` — which
+//! confirms the wiring, but not that anything legible actually gets drawn.
+//! Watching a second, more common host's own traffic (`busctl monitor`
+//! around registration, then reading that host's own source for how it
+//! turns the properties it fetched into pixels) found real gaps:
 //!
 //! - `icon_name` is deliberately left unset (empty string, the default).
 //!   Some hosts' icon-pixmap fallback only ever triggers when `icon_name`
@@ -73,31 +73,24 @@
 //!   through the current icon theme — so a host like that, given a
 //!   non-empty name it can't resolve, shows its own "broken icon"
 //!   placeholder and never looks at `icon_pixmap` at all. An empty name
-//!   is also the one choice that can't go stale if the chosen names
-//!   (`security-high`/`security-medium`/`dialog-error`) turn out to be
-//!   missing from a given icon theme — observed firsthand here: the
-//!   machine this was tested on has no icon theme that ships any of the
-//!   three. [`fallback_icon`]'s raw ARGB32 bytes are what every host is
-//!   expected to render instead.
-//! - `Tray::MENU_ON_ACTIVATE` is *not* set. It looked like a nice touch —
-//!   left-click opens the menu, since there's no single primary action —
-//!   but `ksni`'s own source documents it as needing host-specific
-//!   workarounds for GNOME's appindicator extension and for KDE Plasma
-//!   (versions on either side of 6.4 disagree about whether `Activate`
-//!   gets called at all once `ItemIsMenu` is true). That's exactly the kind
-//!   of per-host special-casing `docs/design.md` § Tray rules out. Left at
-//!   the default (`false`), `Tray::activate` stays a no-op (there isn't a
-//!   window to raise) and the menu is reachable the ordinary dbusmenu way
-//!   — a secondary click querying the `Menu` object path — which this
-//!   module's own side of the protocol answers correctly regardless (its
-//!   `GetLayout` response and the handlers behind each item were checked
-//!   directly, by calling them over the bus the same way a host would).
-//!   Whether a given host's *own* click handling ever reaches that call
-//!   is the host's own capability — some D-Bus-level toolkits expose the
-//!   StatusNotifierItem/dbusmenu protocol as a library primitive that the
-//!   surrounding shell configuration must still wire up to something that
-//!   displays a menu, which is a capability gap this module cannot see or
-//!   fix from here.
+//!   is also the one choice that can't go stale if a given icon theme
+//!   turns out to be missing whatever freedesktop names this build might
+//!   otherwise pick. [`fallback_icon`] draws a padlock glyph directly
+//!   into an ARGB32 bitmap, at two sizes, so every host renders the same
+//!   recognizable shape regardless of which icon theme it has installed.
+//! - `Tray::MENU_ON_ACTIVATE` is left at the default (`false`): a host
+//!   decides on its own terms when to show this module's menu — on a
+//!   left click, a right click, both, or neither — never on a signal from
+//!   kpa. What this module controls is answering the dbusmenu protocol
+//!   correctly once asked: a correct `GetLayout` response and a working
+//!   handler behind each item, on the `/MenuBar` object path, regardless
+//!   of how or whether a given host ever asks.
+//! - [`item_status`] never returns `ksni::Status::Passive` for any state,
+//!   including "all locked" (the state the icon starts in, and spends
+//!   most of its time in): `docs/plan.md` step 4 asks for lock state to
+//!   be "visible at a glance" in every state, which rules out `Passive`
+//!   — that value's own doc says a host is likely to hide an item
+//!   entirely in that state — for any of them.
 
 use std::sync::Arc;
 use std::thread;
@@ -183,9 +176,9 @@ struct TrayItem {
 }
 
 impl ksni::Tray for TrayItem {
-    // Left at the default (`false`) rather than set — see this module's
-    // doc for why `Tray::MENU_ON_ACTIVATE` turned out not to be the
-    // portable choice it looked like.
+    // Left at the default (`false`) — see this module's doc for why
+    // `Tray::MENU_ON_ACTIVATE` isn't the right lever here: the host, not
+    // kpa, decides when to show the menu.
 
     fn id(&self) -> String {
         "kpa".to_string()
@@ -286,16 +279,20 @@ fn any_unlocked(databases: &[DatabaseStatus]) -> bool {
 /// The StatusNotifierItem `Status` property (not to be confused with this
 /// crate's own `proto::Status`): how urgently a host should surface the
 /// item. An error is `NeedsAttention` — its own documented use is exactly
-/// this, "wants to incentive the direct user intervention" — some database
-/// unlocked is `Active`, and all locked is `Passive`, since there's nothing
-/// for the user to act on.
-fn item_status(databases: &[DatabaseStatus], has_error: bool) -> ksni::Status {
+/// this, "wants to incentive the direct user intervention." Every other
+/// state is `Active`, deliberately never `Passive`: that value's own
+/// documented meaning is "it is likely that visualizations will choose to
+/// hide it" — the opposite of `docs/plan.md` step 4's "lock state is
+/// visible at a glance," which has to hold for "all locked" too, since
+/// that's the state the daemon starts in and spends most of its time in.
+fn item_status(_databases: &[DatabaseStatus], has_error: bool) -> ksni::Status {
+    // The parameter stays, unused, so every state-to-display function in
+    // this module takes the same `(databases, has_error)` shape at its
+    // call sites, rather than this one alone dropping it.
     if has_error {
         ksni::Status::NeedsAttention
-    } else if any_unlocked(databases) {
-        ksni::Status::Active
     } else {
-        ksni::Status::Passive
+        ksni::Status::Active
     }
 }
 
@@ -339,21 +336,105 @@ fn aggregate_color(databases: &[DatabaseStatus], has_error: bool) -> (u8, u8, u8
     }
 }
 
-/// A filled circle in `aggregate_color`'s color, for `Tray::icon_pixmap`
-/// and `ToolTip::icon_pixmap` — see this module's doc for why `icon_name`
-/// alone isn't enough. Generated rather than loaded from a file: a 22×22
-/// ARGB32 bitmap is a few hundred bytes of arithmetic, which costs less
-/// than shipping and loading an asset file for three fixed colors.
-fn fallback_icon(databases: &[DatabaseStatus], has_error: bool) -> Vec<ksni::Icon> {
-    const SIZE: i32 = 22;
-    let (r, g, b) = aggregate_color(databases, has_error);
-    let center = (SIZE - 1) as f32 / 2.0;
+/// Which glyph [`draw_padlock`] draws, chosen from aggregate state the same
+/// way [`aggregate_color`] chooses a color: an error always wins, then any
+/// database being unlocked, then all-locked as the remaining case.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LockShape {
+    /// Every configured database locked: a closed padlock, its shackle
+    /// fully seated in the body.
+    Closed,
+    /// At least one database unlocked: the shackle's free end lifted away
+    /// from the body, leaving a visible gap — distinct from `Closed` even
+    /// with color stripped out.
+    Open,
+    /// An unresolved error: the closed padlock's keyhole replaced by an
+    /// exclamation mark, distinct from `Closed` even with color stripped
+    /// out.
+    Error,
+}
 
-    let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let (dx, dy) = (x as f32 - center, y as f32 - center);
-            if dx.hypot(dy) <= center {
+fn lock_shape(databases: &[DatabaseStatus], has_error: bool) -> LockShape {
+    if has_error {
+        LockShape::Error
+    } else if any_unlocked(databases) {
+        LockShape::Open
+    } else {
+        LockShape::Closed
+    }
+}
+
+/// Shortest distance from point `p` to the segment `a`-`b`. The one piece
+/// of geometry [`in_shackle`] needs that a bounding-box test can't give it:
+/// the open shackle's lifted end is a diagonal stroke, not an
+/// axis-aligned rectangle.
+fn dist_to_segment((px, py): (f32, f32), (ax, ay): (f32, f32), (bx, by): (f32, f32)) -> f32 {
+    let (abx, aby) = (bx - ax, by - ay);
+    let len_sq = abx * abx + aby * aby;
+    let t = if len_sq > 0.0 {
+        (((px - ax) * abx + (py - ay) * aby) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (ax + t * abx, ay + t * aby);
+    (px - cx).hypot(py - cy)
+}
+
+/// The padlock body: a rectangle, normalized to a unit square ([`draw_padlock`]
+/// maps every pixel into this space before testing it against the glyph).
+fn in_body(u: f32, v: f32) -> bool {
+    (0.27..0.73).contains(&u) && (0.47..0.85).contains(&v)
+}
+
+/// The shackle: an arc (`dome`, a half-ring) over the body, with a leg
+/// descending from each end to meet it. `LockShape::Open` drops the right
+/// leg and replaces it with a stroke lifted up and away, leaving a gap
+/// between the arc and the body — the one structural difference from
+/// `Closed` a host can't lose by rendering the icon in grayscale.
+fn in_shackle(u: f32, v: f32, shape: LockShape) -> bool {
+    let (cx, cy) = (0.5, 0.33);
+    let r = (u - cx).hypot(v - cy);
+    let dome = v <= cy && (0.105..=0.19).contains(&r);
+    let left_leg = (0.31..0.395).contains(&u) && (0.33..0.50).contains(&v);
+    let right_leg = (0.605..0.69).contains(&u) && (0.33..0.50).contains(&v);
+    let lifted_end = dist_to_segment((u, v), (0.62, 0.30), (0.84, 0.10)) <= 0.05;
+    match shape {
+        LockShape::Closed | LockShape::Error => dome || left_leg || right_leg,
+        LockShape::Open => dome || left_leg || lifted_end,
+    }
+}
+
+/// The cut-out inside the body: a round keyhole for `Closed`/`Open`, an
+/// exclamation mark for `Error` — both read as a hole (the background
+/// shows through), never a second color, so the glyph stays a single-tone
+/// ARGB32 shape.
+fn in_hole(u: f32, v: f32, shape: LockShape) -> bool {
+    match shape {
+        LockShape::Closed | LockShape::Open => (u - 0.5).hypot(v - 0.62) <= 0.055,
+        LockShape::Error => {
+            let bar = (0.47..0.53).contains(&u) && (0.54..0.68).contains(&v);
+            let dot = (u - 0.5).hypot(v - 0.76) <= 0.035;
+            bar || dot
+        }
+    }
+}
+
+fn in_padlock(u: f32, v: f32, shape: LockShape) -> bool {
+    (in_body(u, v) || in_shackle(u, v, shape)) && !in_hole(u, v, shape)
+}
+
+/// Renders one size of the padlock glyph described by [`in_padlock`] into
+/// an ARGB32 bitmap, in `color`. Generated rather than loaded from a file:
+/// the shape is a few hundred bytes of arithmetic per size, which costs
+/// less than shipping and loading an asset file for three fixed
+/// color/shape combinations.
+fn draw_padlock(size: i32, (r, g, b): (u8, u8, u8), shape: LockShape) -> ksni::Icon {
+    let denom = (size - 1).max(1) as f32;
+    let mut data = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let (u, v) = (x as f32 / denom, y as f32 / denom);
+            if in_padlock(u, v, shape) {
                 // ARGB32, network byte order (`ksni::Icon`'s own doc):
                 // opaque alpha, then the color.
                 data.extend_from_slice(&[0xff, r, g, b]);
@@ -362,11 +443,25 @@ fn fallback_icon(databases: &[DatabaseStatus], has_error: bool) -> Vec<ksni::Ico
             }
         }
     }
-    vec![ksni::Icon {
-        width: SIZE,
-        height: SIZE,
+    ksni::Icon {
+        width: size,
+        height: size,
         data,
-    }]
+    }
+}
+
+/// A padlock glyph in `aggregate_color`'s color and [`lock_shape`]'s shape,
+/// for `Tray::icon_pixmap` and `ToolTip::icon_pixmap` — see this module's
+/// doc for why `icon_name` alone isn't enough. Two sizes, smallest first,
+/// so a host that wants a sharper image at a larger panel size has one
+/// without upscaling the smaller bitmap.
+fn fallback_icon(databases: &[DatabaseStatus], has_error: bool) -> Vec<ksni::Icon> {
+    let color = aggregate_color(databases, has_error);
+    let shape = lock_shape(databases, has_error);
+    [22, 44]
+        .into_iter()
+        .map(|size| draw_padlock(size, color, shape))
+        .collect()
 }
 
 /// `docs/design.md` § Tray: "Menu: Unlock…, Lock all, a per-database
@@ -473,7 +568,9 @@ mod tests {
     fn the_icon_is_secure_when_every_database_is_locked() {
         let databases = [locked("personal"), locked("work")];
         assert_eq!(aggregate_color(&databases, false), (0x6b, 0x7b, 0x8c));
-        assert_eq!(item_status(&databases, false), ksni::Status::Passive);
+        // Never `Passive` — see `item_status`'s doc for why "all locked"
+        // must stay as visible as every other state.
+        assert_eq!(item_status(&databases, false), ksni::Status::Active);
     }
 
     #[test]
@@ -507,22 +604,24 @@ mod tests {
     }
 
     /// The fallback icon is never empty, is the size it claims, has an
-    /// opaque center and a transparent corner (so it reads as a filled
-    /// circle, not a filled square), and changes with aggregate state —
-    /// the whole reason it exists is to be visible without relying on a
-    /// host's icon theme at all.
+    /// opaque body and a transparent corner, and changes with aggregate
+    /// state — the whole reason it exists is to be visible without
+    /// relying on a host's icon theme at all.
     #[test]
-    fn the_fallback_icon_is_a_colored_circle_that_tracks_state() {
+    fn the_fallback_icon_is_a_padlock_that_tracks_state() {
         let locked_icon = &fallback_icon(&[locked("personal")], false)[0];
         assert_eq!((locked_icon.width, locked_icon.height), (22, 22));
         assert_eq!(locked_icon.data.len(), 22 * 22 * 4);
 
-        let center = (22 * 11 + 11) * 4; // pixel (11, 11), 4 bytes each
-        assert_eq!(locked_icon.data[center], 0xff, "center should be opaque");
         let corner = 0; // pixel (0, 0)
         assert_eq!(
             locked_icon.data[corner], 0,
-            "a corner should be transparent, outside the circle"
+            "a corner should be transparent, outside the padlock"
+        );
+        let body = (22 * 16 + 11) * 4; // pixel (11, 16), inside the body
+        assert_eq!(
+            locked_icon.data[body], 0xff,
+            "the lock body should be opaque"
         );
 
         let unlocked_icon = &fallback_icon(&[unlocked("personal", 1)], false)[0];
@@ -530,6 +629,68 @@ mod tests {
         assert_ne!(locked_icon.data, unlocked_icon.data);
         assert_ne!(locked_icon.data, error_icon.data);
         assert_ne!(unlocked_icon.data, error_icon.data);
+    }
+
+    /// `fallback_icon` returns a larger size in addition to 22×22, for a
+    /// host that wants a sharper image at a larger panel size.
+    #[test]
+    fn the_fallback_icon_includes_a_larger_size() {
+        let sizes: Vec<(i32, i32)> = fallback_icon(&[locked("personal")], false)
+            .iter()
+            .map(|icon| (icon.width, icon.height))
+            .collect();
+        assert_eq!(sizes, vec![(22, 22), (44, 44)]);
+    }
+
+    /// The three glyph shapes differ structurally, not just by color — a
+    /// host rendering them in grayscale (or a colorblind user) must still
+    /// be able to tell "closed", "open", and "error" apart.
+    #[test]
+    fn the_three_lock_shapes_have_different_silhouettes_in_the_same_color() {
+        let same_color = (0x11, 0x22, 0x33);
+        let closed = draw_padlock(22, same_color, LockShape::Closed);
+        let open = draw_padlock(22, same_color, LockShape::Open);
+        let error = draw_padlock(22, same_color, LockShape::Error);
+        assert_ne!(
+            closed.data, open.data,
+            "an open shackle must look different from a closed one"
+        );
+        assert_ne!(
+            closed.data, error.data,
+            "the error glyph must look different from the closed one"
+        );
+        assert_ne!(open.data, error.data);
+    }
+
+    #[test]
+    fn lock_shape_follows_the_same_priority_as_aggregate_color() {
+        assert_eq!(lock_shape(&[locked("personal")], false), LockShape::Closed);
+        assert_eq!(
+            lock_shape(&[unlocked("personal", 1)], false),
+            LockShape::Open
+        );
+        // An error wins even when something is unlocked.
+        assert_eq!(
+            lock_shape(&[unlocked("personal", 1)], true),
+            LockShape::Error
+        );
+    }
+
+    /// `Status::Passive` means "likely to be hidden" per its own doc — the
+    /// opposite of always being visible at a glance, so no state this
+    /// module can be in should ever produce it.
+    #[test]
+    fn no_state_is_ever_passive() {
+        for databases in [
+            [].as_slice(),
+            &[locked("personal")],
+            &[unlocked("personal", 1)],
+            &[locked("personal"), unlocked("work", 1)],
+        ] {
+            for has_error in [false, true] {
+                assert_ne!(item_status(databases, has_error), ksni::Status::Passive);
+            }
+        }
     }
 
     #[test]
