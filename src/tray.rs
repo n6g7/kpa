@@ -5,7 +5,7 @@
 //! actually hard to test here. `policy.rs` splits into a pure core
 //! (`Policy`) tested against the `Locks`/`SleepInhibitor` traits, and a
 //! D-Bus half (`watch_forever`) that can't be exercised without a bus. The
-//! tray's equivalent split is [`aggregate_color`]/[`fallback_icon`]/
+//! tray's equivalent split is [`lock_shape`]/[`fallback_icon`]/
 //! [`item_status`]/[`tool_tip`]/[`build_menu`] — pure functions of a
 //! `DatabaseStatus` snapshot, tested below with no `ksni`, no D-Bus, and
 //! no `Server` at all — versus [`run`],
@@ -77,9 +77,10 @@
 //!   and never looks at `icon_pixmap` at all. An empty name is also the
 //!   one choice that can't go stale if a given icon theme turns out to be
 //!   missing whatever freedesktop names this build might otherwise pick.
-//!   [`fallback_icon`] draws a padlock glyph directly into an ARGB32
-//!   bitmap, at several sizes, so every host renders the same recognizable
-//!   shape regardless of which icon theme it has installed.
+//!   [`fallback_icon`] decodes a padlock PNG — rasterized ahead of time by
+//!   `assets/tray/render.sh` from the SVGs beside it, embedded with
+//!   `include_bytes!` — at several sizes, so every host renders the same
+//!   recognizable shape regardless of which icon theme it has installed.
 //! - `Tray::MENU_ON_ACTIVATE` is left at the default (`false`): a host
 //!   decides on its own terms when to show this module's menu — on a
 //!   left click, a right click, both, or neither — never on a signal from
@@ -274,7 +275,7 @@ fn unlock_error_code(err: &UnlockError) -> &'static str {
 }
 
 /// Whether at least one configured database is unlocked right now. The one
-/// fact `aggregate_color`/`item_status`/`tool_tip` all start from.
+/// fact `lock_shape`/`item_status`/`tool_tip` all start from.
 fn any_unlocked(databases: &[DatabaseStatus]) -> bool {
     databases.iter().any(|db| !db.locked)
 }
@@ -324,36 +325,14 @@ fn tool_tip(databases: &[DatabaseStatus], last_error: Option<&(String, &'static 
     }
 }
 
-/// `docs/design.md` § Tray: "Icon reflects aggregate state: all locked /
-/// some unlocked / error," as a color, in that priority. `fallback_icon`
-/// is what actually turns this into something a host can draw — see this
-/// module's doc for why that's a generated bitmap rather than a named
-/// freedesktop icon.
-fn aggregate_color(databases: &[DatabaseStatus], has_error: bool) -> (u8, u8, u8) {
-    if has_error {
-        (0xd6, 0x33, 0x3b) // red
-    } else if any_unlocked(databases) {
-        (0xe6, 0xa8, 0x17) // amber
-    } else {
-        (0x6b, 0x7b, 0x8c) // slate blue
-    }
-}
-
-/// Which glyph [`draw_padlock`] draws, chosen from aggregate state the same
-/// way [`aggregate_color`] chooses a color: an error always wins, then any
-/// database being unlocked, then all-locked as the remaining case.
+/// Which embedded padlock PNG [`fallback_icon`] decodes, chosen from
+/// aggregate state: an error always wins, then any database being
+/// unlocked, then all-locked as the remaining case. Each variant names
+/// the `assets/tray/<name>.svg` it comes from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LockShape {
-    /// Every configured database locked: a closed padlock, its shackle
-    /// fully seated in the body.
-    Closed,
-    /// At least one database unlocked: the shackle's free end lifted away
-    /// from the body, leaving a visible gap — distinct from `Closed` even
-    /// with color stripped out.
-    Open,
-    /// An unresolved error: the closed padlock's keyhole replaced by an
-    /// exclamation mark, distinct from `Closed` even with color stripped
-    /// out.
+    Locked,
+    Unlocked,
     Error,
 }
 
@@ -361,113 +340,76 @@ fn lock_shape(databases: &[DatabaseStatus], has_error: bool) -> LockShape {
     if has_error {
         LockShape::Error
     } else if any_unlocked(databases) {
-        LockShape::Open
+        LockShape::Unlocked
     } else {
-        LockShape::Closed
+        LockShape::Locked
     }
 }
 
-/// Shortest distance from point `p` to the segment `a`-`b`. The one piece
-/// of geometry [`in_shackle`] needs that a bounding-box test can't give it:
-/// the open shackle's lifted end is a diagonal stroke, not an
-/// axis-aligned rectangle.
-fn dist_to_segment((px, py): (f32, f32), (ax, ay): (f32, f32), (bx, by): (f32, f32)) -> f32 {
-    let (abx, aby) = (bx - ax, by - ay);
-    let len_sq = abx * abx + aby * aby;
-    let t = if len_sq > 0.0 {
-        (((px - ax) * abx + (py - ay) * aby) / len_sq).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let (cx, cy) = (ax + t * abx, ay + t * aby);
-    (px - cx).hypot(py - cy)
-}
+/// The embedded PNGs for each [`LockShape`], smallest size first — see
+/// `assets/tray/render.sh` for how they're rasterized from the matching
+/// SVG in the same directory.
+const LOCKED_PNGS: [&[u8]; 3] = [
+    include_bytes!("../assets/tray/locked-22.png"),
+    include_bytes!("../assets/tray/locked-32.png"),
+    include_bytes!("../assets/tray/locked-44.png"),
+];
+const UNLOCKED_PNGS: [&[u8]; 3] = [
+    include_bytes!("../assets/tray/unlocked-22.png"),
+    include_bytes!("../assets/tray/unlocked-32.png"),
+    include_bytes!("../assets/tray/unlocked-44.png"),
+];
+const ERROR_PNGS: [&[u8]; 3] = [
+    include_bytes!("../assets/tray/error-22.png"),
+    include_bytes!("../assets/tray/error-32.png"),
+    include_bytes!("../assets/tray/error-44.png"),
+];
 
-/// The padlock body: a rectangle, normalized to a unit square ([`draw_padlock`]
-/// maps every pixel into this space before testing it against the glyph).
-/// Sized to leave only a thin margin around the glyph, so it reads clearly
-/// at panel size rather than as a small mark in the middle of the pixmap.
-fn in_body(u: f32, v: f32) -> bool {
-    (0.20..0.80).contains(&u) && (0.44..0.90).contains(&v)
-}
-
-/// The shackle: an arc (`dome`, a half-ring) over the body, with a leg
-/// descending from each end to meet it. `LockShape::Open` drops the right
-/// leg and replaces it with a stroke lifted up and away, leaving a gap
-/// between the arc and the body — the one structural difference from
-/// `Closed` a host can't lose by rendering the icon in grayscale.
-fn in_shackle(u: f32, v: f32, shape: LockShape) -> bool {
-    let (cx, cy) = (0.5, 0.27);
-    let r = (u - cx).hypot(v - cy);
-    let dome = v <= cy && (0.145..=0.24).contains(&r);
-    let left_leg = (0.27..0.355).contains(&u) && (0.27..0.46).contains(&v);
-    let right_leg = (0.645..0.73).contains(&u) && (0.27..0.46).contains(&v);
-    let lifted_end = dist_to_segment((u, v), (0.68, 0.25), (0.92, 0.04)) <= 0.065;
-    match shape {
-        LockShape::Closed | LockShape::Error => dome || left_leg || right_leg,
-        LockShape::Open => dome || left_leg || lifted_end,
-    }
-}
-
-/// The cut-out inside the body: a round keyhole for `Closed`/`Open`, an
-/// exclamation mark for `Error` — both read as a hole (the background
-/// shows through), never a second color, so the glyph stays a single-tone
-/// ARGB32 shape.
-fn in_hole(u: f32, v: f32, shape: LockShape) -> bool {
-    match shape {
-        LockShape::Closed | LockShape::Open => (u - 0.5).hypot(v - 0.66) <= 0.075,
-        LockShape::Error => {
-            let bar = (0.46..0.54).contains(&u) && (0.52..0.72).contains(&v);
-            let dot = (u - 0.5).hypot(v - 0.82) <= 0.045;
-            bar || dot
-        }
-    }
-}
-
-fn in_padlock(u: f32, v: f32, shape: LockShape) -> bool {
-    (in_body(u, v) || in_shackle(u, v, shape)) && !in_hole(u, v, shape)
-}
-
-/// Renders one size of the padlock glyph described by [`in_padlock`] into
-/// an ARGB32 bitmap, in `color`. Generated rather than loaded from a file:
-/// the shape is a few hundred bytes of arithmetic per size, which costs
-/// less than shipping and loading an asset file for three fixed
-/// color/shape combinations.
-fn draw_padlock(size: i32, (r, g, b): (u8, u8, u8), shape: LockShape) -> ksni::Icon {
-    let denom = (size - 1).max(1) as f32;
-    let mut data = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let (u, v) = (x as f32 / denom, y as f32 / denom);
-            if in_padlock(u, v, shape) {
-                // ARGB32, network byte order (`ksni::Icon`'s own doc):
-                // opaque alpha, then the color.
-                data.extend_from_slice(&[0xff, r, g, b]);
-            } else {
-                data.extend_from_slice(&[0, 0, 0, 0]);
-            }
-        }
+/// Decodes one embedded PNG into the ARGB32 `ksni::Icon` the
+/// StatusNotifierItem protocol wants: alpha first, network byte order
+/// (`ksni::Icon`'s own doc). `assets/tray/render.sh` always produces
+/// RGBA8 (`resvg`'s own default), so that's the only input this handles —
+/// anything else means a `.png` was replaced by hand rather than
+/// regenerated from its `.svg`, which the `expect`s below catch.
+fn decode_icon(png: &[u8]) -> ksni::Icon {
+    let mut reader = png::Decoder::new(png)
+        .read_info()
+        .expect("every embedded tray PNG is well-formed");
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .expect("every embedded tray PNG decodes to its own header");
+    assert_eq!(
+        info.color_type,
+        png::ColorType::Rgba,
+        "assets/tray/render.sh always produces RGBA8 PNGs"
+    );
+    let mut data = Vec::with_capacity(buf.len());
+    let (pixels, _) = buf[..info.buffer_size()].as_chunks::<4>();
+    for &[r, g, b, a] in pixels {
+        data.extend_from_slice(&[a, r, g, b]);
     }
     ksni::Icon {
-        width: size,
-        height: size,
+        width: info.width as i32,
+        height: info.height as i32,
         data,
     }
 }
 
-/// A padlock glyph in `aggregate_color`'s color and [`lock_shape`]'s shape,
-/// for `Tray::icon_pixmap` and `ToolTip::icon_pixmap` — see this module's
-/// doc for why `icon_name` alone isn't enough. Four sizes, smallest first,
-/// covering the common StatusNotifierItem panel sizes, so a host that
-/// wants a sharper image at a larger panel size has one without upscaling
-/// a smaller bitmap.
+/// The tray's padlock glyph, in [`lock_shape`]'s state, for
+/// `Tray::icon_pixmap` and `ToolTip::icon_pixmap` — see this module's doc
+/// for why these come from embedded PNGs rather than a named freedesktop
+/// icon or runtime drawing. Three sizes, smallest first, covering the
+/// common StatusNotifierItem panel sizes, so a host that wants a sharper
+/// image at a larger panel size has one without upscaling a smaller
+/// bitmap.
 fn fallback_icon(databases: &[DatabaseStatus], has_error: bool) -> Vec<ksni::Icon> {
-    let color = aggregate_color(databases, has_error);
-    let shape = lock_shape(databases, has_error);
-    [22, 32, 48, 64]
-        .into_iter()
-        .map(|size| draw_padlock(size, color, shape))
-        .collect()
+    let pngs = match lock_shape(databases, has_error) {
+        LockShape::Locked => &LOCKED_PNGS,
+        LockShape::Unlocked => &UNLOCKED_PNGS,
+        LockShape::Error => &ERROR_PNGS,
+    };
+    pngs.iter().map(|png| decode_icon(png)).collect()
 }
 
 /// `docs/design.md` § Tray: "Menu: a per-database submenu (Lock, Unlock),
@@ -568,24 +510,24 @@ mod tests {
     }
 
     #[test]
-    fn the_icon_is_secure_when_every_database_is_locked() {
+    fn the_icon_is_locked_when_every_database_is_locked() {
         let databases = [locked("personal"), locked("work")];
-        assert_eq!(aggregate_color(&databases, false), (0x6b, 0x7b, 0x8c));
+        assert_eq!(lock_shape(&databases, false), LockShape::Locked);
         // Never `Passive` — see `item_status`'s doc for why "all locked"
         // must stay as visible as every other state.
         assert_eq!(item_status(&databases, false), ksni::Status::Active);
     }
 
     #[test]
-    fn the_icon_is_less_secure_once_anything_is_unlocked() {
+    fn the_icon_is_unlocked_once_anything_is_unlocked() {
         let databases = [locked("personal"), unlocked("work", 3)];
-        assert_eq!(aggregate_color(&databases, false), (0xe6, 0xa8, 0x17));
+        assert_eq!(lock_shape(&databases, false), LockShape::Unlocked);
         assert_eq!(item_status(&databases, false), ksni::Status::Active);
     }
 
     #[test]
     fn no_configured_databases_reads_as_all_locked() {
-        assert_eq!(aggregate_color(&[], false), (0x6b, 0x7b, 0x8c));
+        assert_eq!(lock_shape(&[], false), LockShape::Locked);
     }
 
     /// `Tray::icon_name` stays empty regardless of state — see this
@@ -634,43 +576,38 @@ mod tests {
         assert_ne!(unlocked_icon.data, error_icon.data);
     }
 
-    /// `fallback_icon` returns several sizes, for a host that wants a
-    /// sharper image at a larger panel size.
+    /// `fallback_icon` returns the three embedded sizes, for a host that
+    /// wants a sharper image at a larger panel size.
     #[test]
     fn the_fallback_icon_includes_larger_sizes() {
         let sizes: Vec<(i32, i32)> = fallback_icon(&[locked("personal")], false)
             .iter()
             .map(|icon| (icon.width, icon.height))
             .collect();
-        assert_eq!(sizes, vec![(22, 22), (32, 32), (48, 48), (64, 64)]);
+        assert_eq!(sizes, vec![(22, 22), (32, 32), (44, 44)]);
     }
 
-    /// The three glyph shapes differ structurally, not just by color — a
-    /// host rendering them in grayscale (or a colorblind user) must still
-    /// be able to tell "closed", "open", and "error" apart.
+    /// `decode_icon` reads every embedded size of every state without
+    /// panicking (the `expect`s in its body are the only thing that could
+    /// fail here, since `assets/tray/render.sh`'s own output is what's
+    /// embedded) and always returns the size its own PNG header claims.
     #[test]
-    fn the_three_lock_shapes_have_different_silhouettes_in_the_same_color() {
-        let same_color = (0x11, 0x22, 0x33);
-        let closed = draw_padlock(22, same_color, LockShape::Closed);
-        let open = draw_padlock(22, same_color, LockShape::Open);
-        let error = draw_padlock(22, same_color, LockShape::Error);
-        assert_ne!(
-            closed.data, open.data,
-            "an open shackle must look different from a closed one"
-        );
-        assert_ne!(
-            closed.data, error.data,
-            "the error glyph must look different from the closed one"
-        );
-        assert_ne!(open.data, error.data);
+    fn every_embedded_png_decodes_to_its_own_size() {
+        for pngs in [&LOCKED_PNGS, &UNLOCKED_PNGS, &ERROR_PNGS] {
+            for (bytes, want) in pngs.iter().zip([22, 32, 44]) {
+                let icon = decode_icon(bytes);
+                assert_eq!((icon.width, icon.height), (want, want));
+                assert_eq!(icon.data.len(), (want * want * 4) as usize);
+            }
+        }
     }
 
     #[test]
-    fn lock_shape_follows_the_same_priority_as_aggregate_color() {
-        assert_eq!(lock_shape(&[locked("personal")], false), LockShape::Closed);
+    fn lock_shape_follows_the_documented_priority() {
+        assert_eq!(lock_shape(&[locked("personal")], false), LockShape::Locked);
         assert_eq!(
             lock_shape(&[unlocked("personal", 1)], false),
-            LockShape::Open
+            LockShape::Unlocked
         );
         // An error wins even when something is unlocked.
         assert_eq!(
@@ -701,7 +638,7 @@ mod tests {
         // Even with everything unlocked, an unresolved error still wins —
         // it's the thing most worth the user's attention.
         let databases = [unlocked("personal", 3)];
-        assert_eq!(aggregate_color(&databases, true), (0xd6, 0x33, 0x3b));
+        assert_eq!(lock_shape(&databases, true), LockShape::Error);
         assert_eq!(item_status(&databases, true), ksni::Status::NeedsAttention);
     }
 

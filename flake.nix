@@ -44,6 +44,10 @@
             # org.kde.StatusNotifierWatcher on the session bus works; this
             # is just a small, scriptable one to run for that.
             waybar
+            # Rasterizes assets/tray/*.svg to the PNGs src/tray.rs embeds —
+            # see assets/tray/render.sh. Not a Rust dependency, and not
+            # needed for a normal build: the PNGs it produces are committed.
+            resvg
           ];
 
           # rust-analyzer and clippy both want to find the sysroot's source;
