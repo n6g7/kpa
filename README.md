@@ -50,7 +50,11 @@ github:n6g7/kpa`) and a home-manager module:
 
 `settings` is written to `~/.config/kpa/config.toml` in the shape
 documented by [`config.example.toml`](./config.example.toml). The module
-runs `kpa serve` as a user systemd service (`systemctl --user status kpa`).
+runs `kpa serve` as a user systemd service (`systemctl --user status kpa`),
+sandboxed by default (`NoNewPrivileges`, a restricted syscall filter,
+`AF_UNIX`-only sockets, and more — see `nix/hm-module.nix`). Each setting
+is applied with `lib.mkDefault`, so it can be loosened per directive with
+`systemd.user.services.kpa.Service.<name> = lib.mkForce ...;`.
 
 ## Build & test
 
