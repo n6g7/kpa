@@ -67,17 +67,19 @@
 //! around registration, then reading that host's own source for how it
 //! turns the properties it fetched into pixels) found real gaps:
 //!
-//! - `icon_name` is deliberately left unset (empty string, the default).
-//!   Some hosts' icon-pixmap fallback only ever triggers when `icon_name`
-//!   is empty to begin with — not when it's set but fails to resolve
-//!   through the current icon theme — so a host like that, given a
-//!   non-empty name it can't resolve, shows its own "broken icon"
-//!   placeholder and never looks at `icon_pixmap` at all. An empty name
-//!   is also the one choice that can't go stale if a given icon theme
-//!   turns out to be missing whatever freedesktop names this build might
-//!   otherwise pick. [`fallback_icon`] draws a padlock glyph directly
-//!   into an ARGB32 bitmap, at two sizes, so every host renders the same
-//!   recognizable shape regardless of which icon theme it has installed.
+//! - `icon_name` is deliberately left unset (empty string, the default) on
+//!   both the item itself and every menu item ([`build_menu`]'s doc has
+//!   more on the latter). Some hosts' icon-pixmap fallback only ever
+//!   triggers when `icon_name` is empty to begin with — not when it's set
+//!   but fails to resolve through the current icon theme — so a host like
+//!   that, given a non-empty name it can't resolve, shows its own "broken
+//!   icon" placeholder (a checkerboard, on at least one host observed)
+//!   and never looks at `icon_pixmap` at all. An empty name is also the
+//!   one choice that can't go stale if a given icon theme turns out to be
+//!   missing whatever freedesktop names this build might otherwise pick.
+//!   [`fallback_icon`] draws a padlock glyph directly into an ARGB32
+//!   bitmap, at several sizes, so every host renders the same recognizable
+//!   shape regardless of which icon theme it has installed.
 //! - `Tray::MENU_ON_ACTIVATE` is left at the default (`false`): a host
 //!   decides on its own terms when to show this module's menu — on a
 //!   left click, a right click, both, or neither — never on a signal from
@@ -224,8 +226,9 @@ impl TrayItem {
         self.last_error = None;
     }
 
-    /// "Unlock…"'s per-database items. Unlocking waits on a human and a
-    /// KDF (`docs/design.md` § Protocol) — seconds, not milliseconds — so
+    /// Each per-database submenu's "Unlock" item. Unlocking waits on a
+    /// human and a KDF (`docs/design.md` § Protocol) — seconds, not
+    /// milliseconds — so
     /// it runs on its own thread rather than the menu callback, matching
     /// the advice on `ksni::menu::StandardItem::activate`. The clone of
     /// `self.handle` is what lets that thread tell `ksni` to refresh once
@@ -382,8 +385,10 @@ fn dist_to_segment((px, py): (f32, f32), (ax, ay): (f32, f32), (bx, by): (f32, f
 
 /// The padlock body: a rectangle, normalized to a unit square ([`draw_padlock`]
 /// maps every pixel into this space before testing it against the glyph).
+/// Sized to leave only a thin margin around the glyph, so it reads clearly
+/// at panel size rather than as a small mark in the middle of the pixmap.
 fn in_body(u: f32, v: f32) -> bool {
-    (0.27..0.73).contains(&u) && (0.47..0.85).contains(&v)
+    (0.20..0.80).contains(&u) && (0.44..0.90).contains(&v)
 }
 
 /// The shackle: an arc (`dome`, a half-ring) over the body, with a leg
@@ -392,12 +397,12 @@ fn in_body(u: f32, v: f32) -> bool {
 /// between the arc and the body — the one structural difference from
 /// `Closed` a host can't lose by rendering the icon in grayscale.
 fn in_shackle(u: f32, v: f32, shape: LockShape) -> bool {
-    let (cx, cy) = (0.5, 0.33);
+    let (cx, cy) = (0.5, 0.27);
     let r = (u - cx).hypot(v - cy);
-    let dome = v <= cy && (0.105..=0.19).contains(&r);
-    let left_leg = (0.31..0.395).contains(&u) && (0.33..0.50).contains(&v);
-    let right_leg = (0.605..0.69).contains(&u) && (0.33..0.50).contains(&v);
-    let lifted_end = dist_to_segment((u, v), (0.62, 0.30), (0.84, 0.10)) <= 0.05;
+    let dome = v <= cy && (0.145..=0.24).contains(&r);
+    let left_leg = (0.27..0.355).contains(&u) && (0.27..0.46).contains(&v);
+    let right_leg = (0.645..0.73).contains(&u) && (0.27..0.46).contains(&v);
+    let lifted_end = dist_to_segment((u, v), (0.68, 0.25), (0.92, 0.04)) <= 0.065;
     match shape {
         LockShape::Closed | LockShape::Error => dome || left_leg || right_leg,
         LockShape::Open => dome || left_leg || lifted_end,
@@ -410,10 +415,10 @@ fn in_shackle(u: f32, v: f32, shape: LockShape) -> bool {
 /// ARGB32 shape.
 fn in_hole(u: f32, v: f32, shape: LockShape) -> bool {
     match shape {
-        LockShape::Closed | LockShape::Open => (u - 0.5).hypot(v - 0.62) <= 0.055,
+        LockShape::Closed | LockShape::Open => (u - 0.5).hypot(v - 0.66) <= 0.075,
         LockShape::Error => {
-            let bar = (0.47..0.53).contains(&u) && (0.54..0.68).contains(&v);
-            let dot = (u - 0.5).hypot(v - 0.76) <= 0.035;
+            let bar = (0.46..0.54).contains(&u) && (0.52..0.72).contains(&v);
+            let dot = (u - 0.5).hypot(v - 0.82) <= 0.045;
             bar || dot
         }
     }
@@ -452,83 +457,81 @@ fn draw_padlock(size: i32, (r, g, b): (u8, u8, u8), shape: LockShape) -> ksni::I
 
 /// A padlock glyph in `aggregate_color`'s color and [`lock_shape`]'s shape,
 /// for `Tray::icon_pixmap` and `ToolTip::icon_pixmap` — see this module's
-/// doc for why `icon_name` alone isn't enough. Two sizes, smallest first,
-/// so a host that wants a sharper image at a larger panel size has one
-/// without upscaling the smaller bitmap.
+/// doc for why `icon_name` alone isn't enough. Four sizes, smallest first,
+/// covering the common StatusNotifierItem panel sizes, so a host that
+/// wants a sharper image at a larger panel size has one without upscaling
+/// a smaller bitmap.
 fn fallback_icon(databases: &[DatabaseStatus], has_error: bool) -> Vec<ksni::Icon> {
     let color = aggregate_color(databases, has_error);
     let shape = lock_shape(databases, has_error);
-    [22, 44]
+    [22, 32, 48, 64]
         .into_iter()
         .map(|size| draw_padlock(size, color, shape))
         .collect()
 }
 
-/// `docs/design.md` § Tray: "Menu: Unlock…, Lock all, a per-database
-/// submenu, Quit." A free function, not a `TrayItem` method, so it can be
-/// exercised in tests against a plain `&[DatabaseStatus]` — the closures it
-/// builds take `&mut TrayItem` as `ksni::menu::StandardItem::activate`
-/// requires, but building them needs no live `TrayItem` to close over, just
-/// the database's name.
+/// `docs/design.md` § Tray: "Menu: a per-database submenu (Lock, Unlock),
+/// then Lock all, then Quit." A free function, not a `TrayItem` method, so
+/// it can be exercised in tests against a plain `&[DatabaseStatus]` — the
+/// closures it builds take `&mut TrayItem` as
+/// `ksni::menu::StandardItem::activate` requires, but building them needs
+/// no live `TrayItem` to close over, just the database's name.
+///
+/// No item here sets `icon_name`: a menu item's icon goes through the same
+/// icon-theme lookup as `Tray::icon_name` (see this module's doc), so a
+/// freedesktop name here would hit the same missing-theme checkerboard
+/// `fallback_icon` exists to avoid. A failed unlock is surfaced as a label
+/// suffix instead of an icon, for the same reason.
 fn build_menu(
     databases: &[DatabaseStatus],
     last_error: Option<&(String, &'static str)>,
 ) -> Vec<MenuItem<TrayItem>> {
-    let unlock_targets = databases
+    let mut items: Vec<MenuItem<TrayItem>> = databases
         .iter()
         .map(|db| {
-            let name = db.name.clone();
-            MenuItem::Standard(StandardItem {
-                label: db.name.clone(),
-                enabled: db.locked,
-                activate: Box::new(move |item: &mut TrayItem| item.start_unlock(&name)),
+            let lock_name = db.name.clone();
+            let unlock_name = db.name.clone();
+            let label = if last_error.is_some_and(|(err_db, _)| err_db == &db.name) {
+                format!("{} (unlock failed)", db.name)
+            } else {
+                db.name.clone()
+            };
+            MenuItem::SubMenu(SubMenu {
+                label,
+                submenu: vec![
+                    MenuItem::Standard(StandardItem {
+                        label: "Lock".to_string(),
+                        enabled: !db.locked,
+                        activate: Box::new(move |item: &mut TrayItem| {
+                            item.trigger_lock(Some(&lock_name))
+                        }),
+                        ..Default::default()
+                    }),
+                    MenuItem::Standard(StandardItem {
+                        label: "Unlock".to_string(),
+                        enabled: db.locked,
+                        activate: Box::new(move |item: &mut TrayItem| {
+                            item.start_unlock(&unlock_name)
+                        }),
+                        ..Default::default()
+                    }),
+                ],
                 ..Default::default()
             })
         })
         .collect();
-
-    let mut items = vec![
-        MenuItem::SubMenu(SubMenu {
-            label: "Unlock…".to_string(),
-            enabled: databases.iter().any(|db| db.locked),
-            submenu: unlock_targets,
-            ..Default::default()
-        }),
-        MenuItem::Standard(StandardItem {
-            label: "Lock all".to_string(),
-            enabled: any_unlocked(databases),
-            activate: Box::new(|item: &mut TrayItem| item.trigger_lock(None)),
-            ..Default::default()
-        }),
-    ];
 
     // No separator (and no empty gap) when there are no configured
     // databases to list.
     if !databases.is_empty() {
         items.push(MenuItem::Separator);
     }
-    for db in databases {
-        let name = db.name.clone();
-        let icon = if last_error.is_some_and(|(err_db, _)| err_db == &db.name) {
-            "dialog-error"
-        } else if db.locked {
-            "security-high"
-        } else {
-            "security-medium"
-        };
-        items.push(MenuItem::SubMenu(SubMenu {
-            label: db.name.clone(),
-            icon_name: icon.to_string(),
-            submenu: vec![MenuItem::Standard(StandardItem {
-                label: "Lock".to_string(),
-                enabled: !db.locked,
-                activate: Box::new(move |item: &mut TrayItem| item.trigger_lock(Some(&name))),
-                ..Default::default()
-            })],
-            ..Default::default()
-        }));
-    }
-
+    items.push(MenuItem::Standard(StandardItem {
+        label: "Lock all".to_string(),
+        enabled: any_unlocked(databases),
+        activate: Box::new(|item: &mut TrayItem| item.trigger_lock(None)),
+        ..Default::default()
+    }));
     items.push(MenuItem::Separator);
     items.push(MenuItem::Standard(StandardItem {
         label: "Quit".to_string(),
@@ -631,15 +634,15 @@ mod tests {
         assert_ne!(unlocked_icon.data, error_icon.data);
     }
 
-    /// `fallback_icon` returns a larger size in addition to 22×22, for a
-    /// host that wants a sharper image at a larger panel size.
+    /// `fallback_icon` returns several sizes, for a host that wants a
+    /// sharper image at a larger panel size.
     #[test]
-    fn the_fallback_icon_includes_a_larger_size() {
+    fn the_fallback_icon_includes_larger_sizes() {
         let sizes: Vec<(i32, i32)> = fallback_icon(&[locked("personal")], false)
             .iter()
             .map(|icon| (icon.width, icon.height))
             .collect();
-        assert_eq!(sizes, vec![(22, 22), (44, 44)]);
+        assert_eq!(sizes, vec![(22, 22), (32, 32), (48, 48), (64, 64)]);
     }
 
     /// The three glyph shapes differ structurally, not just by color — a
@@ -782,49 +785,26 @@ mod tests {
 
         assert_eq!(
             labels(&menu),
-            vec![
-                "Unlock…",
-                "Lock all",
-                "---",
-                "personal",
-                "work",
-                "---",
-                "Quit"
-            ]
+            vec!["personal", "work", "---", "Lock all", "---", "Quit"]
         );
 
-        let MenuItem::SubMenu(unlock) = &menu[0] else {
+        let MenuItem::SubMenu(personal_sub) = &menu[0] else {
             panic!("expected a submenu");
         };
-        assert!(unlock.enabled, "something is locked, so Unlock… is usable");
-        assert_eq!(labels(&unlock.submenu), vec!["personal", "work"]);
-        let MenuItem::Standard(personal) = &unlock.submenu[0] else {
-            panic!("expected a standard item");
-        };
-        assert!(personal.enabled, "personal is locked, so it's unlockable");
-        let MenuItem::Standard(work) = &unlock.submenu[1] else {
-            panic!("expected a standard item");
-        };
-        assert!(!work.enabled, "work is already unlocked");
-
-        let MenuItem::Standard(lock_all) = &menu[1] else {
-            panic!("expected a standard item");
-        };
-        assert!(
-            lock_all.enabled,
-            "work is unlocked, so Lock all has something to do"
-        );
-
-        let MenuItem::SubMenu(personal_sub) = &menu[3] else {
-            panic!("expected a submenu");
-        };
+        assert_eq!(labels(&personal_sub.submenu), vec!["Lock", "Unlock"]);
         let MenuItem::Standard(personal_lock) = &personal_sub.submenu[0] else {
             panic!("expected a standard item");
         };
-        assert_eq!(personal_lock.label, "Lock");
         assert!(!personal_lock.enabled, "personal is already locked");
+        let MenuItem::Standard(personal_unlock) = &personal_sub.submenu[1] else {
+            panic!("expected a standard item");
+        };
+        assert!(
+            personal_unlock.enabled,
+            "personal is locked, so it's unlockable"
+        );
 
-        let MenuItem::SubMenu(work_sub) = &menu[4] else {
+        let MenuItem::SubMenu(work_sub) = &menu[1] else {
             panic!("expected a submenu");
         };
         let MenuItem::Standard(work_lock) = &work_sub.submenu[0] else {
@@ -834,46 +814,55 @@ mod tests {
             work_lock.enabled,
             "work is unlocked, so Lock has something to do"
         );
+        let MenuItem::Standard(work_unlock) = &work_sub.submenu[1] else {
+            panic!("expected a standard item");
+        };
+        assert!(!work_unlock.enabled, "work is already unlocked");
+
+        let MenuItem::Standard(lock_all) = &menu[3] else {
+            panic!("expected a standard item");
+        };
+        assert!(
+            lock_all.enabled,
+            "work is unlocked, so Lock all has something to do"
+        );
     }
 
     #[test]
-    fn nothing_locked_disables_unlock_and_nothing_unlocked_disables_lock_all() {
+    fn nothing_unlocked_disables_lock_all() {
         let all_locked = [locked("personal")];
         let menu = build_menu(&all_locked, None);
-        let MenuItem::Standard(lock_all) = &menu[1] else {
+        assert_eq!(
+            labels(&menu),
+            vec!["personal", "---", "Lock all", "---", "Quit"]
+        );
+        let MenuItem::Standard(lock_all) = &menu[2] else {
             panic!("expected a standard item");
         };
         assert!(!lock_all.enabled);
-
-        let all_unlocked = [unlocked("personal", 1)];
-        let menu = build_menu(&all_unlocked, None);
-        let MenuItem::SubMenu(unlock) = &menu[0] else {
-            panic!("expected a submenu");
-        };
-        assert!(!unlock.enabled);
     }
 
     #[test]
-    fn the_erroring_databases_submenu_gets_the_error_icon() {
+    fn the_erroring_database_s_submenu_label_names_the_failure() {
         let databases = [locked("personal"), locked("work")];
         let error = ("work".to_string(), "wrong_credentials");
         let menu = build_menu(&databases, Some(&error));
 
-        let MenuItem::SubMenu(personal_sub) = &menu[3] else {
+        let MenuItem::SubMenu(personal_sub) = &menu[0] else {
             panic!("expected a submenu");
         };
-        assert_eq!(personal_sub.icon_name, "security-high");
+        assert_eq!(personal_sub.label, "personal");
 
-        let MenuItem::SubMenu(work_sub) = &menu[4] else {
+        let MenuItem::SubMenu(work_sub) = &menu[1] else {
             panic!("expected a submenu");
         };
-        assert_eq!(work_sub.icon_name, "dialog-error");
+        assert_eq!(work_sub.label, "work (unlock failed)");
     }
 
     #[test]
     fn with_no_configured_databases_the_menu_still_has_lock_all_and_quit() {
         let menu = build_menu(&[], None);
-        assert_eq!(labels(&menu), vec!["Unlock…", "Lock all", "---", "Quit"]);
+        assert_eq!(labels(&menu), vec!["Lock all", "---", "Quit"]);
     }
 
     /// `TrayItem` itself answers `ksni::Tray`'s queries by calling into a
@@ -896,7 +885,7 @@ mod tests {
         assert_eq!(ksni::Tray::tool_tip(&item).description, "personal: locked");
         assert_eq!(
             labels(&ksni::Tray::menu(&item)),
-            vec!["Unlock…", "Lock all", "---", "personal", "---", "Quit"]
+            vec!["personal", "---", "Lock all", "---", "Quit"]
         );
     }
 

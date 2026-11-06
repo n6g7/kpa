@@ -295,7 +295,7 @@ tooltips. Any StatusNotifierItem host (waybar, quickshell, a KDE/GNOME panel,
 
 - Icon reflects aggregate state: all locked / some unlocked / error.
 - Tooltip lists each database and its state.
-- Menu: Unlock…, Lock all, a per-database submenu, Quit.
+- Menu: a per-database submenu (Lock, Unlock), then Lock all, then Quit.
 
 This satisfies "autostarts, lives in the background until needed" directly
 rather than by proxy through another application's tray.
