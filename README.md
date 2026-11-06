@@ -66,6 +66,32 @@ nix develop -c cargo test
 `direnv allow` drops the `nix develop -c` prefix. CI
 (`.github/workflows/ci.yml`) runs the same commands on every push and PR.
 
+[`fuzz/`](./fuzz) fuzzes request decoding (`src/proto/`) with `cargo-fuzz`,
+in its own Cargo workspace so it's not part of the commands above.
+`cargo-fuzz` needs a nightly rustc for its instrumentation flags; the dev
+shell's own `cargo`/`rustc` stay on stable, so fetch a nightly toolchain
+with `rustup` (also in the dev shell) once:
+
+```sh
+nix develop -c rustup toolchain install nightly --profile minimal
+```
+
+That installs to `~/.rustup`, independent of the dev shell's stable
+toolchain. Put it ahead of the dev shell's `cargo`/`rustc` on `PATH` and run
+the fuzz target for a few minutes:
+
+```sh
+cd fuzz
+nix develop .. -c bash -c '
+  PATH="$HOME/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin:$PATH" \
+    cargo fuzz run decode_request -- -max_total_time=180
+'
+```
+
+A crash leaves a reproducing input under `fuzz/artifacts/decode_request/`;
+rerun with that path as an extra argument to the same command to reproduce
+it outside libFuzzer's loop.
+
 ## Try it
 
 [`config.example.toml`](./config.example.toml) points at the throwaway test

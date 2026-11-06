@@ -87,13 +87,20 @@ Partly pulled forward into step 2 after the September robustness and
 secret-hygiene reviews (`docs/review-2026-09-robustness.md`,
 `docs/review-2026-09-secrets.md`): `PR_SET_DUMPABLE=0`, the request-size
 cap, read/write timeouts, bounded connection handling, and a first zeroize
-pass already landed there. What remains for this step is `cargo-fuzz` and a
-repeat of the zeroize audit once `copy` and the clipboard exist.
+pass already landed there. What remains for this step is a repeat of the
+zeroize audit once `copy` and the clipboard exist.
 
-- **Test:** fuzz `src/proto/` for a few minutes; malformed input must
-  error, never panic or hang the daemon. (A million mutated requests
-  already produced no panics — see the robustness review — but that was a
-  one-off, not a harness in the tree.)
+`fuzz/` is a checked-in `cargo-fuzz` harness: its one target,
+`decode_request`, runs arbitrary bytes through the exact same UTF-8-check-
+then-`decode_request` path `src/server.rs`'s `handle_connection` runs on a
+request line. It's its own Cargo workspace (`fuzz/Cargo.toml`), so it never
+touches `cargo build`/`cargo test` at the repo root. See README.md § Build
+& test for the exact command, including the one-time nightly toolchain it
+needs (`cargo-fuzz`'s instrumentation flags are nightly-only).
+
+- **Test:** `fuzz/`'s `decode_request` target for a few minutes; malformed
+  input must error, never panic or hang. A run of ten million+ mutated
+  requests has produced no panics or hangs so far.
 - **After this:** done.
 
 ---

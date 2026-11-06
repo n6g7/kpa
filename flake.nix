@@ -38,6 +38,18 @@
             # clipboard test by hand — not a Rust dependency (that's
             # wl-clipboard-rs, in Cargo.toml).
             wl-clipboard
+
+            # fuzz/ (docs/plan.md step 6). cargo-fuzz's instrumentation
+            # flags (`-Cinstrument-coverage`, `-Zsanitizer=...`) are
+            # nightly-only rustc features, so it can't run on this shell's
+            # stable toolchain above. nixpkgs doesn't package a nightly
+            # rustc, so rustup is here purely to fetch one on demand
+            # (`rustup toolchain install nightly`, once) — the stable
+            # `cargo`/`rustc` above are still what `cargo build`/`cargo
+            # test` use day to day. See README.md § Build & test for the
+            # exact fuzz command.
+            cargo-fuzz
+            rustup
           ];
 
           # rust-analyzer and clippy both want to find the sysroot's source;
