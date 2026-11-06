@@ -38,6 +38,16 @@
             # clipboard test by hand — not a Rust dependency (that's
             # wl-clipboard-rs, in Cargo.toml).
             wl-clipboard
+            # A StatusNotifierItem host, for driving docs/plan.md step 4's
+            # tray test by hand — not a Rust dependency (that's ksni, in
+            # Cargo.toml). Any host that advertises
+            # org.kde.StatusNotifierWatcher on the session bus works; this
+            # is just a small, scriptable one to run for that.
+            waybar
+            # Rasterizes assets/tray/*.svg to the PNGs src/tray.rs embeds —
+            # see assets/tray/render.sh. Not a Rust dependency, and not
+            # needed for a normal build: the PNGs it produces are committed.
+            resvg
           ];
 
           # rust-analyzer and clippy both want to find the sysroot's source;

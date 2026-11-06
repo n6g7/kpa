@@ -56,8 +56,11 @@ with a clear error naming both versions. `probe` deleted.
 
 ## Step 4 — tray
 
-`tray.rs` on `ksni` — icon state, tooltip, menu (Unlock…, Lock all, per-database
-submenu, Quit).
+`tray.rs` on `ksni` — icon state (all locked / some unlocked / error),
+tooltip, menu (Unlock…, Lock all, a per-database submenu, Quit). Menu
+actions call `Server` directly (`Server::snapshot`, `Unlock::unlock`,
+`Lock::lock`), the same calls the socket's `unlock`/`lock` ops make — no
+second client, no second locking implementation.
 
 - **Test:** icon appears in a StatusNotifierItem host, changes on
   lock/unlock, menu items act.

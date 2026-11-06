@@ -212,6 +212,41 @@ impl Server {
         slots(&self.dbs).values().any(|slot| slot.db.is_some())
     }
 
+    /// The same shape `status()` reports — name, lock state, entry count —
+    /// but without `status()`'s side effect of running the freshness guard
+    /// (`drop_if_stale`) on every configured database.
+    ///
+    /// `tray.rs` polls this on a fixed tick to decide whether to refresh
+    /// what it displays. Running the freshness check on every tick, the
+    /// way `status()` does for an explicit client request, would make an
+    /// autonomous background poll the thing that decides which client
+    /// request discovers a stale database — nondeterministically stealing
+    /// the `stale` error from whichever op would otherwise have reported
+    /// it (`docs/threat-model.md` T-12; this is what
+    /// `tests/server.rs`'s staleness tests caught when the tray's poll
+    /// first called `status()` directly). A stale-but-not-yet-noticed
+    /// database still reads as unlocked here, for up to one poll tick —
+    /// harmless, since nothing reached through this method ever serves
+    /// data from it. The authoritative check stays exactly where it was:
+    /// `status`, `list`, `unlock`, and `copy`, on every real use.
+    pub fn snapshot(&self) -> Vec<DatabaseStatus> {
+        let dbs = slots(&self.dbs);
+        self.config
+            .databases
+            .iter()
+            .map(|cfg| {
+                let entries = dbs
+                    .get(&cfg.name)
+                    .and_then(|slot| slot.db.as_ref().map(vault::entry_count));
+                DatabaseStatus {
+                    name: cfg.name.clone(),
+                    locked: entries.is_none(),
+                    entries,
+                }
+            })
+            .collect()
+    }
+
     fn notify_unlocked(&self) {
         if let Some(events) = self.policy_events.get() {
             let _ = events.send(policy::Event::Unlocked);
@@ -735,7 +770,13 @@ pub(crate) fn log(args: std::fmt::Arguments<'_>) {
 ///
 /// Failures are logged too, not just successes: a failed `unlock` is the
 /// event most worth having a record of.
-fn log_response(response: &Response) {
+///
+/// `pub(crate)` rather than private: `tray.rs` calls `Lock`/`Unlock`
+/// directly (not through `dispatch`) for the same reason this function
+/// exists at all — a tray-triggered lock or unlock is exactly as worth
+/// logging as a socket-triggered one, and this is the one place that
+/// knows how.
+pub(crate) fn log_response(response: &Response) {
     match response {
         Response::Unlock(Ok(db)) => log(format_args!("unlocked {db:?}")),
         Response::Unlock(Err(err)) => log(format_args!("unlock failed: {err:?}")),
