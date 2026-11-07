@@ -629,6 +629,35 @@ fn the_log_never_carries_vault_contents_or_the_password() {
     }
 }
 
+/// `docs/threat-model.md` T-4: "the prompt gets its own stderr, never the
+/// daemon's." A prompt script writing to its own stderr must not have that
+/// output land in the daemon's log, unescaped and without a level or
+/// timestamp.
+#[test]
+fn the_prompts_stderr_never_reaches_the_daemons() {
+    use std::io::Read;
+
+    let mut daemon = Daemon::spawn(
+        &format!(
+            "echo MARKER:{} >&2; printf %s '{}'",
+            common::PASSWORD,
+            common::PASSWORD
+        ),
+        Stdio::piped(),
+    );
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let mut stderr = daemon.child.stderr.take().expect("piped stderr");
+    daemon.child.kill().expect("kill");
+    daemon.child.wait().expect("wait");
+    let mut log = String::new();
+    stderr.read_to_string(&mut log).expect("read log");
+
+    assert!(
+        !log.contains("MARKER:"),
+        "the prompt's stderr reached the daemon's log:\n{log}"
+    );
+}
+
 /// `info` is the default: no debug lines unless asked for.
 #[test]
 fn debug_lines_are_off_by_default() {

@@ -701,6 +701,7 @@ fn prompt_password(argv: &[String]) -> std::io::Result<PromptOutcome> {
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()?;
 
     let mut buf = Zeroizing::new(vec![0u8; MAX_PASSWORD_LEN]);
