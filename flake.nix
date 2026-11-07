@@ -26,7 +26,9 @@
         };
       in
       {
-        packages.default = pkgs.callPackage ./nix/package.nix { };
+        packages.default = pkgs.callPackage ./nix/package.nix {
+          rev = self.dirtyShortRev or self.shortRev or null;
+        };
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
