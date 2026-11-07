@@ -9,11 +9,17 @@
 //! seeing the secret, `wl-paste --list-types` showing the password-manager
 //! hint, the timeout expiring it, and the ownership test (copy, then
 //! `wl-copy hello`, confirm `hello` survives past the timeout) — needs a
-//! real, reachable Wayland compositor. `wayland_available` checks for one;
-//! where it's missing (as in this sandbox: no `$WAYLAND_DISPLAY`, nothing
-//! listening), the tests that need it print why and skip rather than fail,
-//! per `docs/plan.md` step 3's instruction to adapt to what's actually
-//! available. The state machine those tests would exercise — supersession
+//! real, reachable Wayland compositor, and drives that session's actual
+//! clipboard: anything else on it (a clipboard manager, an X11 bridge) can
+//! take the selection mid-test and fail the run. So those tests are
+//! `#[ignore]`d and only run on request, when the clipboard logic changes:
+//!
+//! ```sh
+//! nix develop -c cargo test --test clipboard -- --ignored
+//! ```
+//!
+//! `wayland_available` checks for a compositor; where it's missing, an
+//! opted-in test prints why and skips rather than fails. The state machine those tests would exercise — supersession
 //! making a timeout a no-op, a second `copy` replacing the first — is
 //! covered without any compositor at all by `src/clip.rs`'s own unit tests.
 
@@ -157,6 +163,7 @@ fn copy_fails_cleanly_without_a_wayland_compositor() {
 /// when one is reachable: `copy`, then a real `wl-paste` sees the secret
 /// and `wl-paste --list-types` shows the password-manager hint.
 #[test]
+#[ignore = "drives the live Wayland clipboard; run with --ignored when changing clipboard logic"]
 fn copy_reaches_a_reachable_compositor() {
     if !wayland_available() {
         eprintln!(
@@ -201,6 +208,7 @@ fn copy_reaches_a_reachable_compositor() {
 /// `clipboard_timeout` — `hello` must survive, proving the timeout-driven
 /// drop was a no-op once superseded rather than a blind clear.
 #[test]
+#[ignore = "drives the live Wayland clipboard; run with --ignored when changing clipboard logic"]
 fn surviving_a_takeover_past_the_timeout() {
     if !wayland_available() {
         eprintln!(
