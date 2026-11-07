@@ -70,6 +70,14 @@ nix develop -c cargo test
 `direnv allow` drops the `nix develop -c` prefix. CI
 (`.github/workflows/ci.yml`) runs the same commands on every push and PR.
 
+Two tests in `tests/clipboard.rs` drive the live Wayland clipboard, which
+anything else in your session can interfere with, so `cargo test` skips them.
+Run them when you change the clipboard logic:
+
+```sh
+nix develop -c cargo test --test clipboard -- --ignored
+```
+
 [`fuzz/`](./fuzz) fuzzes request decoding (`src/proto/`) with `cargo-fuzz`,
 in its own Cargo workspace so it's not part of the commands above.
 `cargo-fuzz` needs a nightly rustc, which lives in its own `fuzz` dev shell
