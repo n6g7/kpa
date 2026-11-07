@@ -442,6 +442,39 @@ fn unprotected_field<'a>(entry: &'a keepass::db::Entry, key: &str) -> Option<&'a
 /// `collect_entries`/`entry_count`, for the same reason: a deeply nested
 /// `.kdbx` must not recurse.
 pub fn entry_field(db: &Database, uuid: Uuid, key: &str) -> Option<Option<Zeroizing<String>>> {
+    with_entry(db, uuid, |entry| {
+        entry
+            .fields
+            .get(key)
+            .map(|v| v.get().as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| Zeroizing::new(s.to_string()))
+    })
+}
+
+/// The entry's title, for naming it in the operation log. `None` if there
+/// is no such entry, it has no title, or the title is protected: a log line
+/// must not de-protect a field the user marked protected (same rule as
+/// `unprotected_field`).
+pub fn entry_title(db: &Database, uuid: Uuid) -> Option<String> {
+    use keepass::db::fields;
+
+    with_entry(db, uuid, |entry| {
+        unprotected_field(entry, fields::TITLE)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+    })
+    .flatten()
+}
+
+/// Find the entry with `uuid` and run `read` on it. Explicit worklist, not
+/// recursion, for the same reason as `collect_entries`: a deeply nested
+/// `.kdbx` must not overflow the stack.
+fn with_entry<R>(
+    db: &Database,
+    uuid: Uuid,
+    read: impl FnOnce(&keepass::db::Entry) -> R,
+) -> Option<R> {
     let mut stack = vec![db.root().id()];
     while let Some(id) = stack.pop() {
         let Some(group) = db.group(id) else {
@@ -449,16 +482,9 @@ pub fn entry_field(db: &Database, uuid: Uuid, key: &str) -> Option<Option<Zeroiz
         };
 
         for entry in group.entries() {
-            if entry.id().uuid() != uuid {
-                continue;
+            if entry.id().uuid() == uuid {
+                return Some(read(&entry));
             }
-            let value = entry
-                .fields
-                .get(key)
-                .map(|v| v.get().as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| Zeroizing::new(s.to_string()));
-            return Some(value);
         }
         stack.extend(group.groups().map(|child| child.id()));
     }
@@ -504,7 +530,7 @@ mod tests {
     use keepass::db::fields;
     use uuid::Uuid;
 
-    use super::{entry_count, entry_field, list_entries};
+    use super::{entry_count, entry_field, entry_title, list_entries};
 
     /// `entry_count` must agree with `list_entries` everywhere, including
     /// in nested groups and when fields are protected — it's what `status`
@@ -527,6 +553,31 @@ mod tests {
 
         assert_eq!(entry_count(&db), 3);
         assert_eq!(entry_count(&db), list_entries(&db).len());
+    }
+
+    /// The title that names an entry in the operation log is found at any
+    /// depth, and a protected one is never returned.
+    #[test]
+    fn entry_title_reads_unprotected_titles_only() {
+        let mut db = Database::new();
+        let (open, hidden, untitled);
+        {
+            let mut root = db.root_mut();
+            let mut e = root.add_entry();
+            e.set_unprotected(fields::TITLE, "top");
+            open = e.id().uuid();
+            let mut child = root.add_group();
+            untitled = child.add_entry().id().uuid();
+            let mut deep = child.add_group();
+            let mut e = deep.add_entry();
+            e.set_protected(fields::TITLE, "SECRET-TITLE");
+            hidden = e.id().uuid();
+        }
+
+        assert_eq!(entry_title(&db, open).as_deref(), Some("top"));
+        assert_eq!(entry_title(&db, hidden), None);
+        assert_eq!(entry_title(&db, untitled), None);
+        assert_eq!(entry_title(&db, Uuid::new_v4()), None);
     }
 
     /// Regression for `docs/review-2026-09.md` finding 1: a field the user

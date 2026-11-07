@@ -70,6 +70,7 @@ speak the socket protocol directly works.
 idle_timeout = "30m"
 prompt = ["fuzzel", "--dmenu", "--password", "--prompt"]
 clipboard_timeout = "30s"
+log_level = "info"             # error | warn | info | debug
 
 [[database]]
 name    = "personal"           # stable id used in requests and the tray
@@ -88,6 +89,36 @@ paths resolve against the daemon's working directory.
 If you manage your system declaratively (Nix, Ansible, whatever), this shape
 is meant to be generated rather than hand-edited — every setting is a plain
 TOML value, nothing requires clicking through a GUI.
+
+## Logging
+
+`serve` writes one line per event to stderr, at one of four levels:
+`error`, `warn`, `info` (the default) and `debug`. `log_level` in the config
+sets it and `serve --log-level` overrides it. Under systemd, where stderr is
+the journal, each line carries a `<N>` syslog priority prefix so
+`journalctl -p warning` filters by level; the daemon decides that by
+comparing `$JOURNAL_STREAM` against its own stderr. Elsewhere a line reads
+`<local timestamp> <LEVEL> <message>` (RFC 3339 with the UTC offset), with the timestamp dimmed and the level
+coloured when stderr is a terminal (not when `NO_COLOR` is set or `TERM` is
+`dumb`). Under journald there is no timestamp of kpa's own: the journal
+stamps its own.
+
+| Level   | What it carries                                                           |
+| ------- | ------------------------------------------------------------------------- |
+| `info`  | Every unlock, lock (including idle, screen-lock and suspend), and copy (field, entry title, database) |
+| `warn`  | Failed or refused requests and connections, and the tray or logind failing |
+| `debug` | Why: prompt launches, logind subscription, sleep inhibitor, tray start    |
+
+**What a line may contain.** The operation, the database name, the error
+kind, and for a copy the field name and the entry's title (so the log says
+which secret left, not just which field). Never passwords, protected fields
+(a protected title is replaced by the entry's uuid), usernames, URLs or any
+other vault content, at any level: a log outlives the unlocked session and
+ends up somewhere far less guarded than the socket (threat model TB-7).
+Reads (`status`, `list`) are not logged at all.
+Control characters in a line are escaped, so a crafted name in a request
+can't forge a second line. Every line goes through `log::log`, so that is
+the one function to audit.
 
 ## Protocol
 

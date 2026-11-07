@@ -35,16 +35,16 @@ impl Daemon {
         Daemon::spawn(&format!("sleep 1; printf %s '{password}'"), Stdio::null())
     }
 
-    fn spawn(prompt_script: &str, stdout: Stdio) -> Daemon {
+    fn spawn(prompt_script: &str, log: Stdio) -> Daemon {
         let config = config_toml(prompt_script, &common::password_db().display().to_string());
-        Daemon::spawn_config(&config, None, stdout)
+        Daemon::spawn_config(&config, None, log)
     }
 
     /// Starts `kpa serve` on `config`. `home`, if given, becomes the
     /// daemon's `$HOME` — set on the child process, which has its own
     /// environment, rather than on this test process, where changing it
     /// would race every other test thread.
-    fn spawn_config(config: &str, home: Option<&std::path::Path>, stdout: Stdio) -> Daemon {
+    fn spawn_config(config: &str, home: Option<&std::path::Path>, log: Stdio) -> Daemon {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let socket = dir.path().join("sock");
         let config_path = dir.path().join("config.toml");
@@ -57,8 +57,8 @@ impl Daemon {
             .arg(&socket)
             .arg("--config")
             .arg(&config_path)
-            .stdout(stdout)
-            .stderr(Stdio::null());
+            .stdout(Stdio::null())
+            .stderr(log);
         if let Some(home) = home {
             command.env("HOME", home);
         }
@@ -363,12 +363,12 @@ fn a_second_unlock_does_not_open_a_second_prompt() {
     );
 }
 
-/// Nobody reading the daemon's stdout must not kill it or cost a client
+/// Nobody reading the daemon's log must not kill it or cost a client
 /// its reply (docs/review-2026-09-robustness.md finding 4).
 #[test]
-fn a_closed_stdout_does_not_take_the_daemon_down() {
+fn a_closed_log_does_not_take_the_daemon_down() {
     let mut daemon = Daemon::spawn(&format!("printf %s '{}'", common::PASSWORD), Stdio::piped());
-    drop(daemon.child.stdout.take());
+    drop(daemon.child.stderr.take());
 
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     assert_eq!(daemon.run(&["lock"])["ok"], true);
@@ -574,4 +574,74 @@ fn a_replaced_inode_makes_the_database_stale() {
     std::fs::rename(&replacement, &copy).unwrap();
 
     assert_stale(&daemon, "inode");
+}
+
+/// What the daemon logs names operations and databases, never what a
+/// database holds — at the most verbose level too (`docs/design.md`
+/// § Logging).
+#[test]
+fn the_log_never_carries_vault_contents_or_the_password() {
+    use std::io::Read;
+
+    let config = format!(
+        "log_level = \"debug\"\n{}",
+        config_toml(
+            &format!("printf %s '{}'", common::PASSWORD),
+            &common::password_db().display().to_string()
+        )
+    );
+    let mut daemon = Daemon::spawn_config(&config, None, Stdio::piped());
+
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let listed = daemon.run(&["list"]);
+    assert_eq!(listed["ok"], true);
+    assert_eq!(daemon.run(&["unlock", "nope"])["ok"], false);
+    assert_eq!(daemon.run(&["lock"])["ok"], true);
+
+    let mut stderr = daemon.child.stderr.take().expect("piped stderr");
+    daemon.child.kill().expect("kill");
+    daemon.child.wait().expect("wait");
+    let mut log = String::new();
+    stderr.read_to_string(&mut log).expect("read log");
+
+    assert!(log.contains(" INFO  unlocked \"personal\""), "{log}");
+    assert!(log.contains(" DEBUG prompting for \"personal\""), "{log}");
+    assert!(log.contains(" WARN  unlock failed"), "{log}");
+    assert!(log.contains(" INFO  locked every database"), "{log}");
+
+    let mut secrets = vec![common::PASSWORD.to_string()];
+    for entry in listed["entries"].as_array().expect("entries") {
+        for field in ["title", "username", "url"] {
+            if let Some(text) = entry[field].as_str().filter(|t| t.len() > 2) {
+                secrets.push(text.to_string());
+            }
+        }
+    }
+    assert!(
+        secrets.len() > 1,
+        "the fixture listed no entry text: {listed}"
+    );
+    for secret in &secrets {
+        assert!(
+            !log.contains(secret.as_str()),
+            "{secret:?} reached the log:\n{log}"
+        );
+    }
+}
+
+/// `info` is the default: no debug lines unless asked for.
+#[test]
+fn debug_lines_are_off_by_default() {
+    use std::io::Read;
+
+    let mut daemon = Daemon::spawn(&format!("printf %s '{}'", common::PASSWORD), Stdio::piped());
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let mut stderr = daemon.child.stderr.take().expect("piped stderr");
+    daemon.child.kill().expect("kill");
+    daemon.child.wait().expect("wait");
+    let mut log = String::new();
+    stderr.read_to_string(&mut log).expect("read log");
+
+    assert!(log.contains(" INFO  unlocked"), "{log}");
+    assert!(!log.contains("DEBUG"), "{log}");
 }

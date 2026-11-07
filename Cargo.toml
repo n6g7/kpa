@@ -22,6 +22,7 @@ zbus = "5"
 wl-clipboard-rs = "0.9.5"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 png = "0.17"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"

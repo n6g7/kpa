@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::log::Level;
+
 /// Top-level config, `$XDG_CONFIG_HOME/kpa/config.toml`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Config {
@@ -33,6 +35,11 @@ pub struct Config {
     /// its own clipboard offer (see § Clipboard).
     #[serde(with = "humantime_serde", default = "default_clipboard_timeout")]
     pub clipboard_timeout: Duration,
+
+    /// How much `serve` logs; `--log-level` overrides it. See
+    /// `docs/design.md` § Logging.
+    #[serde(default)]
+    pub log_level: Level,
 
     /// One or more `.kdbx` files to manage. TOML array-of-tables, per
     /// decision #10 — each database unlocks and tracks tray state

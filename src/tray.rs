@@ -24,6 +24,7 @@ use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{StandardItem, SubMenu};
 use ksni::{MenuItem, ToolTip};
 
+use crate::log;
 use crate::proto::{
     DatabaseStatus, Lock, LockRequest, Response, Unlock, UnlockError, UnlockRequest,
 };
@@ -48,10 +49,12 @@ fn run(server: Arc<Server>) {
         // No StatusNotifierWatcher / no session bus. Not fatal: the tray
         // isn't a security goal (`docs/threat-model.md` § 2).
         Err(err) => {
-            server::log(format_args!("tray not started: {err}"));
+            log::warn(format_args!("tray not started: {err}"));
             return;
         }
     };
+
+    log::debug(format_args!("tray registered"));
 
     // Give the item its own handle, so a finished background unlock
     // (`TrayItem::start_unlock`) can tell `ksni` to refresh.
