@@ -879,3 +879,24 @@ fn copy_of_a_resolvable_field_reaches_the_clipboard_handoff() {
         );
     }
 }
+
+/// `list`'s `fields` array: built-ins present and non-empty in the
+/// documented order, then custom fields sorted by key, with the one
+/// colliding with a built-in (`PASSWORD`) `custom:`-prefixed.
+#[test]
+fn list_reports_copyable_field_names() {
+    let daemon = fields_daemon();
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+
+    let listed = daemon.run(&["list", "personal"]);
+    let entries = listed["entries"].as_array().expect("entries array");
+
+    let example = entries
+        .iter()
+        .find(|e| e["title"] == "Example")
+        .expect("Example entry");
+    assert_eq!(
+        example["fields"],
+        serde_json::json!(["username", "password", "url", "custom:PASSWORD", "api-key"])
+    );
+}

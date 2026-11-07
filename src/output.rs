@@ -112,6 +112,7 @@ mod tests {
             username: Some("alice\u{2067}".to_string()),
             url: None,
             group: "Web\u{9b}".to_string(),
+            fields: Vec::new(),
         }]));
         let line = format!(
             "{}\n",

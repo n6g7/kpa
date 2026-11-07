@@ -693,6 +693,7 @@ fn wire_entries(db_name: &str, db: &Database) -> Vec<WireEntry> {
             username: entry.username.clone(),
             url: entry.url.clone(),
             group: entry.group.clone(),
+            fields: entry.fields.clone(),
         })
         .collect()
 }

@@ -181,6 +181,10 @@ pub struct EntrySummary {
     /// Name of the immediate parent group (not a full path — the design
     /// doc's example response uses a bare name like `"Dev"`).
     pub group: String,
+    /// Field *names* `copy` can be asked for on this entry — see
+    /// `copyable_field_names`. Never a value, so protectedness never hides
+    /// an entry here the way it hides `title`/`username`/`url` above.
+    pub fields: Vec<String>,
 }
 
 /// Open a `.kdbx` file with a password and/or a keyfile.
@@ -526,9 +530,98 @@ fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
                 username: unprotected_field(&entry, fields::USERNAME).map(str::to_owned),
                 url: unprotected_field(&entry, fields::URL).map(str::to_owned),
                 group: group.name.clone(),
+                fields: copyable_field_names(&entry),
             });
         }
         stack.extend(group.groups().map(|child| child.id()));
+    }
+}
+
+/// Exact KeePass key spellings that are never "custom": the four built-ins
+/// `copy` supports, and `Title` — kpa never makes `Title` copyable itself,
+/// but it is still KeePass's own reserved key, not a user-defined one.
+/// Exact-case: a differently-cased key (e.g. a custom `USERNAME`) is a
+/// distinct `HashMap` entry and *is* a custom field — see
+/// `copyable_field_names`.
+const RESERVED_ENTRY_KEYS: [&str; 5] = [
+    keepass::db::fields::TITLE,
+    keepass::db::fields::USERNAME,
+    keepass::db::fields::PASSWORD,
+    keepass::db::fields::URL,
+    keepass::db::fields::NOTES,
+];
+
+/// Field names `copy` can be asked for on this entry — never values.
+/// Built-ins in the fixed order `docs/design.md` § Protocol documents
+/// (`username`, `password`, `url`, `notes`), each listed only when
+/// present and non-empty; then this entry's custom (user-defined) string
+/// fields, by their KeePass key, `custom:`-prefixed exactly when that key
+/// collides case-insensitively with a built-in name or with `title`
+/// (the collision rule — also implemented, independently, by
+/// `proto::copy::Field`'s own encode/decode, which this must stay
+/// consistent with).
+///
+/// `keepass`'s `Entry::fields` is an unordered `HashMap`
+/// (`db/types/entry.rs`), so the database's own field order is not
+/// recoverable here; custom keys are sorted instead, which is at least
+/// deterministic.
+///
+/// Protectedness never hides a field's *name* here, unlike `list`'s own
+/// `title`/`username`/`url`: this reads straight through `Value::get()`,
+/// the same as `entry_field` does for `copy` — a bare name carries nothing
+/// a protected value does.
+fn copyable_field_names(entry: &keepass::db::Entry) -> Vec<String> {
+    use keepass::db::fields;
+
+    let has_value = |key: &str| entry.fields.get(key).is_some_and(|v| !v.get().is_empty());
+
+    let mut names: Vec<String> = [
+        ("username", fields::USERNAME),
+        ("password", fields::PASSWORD),
+        ("url", fields::URL),
+        ("notes", fields::NOTES),
+    ]
+    .into_iter()
+    .filter(|(_, key)| has_value(key))
+    .map(|(name, _)| name.to_string())
+    .collect();
+
+    let mut custom: Vec<&String> = entry
+        .fields
+        .iter()
+        .filter(|(key, value)| {
+            !RESERVED_ENTRY_KEYS.contains(&key.as_str()) && !value.get().is_empty()
+        })
+        .map(|(key, _)| key)
+        .collect();
+    custom.sort();
+
+    names.extend(custom.into_iter().map(|key| custom_field_wire_name(key)));
+    names
+}
+
+/// Whether `key` collides, case-insensitively, with a name
+/// `docs/design.md` § Protocol reserves on the wire — the four built-ins
+/// `copyable_field_names` lists plus `title`. Kept in lockstep with
+/// `proto::copy::Field`'s own `RESERVED_NAMES`: that one decides what a
+/// *request* means, this one decides how a *listed* custom key is spelled,
+/// and they have to agree or a name `list` prints would not be the one
+/// `copy` resolves back to the same field.
+fn collides_with_a_reserved_name(key: &str) -> bool {
+    ["username", "password", "url", "notes", "title"]
+        .iter()
+        .any(|reserved| key.eq_ignore_ascii_case(reserved))
+}
+
+/// The wire name for a custom field keyed `key`: the bare key itself,
+/// unless it collides case-insensitively with a reserved name, in which
+/// case it is prefixed `custom:` so a bare request for that spelling still
+/// means the built-in (or, for `title`, means nothing copyable at all).
+fn custom_field_wire_name(key: &str) -> String {
+    if collides_with_a_reserved_name(key) {
+        format!("custom:{key}")
+    } else {
+        key.to_string()
     }
 }
 
@@ -721,5 +814,101 @@ mod tests {
 
         assert!(entry_exists(&db, uuid));
         assert!(!entry_exists(&db, Uuid::new_v4()));
+    }
+
+    /// Built-ins appear in the fixed, documented order, and only when
+    /// present and non-empty — an absent or empty one is skipped, not
+    /// listed with nothing to copy.
+    #[test]
+    fn copyable_fields_lists_present_builtins_in_order() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::URL, "https://example.com");
+            entry.set_unprotected(fields::USERNAME, "alice");
+            entry.set_unprotected(fields::PASSWORD, "hunter2");
+            entry.set_unprotected(fields::NOTES, "");
+            entry.id().uuid()
+        };
+
+        let entries = list_entries(&db);
+        let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
+        assert_eq!(entry.fields, vec!["username", "password", "url"]);
+    }
+
+    /// A protected built-in's *name* still appears — only `list`'s own
+    /// `title`/`username`/`url` values stay filtered by protection, not
+    /// `fields`.
+    #[test]
+    fn copyable_fields_includes_protected_builtins_by_name() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_protected(fields::PASSWORD, "hunter2");
+            entry.id().uuid()
+        };
+
+        let entries = list_entries(&db);
+        let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
+        assert_eq!(entry.fields, vec!["password"]);
+    }
+
+    /// Custom fields are listed by their key, sorted (since `keepass`
+    /// stores them in an unordered `HashMap`), after every built-in.
+    #[test]
+    fn copyable_fields_lists_custom_keys_sorted_after_builtins() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::USERNAME, "alice");
+            entry.set_unprotected("zeta", "z");
+            entry.set_unprotected("api-key", "k");
+            entry.id().uuid()
+        };
+
+        let entries = list_entries(&db);
+        let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
+        assert_eq!(entry.fields, vec!["username", "api-key", "zeta"]);
+    }
+
+    /// A custom field keyed the same as a built-in, only in a different
+    /// case, is a distinct, genuine field (`keepass`'s keys are
+    /// exact-case) — and is listed `custom:`-prefixed, per the collision
+    /// rule, so a bare `password` on the wire still means the built-in.
+    #[test]
+    fn a_custom_field_colliding_with_a_builtin_is_prefixed() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::PASSWORD, "hunter2");
+            // Not `fields::PASSWORD` ("Password") — a differently-cased,
+            // genuinely distinct key.
+            entry.set_unprotected("PASSWORD", "also a secret");
+            entry.id().uuid()
+        };
+
+        let entries = list_entries(&db);
+        let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
+        assert_eq!(entry.fields, vec!["password", "custom:PASSWORD"]);
+    }
+
+    /// An empty custom value is skipped, same rule as the built-ins.
+    #[test]
+    fn copyable_fields_skips_empty_custom_values() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected("empty", "");
+            entry.id().uuid()
+        };
+
+        let entries = list_entries(&db);
+        let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
+        assert!(entry.fields.is_empty());
     }
 }

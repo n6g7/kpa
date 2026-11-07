@@ -178,7 +178,8 @@ its bare key.
 
 {"ok":true,"v":1,"entries":[{"db":"personal","uuid":"…","title":"GitHub",
                              "username":"alice","url":"https://github.com",
-                             "group":"Dev"}]}
+                             "group":"Dev",
+                             "fields":["username","password","custom:Password"]}]}
 
 {"ok":true,"v":1,"copied":"password","expires_in":30}
 
@@ -228,6 +229,18 @@ field counts as protected when its XML carries `Protected="True"` or
 `list` can return a field that carries only that marker; the threat model
 (A-2, G-3) records this as a known gap. The launcher does its own fuzzy
 matching; kpa stays dumb and returns everything else.
+
+**`fields` is the one exception, because it carries names, never values.**
+Each entry's `fields` array names every field `copy` can be asked for on
+it: the built-ins present and non-empty on the entry, in the order
+`username`, `password`, `url`, `notes`, then its custom fields by their
+KeePass key (sorted — `keepass`'s own field storage is an unordered map, so
+the database's own field order isn't recoverable), `custom:`-prefixed per
+the collision rule above. Protectedness never hides a field's *name* here,
+unlike `title`/`username`/`url` above: a protected `Password` still lists
+`password`, and a custom field colliding with a protected built-in still
+lists `custom:<key>`. `fields` is omitted from the wire when empty, like
+the other optional fields.
 
 ## Concurrency and file freshness
 
