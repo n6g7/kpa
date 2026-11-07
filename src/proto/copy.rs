@@ -86,13 +86,15 @@ impl CopyError {
     }
 }
 
-/// What a successful `copy` reports. `db` is never put on the wire (the
-/// client already named it) — it's here only so `server.rs`'s operation
-/// log can say which database a copy touched, matching `list`'s own
-/// `db`-per-entry bookkeeping.
+/// What a successful `copy` reports. `db` and `entry` are never put on the
+/// wire (the client already named both) — they're here only so
+/// `server.rs`'s operation log can say which database and entry a copy
+/// touched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyOutcome {
     pub db: String,
+    /// The entry's title, or its uuid when it has no readable title.
+    pub entry: String,
     pub field: Field,
     /// Whole seconds until the daemon drops its clipboard offer on its own.
     pub expires_in: u64,

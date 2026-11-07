@@ -105,15 +105,17 @@ stamps its own.
 
 | Level   | What it carries                                                           |
 | ------- | ------------------------------------------------------------------------- |
-| `info`  | Every unlock, lock (including idle, screen-lock and suspend), and copy    |
+| `info`  | Every unlock, lock (including idle, screen-lock and suspend), and copy (field, entry title, database) |
 | `warn`  | Failed or refused requests and connections, and the tray or logind failing |
 | `debug` | Why: prompt launches, logind subscription, sleep inhibitor, tray start    |
 
-**What a line may contain.** The operation, the database name, the field
-name for a copy, and the error kind. Never entry titles, usernames, URLs,
-passwords or any other vault content, at any level: a log outlives the
-unlocked session and ends up somewhere far less guarded than the socket
-(threat model TB-7). Reads (`status`, `list`) are not logged at all.
+**What a line may contain.** The operation, the database name, the error
+kind, and for a copy the field name and the entry's title (so the log says
+which secret left, not just which field). Never passwords, protected fields
+(a protected title is replaced by the entry's uuid), usernames, URLs or any
+other vault content, at any level: a log outlives the unlocked session and
+ends up somewhere far less guarded than the socket (threat model TB-7).
+Reads (`status`, `list`) are not logged at all.
 Control characters in a line are escaped, so a crafted name in a request
 can't forge a second line. Every line goes through `log::log`, so that is
 the one function to audit.

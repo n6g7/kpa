@@ -512,9 +512,14 @@ impl CopyEntry for Server {
             match vault::entry_field(database, request.uuid, field_key(request.field)) {
                 None => return Err(CopyError::UnknownUuid { db: db() }),
                 Some(None) => return Err(CopyError::FieldEmpty { db: db() }),
-                Some(Some(value)) => value,
+                Some(Some(value)) => (
+                    value,
+                    vault::entry_title(database, request.uuid)
+                        .unwrap_or_else(|| request.uuid.to_string()),
+                ),
             }
         };
+        let (value, entry) = value;
 
         let offer = self.clip.offer(value).map_err(|err| CopyError::Clipboard {
             db: db(),
@@ -537,6 +542,7 @@ impl CopyEntry for Server {
 
         Ok(CopyOutcome {
             db: db(),
+            entry,
             field: request.field,
             expires_in: timeout.as_secs(),
         })
@@ -762,7 +768,10 @@ fn watch_idle(server: &Server) {
 /// the last place that should accumulate, since it outlives the unlocked
 /// session that produced it and lands somewhere far less guarded than the
 /// socket did. What gets logged is that an operation happened and to which
-/// database, never what was in one.
+/// database. The one piece of vault content that does appear is the title
+/// of the entry a `copy` took a field from: a record of which secret left
+/// is the point of logging a copy. Never a secret, and never a title the
+/// user marked protected.
 ///
 /// Failures are logged too, not just successes: a failed `unlock` is the
 /// event most worth having a record of.
@@ -786,11 +795,11 @@ pub(crate) fn log_response(response: &Response) {
         // `copy` is an access worth recording, same reasoning as `unlock`
         // and `lock` above — unlike `list`/`status`, which stay silent
         // (see the note on `Response::Status { .. } | Response::List(_)`
-        // below). Only the field name and database are logged, never the
-        // secret.
+        // below). The field, the entry's title and the database are logged,
+        // never the secret — and never a protected title.
         Response::Copy(Ok(outcome)) => log::info(format_args!(
-            "copied {:?} from {:?}",
-            outcome.field, outcome.db
+            "copied {:?} of {:?} from {:?}",
+            outcome.field, outcome.entry, outcome.db
         )),
         Response::Copy(Err(err)) => log::warn(format_args!("copy failed: {err:?}")),
 

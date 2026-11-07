@@ -221,6 +221,7 @@ mod tests {
         // and for how long.
         let copy = Response::Copy(Ok(CopyOutcome {
             db: "personal".to_string(),
+            entry: "GitHub".to_string(),
             field: Field::Password,
             expires_in: 30,
         }));
