@@ -7,7 +7,6 @@
 - [ ] SSH agent?
 - [ ] Find out why `cargo run -- ...` rebuilds on each run, even with no changes
 - [ ] `kpa list` returns a list of copyable fields for each entry
-- [ ] Run the live clipboard tests against a private headless compositor, so they can run by default
 
 ## Done
 
