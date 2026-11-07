@@ -7,13 +7,15 @@
 //! outlives the unlocked session that produced it and lands somewhere far
 //! less guarded than the socket (`docs/threat-model.md` TB-7).
 //!
-//! No timestamps: a supervisor stamps its own, and a second clock here would
+//! A line to a terminal or file starts with a UTC timestamp. Under journald
+//! there is none: the journal stamps its own, and a second clock here would
 //! only disagree with it.
 
 use std::fmt::{self, Write as _};
 use std::io::Write as _;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
@@ -92,18 +94,22 @@ pub fn log(level: Level, args: fmt::Arguments<'_>) {
     if !enabled(level) {
         return;
     }
-    let line = format_line(level, journal_attached(), args);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let line = format_line(level, journal_attached(), now, args);
     let _ = std::io::stderr().lock().write_all(line.as_bytes());
 }
 
-/// One finished line, newline included. Control characters in the message
+/// One finished line, newline included. `now` is seconds since the Unix
+/// epoch; it is only used when not logging to the journal. Control characters in the message
 /// are escaped, so a crafted database name in a request cannot start a
 /// second line (or, under journald, a second `<N>` priority).
-fn format_line(level: Level, journal: bool, args: fmt::Arguments<'_>) -> String {
+fn format_line(level: Level, journal: bool, now: u64, args: fmt::Arguments<'_>) -> String {
     let mut line = if journal {
         format!("<{}>", level.priority())
     } else {
-        format!("kpa: {}: ", level.name())
+        format!("{} {}: ", timestamp(now), level.name())
     };
     let mut message = String::new();
     let _ = message.write_fmt(args);
@@ -116,6 +122,28 @@ fn format_line(level: Level, journal: bool, args: fmt::Arguments<'_>) -> String 
     }
     line.push('\n');
     line
+}
+
+/// `2026-11-06T17:33:05Z`: UTC, whole seconds, sortable as text.
+fn timestamp(epoch_secs: u64) -> String {
+    let days = (epoch_secs / 86_400) as i64;
+    let rest = epoch_secs % 86_400;
+    // Civil date from a day count (Howard Hinnant's `civil_from_days`).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3_600,
+        rest % 3_600 / 60,
+        rest % 60
+    )
 }
 
 /// Whether stderr is the journal. systemd sets `JOURNAL_STREAM` to the
@@ -147,24 +175,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plain_lines_carry_the_level() {
+    fn plain_lines_carry_a_timestamp_and_the_level() {
         assert_eq!(
-            format_line(Level::Warn, false, format_args!("unlock failed")),
-            "kpa: warn: unlock failed\n"
+            format_line(Level::Warn, false, 0, format_args!("unlock failed")),
+            "1970-01-01T00:00:00Z warn: unlock failed\n"
         );
     }
 
     #[test]
+    fn timestamps_are_utc_dates() {
+        assert_eq!(timestamp(0), "1970-01-01T00:00:00Z");
+        assert_eq!(timestamp(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(timestamp(1_793_986_385), "2026-11-06T17:33:05Z");
+        assert_eq!(timestamp(4_102_444_799), "2099-12-31T23:59:59Z");
+    }
+
+    #[test]
     fn journal_lines_carry_a_syslog_priority() {
-        assert_eq!(format_line(Level::Error, true, format_args!("x")), "<3>x\n");
-        assert_eq!(format_line(Level::Warn, true, format_args!("x")), "<4>x\n");
-        assert_eq!(format_line(Level::Info, true, format_args!("x")), "<6>x\n");
-        assert_eq!(format_line(Level::Debug, true, format_args!("x")), "<7>x\n");
+        assert_eq!(
+            format_line(Level::Error, true, 0, format_args!("x")),
+            "<3>x\n"
+        );
+        assert_eq!(
+            format_line(Level::Warn, true, 0, format_args!("x")),
+            "<4>x\n"
+        );
+        assert_eq!(
+            format_line(Level::Info, true, 0, format_args!("x")),
+            "<6>x\n"
+        );
+        assert_eq!(
+            format_line(Level::Debug, true, 0, format_args!("x")),
+            "<7>x\n"
+        );
     }
 
     #[test]
     fn control_characters_cannot_start_another_line() {
-        let line = format_line(Level::Info, true, format_args!("a\n<3>b\r\x1b[2J"));
+        let line = format_line(Level::Info, true, 0, format_args!("a\n<3>b\r\x1b[2J"));
         assert_eq!(line.matches('\n').count(), 1, "{line:?}");
         assert!(line.ends_with('\n'));
         assert!(!line.contains('\x1b'));
