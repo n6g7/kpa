@@ -183,7 +183,7 @@ mod tests {
                     entries: None,
                 },
             ],
-            version: "v1.2.3".to_string(),
+            version: "1.2.3".to_string(),
         };
         assert_eq!(
             serde_json::to_value(&status).expect("status should serialize"),
@@ -194,7 +194,7 @@ mod tests {
                     {"name": "personal", "locked": false, "entries": 341},
                     {"name": "work", "locked": true},
                 ],
-                "version": "v1.2.3",
+                "version": "1.2.3",
             })
         );
 

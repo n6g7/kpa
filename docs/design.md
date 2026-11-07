@@ -160,7 +160,7 @@ custom-attribute dump in v1.
 
 ```json
 {"ok":true,"v":1,"databases":[{"name":"personal","locked":false,"entries":341},
-                              {"name":"work","locked":true}],"version":"v1.2.3"}
+                              {"name":"work","locked":true}],"version":"1.2.3"}
 
 {"ok":true,"v":1,"entries":[{"db":"personal","uuid":"…","title":"GitHub",
                              "username":"alice","url":"https://github.com",

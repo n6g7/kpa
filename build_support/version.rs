@@ -14,10 +14,12 @@ pub struct VersionInputs<'a> {
     /// from `self.dirtyShortRev`, which already carries its own `-dirty`
     /// suffix when applicable, so this is used as-is.
     pub build_rev_override: Option<&'a str>,
-    /// `CARGO_PKG_VERSION` (the crate version from `Cargo.toml`), used
-    /// alongside `build_rev_override` since that path can't tell a
-    /// release commit from any other — it reports `{crate_version}+{rev}`
-    /// rather than claiming `dev-` for what may actually be a release.
+    /// `CARGO_PKG_VERSION` (the crate version from `Cargo.toml`). Used in
+    /// every case: as the base every `+{something}` is appended to, and
+    /// alone for an exact release tag. Also what `build_rev_override`
+    /// falls back on, since that path can't tell a release commit from
+    /// any other — it reports `{crate_version}+{rev}` unconditionally
+    /// rather than guessing.
     pub crate_version: &'a str,
     /// `git describe --tags --exact-match HEAD`'s output, if `HEAD` is
     /// exactly a release tag.
@@ -29,13 +31,20 @@ pub struct VersionInputs<'a> {
     pub dirty: bool,
 }
 
-/// Decides the `KPA_VERSION` string:
+/// Decides the `KPA_VERSION` string. One shape throughout —
+/// `{crate_version}` alone only for an exact release tag, `+{something}`
+/// appended for every other case — so a cargo build and a Nix build of the
+/// same commit print the same string, and nothing printed needs its own
+/// parsing rule:
 /// - `{crate_version}+{rev}` when `build_rev_override` is set (the Nix
 ///   package build path, which has no way to tell a release commit from
 ///   any other);
-/// - otherwise `v{tag}` when `HEAD` is exactly a release tag, `dev-{hash}`
-///   otherwise, each with a `-dirty` suffix if the working tree has
-///   uncommitted changes.
+/// - otherwise, with a `.git` to ask: `{crate_version}` when `HEAD` is
+///   exactly a release tag (the tag's own `v` prefix is for git, not for
+///   this string), `{crate_version}+{hash}` otherwise — each with a
+///   `-dirty` suffix if the working tree has uncommitted changes;
+/// - `{crate_version}+unknown` when there's no `.git` to ask and no
+///   override either.
 pub fn compute_version(inputs: VersionInputs) -> String {
     if let Some(rev) = inputs.build_rev_override
         && !rev.is_empty()
@@ -47,12 +56,12 @@ pub fn compute_version(inputs: VersionInputs) -> String {
 
     if let Some(tag) = inputs.exact_tag {
         let tag = tag.strip_prefix('v').unwrap_or(tag);
-        return format!("v{tag}{dirty_suffix}");
+        return format!("{tag}{dirty_suffix}");
     }
 
     if let Some(hash) = inputs.short_hash {
-        return format!("dev-{hash}{dirty_suffix}");
+        return format!("{}+{hash}{dirty_suffix}", inputs.crate_version);
     }
 
-    "dev-unknown".to_string()
+    format!("{}+unknown", inputs.crate_version)
 }
