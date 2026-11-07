@@ -32,6 +32,7 @@ use zeroize::Zeroizing;
 
 use crate::clip::{self, Clipboard};
 use crate::config::Config;
+use crate::log;
 use crate::policy;
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
@@ -194,7 +195,7 @@ impl Server {
         // Logged after the guard is released: a stalled stdout must not
         // hold up every other request.
         for name in &locked {
-            log(format_args!(
+            log::info(format_args!(
                 "locked {name:?} after idle timeout ({:?})",
                 self.config.idle_timeout
             ));
@@ -373,6 +374,7 @@ impl Unlock for Server {
             name,
         };
 
+        log::debug(format_args!("prompting for {name:?}"));
         let password = match prompt_password(&self.config.prompt) {
             Ok(PromptOutcome::Cancelled) => return Err(UnlockError::PromptCancelled { db: db() }),
             // Empty means "no password" — the only way to reach a
@@ -750,16 +752,10 @@ fn watch_idle(server: &Server) {
     }
 }
 
-/// One line on stdout. Never panics, unlike `println!`: a closed or broken
-/// stdout must not take the daemon down with it.
-pub(crate) fn log(args: std::fmt::Arguments<'_>) {
-    let _ = writeln!(std::io::stdout().lock(), "kpa: {args}");
-}
-
 /// Log the operations that change what the daemon is holding, one line per
-/// event on stdout, for whatever is supervising the daemon to collect. No
-/// timestamps: a supervisor stamps its own, and inventing a second clock
-/// here would only disagree with it.
+/// event on stderr (see `crate::log`), for whatever is supervising the
+/// daemon to collect. Successes are `info`; a failed or refused request is
+/// `warn`.
 ///
 /// **Reads are deliberately silent.** `status` and `list` change nothing,
 /// and `list` in particular carries entry titles and usernames — a log is
@@ -778,25 +774,25 @@ pub(crate) fn log(args: std::fmt::Arguments<'_>) {
 /// knows how.
 pub(crate) fn log_response(response: &Response) {
     match response {
-        Response::Unlock(Ok(db)) => log(format_args!("unlocked {db:?}")),
-        Response::Unlock(Err(err)) => log(format_args!("unlock failed: {err:?}")),
+        Response::Unlock(Ok(db)) => log::info(format_args!("unlocked {db:?}")),
+        Response::Unlock(Err(err)) => log::warn(format_args!("unlock failed: {err:?}")),
 
-        Response::Lock(Ok(Some(db))) => log(format_args!("locked {db:?}")),
-        Response::Lock(Ok(None)) => log(format_args!("locked every database")),
-        Response::Lock(Err(err)) => log(format_args!("lock failed: {err:?}")),
+        Response::Lock(Ok(Some(db))) => log::info(format_args!("locked {db:?}")),
+        Response::Lock(Ok(None)) => log::info(format_args!("locked every database")),
+        Response::Lock(Err(err)) => log::warn(format_args!("lock failed: {err:?}")),
 
-        Response::Protocol(err) => log(format_args!("rejected request: {err:?}")),
+        Response::Protocol(err) => log::warn(format_args!("rejected request: {err:?}")),
 
         // `copy` is an access worth recording, same reasoning as `unlock`
         // and `lock` above — unlike `list`/`status`, which stay silent
         // (see the note on `Response::Status { .. } | Response::List(_)`
         // below). Only the field name and database are logged, never the
         // secret.
-        Response::Copy(Ok(outcome)) => log(format_args!(
+        Response::Copy(Ok(outcome)) => log::info(format_args!(
             "copied {:?} from {:?}",
             outcome.field, outcome.db
         )),
-        Response::Copy(Err(err)) => log(format_args!("copy failed: {err:?}")),
+        Response::Copy(Err(err)) => log::warn(format_args!("copy failed: {err:?}")),
 
         // Listed above rather than caught by a `_` arm on purpose: adding
         // an op should be a decision about whether it belongs in the log,
@@ -858,11 +854,11 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
     match socket::peer_uid(&stream) {
         Ok(uid) if uid == owner => {}
         Ok(uid) => {
-            log(format_args!("rejected connection from uid {uid}"));
+            log::warn(format_args!("rejected connection from uid {uid}"));
             return;
         }
         Err(err) => {
-            log(format_args!(
+            log::warn(format_args!(
                 "rejected connection: peer credentials unavailable: {err}"
             ));
             return;

@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use kpa::config::Config;
-use kpa::output::{escape_for_terminal, print_escaped, report_error};
+use kpa::log::{self, Level};
+use kpa::output::{print_escaped, report_error};
 use kpa::policy;
 use kpa::proto::{self, CopyRequest, Field, ListRequest, LockRequest, Op, Request, UnlockRequest};
 use kpa::server::{self, Server};
@@ -38,7 +39,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the daemon: bind the socket and serve requests until killed.
-    Serve,
+    Serve {
+        /// How much to log. Defaults to `log_level` in the config file,
+        /// then `info`.
+        #[arg(long, value_enum)]
+        log_level: Option<Level>,
+    },
     /// Aggregate lock state of every configured database.
     Status,
     /// Unlock one database, prompting for its password.
@@ -105,7 +111,7 @@ fn main() -> ExitCode {
     };
 
     match cli.command {
-        Command::Serve => run_serve(&socket_path, cli.config),
+        Command::Serve { log_level } => run_serve(&socket_path, cli.config, log_level),
         Command::Status => run_client(&socket_path, Op::Status),
         Command::Unlock { db } => run_client(&socket_path, Op::Unlock(UnlockRequest { db })),
         Command::Lock { db } => run_client(&socket_path, Op::Lock(LockRequest { db })),
@@ -142,7 +148,11 @@ fn forbid_core_dumps() -> rustix::io::Result<()> {
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
 }
 
-fn run_serve(socket_path: &Path, config_path: Option<PathBuf>) -> ExitCode {
+fn run_serve(
+    socket_path: &Path,
+    config_path: Option<PathBuf>,
+    log_level: Option<Level>,
+) -> ExitCode {
     if let Err(err) = forbid_core_dumps() {
         report_error(format_args!("marking the daemon non-dumpable: {err}"));
         return ExitCode::FAILURE;
@@ -164,16 +174,8 @@ fn run_serve(socket_path: &Path, config_path: Option<PathBuf>) -> ExitCode {
         }
     };
 
-    // stdout, matching the operation log in `server::log_response` —
-    // errors still go to stderr. Rust line-buffers stdout even when it
-    // isn't a terminal, so lines reach a pipe as they happen. Written with
-    // the error ignored rather than `println!`, which panics if stdout has
-    // been closed: nobody reading the log is no reason to stop serving.
-    let _ = writeln!(
-        std::io::stdout().lock(),
-        "kpa: listening on {}",
-        escape_for_terminal(&socket_path.display().to_string())
-    );
+    log::set_level(log_level.unwrap_or(config.log_level));
+    log::info(format_args!("listening on {}", socket_path.display()));
     let server = Arc::new(Server::new(config));
     // Before serving, so no unlock can happen without the policy hearing of it.
     let events = policy::start(server.clone(), policy::Bus::System);

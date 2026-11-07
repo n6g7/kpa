@@ -6,6 +6,7 @@
 
 pub mod clip;
 pub mod config;
+pub mod log;
 pub mod output;
 pub mod policy;
 pub mod proto;

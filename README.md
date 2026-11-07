@@ -135,7 +135,10 @@ connection, so it's typeable by hand:
 echo '{"v":1,"op":"status"}' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/kpa/sock"
 ```
 
-`serve` logs each unlock and lock to stdout, successes and failures alike.
-Reads (`status`, `list`) are deliberately not logged: they change nothing,
-and `list` carries entry titles and usernames, which shouldn't accumulate
-in a log.
+`serve` logs each unlock, lock and copy to stderr, successes and failures
+alike. Reads (`status`, `list`) are deliberately not logged: they change
+nothing, and `list` carries entry titles and usernames, which shouldn't
+accumulate in a log. Set the level with `log_level` in the config
+(`error`, `warn`, `info` or `debug`) or `serve --log-level`; under systemd the
+levels show up as journal priorities, so `journalctl --user -u kpa -p warning`
+works.

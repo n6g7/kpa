@@ -70,6 +70,7 @@ speak the socket protocol directly works.
 idle_timeout = "30m"
 prompt = ["fuzzel", "--dmenu", "--password", "--prompt"]
 clipboard_timeout = "30s"
+log_level = "info"             # error | warn | info | debug
 
 [[database]]
 name    = "personal"           # stable id used in requests and the tray
@@ -88,6 +89,32 @@ paths resolve against the daemon's working directory.
 If you manage your system declaratively (Nix, Ansible, whatever), this shape
 is meant to be generated rather than hand-edited — every setting is a plain
 TOML value, nothing requires clicking through a GUI.
+
+## Logging
+
+`serve` writes one line per event to stderr, at one of four levels:
+`error`, `warn`, `info` (the default) and `debug`. `log_level` in the config
+sets it and `serve --log-level` overrides it. Under systemd, where stderr is
+the journal, each line carries a `<N>` syslog priority prefix so
+`journalctl -p warning` filters by level; the daemon decides that by
+comparing `$JOURNAL_STREAM` against its own stderr. Elsewhere a line reads
+`kpa: <level>: <message>`. There are no timestamps: a supervisor stamps its
+own.
+
+| Level   | What it carries                                                           |
+| ------- | ------------------------------------------------------------------------- |
+| `info`  | Every unlock, lock (including idle, screen-lock and suspend), and copy    |
+| `warn`  | Failed or refused requests and connections, and the tray or logind failing |
+| `debug` | Why: prompt launches, logind subscription, sleep inhibitor, tray start    |
+
+**What a line may contain.** The operation, the database name, the field
+name for a copy, and the error kind. Never entry titles, usernames, URLs,
+passwords or any other vault content, at any level: a log outlives the
+unlocked session and ends up somewhere far less guarded than the socket
+(threat model TB-7). Reads (`status`, `list`) are not logged at all.
+Control characters in a line are escaped, so a crafted name in a request
+can't forge a second line. Every line goes through `log::log`, so that is
+the one function to audit.
 
 ## Protocol
 

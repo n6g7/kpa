@@ -116,11 +116,11 @@ impl<L: Locks, I: SleepInhibitor> Policy<L, I> {
         match event {
             Event::ScreenLocked => {
                 self.locks.lock_all();
-                crate::server::log(format_args!("locked all databases (screen lock)"));
+                crate::log::info(format_args!("locked all databases (screen lock)"));
             }
             Event::WatchLost => {
                 self.locks.lock_all();
-                crate::server::log(format_args!(
+                crate::log::warn(format_args!(
                     "locked all databases (logind subscription lost)"
                 ));
             }
@@ -130,7 +130,7 @@ impl<L: Locks, I: SleepInhibitor> Policy<L, I> {
                 self.sleeping = true;
                 self.locks.lock_all();
                 self.inhibitor.release();
-                crate::server::log(format_args!("locked all databases (suspending)"));
+                crate::log::info(format_args!("locked all databases (suspending)"));
             }
             Event::Sleeping(false) => self.sleeping = false,
             // Both just change what's unlocked; `reconcile` below, run
@@ -148,11 +148,15 @@ impl<L: Locks, I: SleepInhibitor> Policy<L, I> {
     fn reconcile(&mut self) {
         let want = !self.sleeping && self.locks.any_unlocked();
         if want && !self.inhibitor.is_held() {
-            if let Err(err) = self.inhibitor.hold() {
-                eprintln!("kpa: could not hold a sleep inhibitor: {err}");
+            match self.inhibitor.hold() {
+                Ok(()) => crate::log::debug(format_args!("holding sleep inhibitor")),
+                Err(err) => {
+                    crate::log::warn(format_args!("could not hold a sleep inhibitor: {err}"))
+                }
             }
         } else if !want && self.inhibitor.is_held() {
             self.inhibitor.release();
+            crate::log::debug(format_args!("released sleep inhibitor"));
         }
     }
 }
@@ -212,7 +216,7 @@ fn watch_forever(bus: &Bus, uid: u32, events: &Sender<Event>) {
             let _ = events.send(Event::WatchLost);
         }
         if last_error.as_deref() != Some(error.as_str()) {
-            eprintln!("kpa: logind watch: {error}; retrying");
+            crate::log::warn(format_args!("logind watch: {error}; retrying"));
             last_error = Some(error);
         }
         thread::sleep(RETRY_DELAY);
@@ -246,6 +250,7 @@ fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut b
         Err(err) => return err,
     };
     *subscribed = true;
+    crate::log::debug(format_args!("subscribed to logind"));
     if let Some(path) = &session {
         match locked_hint(conn, path.as_str()) {
             Ok(true) => {

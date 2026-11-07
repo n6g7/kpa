@@ -26,6 +26,9 @@
 idle_timeout = "30m"
 clipboard_timeout = "30s"
 
+# error | warn | info | debug. `kpa serve --log-level` overrides it.
+log_level = "info"
+
 # How the daemon asks for a master password. It runs this command and reads
 # the password from stdout, so the scripted version below unlocks the
 # fixture with no GUI and nothing to type. Swap in the commented line for a
