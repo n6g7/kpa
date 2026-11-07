@@ -144,11 +144,12 @@ pub struct Server {
     /// Which database the clipboard's current offer, if any, was copied
     /// from — `None` once nothing is offered. `copy` sets this on a
     /// successful handoff; every lock path (`Lock::lock`,
-    /// `policy::Locks::lock_all`, `expire_idle`) reads it to decide
-    /// whether the database it's locking is the one holding the
-    /// clipboard, in which case `docs/threat-model.md` G-6 ("lock clears
-    /// what kpa owns") says the offer must end too, not just outlive its
-    /// own `clipboard_timeout`. `Clipboard` itself stays database-agnostic
+    /// `policy::Locks::lock_all`, `expire_idle`) and the freshness guard
+    /// (`drop_stale`) read it to decide whether the database being locked
+    /// or dropped is the one holding the clipboard, in which case
+    /// `docs/threat-model.md` G-6 ("lock clears what kpa owns") says the
+    /// offer must end too, not just outlive its own `clipboard_timeout`.
+    /// `Clipboard` itself stays database-agnostic
     /// (see `clip.rs`'s doc comment) — this is the one place that
     /// association is tracked. `Arc` so `copy`'s own expiry thread (which
     /// outlives the request, same as `clip` above) can clear it too, once
@@ -245,6 +246,38 @@ impl Server {
         self.clip.end_now();
     }
 
+    /// Freshness guard (`docs/threat-model.md` T-12) for the databases
+    /// named in `names`: drops each one whose file has changed since it
+    /// was unlocked (`drop_if_stale`), ends its clipboard offer, and
+    /// returns the names it dropped — in the order `names` was given, so
+    /// a caller that needs a deterministic one back (`list`'s
+    /// all-databases form) can just take the first. `status`, `unlock`,
+    /// `list` and `copy` all run this before using an unlocked database,
+    /// instead of calling `drop_if_stale` and ending the offer separately.
+    ///
+    /// The check (one `stat`) and the drop happen atomically under the
+    /// slots mutex, same as before this existed. Ending an offer is a
+    /// round trip to the clipboard backend, so that part always happens
+    /// after the mutex is released, never while it's held. What a caller
+    /// does afterward — reading the in-memory database — opens no new
+    /// window: a file change after the `stat` is served exactly as it
+    /// always was, and a `lock` landing between this call and that read
+    /// just makes the read see a locked database instead.
+    fn drop_stale<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let dropped: Vec<String> = {
+            let mut dbs = slots(&self.dbs);
+            names
+                .into_iter()
+                .filter(|name| dbs.get_mut(*name).is_some_and(drop_if_stale))
+                .map(str::to_string)
+                .collect()
+        };
+        for name in &dropped {
+            self.end_clipboard_for(name);
+        }
+        dropped
+    }
+
     /// Where to report unlocks. Called once, before the server takes requests.
     pub fn set_policy_events(&self, events: Sender<policy::Event>) {
         let _ = self.policy_events.set(events);
@@ -255,23 +288,25 @@ impl Server {
         slots(&self.dbs).values().any(|slot| slot.db.is_some())
     }
 
-    /// The same shape `status()` reports — name, lock state, entry count —
-    /// but without `status()`'s side effect of running the freshness guard
-    /// (`drop_if_stale`) on every configured database.
+    /// The shape both `status()` and `tray.rs`'s poll report — name, lock
+    /// state, entry count — built from whatever `dbs` currently holds,
+    /// without itself running the freshness guard (`drop_stale`) on any
+    /// configured database. `status()` runs that guard first and then
+    /// calls this to build its response from what's left; `tray.rs` calls
+    /// this directly, skipping the guard.
     ///
-    /// `tray.rs` polls this on a fixed tick to decide whether to refresh
-    /// what it displays. Running the freshness check on every tick, the
-    /// way `status()` does for an explicit client request, would make an
-    /// autonomous background poll the thing that decides which client
-    /// request discovers a stale database — nondeterministically stealing
-    /// the `stale` error from whichever op would otherwise have reported
-    /// it (`docs/threat-model.md` T-12; this is what
-    /// `tests/server.rs`'s staleness tests caught when the tray's poll
-    /// first called `status()` directly). A stale-but-not-yet-noticed
-    /// database still reads as unlocked here, for up to one poll tick —
-    /// harmless, since nothing reached through this method ever serves
-    /// data from it. The authoritative check stays exactly where it was:
-    /// `status`, `list`, `unlock`, and `copy`, on every real use.
+    /// Running the freshness check on every tick, the way `status()`
+    /// does for an explicit client request, would make an autonomous
+    /// background poll the thing that decides which client request
+    /// discovers a stale database — nondeterministically stealing the
+    /// `stale` error from whichever op would otherwise have reported it
+    /// (`docs/threat-model.md` T-12; this is what `tests/server.rs`'s
+    /// staleness tests caught when the tray's poll first called
+    /// `status()` directly). A stale-but-not-yet-noticed database still
+    /// reads as unlocked here, for up to one poll tick — harmless, since
+    /// nothing reached through this method ever serves data from it. The
+    /// authoritative check stays exactly where it was: `status`, `list`,
+    /// `unlock`, and `copy`, on every real use.
     pub fn snapshot(&self) -> Vec<DatabaseStatus> {
         let dbs = slots(&self.dbs);
         self.config
@@ -327,7 +362,9 @@ fn slots(dbs: &Mutex<HashMap<String, Slot>>) -> MutexGuard<'_, HashMap<String, S
 
 /// Freshness guard (`docs/threat-model.md` T-12): if the file behind `slot`
 /// is no longer the one its database was opened from, drops the database
-/// and returns `true`. Called before every use of an unlocked database.
+/// and returns `true`. Only called by `drop_stale`, which also ends the
+/// clipboard offer a drop implies — `status`, `unlock`, `list` and `copy`
+/// all go through that, never this directly.
 ///
 /// The stat runs under the slots mutex. That is one `stat` call, cheap enough
 /// to keep the check and the drop atomic with respect to other requests.
@@ -347,24 +384,10 @@ fn drop_if_stale(slot: &mut Slot) -> bool {
 
 impl Status for Server {
     fn status(&self) -> Vec<DatabaseStatus> {
-        let mut dbs = slots(&self.dbs);
-        self.config
-            .databases
-            .iter()
-            .map(|cfg| {
-                // A stale database is dropped by `drop_if_stale`, so it is
-                // reported as locked. `status` has no error to return.
-                let entries = dbs.get_mut(&cfg.name).and_then(|slot| {
-                    drop_if_stale(slot);
-                    slot.db.as_ref().map(vault::entry_count)
-                });
-                DatabaseStatus {
-                    name: cfg.name.clone(),
-                    locked: entries.is_none(),
-                    entries,
-                }
-            })
-            .collect()
+        // A stale database is dropped here, so it is reported as locked
+        // by `snapshot` below. `status` has no error to return.
+        self.drop_stale(self.config.databases.iter().map(|cfg| cfg.name.as_str()));
+        self.snapshot()
     }
 }
 
@@ -393,15 +416,21 @@ impl Unlock for Server {
             return Err(UnlockError::UnknownDb { db: db() });
         };
 
+        // Runs first and on its own, before the mutex below: a stale
+        // database must not keep serving a clipboard offer just because
+        // this unlock then loses the `unlocking` race and returns
+        // `InProgress` without installing anything.
+        self.drop_stale([name]);
+
         let epoch = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
                 return Err(UnlockError::UnknownDb { db: db() });
             };
-            // Already unlocked and the file is unchanged: succeed without
-            // re-prompting. If the file changed, the database is dropped
-            // and this unlock continues to a fresh prompt.
-            if slot.db.is_some() && !drop_if_stale(slot) {
+            // Already unlocked: `drop_stale` above already dropped it if
+            // its file had changed, so finding it still installed here
+            // means the file is unchanged — succeed without re-prompting.
+            if slot.db.is_some() {
                 return Ok(db());
             }
             if slot.unlocking {
@@ -485,22 +514,21 @@ impl Lock for Server {
 
 impl List for Server {
     fn list(&self, request: &ListRequest) -> Result<Vec<WireEntry>, ListError> {
-        let mut dbs = slots(&self.dbs);
-
         // Each database a successful list reads gets its own timer reset;
         // the others keep running.
         match request.db.as_deref() {
-            Some(name) => match dbs.get_mut(name) {
-                None => Err(ListError::UnknownDb {
-                    db: name.to_string(),
-                }),
-                Some(slot) => {
-                    if drop_if_stale(slot) {
-                        return Err(ListError::Stale {
-                            db: name.to_string(),
-                        });
-                    }
-                    match slot.entries(name) {
+            Some(name) => {
+                if !self.drop_stale([name]).is_empty() {
+                    return Err(ListError::Stale {
+                        db: name.to_string(),
+                    });
+                }
+                let mut dbs = slots(&self.dbs);
+                match dbs.get_mut(name) {
+                    None => Err(ListError::UnknownDb {
+                        db: name.to_string(),
+                    }),
+                    Some(slot) => match slot.entries(name) {
                         None => Err(ListError::Locked {
                             db: name.to_string(),
                         }),
@@ -508,20 +536,25 @@ impl List for Server {
                             slot.touch();
                             Ok(entries)
                         }
-                    }
+                    },
                 }
-            },
+            }
             None => {
-                // A stale database fails the whole listing, naming it, rather
-                // than being skipped as if it were locked. Once dropped it is
-                // skipped by later listings.
+                // A stale database fails the whole listing, naming it,
+                // rather than being skipped as if it were locked. Once
+                // dropped it is skipped by later listings. `drop_stale`
+                // reports what it dropped in the order `names` was given
+                // here — config order — so naming its first entry is
+                // deterministic, unlike the `HashMap` the loop below
+                // iterates over.
+                let names = self.config.databases.iter().map(|cfg| cfg.name.as_str());
+                if let Some(name) = self.drop_stale(names).into_iter().next() {
+                    return Err(ListError::Stale { db: name });
+                }
+
+                let mut dbs = slots(&self.dbs);
                 let mut entries = Vec::new();
                 for (db_name, slot) in dbs.iter_mut() {
-                    if drop_if_stale(slot) {
-                        return Err(ListError::Stale {
-                            db: db_name.clone(),
-                        });
-                    }
                     if let Some(read) = slot.entries(db_name) {
                         entries.extend(read);
                         slot.touch();
@@ -538,6 +571,10 @@ impl CopyEntry for Server {
         let name = request.db.as_str();
         let db = || name.to_string();
 
+        if !self.drop_stale([name]).is_empty() {
+            return Err(CopyError::Stale { db: db() });
+        }
+
         // The lookup happens with the mutex held — it's an in-memory read,
         // sub-millisecond like `list` — but the clipboard handoff below
         // does not: offering to the backend is a Wayland round trip,
@@ -549,9 +586,6 @@ impl CopyEntry for Server {
             let Some(slot) = dbs.get_mut(name) else {
                 return Err(CopyError::UnknownDb { db: db() });
             };
-            if drop_if_stale(slot) {
-                return Err(CopyError::Stale { db: db() });
-            }
             let Some(database) = slot.db.as_ref() else {
                 return Err(CopyError::Locked { db: db() });
             };
@@ -1299,11 +1333,17 @@ mod tests {
         assert_eq!(*offered.lock().unwrap(), vec!["entrypass1".to_string()]);
     }
 
+    /// What `clip::RecordingBackend::new_tracking` hands back: every offer
+    /// made so far, each independently queryable for liveness. Named so
+    /// the tracking test fixtures below don't each spell out the nested
+    /// generic.
+    type TrackedOffers = Arc<Mutex<Vec<Arc<clip::RecordedOffer>>>>;
+
     /// A server with two configured, locked databases and a recording
     /// clipboard backend that tracks per-offer liveness — for the
     /// lock-clears-clipboard tests below, which need to tell whether
     /// `lock` actually ended the offer `copy` started.
-    fn copy_server_two_dbs_tracking() -> (Server, Arc<Mutex<Vec<Arc<clip::RecordedOffer>>>>) {
+    fn copy_server_two_dbs_tracking() -> (Server, TrackedOffers) {
         let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
         let server = Server::with_clipboard(
             Config::parse(
@@ -1664,5 +1704,255 @@ mod tests {
 
         assert_eq!(server.expire_idle(Instant::now()), ["personal"]);
         assert_eq!(slots(&server.dbs)["work"].lock_epoch, epoch_before);
+    }
+
+    /// Two configured, locked databases and a recording clipboard backend
+    /// that tracks per-offer liveness, with a prompt that fails instantly
+    /// rather than the default `fuzzel` (which may hang or not exist) —
+    /// for the freshness-guard tests below, which drive `unlock` far
+    /// enough to re-prompt without needing it to succeed.
+    fn stale_drop_test_server() -> (Server, TrackedOffers) {
+        let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
+        let server = Server::with_clipboard(
+            Config::parse(
+                "prompt = [\"/bin/sh\", \"-c\", \"exit 1\"]\n\
+                 [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
+                 [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n",
+            )
+            .expect("valid config"),
+            backend,
+        );
+        (server, offers)
+    }
+
+    /// Appends a byte to the file behind `name`'s slot, changing its size
+    /// so the next freshness check (`drop_if_stale`) sees it as changed —
+    /// the same technique `tests/server.rs`'s
+    /// `a_changed_size_makes_the_database_stale` uses against the real
+    /// daemon, chosen because it doesn't depend on timestamp resolution.
+    fn make_stale(server: &Server, name: &str) {
+        let path = slots(&server.dbs)[name].path.clone();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open for append");
+        file.write_all(b"x").expect("append a byte");
+    }
+
+    /// `personal` holds a live clipboard offer and has just gone stale on
+    /// disk; `work` is untouched. Returns the offer so a test can check
+    /// whether the guard it drives ended it.
+    fn stale_copy_setup() -> (Server, TrackedOffers, Arc<clip::RecordedOffer>) {
+        let (server, offers) = stale_drop_test_server();
+        let uuid = unlock_with_entry(&server, "personal");
+        CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid,
+                field: Field::Password,
+            },
+        )
+        .expect("entry and field exist");
+        let offer = offers.lock().unwrap()[0].clone();
+        assert!(offer.is_live(), "sanity: nothing has ended it yet");
+        make_stale(&server, "personal");
+        (server, offers, offer)
+    }
+
+    /// `docs/threat-model.md` T-8 ("a clipboard offer outliving its
+    /// database's lock"): `status` runs the freshness guard on every
+    /// configured database, and dropping a stale one must end its
+    /// clipboard offer the same as any other lock path, not leave it
+    /// being served until its own `clipboard_timeout`.
+    #[test]
+    fn status_ends_the_clipboard_offer_for_a_stale_database() {
+        let (server, _offers, offer) = stale_copy_setup();
+
+        let _ = Status::status(&server);
+
+        assert!(
+            !offer.is_live(),
+            "status dropping a stale database must end its clipboard offer"
+        );
+    }
+
+    /// Same as above, through `list` naming the stale database.
+    #[test]
+    fn list_named_ends_the_clipboard_offer_for_a_stale_database() {
+        let (server, _offers, offer) = stale_copy_setup();
+
+        let _ = List::list(
+            &server,
+            &ListRequest {
+                db: Some("personal".to_string()),
+            },
+        );
+
+        assert!(
+            !offer.is_live(),
+            "list of the stale database must end its clipboard offer"
+        );
+    }
+
+    /// Same as above, through `list` of every database.
+    #[test]
+    fn list_all_ends_the_clipboard_offer_for_a_stale_database() {
+        let (server, _offers, offer) = stale_copy_setup();
+
+        let _ = List::list(&server, &ListRequest { db: None });
+
+        assert!(
+            !offer.is_live(),
+            "list of all databases must end the stale database's clipboard offer"
+        );
+    }
+
+    /// Same as above, through `unlock`'s re-prompt branch — reached when
+    /// the database it names is already unlocked but stale.
+    #[test]
+    fn unlock_ends_the_clipboard_offer_for_a_stale_database() {
+        let _spawning = spawn_lock();
+        let (server, _offers, offer) = stale_copy_setup();
+
+        let _ = Unlock::unlock(
+            &server,
+            &UnlockRequest {
+                db: "personal".to_string(),
+            },
+        );
+
+        assert!(
+            !offer.is_live(),
+            "unlock's re-prompt branch dropping a stale database must end its clipboard offer"
+        );
+    }
+
+    /// Same as above, through `copy`'s pre-check.
+    #[test]
+    fn copy_ends_the_clipboard_offer_for_a_stale_database() {
+        let (server, _offers, offer) = stale_copy_setup();
+
+        let _ = CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "personal".to_string(),
+                uuid: uuid::Uuid::nil(),
+                field: Field::Password,
+            },
+        );
+
+        assert!(
+            !offer.is_live(),
+            "copy's staleness pre-check dropping a stale database must end its clipboard offer"
+        );
+    }
+
+    /// `drop_stale` runs before the `unlocking` check, so a stale
+    /// database that is also mid-unlock elsewhere (a second `unlock`
+    /// losing the race to a first one still prompting) must still have
+    /// its clipboard offer ended — the `InProgress` error that follows
+    /// must not skip that bookkeeping.
+    #[test]
+    fn unlock_ends_the_clipboard_offer_even_when_a_second_unlock_is_racing() {
+        let (server, _offers, offer) = stale_copy_setup();
+        slots(&server.dbs)
+            .get_mut("personal")
+            .expect("configured")
+            .unlocking = true;
+
+        let result = Unlock::unlock(
+            &server,
+            &UnlockRequest {
+                db: "personal".to_string(),
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(UnlockError::InProgress {
+                db: "personal".to_string()
+            })
+        );
+        assert!(
+            !offer.is_live(),
+            "a stale database racing a second unlock must still end its clipboard offer"
+        );
+    }
+
+    /// `list` of every database must not stop at the first stale one it
+    /// finds: every configured database that's gone stale gets dropped
+    /// and, for whichever of them was actually holding the clipboard's
+    /// current offer, that offer ends too — not skipped because a
+    /// different (earlier, in config order) database happened to be
+    /// reported as the `stale` error. The error itself still names the
+    /// first stale database in config order, deterministically, rather
+    /// than whatever order the underlying `HashMap` happens to iterate.
+    #[test]
+    fn list_all_with_two_stale_databases_ends_the_offer_and_reports_the_first_in_config_order() {
+        let (server, offers) = stale_drop_test_server();
+        // The live offer belongs to "work" — the *second* name in
+        // config order — so ending it proves `list` kept going past
+        // "personal" instead of stopping there.
+        let uuid = unlock_with_entry(&server, "work");
+        CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "work".to_string(),
+                uuid,
+                field: Field::Password,
+            },
+        )
+        .expect("entry and field exist");
+        let offer = offers.lock().unwrap()[0].clone();
+        assert!(offer.is_live(), "sanity: nothing has ended it yet");
+        unlock_directly(&server, "personal");
+        make_stale(&server, "personal");
+        make_stale(&server, "work");
+
+        let result = List::list(&server, &ListRequest { db: None });
+
+        assert_eq!(
+            result,
+            Err(ListError::Stale {
+                db: "personal".to_string()
+            }),
+            "the first stale database in config order must be the one reported"
+        );
+        assert!(
+            !offer.is_live(),
+            "dropping every stale database must end the offer belonging to whichever \
+             one actually held it, even when that one isn't first in config order"
+        );
+        assert!(!is_unlocked(&server, "personal"));
+        assert!(!is_unlocked(&server, "work"));
+    }
+
+    /// The flip side, same as the unrelated-lock tests above: dropping a
+    /// stale database must not end a *different* database's clipboard
+    /// offer.
+    #[test]
+    fn dropping_a_stale_database_does_not_end_an_unrelated_offer() {
+        let (server, offers) = stale_drop_test_server();
+        let uuid = unlock_with_entry(&server, "work");
+        CopyEntry::copy(
+            &server,
+            &CopyRequest {
+                db: "work".to_string(),
+                uuid,
+                field: Field::Password,
+            },
+        )
+        .expect("entry and field exist");
+        let offer = offers.lock().unwrap()[0].clone();
+        unlock_directly(&server, "personal");
+        make_stale(&server, "personal");
+
+        let _ = Status::status(&server);
+
+        assert!(
+            offer.is_live(),
+            "dropping a different database's staleness must not touch this offer"
+        );
     }
 }
