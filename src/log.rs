@@ -7,15 +7,15 @@
 //! outlives the unlocked session that produced it and lands somewhere far
 //! less guarded than the socket (`docs/threat-model.md` TB-7).
 //!
-//! A line to a terminal or file starts with a UTC timestamp. Under journald
+//! A line to a terminal or file starts with a local-time RFC 3339 timestamp. Under journald
 //! there is none: the journal stamps its own, and a second clock here would
 //! only disagree with it.
 
+use chrono::{DateTime, FixedOffset, Local, SecondsFormat};
 use std::fmt::{self, Write as _};
 use std::io::{IsTerminal as _, Write as _};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
@@ -105,10 +105,7 @@ pub fn log(level: Level, args: fmt::Arguments<'_>) {
     if !enabled(level) {
         return;
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let line = format_line(level, style(), now, args);
+    let line = format_line(level, style(), Local::now().fixed_offset(), args);
     let _ = std::io::stderr().lock().write_all(line.as_bytes());
 }
 
@@ -117,7 +114,7 @@ pub fn log(level: Level, args: fmt::Arguments<'_>) {
 enum Style {
     /// `<N>message`: journald reads the priority and adds its own timestamp.
     Journal,
-    /// `2026-11-06T17:33:05Z WARN  message`.
+    /// `2026-11-06T09:33:05-08:00 WARN  message`.
     Plain,
     /// `Plain` with the timestamp dimmed and the level coloured.
     Colour,
@@ -151,18 +148,23 @@ fn wants_colour(
     is_terminal && no_colour.is_none_or(|v| v.is_empty()) && term.is_some_and(|t| t != "dumb")
 }
 
-/// One finished line, newline included. `now` is seconds since the Unix
-/// epoch; the journal style ignores it. Control characters in the message
+/// One finished line, newline included. The journal style ignores `now`. Control characters in the message
 /// are escaped, so a crafted database name in a request cannot start a
 /// second line (or, under journald, a second `<N>` priority) or inject
 /// terminal escapes.
-fn format_line(level: Level, style: Style, now: u64, args: fmt::Arguments<'_>) -> String {
+fn format_line(
+    level: Level,
+    style: Style,
+    now: DateTime<FixedOffset>,
+    args: fmt::Arguments<'_>,
+) -> String {
+    let stamp = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     let mut line = match style {
         Style::Journal => format!("<{}>", level.priority()),
-        Style::Plain => format!("{} {} ", timestamp(now), level.label()),
+        Style::Plain => format!("{} {} ", stamp, level.label()),
         Style::Colour => format!(
             "\x1b[2m{}\x1b[0m \x1b[{}m{}\x1b[0m ",
-            timestamp(now),
+            stamp,
             level.colour(),
             level.label()
         ),
@@ -178,28 +180,6 @@ fn format_line(level: Level, style: Style, now: u64, args: fmt::Arguments<'_>) -
     }
     line.push('\n');
     line
-}
-
-/// `2026-11-06T17:33:05Z`: UTC, whole seconds, sortable as text.
-fn timestamp(epoch_secs: u64) -> String {
-    let days = (epoch_secs / 86_400) as i64;
-    let rest = epoch_secs % 86_400;
-    // Civil date from a day count (Howard Hinnant's `civil_from_days`).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rest / 3_600,
-        rest % 3_600 / 60,
-        rest % 60
-    )
 }
 
 /// Whether stderr is the journal. systemd sets `JOURNAL_STREAM` to the
@@ -230,10 +210,19 @@ fn matches_journal_stream(var: &str, dev: u64, ino: u64) -> bool {
 mod tests {
     use super::*;
 
+    fn epoch() -> DateTime<FixedOffset> {
+        DateTime::from_timestamp(0, 0).unwrap().fixed_offset()
+    }
+
     #[test]
     fn plain_lines_carry_a_timestamp_and_the_level() {
         assert_eq!(
-            format_line(Level::Warn, Style::Plain, 0, format_args!("unlock failed")),
+            format_line(
+                Level::Warn,
+                Style::Plain,
+                epoch(),
+                format_args!("unlock failed")
+            ),
             "1970-01-01T00:00:00Z WARN  unlock failed\n"
         );
     }
@@ -241,7 +230,7 @@ mod tests {
     #[test]
     fn colour_lines_dim_the_timestamp_and_colour_the_level() {
         assert_eq!(
-            format_line(Level::Error, Style::Colour, 0, format_args!("x")),
+            format_line(Level::Error, Style::Colour, epoch(), format_args!("x")),
             "\x1b[2m1970-01-01T00:00:00Z\x1b[0m \x1b[1;31mERROR\x1b[0m x\n"
         );
     }
@@ -259,29 +248,30 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_are_utc_dates() {
-        assert_eq!(timestamp(0), "1970-01-01T00:00:00Z");
-        assert_eq!(timestamp(951_782_400), "2000-02-29T00:00:00Z");
-        assert_eq!(timestamp(1_793_986_385), "2026-11-06T17:33:05Z");
-        assert_eq!(timestamp(4_102_444_799), "2099-12-31T23:59:59Z");
+    fn timestamps_keep_the_local_offset() {
+        let now = DateTime::parse_from_rfc3339("2026-11-06T09:33:05.678-08:00").unwrap();
+        assert_eq!(
+            format_line(Level::Info, Style::Plain, now, format_args!("x")),
+            "2026-11-06T09:33:05-08:00 INFO  x\n"
+        );
     }
 
     #[test]
     fn journal_lines_carry_a_syslog_priority() {
         assert_eq!(
-            format_line(Level::Error, Style::Journal, 0, format_args!("x")),
+            format_line(Level::Error, Style::Journal, epoch(), format_args!("x")),
             "<3>x\n"
         );
         assert_eq!(
-            format_line(Level::Warn, Style::Journal, 0, format_args!("x")),
+            format_line(Level::Warn, Style::Journal, epoch(), format_args!("x")),
             "<4>x\n"
         );
         assert_eq!(
-            format_line(Level::Info, Style::Journal, 0, format_args!("x")),
+            format_line(Level::Info, Style::Journal, epoch(), format_args!("x")),
             "<6>x\n"
         );
         assert_eq!(
-            format_line(Level::Debug, Style::Journal, 0, format_args!("x")),
+            format_line(Level::Debug, Style::Journal, epoch(), format_args!("x")),
             "<7>x\n"
         );
     }
@@ -291,7 +281,7 @@ mod tests {
         let line = format_line(
             Level::Info,
             Style::Journal,
-            0,
+            epoch(),
             format_args!("a\n<3>b\r\x1b[2J"),
         );
         assert_eq!(line.matches('\n').count(), 1, "{line:?}");

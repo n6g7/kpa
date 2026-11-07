@@ -604,10 +604,10 @@ fn the_log_never_carries_vault_contents_or_the_password() {
     let mut log = String::new();
     stderr.read_to_string(&mut log).expect("read log");
 
-    assert!(log.contains("Z INFO  unlocked \"personal\""), "{log}");
-    assert!(log.contains("Z DEBUG prompting for \"personal\""), "{log}");
-    assert!(log.contains("Z WARN  unlock failed"), "{log}");
-    assert!(log.contains("Z INFO  locked every database"), "{log}");
+    assert!(log.contains(" INFO  unlocked \"personal\""), "{log}");
+    assert!(log.contains(" DEBUG prompting for \"personal\""), "{log}");
+    assert!(log.contains(" WARN  unlock failed"), "{log}");
+    assert!(log.contains(" INFO  locked every database"), "{log}");
 
     let mut secrets = vec![common::PASSWORD.to_string()];
     for entry in listed["entries"].as_array().expect("entries") {
@@ -642,6 +642,6 @@ fn debug_lines_are_off_by_default() {
     let mut log = String::new();
     stderr.read_to_string(&mut log).expect("read log");
 
-    assert!(log.contains("Z INFO  unlocked"), "{log}");
+    assert!(log.contains(" INFO  unlocked"), "{log}");
     assert!(!log.contains("DEBUG"), "{log}");
 }
