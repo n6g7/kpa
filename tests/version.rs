@@ -27,35 +27,37 @@ fn inputs<'a>(
 
 #[test]
 fn exact_tag_clean() {
+    // The tag itself (`v1.2.3`, for release-please) keeps its `v`; the
+    // string `kpa version` reports does not.
     let version = compute_version(inputs(None, Some("v1.2.3"), Some("abc1234"), false));
-    assert_eq!(version, "v1.2.3");
+    assert_eq!(version, "1.2.3");
 }
 
 #[test]
 fn exact_tag_dirty() {
     let version = compute_version(inputs(None, Some("v1.2.3"), Some("abc1234"), true));
-    assert_eq!(version, "v1.2.3-dirty");
+    assert_eq!(version, "1.2.3-dirty");
 }
 
 #[test]
-fn exact_tag_without_v_prefix_still_gets_one() {
+fn exact_tag_without_v_prefix_is_unaffected() {
     // `git describe --tags` returns tags verbatim; a tag named without a
-    // leading `v` shouldn't produce `vv1.2.3` or lose the `v` prefix kpa's
-    // version string always has.
+    // leading `v` is already in the shape this string wants, so stripping
+    // a `v` that isn't there must be a no-op rather than eating a digit.
     let version = compute_version(inputs(None, Some("1.2.3"), Some("abc1234"), false));
-    assert_eq!(version, "v1.2.3");
+    assert_eq!(version, "1.2.3");
 }
 
 #[test]
 fn untagged_clean() {
     let version = compute_version(inputs(None, None, Some("abc1234"), false));
-    assert_eq!(version, "dev-abc1234");
+    assert_eq!(version, "0.1.0+abc1234");
 }
 
 #[test]
 fn untagged_dirty() {
     let version = compute_version(inputs(None, None, Some("abc1234"), true));
-    assert_eq!(version, "dev-abc1234-dirty");
+    assert_eq!(version, "0.1.0+abc1234-dirty");
 }
 
 #[test]
@@ -76,8 +78,8 @@ fn build_rev_override_takes_priority_over_everything() {
 #[test]
 fn build_rev_override_clean() {
     // Nix has no .git, so it can't tell a release tag from any other
-    // commit — the override path always reports {crate_version}+{rev}
-    // rather than guessing `v`/`dev-`.
+    // commit — the override path always reports {crate_version}+{rev},
+    // the same shape every other non-release case uses.
     let version = compute_version(inputs(Some("abc1234"), None, None, false));
     assert_eq!(version, "0.1.0+abc1234");
 }
@@ -96,19 +98,19 @@ fn empty_build_rev_override_is_ignored() {
     // variable is set but empty; that should fall through to git, not
     // produce "0.1.0+".
     let version = compute_version(inputs(Some(""), None, Some("abc1234"), false));
-    assert_eq!(version, "dev-abc1234");
+    assert_eq!(version, "0.1.0+abc1234");
 }
 
 #[test]
-fn nothing_available_falls_back_to_dev_unknown() {
+fn nothing_available_falls_back_to_unknown() {
     let version = compute_version(inputs(None, None, None, false));
-    assert_eq!(version, "dev-unknown");
+    assert_eq!(version, "0.1.0+unknown");
 }
 
 #[test]
 fn nothing_available_dirty_flag_has_no_effect() {
-    // No commit to describe means no `-dirty` suffix either; "dirty
-    // dev-unknown" wouldn't mean anything.
+    // No commit to describe means no `-dirty` suffix either; "0.1.0+unknown
+    // -dirty" wouldn't mean anything.
     let version = compute_version(inputs(None, None, None, true));
-    assert_eq!(version, "dev-unknown");
+    assert_eq!(version, "0.1.0+unknown");
 }

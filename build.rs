@@ -1,7 +1,8 @@
-//! Embeds the version `kpa version` reports: `v{tag}` when `HEAD` is
-//! exactly a release tag, `dev-{commit}` otherwise (with a `-dirty` suffix
-//! if the working tree has uncommitted changes). Resolved at build time
-//! (not runtime) since the built binary may run on a machine, or in a
+//! Embeds the version `kpa version` reports: the crate version alone
+//! (`Cargo.toml`'s, e.g. `0.1.0`) when `HEAD` is exactly a release tag,
+//! `{crate_version}+{commit}` otherwise (with a `-dirty` suffix if the
+//! working tree has uncommitted changes). Resolved at build time (not
+//! runtime) since the built binary may run on a machine, or in a
 //! container, with no `.git` directory at all.
 //!
 //! The Nix package build has no `.git` in its sandbox, so it can't ask git
@@ -10,7 +11,7 @@
 //! `self.dirtyShortRev`, which already carries a `-dirty` suffix of its
 //! own when applicable), and that takes priority over any git lookup,
 //! reporting `{crate_version}+{rev}` (e.g. `0.1.0+abc1234`) rather than
-//! guessing at `v`/`dev-`.
+//! guessing whether the commit it's building happens to be a release.
 //!
 //! The actual decision is a pure function in `build_support/version.rs`,
 //! unit-tested from `tests/version.rs`; everything here is just gathering

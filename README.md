@@ -125,12 +125,21 @@ cargo run -- list              # every entry in every unlocked database (alias: 
 cargo run -- list personal     # just the one
 cargo run -- lock personal     # lock one
 cargo run -- lock              # lock all of them
+cargo run -- version           # the CLI's build version, and the running daemon's
 ```
 
 Each client subcommand prints the daemon's raw JSON response and exits
 non-zero when `ok` is `false`. The socket defaults to
 `$XDG_RUNTIME_DIR/kpa/sock`; pass `--socket <path>` to both sides to use a
 different one.
+
+`version` is the exception: it prints plain text, not JSON, and always
+exits `0`. It always prints the CLI's own build version as `client: …`,
+then `server: …` for the running daemon's, so an upgrade that replaces the
+binary but leaves the old `kpa serve` running shows up as a mismatch
+instead of silently serving the previous build. With no daemon reachable,
+or one old enough to not report a version, `server:` says so instead —
+that's not a failure of the command itself.
 
 The protocol is line-delimited JSON, one request and one response per
 connection, so it's typeable by hand:

@@ -61,6 +61,7 @@ where
     match &request.op {
         Op::Status => Response::Status {
             databases: handler.status(),
+            version: handler.daemon_version(),
         },
         Op::Unlock(request) => Response::Unlock(handler.unlock(request)),
         Op::Lock(request) => Response::Lock(handler.lock(request)),
@@ -93,6 +94,12 @@ where
 pub enum Response {
     Status {
         databases: Vec<DatabaseStatus>,
+        /// The daemon's own build version (`kpa::VERSION`), so `kpa version`
+        /// can name a CLI/daemon mismatch after an upgrade where the old
+        /// daemon is still running. Always present on this build; absent
+        /// only when the peer is an older daemon that predates this field —
+        /// the client reads it as an optional field for exactly that reason.
+        version: String,
     },
     /// `Ok` names the database that is now unlocked.
     Unlock(Result<String, UnlockError>),
@@ -118,9 +125,10 @@ impl Serialize for Response {
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("v", &VERSION)?;
         match self {
-            Response::Status { databases } => {
+            Response::Status { databases, version } => {
                 map.serialize_entry("ok", &true)?;
                 map.serialize_entry("databases", databases)?;
+                map.serialize_entry("version", version)?;
             }
             Response::Unlock(Ok(db)) => {
                 map.serialize_entry("ok", &true)?;
@@ -175,6 +183,7 @@ mod tests {
                     entries: None,
                 },
             ],
+            version: "1.2.3".to_string(),
         };
         assert_eq!(
             serde_json::to_value(&status).expect("status should serialize"),
@@ -185,6 +194,7 @@ mod tests {
                     {"name": "personal", "locked": false, "entries": 341},
                     {"name": "work", "locked": true},
                 ],
+                "version": "1.2.3",
             })
         );
 

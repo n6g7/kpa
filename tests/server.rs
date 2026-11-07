@@ -8,7 +8,7 @@
 mod common;
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -673,4 +673,131 @@ fn debug_lines_are_off_by_default() {
 
     assert!(log.contains(" INFO  unlocked"), "{log}");
     assert!(!log.contains("DEBUG"), "{log}");
+}
+
+/// `status`'s response carries the daemon's own build version, which is
+/// what `kpa version` reads to compare against the CLI's.
+#[test]
+fn status_reports_the_daemon_version() {
+    let daemon = Daemon::start(common::PASSWORD);
+    let status = daemon.run(&["status"]);
+    assert_eq!(status["version"], kpa::VERSION);
+}
+
+/// The daemon names its own version in its first log line, so an operator
+/// reading `journalctl` (or this test, reading piped stderr) doesn't have
+/// to separately ask it.
+#[test]
+fn serve_logs_its_version_on_startup() {
+    use std::io::Read;
+
+    let mut daemon = Daemon::spawn(&format!("printf %s '{}'", common::PASSWORD), Stdio::piped());
+    // Make sure the daemon is actually up and has had a chance to log
+    // before reading its stderr.
+    assert_eq!(daemon.run(&["status"])["ok"], true);
+    let mut stderr = daemon.child.stderr.take().expect("piped stderr");
+    daemon.child.kill().expect("kill");
+    daemon.child.wait().expect("wait");
+    let mut log = String::new();
+    stderr.read_to_string(&mut log).expect("read log");
+
+    assert!(
+        log.contains(&format!("kpa {} listening on", kpa::VERSION)),
+        "{log}"
+    );
+}
+
+/// `kpa version` against a real, running daemon: the CLI's own version,
+/// labelled `client:`, then the daemon's (which matches, since both come
+/// from the same build), labelled `server:`.
+#[test]
+fn version_reports_the_running_daemons_version() {
+    let daemon = Daemon::start(common::PASSWORD);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kpa"))
+        .arg("--socket")
+        .arg(&daemon.socket)
+        .arg("version")
+        .output()
+        .expect("failed to spawn kpa client");
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).expect("stdout is not valid UTF-8");
+
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next(),
+        Some(format!("client: {}", kpa::VERSION)).as_deref()
+    );
+    assert_eq!(
+        lines.next(),
+        Some(format!("server: {}", kpa::VERSION)).as_deref()
+    );
+}
+
+/// `kpa version` with no daemon reachable: still prints the CLI's own
+/// version, says so plainly about the server, and exits `0` — there is
+/// nothing wrong with the CLI itself just because nothing is listening.
+#[test]
+fn version_reports_an_unreachable_daemon() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let socket = dir.path().join("sock"); // never bound by anything
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kpa"))
+        .arg("--socket")
+        .arg(&socket)
+        .arg("version")
+        .output()
+        .expect("failed to spawn kpa client");
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).expect("stdout is not valid UTF-8");
+
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next(),
+        Some(format!("client: {}", kpa::VERSION)).as_deref()
+    );
+    let server_line = lines.next().expect("a second line about the server");
+    assert!(server_line.starts_with("server: not running"), "{text}");
+}
+
+/// `kpa version` against an older daemon that predates the `version` field
+/// on `status` — a hand-rolled listener standing in for it, since the real
+/// `kpa serve` always reports its own version now. Reachable, but with
+/// nothing to name, is its own outcome, distinct from unreachable.
+#[test]
+fn version_reports_an_older_daemon_that_does_not_report_a_version() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let socket = dir.path().join("sock");
+    let listener = UnixListener::bind(&socket).expect("failed to bind fake socket");
+
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read request");
+        let mut stream = stream;
+        // The pre-`version` wire shape of a successful `status` response.
+        writeln!(stream, r#"{{"v":1,"ok":true,"databases":[]}}"#).expect("write response");
+    });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kpa"))
+        .arg("--socket")
+        .arg(&socket)
+        .arg("version")
+        .output()
+        .expect("failed to spawn kpa client");
+    server.join().expect("fake daemon thread panicked");
+
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).expect("stdout is not valid UTF-8");
+
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next(),
+        Some(format!("client: {}", kpa::VERSION)).as_deref()
+    );
+    assert_eq!(
+        lines.next(),
+        Some("server: unknown (daemon predates version reporting)")
+    );
 }

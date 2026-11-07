@@ -2,8 +2,9 @@
   lib,
   rustPlatform,
   # The flake's own `self`, so `kpa version` can report the commit it was
-  # built from. `null` falls back to "dev-unknown" (there's no `.git` in
-  # this derivation's build sandbox for build.rs to inspect itself).
+  # built from. `null` falls back to "{crate version}+unknown" (there's no
+  # `.git` in this derivation's build sandbox for build.rs to inspect
+  # itself).
   rev ? null,
 }:
 

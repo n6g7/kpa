@@ -1021,7 +1021,13 @@ mod tests {
     #[test]
     fn a_valid_request_is_still_answered() {
         let reply = exchange(b"{\"v\":1,\"op\":\"status\"}\n");
-        assert_eq!(reply, "{\"v\":1,\"ok\":true,\"databases\":[]}\n");
+        assert_eq!(
+            reply,
+            format!(
+                "{{\"v\":1,\"ok\":true,\"databases\":[],\"version\":{:?}}}\n",
+                crate::VERSION
+            )
+        );
     }
 
     fn sh(script: &str) -> Vec<String> {

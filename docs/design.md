@@ -160,7 +160,7 @@ custom-attribute dump in v1.
 
 ```json
 {"ok":true,"v":1,"databases":[{"name":"personal","locked":false,"entries":341},
-                              {"name":"work","locked":true}]}
+                              {"name":"work","locked":true}],"version":"1.2.3"}
 
 {"ok":true,"v":1,"entries":[{"db":"personal","uuid":"…","title":"GitHub",
                              "username":"alice","url":"https://github.com",
@@ -177,7 +177,18 @@ custom-attribute dump in v1.
 
 The last one is the version-skew rejection: the client sent `"v":1`, the
 daemon is actually on `2`, and its own `v` in the response is what makes
-that visible — no extra `client_v`/`daemon_v` fields needed.
+that visible — no extra `client_v`/`daemon_v` fields needed. `v` is the
+*protocol* version, not the build: `status`'s `version` field is the
+running daemon's build version (the same string `kpa version` prints for
+the CLI itself), piggybacked on `status` rather than given its own op since
+it's the one extra thing `kpa version` needs and `status` is already the
+no-argument "what's the daemon's state" round trip. `kpa version` sends it
+and prints both, labelled `client:`/`server:`, so an upgrade that replaces
+the binary but leaves the old daemon running still shows up as a mismatch
+rather than silently serving the previous build. No daemon reachable
+(`server: not running`) and an older daemon that predates this field
+(`server: unknown (daemon predates version reporting)`) are both reported
+rather than treated as failures — `kpa version` always exits `0`.
 
 Two `unlock` errors exist because unlocking is slow (it waits on a human
 and a KDF) and happens outside the vault mutex:

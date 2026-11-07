@@ -8,7 +8,6 @@
 - [ ] Find out why `cargo run -- ...` rebuilds on each run, even with no changes
 - [ ] One more security audit
 - [ ] `kpa list` returns a list of copyable fields for each entry
-- [ ] `kpa version` reports the server's version too, and `kpa serve` prints its version on start
 
 ## Done
 
@@ -16,3 +15,4 @@
 - [x] Flake module to make installing easy
 - [x] Better logging
 - [x] `kpa version` prints the commit used when not a tagged release
+- [x] `kpa version` reports the server's version too, and `kpa serve` prints its version on start
