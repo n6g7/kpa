@@ -70,3 +70,11 @@ pub fn kdbx4_db() -> PathBuf {
 pub fn hostile_db() -> PathBuf {
     ensure_fixtures().join("fixture-hostile.kdbx")
 }
+
+/// A database for `copy`'s custom-field, collision, and `totp` cases
+/// (`tests/fixture.sh`): entry `"Example"` has a custom `api-key` field, a
+/// custom `PASSWORD` field colliding with the built-in, and a valid `otp`
+/// field; `"NoOtp"` has none; `"BadOtp"`'s `otp` field doesn't parse.
+pub fn fields_db() -> PathBuf {
+    ensure_fixtures().join("fixture-fields.kdbx")
+}

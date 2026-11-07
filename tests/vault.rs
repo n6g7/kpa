@@ -39,6 +39,105 @@ fn wrong_password_fails_cleanly() {
     }
 }
 
+/// `list`'s `fields` array against a real database: built-ins in order,
+/// custom fields sorted after them, and the collision rule applied to a
+/// custom `PASSWORD` key that collides with the real `Password` field.
+#[test]
+fn copyable_fields_against_a_real_database() {
+    let password = Zeroizing::new(common::PASSWORD.to_string());
+    let (db, _) = vault::open(&common::fields_db(), Some(&password), None)
+        .expect("fixture should open with its real password");
+
+    let entries = vault::list_entries(&db);
+    let example = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("Example"))
+        .expect("fixture should have an Example entry");
+
+    // Custom keys sort by their raw key, before the collision prefix is
+    // applied — "PASSWORD" sorts ahead of "api-key" (ASCII uppercase
+    // precedes lowercase).
+    assert_eq!(
+        example.fields,
+        vec![
+            "username",
+            "password",
+            "url",
+            "totp",
+            "custom:PASSWORD",
+            "api-key"
+        ]
+    );
+
+    let no_otp = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("NoOtp"))
+        .expect("fixture should have a NoOtp entry");
+    assert!(!no_otp.fields.contains(&"totp".to_string()));
+}
+
+/// `entry_totp` against the same database, end to end through `vault::open`
+/// rather than an in-process `Database::new()` — the real decode/parse path.
+#[test]
+fn entry_totp_against_a_real_database() {
+    let password = Zeroizing::new(common::PASSWORD.to_string());
+    let (db, _) = vault::open(&common::fields_db(), Some(&password), None)
+        .expect("fixture should open with its real password");
+    let entries = vault::list_entries(&db);
+
+    let example = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("Example"))
+        .expect("Example entry");
+    let code = vault::entry_totp(&db, example.uuid)
+        .expect("entry exists")
+        .expect("a valid otp field should produce a code");
+    assert_eq!(code.len(), 6);
+    assert!(code.chars().all(|c| c.is_ascii_digit()));
+
+    let bad_otp = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("BadOtp"))
+        .expect("BadOtp entry");
+    assert_eq!(vault::entry_totp(&db, bad_otp.uuid), Some(None));
+
+    let no_otp = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("NoOtp"))
+        .expect("NoOtp entry");
+    assert_eq!(vault::entry_totp(&db, no_otp.uuid), Some(None));
+}
+
+/// A custom field colliding case-insensitively with a built-in is a
+/// genuine, distinct field — `entry_field` reads it by its own literal
+/// key, separate from the real `Password`.
+#[test]
+fn custom_colliding_field_is_read_by_its_literal_key() {
+    let password = Zeroizing::new(common::PASSWORD.to_string());
+    let (db, _) = vault::open(&common::fields_db(), Some(&password), None)
+        .expect("fixture should open with its real password");
+    let entries = vault::list_entries(&db);
+    let example = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("Example"))
+        .expect("Example entry");
+
+    assert_eq!(
+        vault::entry_field(&db, example.uuid, "Password")
+            .expect("entry exists")
+            .as_deref()
+            .map(String::as_str),
+        Some("entrypass1")
+    );
+    assert_eq!(
+        vault::entry_field(&db, example.uuid, "PASSWORD")
+            .expect("entry exists")
+            .as_deref()
+            .map(String::as_str),
+        Some("not-the-real-password")
+    );
+}
+
 #[test]
 fn opens_a_genuine_kdbx4_database() {
     // keepass's own docs claim KDBX3 *and* KDBX4 support, and

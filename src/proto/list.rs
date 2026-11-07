@@ -28,7 +28,10 @@ pub struct ListRequest {
 /// Carries no secret: no password, no notes, and any field the user marked
 /// protected is absent rather than de-protected — `vault::list_entries`
 /// does that filtering, per `docs/design.md` § Protocol ("`list` never
-/// returns secrets").
+/// returns secrets"). `fields` is the one exception to "no secret-shaped
+/// content": it carries *names* only, never values, and a field's
+/// protectedness never hides its name here — only `title`/`username`/`url`
+/// above stay filtered by it, because those three carry values.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct WireEntry {
     pub db: String,
@@ -41,6 +44,15 @@ pub struct WireEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     pub group: String,
+    /// Field names `copy` can be asked for on this entry: the built-ins
+    /// present and non-empty on it, in the fixed order `username`,
+    /// `password`, `url`, `notes`, `totp`, then its custom (user-defined)
+    /// fields by their KeePass key — `custom:`-prefixed when that key
+    /// collides case-insensitively with a built-in name or with `title`
+    /// (`docs/design.md` § Protocol's collision rule). Omitted from the
+    /// wire when empty, like the `Option` fields above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

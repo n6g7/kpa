@@ -40,7 +40,7 @@ graph LR
 | --- | ------------------------------------------------------------------------------- | ----------- |
 | A-1 | Credentials: master password, keyfile contents, anything password-equivalent (e.g. derived keys) | Highest |
 | A-2 | Protected field values: passwords, any field whose value carries `Protected="True"` or `ProtectInMemory="True"` (KeePassXC honours both), and Notes whether or not protected | High |
-| A-3 | Entry metadata: titles, usernames, URLs, groups, and the database's own name and description stored in the `.kdbx`. kpa's config `name` labels are not A-3 | Medium |
+| A-3 | Entry metadata: titles, usernames, URLs, groups, custom field *names* (`list`'s `fields` array — never a custom field's *value*, which is A-2 like any other field value), and the database's own name and description stored in the `.kdbx`. kpa's config `name` labels are not A-3 | Medium |
 | A-4 | Integrity of the `.kdbx` and keyfile on disk, and of their directories          | High        |
 | A-5 | The user's clipboard contents that kpa didn't put there                         | Low         |
 
@@ -133,7 +133,10 @@ failing for an in-scope actor.
   stderr, a log, an error string, the tray, a child's argv or environment —
   only in the clipboard offer, after a `copy` naming that exact field.
   `list` omits every protected field and Notes rather than de-protecting
-  them.
+  them. `list`'s `fields` array is the one exception: it names which fields
+  exist and are copyable, never a value, so a protected field's or a
+  protected Notes' *name* still appears there — a name alone carries none
+  of A-2, the same way a title's existence isn't A-2 either.
 
   **Known gap (keepass 0.15.0).** The `ProtectInMemory="True"` marker is
   part of A-2, but the pinned `keepass` crate cannot see it. Its XML
@@ -291,10 +294,16 @@ mounts the guard is best effort.
 Response: line-delimited JSON is serialized, never concatenated; `copy`
 addresses entries by `(db, uuid, field)`; the CLI escapes DEL, C1 controls
 and Unicode bidi/format characters before writing to a terminal (JSON
-escaping covers only C0). In scope: terminal escape or control sequences
-reaching the CLI's terminal output unescaped; a field breaking framing; a
-title or UUID collision across databases that makes a `copy` resolve to a
-different entry than the one listed.
+escaping covers only C0). A custom field's key is entry content too: the
+collision rule (`docs/design.md` § Protocol) makes a bare name that spells
+a built-in case-insensitively always mean the built-in, by type rather than
+by convention, so a custom key crafted to spell `password` or `title`
+cannot stand in for the real field or intercept a `copy` meant for it. In
+scope: terminal escape or control sequences reaching the CLI's terminal
+output unescaped; a field breaking framing; a title or UUID collision
+across databases that makes a `copy` resolve to a different entry than the
+one listed; a custom field's key reaching a built-in's `copy` target or
+vice versa.
 
 **T-14 · Socket abuse** (D) — ACT-5 · TB-1 · — → G-11  
 Response: 64 KiB line cap, 5 s total deadline per request and per
