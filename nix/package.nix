@@ -1,4 +1,11 @@
-{ lib, rustPlatform }:
+{
+  lib,
+  rustPlatform,
+  # The flake's own `self`, so `kpa version` can report the commit it was
+  # built from. `null` falls back to "dev-unknown" (there's no `.git` in
+  # this derivation's build sandbox for build.rs to inspect itself).
+  rev ? null,
+}:
 
 rustPlatform.buildRustPackage {
   pname = "kpa";
@@ -7,6 +14,10 @@ rustPlatform.buildRustPackage {
   src = lib.cleanSource ../.;
 
   cargoLock.lockFile = ../Cargo.lock;
+
+  env = lib.optionalAttrs (rev != null) {
+    KPA_BUILD_REV = rev;
+  };
 
   # The test suite needs keepassxc-cli, pykeepass and a dbus session to
   # build and drive fixtures (see flake.nix's devShell) — not something to
