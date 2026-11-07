@@ -20,6 +20,16 @@ pub struct DatabaseStatus {
 /// is no failure to report.
 pub trait Status {
     fn status(&self) -> Vec<DatabaseStatus>;
+
+    /// The daemon's own build version (`kpa::VERSION`), piggybacked on
+    /// `status` rather than given its own op: `kpa version` needs exactly
+    /// one thing from the daemon, and `status` is already the "what's the
+    /// daemon's state" round trip every client makes to find out. A default
+    /// impl, since every `Handler` means the same build talking about
+    /// itself — there is nothing for an implementor to override.
+    fn daemon_version(&self) -> String {
+        crate::VERSION.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -53,5 +63,19 @@ mod tests {
             serde_json::to_value(&locked).expect("should serialize"),
             json!({"name": "personal", "locked": true})
         );
+    }
+
+    /// `daemon_version`'s default impl is what every real `Handler` gets
+    /// for free; pin it against `crate::VERSION` so a change to one can't
+    /// silently drift from the other.
+    #[test]
+    fn daemon_version_defaults_to_the_crate_version() {
+        struct Fake;
+        impl Status for Fake {
+            fn status(&self) -> Vec<DatabaseStatus> {
+                Vec::new()
+            }
+        }
+        assert_eq!(Fake.daemon_version(), crate::VERSION);
     }
 }

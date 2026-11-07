@@ -92,11 +92,13 @@ impl From<FieldArg> for Field {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    // Doesn't touch the socket, so it works even without `$XDG_RUNTIME_DIR`
-    // set or a daemon running — handle it before resolving `socket_path`.
+    // Reports the CLI's own version unconditionally, then best-efforts the
+    // daemon's — so it still works with no `$XDG_RUNTIME_DIR` set and no
+    // daemon running, handled before `socket_path` is resolved the way
+    // every other subcommand needs it (which would otherwise fail loudly
+    // in exactly the case this command has to tolerate quietly).
     if let Command::Version = cli.command {
-        println!("{}", kpa::VERSION);
-        return ExitCode::SUCCESS;
+        return run_version(cli.socket);
     }
 
     let socket_path = match cli.socket {
@@ -175,7 +177,11 @@ fn run_serve(
     };
 
     log::set_level(log_level.unwrap_or(config.log_level));
-    log::info(format_args!("listening on {}", socket_path.display()));
+    log::info(format_args!(
+        "kpa {} listening on {}",
+        kpa::VERSION,
+        socket_path.display()
+    ));
     let server = Arc::new(Server::new(config));
     // Before serving, so no unlock can happen without the policy hearing of it.
     let events = policy::start(server.clone(), policy::Bus::System);
@@ -223,6 +229,53 @@ fn run_client(socket_path: &Path, op: Op) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `kpa version`: the CLI's own build version, plus the running daemon's if
+/// one is reachable. Always exits `SUCCESS` — there is no daemon down to
+/// report as *this* command's failure, only as a fact to print; every
+/// other outcome below (no daemon, an old daemon that doesn't report a
+/// version, a daemon up and matching or not) is equally just information.
+///
+/// Goes through [`send_request`]/[`check_peer_uid`] like any other op, so a
+/// socket that answers but belongs to another uid is still refused before
+/// anything is sent to it — `kpa version`'s string isn't secret, but the
+/// path that reaches a daemon at all stays the one path.
+fn run_version(socket: Option<PathBuf>) -> ExitCode {
+    println!("{}", kpa::VERSION);
+
+    let socket_path = socket.or_else(|| default_socket_path().ok());
+    let Some(socket_path) = socket_path else {
+        println!("daemon: not reachable (XDG_RUNTIME_DIR is not set; pass --socket to check)");
+        return ExitCode::SUCCESS;
+    };
+
+    let request = Request {
+        v: proto::VERSION,
+        op: Op::Status,
+    };
+    match send_request(&socket_path, &request) {
+        Ok(line) => {
+            let daemon_version = serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("version")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
+            match daemon_version {
+                Some(version) => println!("daemon: {version}"),
+                // An older daemon, from before this field existed.
+                None => println!("daemon: reachable, but it doesn't report a version"),
+            }
+        }
+        Err(err @ ClientError::Connect(..)) => {
+            println!("daemon: not reachable ({err}; is `kpa serve` running?)");
+        }
+        Err(err) => println!("daemon: {err}"),
+    }
+    ExitCode::SUCCESS
 }
 
 /// Errors sending one request and reading its response. A thin wrapper
