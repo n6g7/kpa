@@ -242,11 +242,11 @@ fn run_client(socket_path: &Path, op: Op) -> ExitCode {
 /// anything is sent to it — `kpa version`'s string isn't secret, but the
 /// path that reaches a daemon at all stays the one path.
 fn run_version(socket: Option<PathBuf>) -> ExitCode {
-    println!("{}", kpa::VERSION);
+    println!("client: {}", kpa::VERSION);
 
     let socket_path = socket.or_else(|| default_socket_path().ok());
     let Some(socket_path) = socket_path else {
-        println!("daemon: not reachable (XDG_RUNTIME_DIR is not set; pass --socket to check)");
+        println!("server: not running (XDG_RUNTIME_DIR is not set; pass --socket to check)");
         return ExitCode::SUCCESS;
     };
 
@@ -265,15 +265,15 @@ fn run_version(socket: Option<PathBuf>) -> ExitCode {
                         .map(str::to_string)
                 });
             match daemon_version {
-                Some(version) => println!("daemon: {version}"),
+                Some(version) => println!("server: {version}"),
                 // An older daemon, from before this field existed.
-                None => println!("daemon: reachable, but it doesn't report a version"),
+                None => println!("server: unknown (daemon predates version reporting)"),
             }
         }
         Err(err @ ClientError::Connect(..)) => {
-            println!("daemon: not reachable ({err}; is `kpa serve` running?)");
+            println!("server: not running ({err}; is `kpa serve` running?)");
         }
-        Err(err) => println!("daemon: {err}"),
+        Err(err) => println!("server: {err}"),
     }
     ExitCode::SUCCESS
 }

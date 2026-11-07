@@ -183,11 +183,12 @@ running daemon's build version (the same string `kpa version` prints for
 the CLI itself), piggybacked on `status` rather than given its own op since
 it's the one extra thing `kpa version` needs and `status` is already the
 no-argument "what's the daemon's state" round trip. `kpa version` sends it
-and prints both versions, so an upgrade that replaces the binary but leaves
-the old daemon running still shows up as a mismatch rather than silently
-serving the previous build. An older daemon that predates this field simply
-omits it; `kpa version` reports that it's reachable but doesn't say which
-build it's running, rather than failing.
+and prints both, labelled `client:`/`server:`, so an upgrade that replaces
+the binary but leaves the old daemon running still shows up as a mismatch
+rather than silently serving the previous build. No daemon reachable
+(`server: not running`) and an older daemon that predates this field
+(`server: unknown (daemon predates version reporting)`) are both reported
+rather than treated as failures — `kpa version` always exits `0`.
 
 Two `unlock` errors exist because unlocking is slow (it waits on a human
 and a KDF) and happens outside the vault mutex:

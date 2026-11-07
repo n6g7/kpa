@@ -134,11 +134,12 @@ non-zero when `ok` is `false`. The socket defaults to
 different one.
 
 `version` is the exception: it prints plain text, not JSON, and always
-exits `0`. It always prints the CLI's own build version; if a daemon is
-reachable it also prints that daemon's, so an upgrade that replaces the
+exits `0`. It always prints the CLI's own build version as `client: …`,
+then `server: …` for the running daemon's, so an upgrade that replaces the
 binary but leaves the old `kpa serve` running shows up as a mismatch
-instead of silently serving the previous build. With no daemon reachable it
-says so and stops there — that's not a failure of the command itself.
+instead of silently serving the previous build. With no daemon reachable,
+or one old enough to not report a version, `server:` says so instead —
+that's not a failure of the command itself.
 
 The protocol is line-delimited JSON, one request and one response per
 connection, so it's typeable by hand:
