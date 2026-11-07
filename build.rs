@@ -5,11 +5,22 @@
 //! container, with no `.git` directory at all.
 //!
 //! The Nix package build has no `.git` in its sandbox, so it can't ask git
-//! anything. It instead sets `KPA_BUILD_REV` (to the flake's
+//! anything — including whether the commit it's building is a release
+//! tag. It instead sets `KPA_BUILD_REV` (to the flake's
 //! `self.dirtyShortRev`, which already carries a `-dirty` suffix of its
-//! own when applicable) and that takes priority over any git lookup.
+//! own when applicable), and that takes priority over any git lookup,
+//! reporting `{crate_version}+{rev}` (e.g. `0.1.0+abc1234`) rather than
+//! guessing at `v`/`dev-`.
+//!
+//! The actual decision is a pure function in `build_support/version.rs`,
+//! unit-tested from `tests/version.rs`; everything here is just gathering
+//! its inputs from git and the environment.
+
+#[path = "build_support/version.rs"]
+mod version;
 
 use std::process::Command;
+use version::{VersionInputs, compute_version};
 
 fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
@@ -17,22 +28,23 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/index");
     println!("cargo:rerun-if-env-changed=KPA_BUILD_REV");
 
-    let version = std::env::var("KPA_BUILD_REV")
-        .ok()
-        .filter(|rev| !rev.is_empty())
-        .map(|rev| format!("dev-{rev}"))
-        .or_else(git_version)
-        .unwrap_or_else(|| "dev-unknown".to_string());
+    let build_rev_override = std::env::var("KPA_BUILD_REV").ok();
+    // Cargo sets this for every build script, from the `[package]
+    // version` in Cargo.toml.
+    let crate_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let exact_tag = exact_tag();
+    let short_hash = short_hash();
+    let dirty = is_dirty();
+
+    let version = compute_version(VersionInputs {
+        build_rev_override: build_rev_override.as_deref(),
+        crate_version: &crate_version,
+        exact_tag: exact_tag.as_deref(),
+        short_hash: short_hash.as_deref(),
+        dirty,
+    });
 
     println!("cargo:rustc-env=KPA_VERSION={version}");
-}
-
-fn git_version() -> Option<String> {
-    let dirty_suffix = if is_dirty() { "-dirty" } else { "" };
-
-    exact_tag()
-        .map(|tag| format!("v{}{dirty_suffix}", tag.strip_prefix('v').unwrap_or(&tag)))
-        .or_else(|| short_hash().map(|hash| format!("dev-{hash}{dirty_suffix}")))
 }
 
 fn exact_tag() -> Option<String> {
