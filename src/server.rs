@@ -245,6 +245,29 @@ impl Server {
         self.clip.end_now();
     }
 
+    /// Releases `dbs` — the slots mutex a freshness guard (`drop_if_stale`)
+    /// just ran under — and ends the clipboard offer for every name in
+    /// `dropped`. The one place `status`, `unlock`, `list` and `copy` all
+    /// hand their drop decision to, instead of each pairing "release the
+    /// mutex" with "end the offer this drop implies" by hand: a call site
+    /// runs the guard, collects what it dropped (zero, one, or several
+    /// names — `status` and `list`'s all-databases form can each find
+    /// more than one; `Option<String>` works here too, since it iterates
+    /// zero or one items), and ends this one call with the mutex released
+    /// either way. Same reasoning as `expire_idle`: ending an offer is a
+    /// round trip to the clipboard backend, so it only ever happens after
+    /// `dbs` is dropped, never while it's held.
+    fn end_dropped(
+        &self,
+        dbs: MutexGuard<'_, HashMap<String, Slot>>,
+        dropped: impl IntoIterator<Item = String>,
+    ) {
+        drop(dbs);
+        for name in dropped {
+            self.end_clipboard_for(&name);
+        }
+    }
+
     /// Where to report unlocks. Called once, before the server takes requests.
     pub fn set_policy_events(&self, events: Sender<policy::Event>) {
         let _ = self.policy_events.set(events);
@@ -347,36 +370,29 @@ fn drop_if_stale(slot: &mut Slot) -> bool {
 
 impl Status for Server {
     fn status(&self) -> Vec<DatabaseStatus> {
+        let mut dbs = slots(&self.dbs);
         let mut dropped = Vec::new();
-        let statuses = {
-            let mut dbs = slots(&self.dbs);
-            self.config
-                .databases
-                .iter()
-                .map(|cfg| {
-                    // A stale database is dropped by `drop_if_stale`, so it is
-                    // reported as locked. `status` has no error to return.
-                    let entries = dbs.get_mut(&cfg.name).and_then(|slot| {
-                        if drop_if_stale(slot) {
-                            dropped.push(cfg.name.clone());
-                        }
-                        slot.db.as_ref().map(vault::entry_count)
-                    });
-                    DatabaseStatus {
-                        name: cfg.name.clone(),
-                        locked: entries.is_none(),
-                        entries,
+        let statuses = self
+            .config
+            .databases
+            .iter()
+            .map(|cfg| {
+                // A stale database is dropped by `drop_if_stale`, so it is
+                // reported as locked. `status` has no error to return.
+                let entries = dbs.get_mut(&cfg.name).and_then(|slot| {
+                    if drop_if_stale(slot) {
+                        dropped.push(cfg.name.clone());
                     }
-                })
-                .collect()
-        };
-        // Outside the `dbs` guard, same reasoning as `expire_idle`: ending
-        // a clipboard offer is a round trip to the backend, not
-        // bookkeeping. `status` can drop several databases in one call,
-        // so each one that was dropped gets its offer ended.
-        for name in &dropped {
-            self.end_clipboard_for(name);
-        }
+                    slot.db.as_ref().map(vault::entry_count)
+                });
+                DatabaseStatus {
+                    name: cfg.name.clone(),
+                    locked: entries.is_none(),
+                    entries,
+                }
+            })
+            .collect();
+        self.end_dropped(dbs, dropped);
         statuses
     }
 }
@@ -406,36 +422,32 @@ impl Unlock for Server {
             return Err(UnlockError::UnknownDb { db: db() });
         };
 
-        let mut dropped_stale = false;
-        let epoch = {
-            let mut dbs = slots(&self.dbs);
-            let Some(slot) = dbs.get_mut(name) else {
-                return Err(UnlockError::UnknownDb { db: db() });
-            };
-            // Already unlocked and the file is unchanged: succeed without
-            // re-prompting. If the file changed, the database is dropped
-            // and this unlock continues to a fresh prompt.
-            if slot.db.is_some() {
-                if drop_if_stale(slot) {
-                    dropped_stale = true;
-                } else {
-                    return Ok(db());
-                }
-            }
-            if slot.unlocking {
-                return Err(UnlockError::InProgress { db: db() });
-            }
-            slot.unlocking = true;
-            slot.lock_epoch
+        let mut dbs = slots(&self.dbs);
+        let Some(slot) = dbs.get_mut(name) else {
+            return Err(UnlockError::UnknownDb { db: db() });
         };
-        // Outside the `dbs` guard just released, same reasoning as
-        // `expire_idle`: ending a clipboard offer is a round trip to the
-        // backend, not bookkeeping.
-        if dropped_stale {
-            self.end_clipboard_for(name);
+        // Already unlocked and the file is unchanged: succeed without
+        // re-prompting. If the file changed, the database is dropped
+        // and this unlock continues to a fresh prompt.
+        let was_unlocked = slot.db.is_some();
+        let stale = was_unlocked && drop_if_stale(slot);
+        if was_unlocked && !stale {
+            return Ok(db());
         }
-        // Declared before `dbs` below, so it drops after that guard has
-        // released the mutex — `UnlockingFlag::drop` takes it again.
+        // `end_dropped` releases `dbs` either way, so this covers every
+        // way out from here on, including the `InProgress` error below —
+        // a stale database must not keep serving a clipboard offer just
+        // because a second unlock lost the race to the first.
+        let outcome = if slot.unlocking {
+            Err(UnlockError::InProgress { db: db() })
+        } else {
+            slot.unlocking = true;
+            Ok(slot.lock_epoch)
+        };
+        self.end_dropped(dbs, stale.then(|| name.to_string()));
+        let epoch = outcome?;
+        // `end_dropped` above already released the slots mutex, which
+        // `UnlockingFlag::drop` takes again.
         let _unlocking = UnlockingFlag {
             dbs: &self.dbs,
             name,
@@ -513,38 +525,38 @@ impl List for Server {
 
         // Each database a successful list reads gets its own timer reset;
         // the others keep running.
-        let (result, dropped_stale): (_, Option<String>) = match request.db.as_deref() {
-            Some(name) => match dbs.get_mut(name) {
-                None => (
-                    Err(ListError::UnknownDb {
-                        db: name.to_string(),
-                    }),
-                    None,
-                ),
-                Some(slot) => {
-                    if drop_if_stale(slot) {
-                        (
+        match request.db.as_deref() {
+            Some(name) => {
+                let (result, stale) = match dbs.get_mut(name) {
+                    None => (
+                        Err(ListError::UnknownDb {
+                            db: name.to_string(),
+                        }),
+                        false,
+                    ),
+                    Some(slot) => {
+                        let stale = drop_if_stale(slot);
+                        let result = if stale {
                             Err(ListError::Stale {
                                 db: name.to_string(),
-                            }),
-                            Some(name.to_string()),
-                        )
-                    } else {
-                        match slot.entries(name) {
-                            None => (
-                                Err(ListError::Locked {
+                            })
+                        } else {
+                            match slot.entries(name) {
+                                None => Err(ListError::Locked {
                                     db: name.to_string(),
                                 }),
-                                None,
-                            ),
-                            Some(entries) => {
-                                slot.touch();
-                                (Ok(entries), None)
+                                Some(entries) => {
+                                    slot.touch();
+                                    Ok(entries)
+                                }
                             }
-                        }
+                        };
+                        (result, stale)
                     }
-                }
-            },
+                };
+                self.end_dropped(dbs, stale.then(|| name.to_string()));
+                result
+            }
             None => {
                 // A stale database fails the whole listing, naming it, rather
                 // than being skipped as if it were locked. Once dropped it is
@@ -561,20 +573,14 @@ impl List for Server {
                         slot.touch();
                     }
                 }
-                match stale {
-                    Some(name) => (Err(ListError::Stale { db: name.clone() }), Some(name)),
-                    None => (Ok(entries), None),
-                }
+                let result = match &stale {
+                    Some(name) => Err(ListError::Stale { db: name.clone() }),
+                    None => Ok(entries),
+                };
+                self.end_dropped(dbs, stale);
+                result
             }
-        };
-        // Outside the `dbs` guard, released by this `drop`, same reasoning
-        // as `expire_idle`: ending a clipboard offer is a round trip to
-        // the backend, not bookkeeping.
-        drop(dbs);
-        if let Some(name) = &dropped_stale {
-            self.end_clipboard_for(name);
         }
-        result
     }
 }
 
@@ -594,26 +600,27 @@ impl CopyEntry for Server {
             let Some(slot) = dbs.get_mut(name) else {
                 return Err(CopyError::UnknownDb { db: db() });
             };
-            if drop_if_stale(slot) {
-                // Outside the `dbs` guard, released by this `drop`, same
-                // reasoning as `expire_idle`: ending a clipboard offer is
-                // a round trip to the backend, not bookkeeping.
-                drop(dbs);
-                self.end_clipboard_for(name);
-                return Err(CopyError::Stale { db: db() });
-            }
-            let Some(database) = slot.db.as_ref() else {
-                return Err(CopyError::Locked { db: db() });
+            let stale = drop_if_stale(slot);
+            let result = if stale {
+                Err(CopyError::Stale { db: db() })
+            } else {
+                match slot.db.as_ref() {
+                    None => Err(CopyError::Locked { db: db() }),
+                    Some(database) => {
+                        match vault::entry_field(database, request.uuid, field_key(request.field)) {
+                            None => Err(CopyError::UnknownUuid { db: db() }),
+                            Some(None) => Err(CopyError::FieldEmpty { db: db() }),
+                            Some(Some(value)) => Ok((
+                                value,
+                                vault::entry_title(database, request.uuid)
+                                    .unwrap_or_else(|| request.uuid.to_string()),
+                            )),
+                        }
+                    }
+                }
             };
-            match vault::entry_field(database, request.uuid, field_key(request.field)) {
-                None => return Err(CopyError::UnknownUuid { db: db() }),
-                Some(None) => return Err(CopyError::FieldEmpty { db: db() }),
-                Some(Some(value)) => (
-                    value,
-                    vault::entry_title(database, request.uuid)
-                        .unwrap_or_else(|| request.uuid.to_string()),
-                ),
-            }
+            self.end_dropped(dbs, stale.then(|| name.to_string()));
+            result?
         };
         let (value, entry) = value;
 
