@@ -98,8 +98,10 @@ sets it and `serve --log-level` overrides it. Under systemd, where stderr is
 the journal, each line carries a `<N>` syslog priority prefix so
 `journalctl -p warning` filters by level; the daemon decides that by
 comparing `$JOURNAL_STREAM` against its own stderr. Elsewhere a line reads
-`<UTC timestamp> <level>: <message>`. Under journald there is no timestamp
-of kpa's own: the journal stamps its own.
+`<UTC timestamp> <LEVEL> <message>`, with the timestamp dimmed and the level
+coloured when stderr is a terminal (not when `NO_COLOR` is set or `TERM` is
+`dumb`). Under journald there is no timestamp of kpa's own: the journal
+stamps its own.
 
 | Level   | What it carries                                                           |
 | ------- | ------------------------------------------------------------------------- |

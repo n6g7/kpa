@@ -12,7 +12,7 @@
 //! only disagree with it.
 
 use std::fmt::{self, Write as _};
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,12 +39,23 @@ pub enum Level {
 }
 
 impl Level {
-    fn name(self) -> &'static str {
+    /// Upper case and padded to a common width, so messages line up.
+    fn label(self) -> &'static str {
         match self {
-            Level::Error => "error",
-            Level::Warn => "warn",
-            Level::Info => "info",
-            Level::Debug => "debug",
+            Level::Error => "ERROR",
+            Level::Warn => "WARN ",
+            Level::Info => "INFO ",
+            Level::Debug => "DEBUG",
+        }
+    }
+
+    /// The SGR colour code for the level's label.
+    fn colour(self) -> &'static str {
+        match self {
+            Level::Error => "1;31",
+            Level::Warn => "33",
+            Level::Info => "32",
+            Level::Debug => "34",
         }
     }
 
@@ -97,19 +108,64 @@ pub fn log(level: Level, args: fmt::Arguments<'_>) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let line = format_line(level, journal_attached(), now, args);
+    let line = format_line(level, style(), now, args);
     let _ = std::io::stderr().lock().write_all(line.as_bytes());
 }
 
+/// How lines are laid out, decided once from where stderr goes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Style {
+    /// `<N>message`: journald reads the priority and adds its own timestamp.
+    Journal,
+    /// `2026-11-06T17:33:05Z WARN  message`.
+    Plain,
+    /// `Plain` with the timestamp dimmed and the level coloured.
+    Colour,
+}
+
+fn style() -> Style {
+    static STYLE: OnceLock<Style> = OnceLock::new();
+    *STYLE.get_or_init(|| {
+        if journal_attached() {
+            Style::Journal
+        } else if wants_colour(
+            std::io::stderr().is_terminal(),
+            std::env::var_os("NO_COLOR").as_deref(),
+            std::env::var_os("TERM").as_deref(),
+        ) {
+            Style::Colour
+        } else {
+            Style::Plain
+        }
+    })
+}
+
+/// Colour only on a terminal that can show it. `NO_COLOR` set to anything
+/// non-empty turns it off (https://no-color.org), and `TERM=dumb` can't
+/// show it.
+fn wants_colour(
+    is_terminal: bool,
+    no_colour: Option<&std::ffi::OsStr>,
+    term: Option<&std::ffi::OsStr>,
+) -> bool {
+    is_terminal && no_colour.is_none_or(|v| v.is_empty()) && term.is_some_and(|t| t != "dumb")
+}
+
 /// One finished line, newline included. `now` is seconds since the Unix
-/// epoch; it is only used when not logging to the journal. Control characters in the message
+/// epoch; the journal style ignores it. Control characters in the message
 /// are escaped, so a crafted database name in a request cannot start a
-/// second line (or, under journald, a second `<N>` priority).
-fn format_line(level: Level, journal: bool, now: u64, args: fmt::Arguments<'_>) -> String {
-    let mut line = if journal {
-        format!("<{}>", level.priority())
-    } else {
-        format!("{} {}: ", timestamp(now), level.name())
+/// second line (or, under journald, a second `<N>` priority) or inject
+/// terminal escapes.
+fn format_line(level: Level, style: Style, now: u64, args: fmt::Arguments<'_>) -> String {
+    let mut line = match style {
+        Style::Journal => format!("<{}>", level.priority()),
+        Style::Plain => format!("{} {} ", timestamp(now), level.label()),
+        Style::Colour => format!(
+            "\x1b[2m{}\x1b[0m \x1b[{}m{}\x1b[0m ",
+            timestamp(now),
+            level.colour(),
+            level.label()
+        ),
     };
     let mut message = String::new();
     let _ = message.write_fmt(args);
@@ -177,9 +233,29 @@ mod tests {
     #[test]
     fn plain_lines_carry_a_timestamp_and_the_level() {
         assert_eq!(
-            format_line(Level::Warn, false, 0, format_args!("unlock failed")),
-            "1970-01-01T00:00:00Z warn: unlock failed\n"
+            format_line(Level::Warn, Style::Plain, 0, format_args!("unlock failed")),
+            "1970-01-01T00:00:00Z WARN  unlock failed\n"
         );
+    }
+
+    #[test]
+    fn colour_lines_dim_the_timestamp_and_colour_the_level() {
+        assert_eq!(
+            format_line(Level::Error, Style::Colour, 0, format_args!("x")),
+            "\x1b[2m1970-01-01T00:00:00Z\x1b[0m \x1b[1;31mERROR\x1b[0m x\n"
+        );
+    }
+
+    #[test]
+    fn colour_needs_a_capable_terminal_and_no_opt_out() {
+        use std::ffi::OsStr;
+        let xterm = Some(OsStr::new("xterm-256color"));
+        assert!(wants_colour(true, None, xterm));
+        assert!(wants_colour(true, Some(OsStr::new("")), xterm));
+        assert!(!wants_colour(false, None, xterm));
+        assert!(!wants_colour(true, Some(OsStr::new("1")), xterm));
+        assert!(!wants_colour(true, None, Some(OsStr::new("dumb"))));
+        assert!(!wants_colour(true, None, None));
     }
 
     #[test]
@@ -193,26 +269,31 @@ mod tests {
     #[test]
     fn journal_lines_carry_a_syslog_priority() {
         assert_eq!(
-            format_line(Level::Error, true, 0, format_args!("x")),
+            format_line(Level::Error, Style::Journal, 0, format_args!("x")),
             "<3>x\n"
         );
         assert_eq!(
-            format_line(Level::Warn, true, 0, format_args!("x")),
+            format_line(Level::Warn, Style::Journal, 0, format_args!("x")),
             "<4>x\n"
         );
         assert_eq!(
-            format_line(Level::Info, true, 0, format_args!("x")),
+            format_line(Level::Info, Style::Journal, 0, format_args!("x")),
             "<6>x\n"
         );
         assert_eq!(
-            format_line(Level::Debug, true, 0, format_args!("x")),
+            format_line(Level::Debug, Style::Journal, 0, format_args!("x")),
             "<7>x\n"
         );
     }
 
     #[test]
     fn control_characters_cannot_start_another_line() {
-        let line = format_line(Level::Info, true, 0, format_args!("a\n<3>b\r\x1b[2J"));
+        let line = format_line(
+            Level::Info,
+            Style::Journal,
+            0,
+            format_args!("a\n<3>b\r\x1b[2J"),
+        );
         assert_eq!(line.matches('\n').count(), 1, "{line:?}");
         assert!(line.ends_with('\n'));
         assert!(!line.contains('\x1b'));
