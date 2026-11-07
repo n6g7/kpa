@@ -291,10 +291,16 @@ mounts the guard is best effort.
 Response: line-delimited JSON is serialized, never concatenated; `copy`
 addresses entries by `(db, uuid, field)`; the CLI escapes DEL, C1 controls
 and Unicode bidi/format characters before writing to a terminal (JSON
-escaping covers only C0). In scope: terminal escape or control sequences
-reaching the CLI's terminal output unescaped; a field breaking framing; a
-title or UUID collision across databases that makes a `copy` resolve to a
-different entry than the one listed.
+escaping covers only C0). A custom field's key is entry content too: the
+collision rule (`docs/design.md` § Protocol) makes a bare name that spells
+a built-in case-insensitively always mean the built-in, by type rather than
+by convention, so a custom key crafted to spell `password` or `title`
+cannot stand in for the real field or intercept a `copy` meant for it. In
+scope: terminal escape or control sequences reaching the CLI's terminal
+output unescaped; a field breaking framing; a title or UUID collision
+across databases that makes a `copy` resolve to a different entry than the
+one listed; a custom field's key reaching a built-in's `copy` target or
+vice versa.
 
 **T-14 · Socket abuse** (D) — ACT-5 · TB-1 · — → G-11  
 Response: 64 KiB line cap, 5 s total deadline per request and per

@@ -151,10 +151,24 @@ restarting it costs one re-unlock.
 {"v":1,"op":"lock","db":"personal"}          // db omitted = lock all
 {"v":1,"op":"list"}                          // db omitted = all unlocked
 {"v":1,"op":"copy","db":"personal","uuid":"…","field":"password"}
+{"v":1,"op":"copy","db":"personal","uuid":"…","field":"custom:Password"}
 ```
 
-`field` is an allow-list: `password`, `username`, `url`, `notes`. No arbitrary
-custom-attribute dump in v1.
+`field` accepts `username`, `password`, `url`, `notes`, or a custom
+(user-defined) field by its KeePass key. Decoding never rejects a `field`
+value — any string is accepted, and one that doesn't resolve to anything on
+the entry asked about fails with `field_empty`, the same as an empty or
+absent field.
+
+**Collision rule.** `username`, `password`, `url`, `notes`, and KeePass's
+own reserved `title` are matched case-insensitively and always mean the
+built-in (`title` has no built-in `copy` serves, so a bare request for it
+never resolves to anything). A custom field is legal in KeePass even when
+its key collides with one of these only in case (e.g. a custom `Password`
+field alongside the real one) — that field is still addressable, but only
+via the `custom:` prefix (`custom:Password`), never its bare key, so a bare
+request always means the built-in. Any other custom field is addressed by
+its bare key.
 
 ### Responses
 
@@ -418,7 +432,8 @@ intermediate state. Total is roughly 900 LoC of Rust.
 - TOTP
 - `kpa get` behind an explicit flag
 - `pinentry` as the prompt
-- Custom-attribute access
+- Attachments (binary content; out of scope for a line-delimited JSON
+  protocol)
 
 ## Open questions
 

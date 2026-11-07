@@ -801,3 +801,81 @@ fn version_reports_an_older_daemon_that_does_not_report_a_version() {
         Some("server: unknown (daemon predates version reporting)")
     );
 }
+
+/// Starts a daemon against `common::fields_db()` (custom fields and a
+/// colliding custom field — `tests/fixture.sh`).
+fn fields_daemon() -> Daemon {
+    let config = config_toml(
+        &format!("printf %s {}", common::PASSWORD),
+        &common::fields_db().display().to_string(),
+    );
+    Daemon::spawn_config(&config, None, Stdio::null())
+}
+
+/// Looks up one entry's uuid by title via `list`.
+fn uuid_of(daemon: &Daemon, title: &str) -> String {
+    let listed = daemon.run(&["list", "personal"]);
+    listed["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .find(|e| e["title"] == title)
+        .unwrap_or_else(|| panic!("no entry titled {title:?} in {listed}"))["uuid"]
+        .as_str()
+        .expect("uuid is a string")
+        .to_string()
+}
+
+/// A field name that doesn't resolve to anything on the entry — not a
+/// built-in, not a real custom key — fails `field_empty`, the same as an
+/// empty or absent one, rather than being rejected before dispatch.
+#[test]
+fn copy_of_an_unrecognized_field_name_is_field_empty() {
+    let daemon = fields_daemon();
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let uuid = uuid_of(&daemon, "Example");
+
+    let copied = daemon.run(&["copy", "personal", &uuid, "no-such-field"]);
+    assert_eq!(copied["ok"], false);
+    assert_eq!(copied["error"], "field_empty");
+}
+
+/// A bare `title` never resolves to anything — not the entry's own title
+/// (never copyable) and not a same-spelled custom field (that needs
+/// `custom:title`, which this entry doesn't have anyway).
+#[test]
+fn copy_of_a_bare_title_is_field_empty() {
+    let daemon = fields_daemon();
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let uuid = uuid_of(&daemon, "Example");
+
+    let copied = daemon.run(&["copy", "personal", &uuid, "title"]);
+    assert_eq!(copied["ok"], false);
+    assert_eq!(copied["error"], "field_empty");
+}
+
+/// A custom field by its bare key, and a custom field reached by its
+/// `custom:`-prefixed collision name, both resolve to a real value and
+/// reach the clipboard handoff — never `field_empty`. Drives whatever
+/// clipboard this machine actually has (same as `tests/clipboard.rs`'s
+/// own `#[ignore]`d tests), so it stays opt-in rather than running by
+/// default:
+///
+/// ```sh
+/// nix develop -c cargo test --test server -- --ignored copy_of_a_resolvable_field
+/// ```
+#[test]
+#[ignore = "drives the live clipboard; run with --ignored when changing field resolution"]
+fn copy_of_a_resolvable_field_reaches_the_clipboard_handoff() {
+    let daemon = fields_daemon();
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let uuid = uuid_of(&daemon, "Example");
+
+    for field in ["api-key", "custom:PASSWORD", "password"] {
+        let copied = daemon.run(&["copy", "personal", &uuid, field]);
+        assert_ne!(
+            copied["error"], "field_empty",
+            "{field}: should have resolved to a value, got {copied}"
+        );
+    }
+}
