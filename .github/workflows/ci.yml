@@ -18,7 +18,13 @@ jobs:
       # same versions as `nix develop -c cargo test` locally — nothing to
       # keep in sync by hand.
       - uses: DeterminateSystems/nix-installer-action@v23
+      # The dev shell is all public nixpkgs, which Nix already fetches from
+      # cache.nixos.org. The GitHub Actions cache adds nothing here, and
+      # uploading to it costs minutes per run: it stores one entry per
+      # store path, uploads them one at a time, and is rate-limited.
       - uses: DeterminateSystems/magic-nix-cache-action@v15
+        with:
+          use-gha-cache: disabled
 
       # Nix caches the toolchain itself; this caches cargo's own build
       # artifacts (registry downloads + target/) across runs, keyed on
