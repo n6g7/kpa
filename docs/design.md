@@ -34,7 +34,7 @@ that can modify a database. `keepass` is also built without its
 | 3   | **Single binary, two roles** — `kpa serve` + client subcommands                                           | No client/daemon version skew within a release; one build artifact.                                                                                                                                                           |
 | 4   | **No `get` in v1 — `copy` only**                                                                          | The daemon owns the clipboard, so the secret never enters the client's address space. `get` would print secrets to stdout, into shell history and scrollback. Deferred, and will be opt-in behind a flag if added.            |
 | 5   | **v1 keys: master password + keyfile only**                                                               | Challenge-response deferred.                                                                                                                                                                                                  |
-| 6   | **No TOTP in v1**                                                                                         | Cheap to add later (`keepass`'s `totp` feature, read-only). HOTP is permanently out — counters need writes.                                                                                                                   |
+| 6   | **TOTP via `keepass`'s `totp` feature, read-only**                                                       | `copy` generates the current code from the `otp` field at copy time; the seed never leaves the process. HOTP is permanently out — counters need writes.                                                                     |
 | 7   | **Idle timeout 30 min per database**, config-overridable                                                               | logind's `Lock` signal already covers screen-lock; this only catches walking away without locking.                                                                                                                            |
 | 8   | **Daemon autostarts locked**                                                                              | A tray should show state from login onward, and nothing prompts until something actually asks.                                                                                                                                |
 | 9   | **Unlock prompt: a `--dmenu`-style password prompt** (e.g. `fuzzel --password --dmenu`) in v1, config key | Trivial to wire up and fits most Wayland setups out of the box. `pinentry` is the better long-term answer for secure memory, but driving Assuan is fiddly — so the prompt is swappable from day one rather than hardcoded.    |
@@ -154,21 +154,22 @@ restarting it costs one re-unlock.
 {"v":1,"op":"copy","db":"personal","uuid":"…","field":"custom:Password"}
 ```
 
-`field` accepts `username`, `password`, `url`, `notes`, or a custom
+`field` accepts any name `list`'s `fields` array returns for that entry
+(below): `username`, `password`, `url`, `notes`, `totp`, or a custom
 (user-defined) field by its KeePass key. Decoding never rejects a `field`
 value — any string is accepted, and one that doesn't resolve to anything on
 the entry asked about fails with `field_empty`, the same as an empty or
 absent field.
 
-**Collision rule.** `username`, `password`, `url`, `notes`, and KeePass's
-own reserved `title` are matched case-insensitively and always mean the
-built-in (`title` has no built-in `copy` serves, so a bare request for it
-never resolves to anything). A custom field is legal in KeePass even when
-its key collides with one of these only in case (e.g. a custom `Password`
-field alongside the real one) — that field is still addressable, but only
-via the `custom:` prefix (`custom:Password`), never its bare key, so a bare
-request always means the built-in. Any other custom field is addressed by
-its bare key.
+**Collision rule.** `username`, `password`, `url`, `notes`, `totp`, and
+KeePass's own reserved `title` are matched case-insensitively and always
+mean the built-in (`title` has no built-in `copy` serves, so a bare request
+for it never resolves to anything). A custom field is legal in KeePass even
+when its key collides with one of these only in case (e.g. a custom `Password`
+field alongside the real one) — that field is still listed and copyable, but
+only via the `custom:` prefix (`custom:Password`), never its bare key, so a
+bare request always means the built-in. Any other custom field is addressed
+by its bare key.
 
 ### Responses
 
@@ -179,7 +180,7 @@ its bare key.
 {"ok":true,"v":1,"entries":[{"db":"personal","uuid":"…","title":"GitHub",
                              "username":"alice","url":"https://github.com",
                              "group":"Dev",
-                             "fields":["username","password","custom:Password"]}]}
+                             "fields":["username","password","totp","custom:Password"]}]}
 
 {"ok":true,"v":1,"copied":"password","expires_in":30}
 
@@ -233,7 +234,7 @@ matching; kpa stays dumb and returns everything else.
 **`fields` is the one exception, because it carries names, never values.**
 Each entry's `fields` array names every field `copy` can be asked for on
 it: the built-ins present and non-empty on the entry, in the order
-`username`, `password`, `url`, `notes`, then its custom fields by their
+`username`, `password`, `url`, `notes`, `totp`, then its custom fields by their
 KeePass key (sorted — `keepass`'s own field storage is an unordered map, so
 the database's own field order isn't recoverable), `custom:`-prefixed per
 the collision rule above. Protectedness never hides a field's *name* here,
@@ -431,10 +432,10 @@ overnight, secrets in shell scrollback — and that is the whole claim.
 
 ## Dependencies
 
-`keepass` (KDBX + Argon2; `challenge_response` feature off in v1),
-`serde`/`serde_json`, `toml`, `clap`, `zbus` (logind), `ksni` (tray),
-`wl-clipboard-rs`, `zeroize`. Threads over async unless `ksni`'s runtime choice
-makes tokio simpler.
+`keepass` (KDBX + Argon2 + TOTP via its `totp` feature;
+`challenge_response` feature off in v1), `serde`/`serde_json`, `toml`,
+`clap`, `zbus` (logind), `ksni` (tray), `wl-clipboard-rs`, `zeroize`.
+Threads over async unless `ksni`'s runtime choice makes tokio simpler.
 
 ## Staging
 
@@ -446,11 +447,13 @@ intermediate state. Total is roughly 900 LoC of Rust.
 - YubiKey challenge-response (note for whenever this lands: don't reuse the
   key's own PIN as a vault credential — it collapses a two-factor property
   into one)
-- TOTP
 - `kpa get` behind an explicit flag
 - `pinentry` as the prompt
 - Attachments (binary content; out of scope for a line-delimited JSON
   protocol)
+- The legacy KeeOtp `TimeOtp-*` fields: a different, older convention from
+  the de-facto-standard `otp` field, which `keepass`'s `totp` feature does
+  not parse
 
 ## Open questions
 

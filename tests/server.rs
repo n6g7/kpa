@@ -854,8 +854,8 @@ fn copy_of_a_bare_title_is_field_empty() {
     assert_eq!(copied["error"], "field_empty");
 }
 
-/// A custom field by its bare key, and a custom field reached by its
-/// `custom:`-prefixed collision name, both resolve to a real value and
+/// `totp`, a custom field by its bare key, and a custom field reached by
+/// its `custom:`-prefixed collision name all resolve to a real value and
 /// reach the clipboard handoff — never `field_empty`. Drives whatever
 /// clipboard this machine actually has (same as `tests/clipboard.rs`'s
 /// own `#[ignore]`d tests), so it stays opt-in rather than running by
@@ -871,7 +871,7 @@ fn copy_of_a_resolvable_field_reaches_the_clipboard_handoff() {
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let uuid = uuid_of(&daemon, "Example");
 
-    for field in ["api-key", "custom:PASSWORD", "password"] {
+    for field in ["totp", "api-key", "custom:PASSWORD", "password"] {
         let copied = daemon.run(&["copy", "personal", &uuid, field]);
         assert_ne!(
             copied["error"], "field_empty",
@@ -897,6 +897,37 @@ fn list_reports_copyable_field_names() {
         .expect("Example entry");
     assert_eq!(
         example["fields"],
-        serde_json::json!(["username", "password", "url", "custom:PASSWORD", "api-key"])
+        serde_json::json!([
+            "username",
+            "password",
+            "url",
+            "totp",
+            "custom:PASSWORD",
+            "api-key"
+        ])
     );
+
+    let no_otp = entries
+        .iter()
+        .find(|e| e["title"] == "NoOtp")
+        .expect("NoOtp entry");
+    assert_eq!(
+        no_otp["fields"],
+        serde_json::json!(["username", "password"])
+    );
+}
+
+/// `totp` on an entry with no `otp` field, or one that doesn't parse, is
+/// `field_empty` — never a parse error that could echo the bad value.
+#[test]
+fn copy_of_totp_without_a_valid_otp_field_is_field_empty() {
+    let daemon = fields_daemon();
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+
+    for title in ["NoOtp", "BadOtp"] {
+        let uuid = uuid_of(&daemon, title);
+        let copied = daemon.run(&["copy", "personal", &uuid, "totp"]);
+        assert_eq!(copied["ok"], false, "{title}: {copied}");
+        assert_eq!(copied["error"], "field_empty", "{title}: {copied}");
+    }
 }

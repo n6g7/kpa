@@ -78,9 +78,13 @@ kp.add_entry(
 kp.save()
 PYEOF
 
-# Custom (user-defined) fields, and a custom field colliding
-# case-insensitively with a built-in name — for `copy`'s custom-field and
-# collision cases.
+# Custom (user-defined) fields, a custom field colliding
+# case-insensitively with a built-in name, and a valid `otp` field — for
+# `list`'s `fields` array and `copy`'s `totp`/custom-field/collision
+# cases. The otpauth:// URL and secret are the `keepass` crate's own test
+# vector (`db/otp.rs`'s `kdbx4_otp_tests::totp_default`), reused here
+# rather than a fresh one, so the generated code is independently
+# checkable.
 python3 - "$FIELDS_DB" <<'PYEOF'
 import sys
 from pykeepass import create_database
@@ -94,17 +98,25 @@ entry.set_custom_property("api-key", "abc123")
 # name — legal in KeePass (keys are exact-case), and distinct from the
 # entry's real `Password` field above.
 entry.set_custom_property("PASSWORD", "not-the-real-password")
+entry.otp = "otpauth://totp/KeePassXC:none?secret=JBSWY3DPEHPK3PXP&period=30&digits=6&issuer=KeePassXC"
+
+no_otp = kp.add_entry(group, "NoOtp", "bob", "entrypass2")
+
+bad_otp = kp.add_entry(group, "BadOtp", "carol", "entrypass3")
+bad_otp.otp = "not an otpauth url"
 
 # pykeepass appends each new <String> after the existing <AutoType>
 # element, but `keepass`'s XML deserializer only collects a run of
 # consecutive same-named elements into its `string_fields` list — a
 # <String> that resumes after a different tag starts a second, separate
 # run, which it rejects as a duplicate field. Moving <AutoType> back to
-# the end of the entry keeps every <String> contiguous, matching what a
+# the end of each entry keeps every <String> contiguous, matching what a
 # KeePass client itself would write.
-auto_type = entry._element.find("AutoType")
-entry._element.remove(auto_type)
-entry._element.append(auto_type)
+for e in (entry, no_otp, bad_otp):
+    auto_type = e._element.find("AutoType")
+    if auto_type is not None:
+        e._element.remove(auto_type)
+        e._element.append(auto_type)
 
 kp.save()
 PYEOF

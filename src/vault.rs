@@ -464,6 +464,31 @@ pub fn entry_exists(db: &Database, uuid: Uuid) -> bool {
     with_entry(db, uuid, |_| ()).is_some()
 }
 
+/// The current code for this entry's `otp` field, generated now — the
+/// field itself only ever holds the seed (an `otpauth://` URL), and kpa
+/// never returns that, logs it, or holds it longer than this call needs
+/// to. `None` if no entry with this uuid exists; `Some(None)` if it exists
+/// but has no `otp` field, the field doesn't parse as a valid `otpauth://`
+/// URL, or the system clock can't be read — `copy` reports all of these
+/// the same as any other field with nothing to give (`FieldEmpty`), never
+/// the parse error, which could otherwise echo back raw seed bytes.
+///
+/// Only the de-facto-standard `otp` field (`keepass`'s `fields::OTP`) is
+/// read. The legacy KeeOtp `TimeOtp-Seed`/`-Length`/`-Period` fields are
+/// a different, older convention that `keepass` 0.15's `totp` feature
+/// does not parse, so supporting them would mean hand-rolling that format
+/// here — out of scope for what "the crate's own feature, read-only"
+/// promises.
+pub fn entry_totp(db: &Database, uuid: Uuid) -> Option<Option<Zeroizing<String>>> {
+    with_entry(db, uuid, |entry| {
+        entry
+            .get_otp()
+            .ok()
+            .and_then(|totp| totp.value_now().ok())
+            .map(|code| Zeroizing::new(code.code))
+    })
+}
+
 /// The entry's title, for naming it in the operation log. `None` if there
 /// is no such entry, it has no title, or the title is protected: a log line
 /// must not de-protect a field the user marked protected (same rule as
@@ -538,22 +563,23 @@ fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
 }
 
 /// Exact KeePass key spellings that are never "custom": the four built-ins
-/// `copy` supports, and `Title` — kpa never makes `Title` copyable itself,
-/// but it is still KeePass's own reserved key, not a user-defined one.
-/// Exact-case: a differently-cased key (e.g. a custom `USERNAME`) is a
-/// distinct `HashMap` entry and *is* a custom field — see
+/// `copy` supports, `otp`, and `Title` — kpa never makes `Title` copyable
+/// itself, but it is still KeePass's own reserved key, not a user-defined
+/// one. Exact-case: a differently-cased key (e.g. a custom `USERNAME`) is
+/// a distinct `HashMap` entry and *is* a custom field — see
 /// `copyable_field_names`.
-const RESERVED_ENTRY_KEYS: [&str; 5] = [
+const RESERVED_ENTRY_KEYS: [&str; 6] = [
     keepass::db::fields::TITLE,
     keepass::db::fields::USERNAME,
     keepass::db::fields::PASSWORD,
     keepass::db::fields::URL,
     keepass::db::fields::NOTES,
+    keepass::db::fields::OTP,
 ];
 
 /// Field names `copy` can be asked for on this entry — never values.
 /// Built-ins in the fixed order `docs/design.md` § Protocol documents
-/// (`username`, `password`, `url`, `notes`), each listed only when
+/// (`username`, `password`, `url`, `notes`, `totp`), each listed only when
 /// present and non-empty; then this entry's custom (user-defined) string
 /// fields, by their KeePass key, `custom:`-prefixed exactly when that key
 /// collides case-insensitively with a built-in name or with `title`
@@ -569,7 +595,10 @@ const RESERVED_ENTRY_KEYS: [&str; 5] = [
 /// Protectedness never hides a field's *name* here, unlike `list`'s own
 /// `title`/`username`/`url`: this reads straight through `Value::get()`,
 /// the same as `entry_field` does for `copy` — a bare name carries nothing
-/// a protected value does.
+/// a protected value does. `totp` is listed whenever the `otp` field is
+/// present and non-empty, regardless of whether it actually parses as a
+/// valid `otpauth://` URL — `entry_totp` is what validates that, at copy
+/// time.
 fn copyable_field_names(entry: &keepass::db::Entry) -> Vec<String> {
     use keepass::db::fields;
 
@@ -580,6 +609,7 @@ fn copyable_field_names(entry: &keepass::db::Entry) -> Vec<String> {
         ("password", fields::PASSWORD),
         ("url", fields::URL),
         ("notes", fields::NOTES),
+        ("totp", fields::OTP),
     ]
     .into_iter()
     .filter(|(_, key)| has_value(key))
@@ -601,14 +631,14 @@ fn copyable_field_names(entry: &keepass::db::Entry) -> Vec<String> {
 }
 
 /// Whether `key` collides, case-insensitively, with a name
-/// `docs/design.md` § Protocol reserves on the wire — the four built-ins
+/// `docs/design.md` § Protocol reserves on the wire — the five built-ins
 /// `copyable_field_names` lists plus `title`. Kept in lockstep with
 /// `proto::copy::Field`'s own `RESERVED_NAMES`: that one decides what a
 /// *request* means, this one decides how a *listed* custom key is spelled,
 /// and they have to agree or a name `list` prints would not be the one
 /// `copy` resolves back to the same field.
 fn collides_with_a_reserved_name(key: &str) -> bool {
-    ["username", "password", "url", "notes", "title"]
+    ["username", "password", "url", "notes", "totp", "title"]
         .iter()
         .any(|reserved| key.eq_ignore_ascii_case(reserved))
 }
@@ -631,7 +661,7 @@ mod tests {
     use keepass::db::fields;
     use uuid::Uuid;
 
-    use super::{entry_count, entry_exists, entry_field, entry_title, list_entries};
+    use super::{entry_count, entry_exists, entry_field, entry_title, entry_totp, list_entries};
 
     /// `entry_count` must agree with `list_entries` everywhere, including
     /// in nested groups and when fields are protected — it's what `status`
@@ -910,5 +940,66 @@ mod tests {
         let entries = list_entries(&db);
         let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
         assert!(entry.fields.is_empty());
+    }
+
+    /// `totp` is listed as copyable only when the `otp` field is present
+    /// and non-empty — `copyable_field_names` doesn't itself validate that
+    /// it parses (that's `entry_totp`'s job, at copy time).
+    #[test]
+    fn copyable_fields_lists_totp_when_otp_is_present() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::OTP, "otpauth://totp/x?secret=ABC");
+            entry.id().uuid()
+        };
+
+        let entries = list_entries(&db);
+        let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
+        assert_eq!(entry.fields, vec!["totp"]);
+    }
+
+    /// `entry_totp` generates the current code from a valid `otpauth://`
+    /// seed, deterministically for a fixed time — the `keepass` crate's
+    /// own test vector (`db/otp.rs`), reused here against kpa's own entry
+    /// lookup rather than `keepass`'s `TOTP` type directly.
+    #[test]
+    fn entry_totp_generates_a_code_from_a_valid_otp_field() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(
+                fields::OTP,
+                "otpauth://totp/KeePassXC:none?secret=JBSWY3DPEHPK3PXP&period=30&digits=6&issuer=KeePassXC",
+            );
+            entry.id().uuid()
+        };
+
+        let code = entry_totp(&db, uuid)
+            .expect("entry exists")
+            .expect("a valid otp field should produce a code");
+        assert_eq!(code.len(), 6, "expected a 6-digit code, got {code:?}");
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    /// An entry with no `otp` field, or one that doesn't parse as a valid
+    /// `otpauth://` URL, has nothing to copy — not an error that could
+    /// echo the bad value back.
+    #[test]
+    fn entry_totp_is_absent_without_a_valid_otp_field() {
+        let mut db = Database::new();
+        let (no_field, bad_field) = {
+            let mut root = db.root_mut();
+            let no_field = root.add_entry().id().uuid();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::OTP, "not an otpauth url");
+            (no_field, entry.id().uuid())
+        };
+
+        assert_eq!(entry_totp(&db, no_field), Some(None));
+        assert_eq!(entry_totp(&db, bad_field), Some(None));
+        assert_eq!(entry_totp(&db, Uuid::new_v4()), None);
     }
 }
