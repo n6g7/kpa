@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0](https://github.com/n6g7/kpa/compare/v0.1.0...v0.2.0) (2026-11-08)
+
+
+### Features
+
+* copy and list totp codes ([#33](https://github.com/n6g7/kpa/issues/33)) ([df7ed4c](https://github.com/n6g7/kpa/commit/df7ed4ce4249a0777d16bec15eee457119a6e286))
+* let copy address custom fields ([#35](https://github.com/n6g7/kpa/issues/35)) ([108888e](https://github.com/n6g7/kpa/commit/108888e100d3f92a5834dfd0e2f795600467b565))
+* list reports each entry's copyable field names ([#32](https://github.com/n6g7/kpa/issues/32)) ([844c5d8](https://github.com/n6g7/kpa/commit/844c5d883e322b81a4a2bd9e0bf8ae0ec48e27fb))
+
+
+### Bug Fixes
+
+* log an operation before sending its reply ([#37](https://github.com/n6g7/kpa/issues/37)) ([464cbb0](https://github.com/n6g7/kpa/commit/464cbb07793ce2ce50cca342eca7f57c954174cf))
+* register the tray whenever a watcher is or becomes available ([#31](https://github.com/n6g7/kpa/issues/31)) ([78ac3af](https://github.com/n6g7/kpa/commit/78ac3afca89b5f5c7c1b0b160b126e120f8e1ebf))
+* report the commit in kpa version on release builds too ([#28](https://github.com/n6g7/kpa/issues/28)) ([51f4204](https://github.com/n6g7/kpa/commit/51f42041bfb1352f1c8ca1c34074a67183d33a69))
+
 ## 0.1.0 (2026-11-07)
 
 
