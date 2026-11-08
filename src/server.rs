@@ -1012,8 +1012,11 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
         },
     };
 
-    write_response(&mut stream, &response);
+    // Log first: once a client has seen the response, the operation is
+    // already in the log. (Logging after the write lets a client that
+    // reads the log right after its reply, as the tests do, miss the line.)
     log_response(&response);
+    write_response(&mut stream, &response);
 }
 
 #[cfg(test)]
