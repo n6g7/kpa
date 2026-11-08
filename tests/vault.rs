@@ -89,8 +89,53 @@ fn copyable_fields_against_a_real_database() {
     // precedes lowercase).
     assert_eq!(
         example.fields,
-        vec!["username", "password", "url", "custom:PASSWORD", "api-key"]
+        vec![
+            "username",
+            "password",
+            "url",
+            "totp",
+            "custom:PASSWORD",
+            "api-key"
+        ]
     );
+
+    let no_otp = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("NoOtp"))
+        .expect("fixture should have a NoOtp entry");
+    assert!(!no_otp.fields.contains(&"totp".to_string()));
+}
+
+/// `entry_totp` against the same database, end to end through `vault::open`
+/// rather than an in-process `Database::new()` — the real decode/parse path.
+#[test]
+fn entry_totp_against_a_real_database() {
+    let password = Zeroizing::new(common::PASSWORD.to_string());
+    let (db, _) = vault::open(&common::fields_db(), Some(&password), None)
+        .expect("fixture should open with its real password");
+    let entries = vault::list_entries(&db);
+
+    let example = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("Example"))
+        .expect("Example entry");
+    let code = vault::entry_totp(&db, example.uuid)
+        .expect("entry exists")
+        .expect("a valid otp field should produce a code");
+    assert_eq!(code.len(), 6);
+    assert!(code.chars().all(|c| c.is_ascii_digit()));
+
+    let bad_otp = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("BadOtp"))
+        .expect("BadOtp entry");
+    assert_eq!(vault::entry_totp(&db, bad_otp.uuid), Some(None));
+
+    let no_otp = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("NoOtp"))
+        .expect("NoOtp entry");
+    assert_eq!(vault::entry_totp(&db, no_otp.uuid), Some(None));
 }
 
 #[test]

@@ -671,6 +671,11 @@ fn resolve_field(
         Field::Password => vault::entry_field(database, uuid, fields::PASSWORD),
         Field::Url => vault::entry_field(database, uuid, fields::URL),
         Field::Notes => vault::entry_field(database, uuid, fields::NOTES),
+        // Generated at copy time from the `otp` field's otpauth:// URL —
+        // the field itself only ever holds the seed; this is the only
+        // `Field` variant that doesn't read a field's value straight
+        // through.
+        Field::Totp => vault::entry_totp(database, uuid),
         Field::Custom(key) => vault::entry_field(database, uuid, key),
         // `title` is reserved but never copyable (see `Field`'s doc
         // comment) — there is nothing to look up but whether the entry

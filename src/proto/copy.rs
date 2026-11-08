@@ -18,19 +18,20 @@ pub struct CopyRequest {
     pub field: Field,
 }
 
-/// Names colliding, case-insensitively, with one of the four built-ins
+/// Names colliding, case-insensitively, with one of the five built-ins
 /// below or with `title` — KeePass's own reserved key, which `copy` never
 /// serves. A custom field keyed any of these (always in a different case:
 /// KeePass's own keys are exact-case, so a same-spelled custom key is a
 /// distinct, genuine field) needs the `custom:` prefix to be addressed by
 /// its key; a bare name among these always means the built-in instead
 /// (`docs/design.md` § Protocol's collision rule).
-const RESERVED_NAMES: [&str; 5] = ["username", "password", "url", "notes", "title"];
+const RESERVED_NAMES: [&str; 6] = ["username", "password", "url", "notes", "totp", "title"];
 
-/// The fields `copy` can be asked for: the four it always could, and any
-/// custom (user-defined) field — a string-like type rather than a bare
-/// `String`, so the four built-ins stay enforced by the type while still
-/// letting `copy` reach a real custom field by its KeePass key.
+/// The fields `copy` can be asked for: the four it always could, `totp`
+/// (the code generated at copy time from the entry's `otp` field), and
+/// any custom (user-defined) field — a string-like type rather than a
+/// bare `String`, so the five built-ins stay enforced by the type while
+/// still letting `copy` reach a real custom field by its KeePass key.
 ///
 /// Decoding never fails: any wire string is a valid `Field`, because any
 /// string naming a built-in or a real custom key is meaningful, and one
@@ -44,6 +45,9 @@ pub enum Field {
     Password,
     Url,
     Notes,
+    /// The code generated from the entry's `otp` field at the moment of
+    /// the `copy` — never the seed itself. `docs/design.md` § Protocol.
+    Totp,
     /// A custom (user-defined) field, addressed by its literal KeePass
     /// key: either a bare name that doesn't collide with a reserved one,
     /// or any key at all when given with the `custom:` prefix (which
@@ -68,6 +72,7 @@ impl Field {
             Field::Password => "password".to_string(),
             Field::Url => "url".to_string(),
             Field::Notes => "notes".to_string(),
+            Field::Totp => "totp".to_string(),
             Field::ReservedTitle => "title".to_string(),
             Field::Custom(key) => {
                 if RESERVED_NAMES
@@ -86,7 +91,7 @@ impl Field {
     /// literally (lowercase, exact) — it is protocol syntax, not vault
     /// content — and always yields `Custom` with the rest of the string as
     /// the literal key, bypassing the collision check below entirely.
-    /// Otherwise, a name that matches one of the four built-ins
+    /// Otherwise, a name that matches one of the four built-ins or `totp`
     /// case-insensitively is that built-in; a bare `title`
     /// (case-insensitively) is `ReservedTitle`; anything else is `Custom`
     /// with the raw string as the literal key.
@@ -102,6 +107,8 @@ impl Field {
             Field::Url
         } else if raw.eq_ignore_ascii_case("notes") {
             Field::Notes
+        } else if raw.eq_ignore_ascii_case("totp") {
+            Field::Totp
         } else if raw.eq_ignore_ascii_case("title") {
             Field::ReservedTitle
         } else {
@@ -234,6 +241,7 @@ mod tests {
             ("password", Field::Password),
             ("url", Field::Url),
             ("notes", Field::Notes),
+            ("totp", Field::Totp),
         ];
         for (name, field) in cases {
             assert_eq!(Field::decode(name), field, "decoding {name:?}");
@@ -291,6 +299,7 @@ mod tests {
             Field::Custom("Password".to_string()).encode(),
             "custom:Password"
         );
+        assert_eq!(Field::Custom("TOTP".to_string()).encode(), "custom:TOTP");
         assert_eq!(Field::Custom("Title".to_string()).encode(), "custom:Title");
     }
 
