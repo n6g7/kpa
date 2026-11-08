@@ -28,6 +28,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use keepass::Database;
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::clip::{self, Clipboard};
@@ -589,7 +590,7 @@ impl CopyEntry for Server {
             let Some(database) = slot.db.as_ref() else {
                 return Err(CopyError::Locked { db: db() });
             };
-            match vault::entry_field(database, request.uuid, field_key(request.field)) {
+            match resolve_field(database, request.uuid, &request.field) {
                 None => return Err(CopyError::UnknownUuid { db: db() }),
                 Some(None) => return Err(CopyError::FieldEmpty { db: db() }),
                 Some(Some(value)) => (
@@ -645,23 +646,37 @@ impl CopyEntry for Server {
         Ok(CopyOutcome {
             db: db(),
             entry,
-            field: request.field,
+            field: request.field.clone(),
             expires_in: timeout.as_secs(),
         })
     }
 }
 
-/// `copy`'s wire `Field` to the `keepass` field key it reads. Kept in
-/// `server.rs` rather than `proto::copy`, so the protocol module stays free
-/// of a `keepass` dependency.
-fn field_key(field: Field) -> &'static str {
+/// Resolves `copy`'s wire `Field` against one entry: `None` means `uuid`
+/// doesn't name an entry in this database; `Some(None)` means it does but
+/// there is nothing to copy for this field — absent, empty, or a bare
+/// `title` (never copyable). Kept in `server.rs` rather than `proto::copy`
+/// or `vault.rs`, same reasoning as the `field_key` this replaces: it is
+/// the one place that bridges the wire vocabulary and the `keepass` field
+/// keys.
+fn resolve_field(
+    database: &Database,
+    uuid: Uuid,
+    field: &Field,
+) -> Option<Option<Zeroizing<String>>> {
     use keepass::db::fields;
 
     match field {
-        Field::Password => fields::PASSWORD,
-        Field::Username => fields::USERNAME,
-        Field::Url => fields::URL,
-        Field::Notes => fields::NOTES,
+        Field::Username => vault::entry_field(database, uuid, fields::USERNAME),
+        Field::Password => vault::entry_field(database, uuid, fields::PASSWORD),
+        Field::Url => vault::entry_field(database, uuid, fields::URL),
+        Field::Notes => vault::entry_field(database, uuid, fields::NOTES),
+        Field::Custom(key) => vault::entry_field(database, uuid, key),
+        // `title` is reserved but never copyable (see `Field`'s doc
+        // comment) — there is nothing to look up but whether the entry
+        // itself exists, to still distinguish `UnknownUuid` from
+        // `FieldEmpty`.
+        Field::ReservedTitle => vault::entry_exists(database, uuid).then_some(None),
     }
 }
 

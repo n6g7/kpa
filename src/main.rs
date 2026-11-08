@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use kpa::config::Config;
 use kpa::log::{self, Level};
 use kpa::output::{print_escaped, report_error};
@@ -55,38 +55,18 @@ enum Command {
     #[command(visible_alias = "ls")]
     List { db: Option<String> },
     /// Copy one field of one entry to the clipboard; the daemon drops it
-    /// again after `clipboard_timeout`.
+    /// again after `clipboard_timeout`. `field` is `username`, `password`,
+    /// `url`, `notes`, a custom field's bare key, or `custom:<key>` for a
+    /// custom key that collides with one of those (`docs/design.md` §
+    /// Protocol's collision rule).
     #[command(visible_alias = "cp")]
     Copy {
         db: String,
         uuid: Uuid,
-        field: FieldArg,
+        field: Field,
     },
     /// Print the version this binary was built from.
     Version,
-}
-
-/// `clap::ValueEnum` for `copy`'s `field` argument. A separate type from
-/// `proto::Field` rather than deriving `ValueEnum` on it there: the
-/// protocol module has no reason to depend on `clap`, same reasoning as
-/// `LockRequest`/`UnlockRequest` not deriving it either.
-#[derive(Clone, Copy, ValueEnum)]
-enum FieldArg {
-    Password,
-    Username,
-    Url,
-    Notes,
-}
-
-impl From<FieldArg> for Field {
-    fn from(arg: FieldArg) -> Field {
-        match arg {
-            FieldArg::Password => Field::Password,
-            FieldArg::Username => Field::Username,
-            FieldArg::Url => Field::Url,
-            FieldArg::Notes => Field::Notes,
-        }
-    }
 }
 
 fn main() -> ExitCode {
@@ -118,14 +98,9 @@ fn main() -> ExitCode {
         Command::Unlock { db } => run_client(&socket_path, Op::Unlock(UnlockRequest { db })),
         Command::Lock { db } => run_client(&socket_path, Op::Lock(LockRequest { db })),
         Command::List { db } => run_client(&socket_path, Op::List(ListRequest { db })),
-        Command::Copy { db, uuid, field } => run_client(
-            &socket_path,
-            Op::Copy(CopyRequest {
-                db,
-                uuid,
-                field: field.into(),
-            }),
-        ),
+        Command::Copy { db, uuid, field } => {
+            run_client(&socket_path, Op::Copy(CopyRequest { db, uuid, field }))
+        }
         Command::Version => unreachable!("handled above, before socket_path is resolved"),
     }
 }

@@ -281,12 +281,30 @@ mod tests {
             r#"{"v":1,"op":"teleport"}"#,             // unknown op
             r#"{"v":1,"op":"unlock"}"#,               // `unlock` needs a `db`
             r#"{"v":1,"op":"copy","db":"personal"}"#, // `copy` needs a `uuid` and `field`
-            r#"{"v":1,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"notes_dump"}"#, // not on the allow-list
         ] {
             assert!(
                 matches!(decode_request(line), Err(DecodeError::MalformedRequest)),
                 "should have been rejected: {line:?}"
             );
         }
+    }
+
+    /// `field` is no longer a closed allow-list: any string decodes,
+    /// because any string might name a real custom field on the entry
+    /// `copy` is asked about — see `proto::copy::Field`'s own doc comment.
+    /// A name that doesn't resolve to anything fails at `copy` time
+    /// (`FieldEmpty`), not at decode time.
+    #[test]
+    fn an_unrecognized_field_name_still_decodes() {
+        let line = r#"{"v":1,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"notes_dump"}"#;
+        let request = decode_request(line).expect("an unrecognized field name should still decode");
+        assert_eq!(
+            request.op,
+            Op::Copy(CopyRequest {
+                db: "personal".to_string(),
+                uuid: uuid(),
+                field: Field::Custom("notes_dump".to_string()),
+            })
+        );
     }
 }

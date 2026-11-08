@@ -39,6 +39,36 @@ fn wrong_password_fails_cleanly() {
     }
 }
 
+/// A custom field colliding case-insensitively with a built-in is a
+/// genuine, distinct field — `entry_field` reads it by its own literal
+/// key, separate from the real `Password`.
+#[test]
+fn custom_colliding_field_is_read_by_its_literal_key() {
+    let password = Zeroizing::new(common::PASSWORD.to_string());
+    let (db, _) = vault::open(&common::fields_db(), Some(&password), None)
+        .expect("fixture should open with its real password");
+    let entries = vault::list_entries(&db);
+    let example = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("Example"))
+        .expect("Example entry");
+
+    assert_eq!(
+        vault::entry_field(&db, example.uuid, "Password")
+            .expect("entry exists")
+            .as_deref()
+            .map(String::as_str),
+        Some("entrypass1")
+    );
+    assert_eq!(
+        vault::entry_field(&db, example.uuid, "PASSWORD")
+            .expect("entry exists")
+            .as_deref()
+            .map(String::as_str),
+        Some("not-the-real-password")
+    );
+}
+
 #[test]
 fn opens_a_genuine_kdbx4_database() {
     // keepass's own docs claim KDBX3 *and* KDBX4 support, and

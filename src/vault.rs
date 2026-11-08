@@ -452,6 +452,14 @@ pub fn entry_field(db: &Database, uuid: Uuid, key: &str) -> Option<Option<Zeroiz
     })
 }
 
+/// Whether an entry with this uuid exists, regardless of its fields.
+/// `copy`'s bare `title` request needs exactly this and nothing more: it
+/// never resolves to any field (`proto::copy::Field::ReservedTitle`), but
+/// still has to distinguish `UnknownUuid` from `FieldEmpty`.
+pub fn entry_exists(db: &Database, uuid: Uuid) -> bool {
+    with_entry(db, uuid, |_| ()).is_some()
+}
+
 /// The entry's title, for naming it in the operation log. `None` if there
 /// is no such entry, it has no title, or the title is protected: a log line
 /// must not de-protect a field the user marked protected (same rule as
@@ -530,7 +538,7 @@ mod tests {
     use keepass::db::fields;
     use uuid::Uuid;
 
-    use super::{entry_count, entry_field, entry_title, list_entries};
+    use super::{entry_count, entry_exists, entry_field, entry_title, list_entries};
 
     /// `entry_count` must agree with `list_entries` everywhere, including
     /// in nested groups and when fields are protected — it's what `status`
@@ -702,5 +710,16 @@ mod tests {
                 .map(String::as_str),
             Some("deep notes")
         );
+    }
+
+    /// `entry_exists` distinguishes a real uuid from a made-up one,
+    /// independent of what fields that entry has.
+    #[test]
+    fn entry_exists_checks_only_the_uuid() {
+        let mut db = Database::new();
+        let uuid = db.root_mut().add_entry().id().uuid();
+
+        assert!(entry_exists(&db, uuid));
+        assert!(!entry_exists(&db, Uuid::new_v4()));
     }
 }
