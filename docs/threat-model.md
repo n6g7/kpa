@@ -40,7 +40,7 @@ graph LR
 | --- | ------------------------------------------------------------------------------- | ----------- |
 | A-1 | Credentials: master password, keyfile contents, anything password-equivalent (e.g. derived keys) | Highest |
 | A-2 | Protected field values: passwords, any field whose value carries `Protected="True"` or `ProtectInMemory="True"` (KeePassXC honours both), and Notes whether or not protected | High |
-| A-3 | Entry metadata: titles, usernames, URLs, groups, and the database's own name and description stored in the `.kdbx`. kpa's config `name` labels are not A-3 | Medium |
+| A-3 | Entry metadata: titles, usernames, URLs, groups, custom field *names* (`list`'s `fields` array — never a custom field's *value*, which is A-2 like any other field value), and the database's own name and description stored in the `.kdbx`. kpa's config `name` labels are not A-3 | Medium |
 | A-4 | Integrity of the `.kdbx` and keyfile on disk, and of their directories          | High        |
 | A-5 | The user's clipboard contents that kpa didn't put there                         | Low         |
 
@@ -133,7 +133,10 @@ failing for an in-scope actor.
   stderr, a log, an error string, the tray, a child's argv or environment —
   only in the clipboard offer, after a `copy` naming that exact field.
   `list` omits every protected field and Notes rather than de-protecting
-  them.
+  them. `list`'s `fields` array is the one exception: it names which fields
+  exist and are copyable, never a value, so a protected field's or a
+  protected Notes' *name* still appears there — a name alone carries none
+  of A-2, the same way a title's existence isn't A-2 either.
 
   **Known gap (keepass 0.15.0).** The `ProtectInMemory="True"` marker is
   part of A-2, but the pinned `keepass` crate cannot see it. Its XML

@@ -205,6 +205,7 @@ mod tests {
             username: Some("alice".to_string()),
             url: None,
             group: "Dev".to_string(),
+            fields: vec!["username".to_string(), "password".to_string()],
         }]));
         assert_eq!(
             serde_json::to_value(&list).expect("list should serialize"),
@@ -217,6 +218,7 @@ mod tests {
                     "title": "GitHub",
                     "username": "alice",
                     "group": "Dev",
+                    "fields": ["username", "password"],
                 }],
             })
         );
@@ -281,6 +283,7 @@ mod tests {
             username: None,
             url: None,
             group: "Web".to_string(),
+            fields: Vec::new(),
         }]));
 
         let value = serde_json::to_value(&response).expect("should serialize");
@@ -293,7 +296,7 @@ mod tests {
                 "group": "Web",
             })
         );
-        for withheld in ["title", "username", "url"] {
+        for withheld in ["title", "username", "url", "fields"] {
             assert!(entry.get(withheld).is_none(), "{withheld} should be absent");
         }
     }

@@ -69,6 +69,30 @@ fn custom_colliding_field_is_read_by_its_literal_key() {
     );
 }
 
+/// `list`'s `fields` array against a real database: built-ins in order,
+/// custom fields sorted after them, and the collision rule applied to a
+/// custom `PASSWORD` key that collides with the real `Password` field.
+#[test]
+fn copyable_fields_against_a_real_database() {
+    let password = Zeroizing::new(common::PASSWORD.to_string());
+    let (db, _) = vault::open(&common::fields_db(), Some(&password), None)
+        .expect("fixture should open with its real password");
+
+    let entries = vault::list_entries(&db);
+    let example = entries
+        .iter()
+        .find(|e| e.title.as_deref() == Some("Example"))
+        .expect("fixture should have an Example entry");
+
+    // Custom keys sort by their raw key, before the collision prefix is
+    // applied — "PASSWORD" sorts ahead of "api-key" (ASCII uppercase
+    // precedes lowercase).
+    assert_eq!(
+        example.fields,
+        vec!["username", "password", "url", "custom:PASSWORD", "api-key"]
+    );
+}
+
 #[test]
 fn opens_a_genuine_kdbx4_database() {
     // keepass's own docs claim KDBX3 *and* KDBX4 support, and
