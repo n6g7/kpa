@@ -9,6 +9,7 @@
 - [ ] `kpa list` returns a list of copyable fields for each entry
 - [ ] Passkey provider
 - [ ] Support headless use (no window manager or GUI)
+- [ ] Triage the low and informational findings from the latest security audit
 
 ## Done
 
@@ -18,3 +19,4 @@
 - [x] `kpa version` prints the commit used when not a tagged release
 - [x] `kpa version` reports the server's version too, and `kpa serve` prints its version on start
 - [x] One more security audit
+- [x] Fix the high and medium findings from the latest security audit
