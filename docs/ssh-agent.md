@@ -7,7 +7,9 @@ its own KeePass client's agent over the same synced vault (§ 2).
 
 This is a proposal: nothing here is built. It reverses one line of
 [`design.md`](./design.md) § Scope ("Is not: … an SSH agent") and extends
-[`threat-model.md`](./threat-model.md); § 10 lists those edits.
+[`threat-model.md`](./threat-model.md); § 10 lists those edits. It builds
+on the headless proposal, [`headless.md`](./headless.md), for prompt
+routing, prompt timeouts and unlocking from a terminal.
 
 ## 1. Recommendation
 
@@ -335,17 +337,11 @@ prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
 The message is always passed as an option's value, never as a positional
 argument.
 
-**Timeouts and cancels.**
-
-- A prompt left unanswered for `prompt_timeout` (default 60 s) is killed.
-- Cancelling or timing out puts that database in backoff for 2 minutes.
-  Signatures from it then fail at once without prompting, which stops
-  prompt storms from loops, submodules and background fetches.
-
-**Locks kill prompts.** Any lock (screen lock, suspend, explicit) kills a
-prompt that is still open. Today a prompt raised just before a screen lock
-waits behind the locker until the user returns. With on-demand prompts that
-becomes common, so the fix is needed regardless.
+**Timeouts and cancels.** Prompts time out after `prompt_timeout`, and a
+lock kills an open prompt ([`headless.md`](./headless.md) § 6). On top of
+that, cancelling or timing out puts that database in backoff for 2
+minutes. Signatures from it then fail at once without prompting, which
+stops prompt storms from loops, submodules and background fetches.
 
 ### 6.7 Confirmation
 
@@ -382,37 +378,16 @@ queue.
 
 ### 6.8 Where prompts may appear
 
-A prompt is raised only when both of these hold. Otherwise the signature
-fails without one.
+Prompts follow [`headless.md`](./headless.md) § 3: no prompt for a
+requester outside the desktop, or while the screen is known to be locked.
+The signature fails without one. Two points are specific to the agent:
 
-- **The screen is not known to be locked.** kpa already follows the
-  display session for `Lock` and `LockedHint`. While `LockedHint` is true
-  or the session is inactive, no prompt is raised. A locker that only
-  answers the `Lock` signal never reports the unlock (ASM-7). In that case
-  kpa does not know the screen is locked, and the prompt timeout (§ 6.6)
-  bounds the cost.
-- **The requester runs in the desktop.** kpa takes the peer's pid from
-  `SO_PEERCRED` and reads its cgroup from `/proc/<pid>/cgroup`. It
-  recognizes two places: inside `user@<uid>.service`, where the
-  compositor and everything it spawns live, or inside the display session's own scope
-  (`User.Display`). Everything else is outside the desktop:
-  - an SSH login, which gets its own `session-N.scope`;
-  - a terminal server's shell, which lives under that server's system
-    service;
-  - a cron job.
-
-  For a forwarded request the peer is the local `ssh`, so the check is
+- **For a forwarded request the peer is the local `ssh`**, so the check is
   about where that `ssh` runs. `ssh -A` typed in a desktop terminal prompts
   here. The same command typed in an SSH login or a terminal-server shell
   does not.
-
-This decides where a prompt goes, not who is authorized. A same-uid
-process can launder work into another cgroup, through `systemd-run --user`
-or by asking the compositor to spawn it. The most that gets it is a prompt
-on screen (NG-7). User services such as timers and Syncthing count as
-desktop; that is S6.
-
-The same rule governs an explicit `kpa unlock` (§ 6.10).
+- **User services such as timers and Syncthing count as desktop.** That is
+  S6.
 
 ### 6.9 Lock and idle
 
@@ -429,36 +404,15 @@ The same rule governs an explicit `kpa unlock` (§ 6.10).
 
 ### 6.10 Unlocking from a terminal
 
-S4 needs a way to unlock that doesn't involve the screen. The usual case
-is an SSH login or a terminal-server shell into the machine that runs kpa,
-with no agent forwarded, used to pull a git repository over SSH.
+S4 unlocks with `kpa unlock` on the terminal, as
+[`headless.md`](./headless.md) § 4 describes. The usual case is an SSH
+login or a terminal-server shell into the machine that runs kpa, with no
+agent forwarded, used to pull a git repository over SSH.
 
-The daemon applies § 6.8 to `unlock` requests as well:
-
-- **From the desktop**, it prompts with the configured `prompt`, as today.
-- **From outside the desktop**, it answers a new error, `no_display`.
-
-`kpa unlock <db>` handles `no_display` when its stdin is a terminal:
-
-1. It reads the password on that terminal, with echo off.
-2. It sends the request again with the password following the JSON request
-   line, as raw bytes. The password never goes through `serde_json`.
-3. The daemon reads it into the same fixed, zeroizing buffer as prompt
-   output.
-4. The CLI marks itself non-dumpable and zeroizes its copy.
-
-`--tty` skips the first round trip.
-
-This changes "the daemon always prompts". The password now crosses TB-1
-inbound, from a same-uid client.
-
-Rejected alternatives:
-
-- **Passing the terminal's fd with `SCM_RIGHTS`.** If the client dies, the
-  daemon races the shell for keystrokes and terminal modes.
-- **Agent `UNLOCK` (`ssh-add -X`).** The agent socket is reachable from
-  forwarded hosts, so any forwarding kpa failed to recognize would make it a
-  remote password-guessing oracle.
+The agent adds one rejected alternative: **agent `UNLOCK`
+(`ssh-add -X`)**. The agent socket is reachable from forwarded hosts, so
+any forwarding kpa failed to recognize would make it a remote
+password-guessing oracle.
 
 ## 7. Configuration
 
@@ -567,7 +521,7 @@ The setup kpa replaces, on a typical NixOS desktop with KeePassXC:
 - **Screen lockers.** kpa sees the `Lock` signal when the idle daemon runs
   `loginctl lock-session`. Some lockers don't set `LockedHint`. With one of
   those, a prompt raised while the screen is locked waits out its timeout
-  (§ 6.8).
+  ([`headless.md`](./headless.md) § 6).
 - **The confirm program has to return a choice.** Tray menus and
   notification actions only work where the desktop renders them, so a
   dmenu-style program is the portable choice.
@@ -614,8 +568,8 @@ The setup kpa replaces, on a typical NixOS desktop with KeePassXC:
     first.
 - **G-14 (new) · The agent never accepts a key or a secret.** Add, remove,
   `LOCK` and `UNLOCK` all fail.
-- **G-5** gains: "Signatures are not activity. A lock ends any prompt in
-  flight."
+- **G-5** gains: "Signatures are not activity." Ending prompts on lock is
+  [`headless.md`](./headless.md)'s.
 - **G-11** extends to the agent socket.
 
 **Threats**
@@ -687,9 +641,9 @@ The setup kpa replaces, on a typical NixOS desktop with KeePassXC:
 - `Slot` gains the key cache, cleared in `Slot::lock()`.
 - A `SshSign` trait sits beside `CopyEntry`.
 - Unlock waiters use a condvar.
-- Lock kills open prompts.
-- The prompt and confirm runner gains `{message}`, a timeout and the
-  shared queue.
+- The prompt and confirm runner gains `{message}` and the shared queue.
+  The timeout and lock-kills-prompt come from
+  [`headless.md`](./headless.md).
 - `log_response` gains agent events: key name, purpose, connection class,
   destination fingerprint and decision. Like `list`, `REQUEST_IDENTITIES`
   is not logged.
@@ -727,9 +681,9 @@ once it lands.
    - The user unlocks from the launcher or tray first.
    - Enough to switch off KeePassXC's agent on Linux.
 2. **Unlock on demand.**
-   - `{message}`, timeouts, backoff, lock kills prompts.
-   - Prompt routing (§ 6.8), unlock waiters.
-   - Unlocking from a terminal (§ 6.10).
+   - `{message}`, backoff, unlock waiters.
+   - Needs [`headless.md`](./headless.md)'s phases 1 and 2: timeouts,
+     lock kills prompts, prompt routing, terminal unlock.
 3. **Forwarding.**
    - `forwarding = "confirm"`, the confirm prompt, session approvals.
    - `known_hosts` names, the end-to-end `sshd` test.
