@@ -19,9 +19,9 @@ and remote use needs the terminal unlock in § 4.
   daemon never raises a graphical prompt for such a request. `kpa unlock`
   reads the password on its own terminal and sends it over the socket
   (§ 4).
-- **Copying needs a desktop that can take it.** `copy` succeeds only while
-  there is an active, unlocked display session, wherever the request comes
-  from (§ 5). With no desktop session, or a locked one, it is refused.
+- **Copying needs a requester on the desktop, and the desktop unlocked**
+  (§ 5). A `copy` from outside the desktop is refused, since the secret
+  would land on a clipboard the requester can't paste from.
 - **Prompts get a timeout, and a lock kills an open prompt** (§ 6).
 - **`status`, `lock` and `list` work anywhere**, as they do today.
 
@@ -43,17 +43,15 @@ logind session, or lingering can be enabled.
 | ---------------------------------------------- | ------------------------------------------- | ------------------------------------------------------ | ------------------------ |
 | Desktop, screen unlocked                       | Graphical prompt, as today                  | Clipboard, as today                                    | As today                 |
 | Desktop, screen locked                         | Refused, `no_display`. No prompt behind the locker | Refused, `no_display`                           | As today                 |
-| Outside the desktop, desk screen unlocked      | Terminal prompt (§ 4)                       | Desk clipboard. The CLI says so                        | As today                 |
+| Outside the desktop, desk screen unlocked      | Terminal prompt (§ 4)                       | Refused, `no_display`                                  | As today                 |
 | Outside the desktop, desk screen locked        | Terminal prompt                             | Refused, `no_display`                                  | As today                 |
 | No display session at all                      | Terminal prompt                             | Refused, `no_display`                                  | As today                 |
-| Outside the desktop, no terminal (a cron job)  | Refused, `no_display`                       | As the rows above                                      | As today                 |
+| Outside the desktop, no terminal (a cron job)  | Refused, `no_display`                       | Refused, `no_display`                                  | As today                 |
 
-The two operations need different questions answered:
-
-- **`unlock` asks where the user is**, because a prompt must appear where
-  someone can answer it. That is the requester's classification.
-- **`copy` asks whether the clipboard is a safe place for a secret**, which
-  is the desk's state. The requester's location doesn't matter (§ 5).
+Both operations ask where the user is, from the requester's
+classification. A prompt must appear where someone can answer it, and a
+secret must land where the requester can paste it. `copy` also needs the
+desk unlocked (§ 5).
 
 ## 3. Telling the desktop from outside it
 
@@ -88,12 +86,13 @@ screen (NG-7), or a terminal prompt it has to answer itself.
 
 - **A terminal server shared between the desk and remote clients** runs
   every shell under its own service. Its shells count as outside even when
-  used at the desk, so `kpa unlock` there asks on the terminal. `copy` is
-  unaffected, since it follows the desk's state.
+  used at the desk. So `kpa unlock` there asks on the terminal, and `kpa
+  copy` there is refused. The launcher and desktop terminals are
+  unaffected.
 - **A multiplexer started from the desktop and attached over SSH** runs in
   the desktop's cgroup. An unlock from it raises the graphical prompt on
   the desk's screen, which the remote user can't see. The prompt timeout
-  (§ 6) bounds that.
+  (§ 6) bounds that. A `copy` from it lands on the desk's clipboard.
 
 ## 4. Unlocking from a terminal
 
@@ -103,18 +102,33 @@ controlling terminal:
 
 1. It opens `/dev/tty` and reads the password with echo off, as `ssh` and
    `sudo` do. Redirecting stdin doesn't change where it reads.
-2. It sends the request again, with `"password": true`. The password
-   follows the JSON request line as raw bytes, never through `serde_json`.
-3. The daemon reads it into the same fixed, zeroizing buffer as the
-   prompt's output (`MAX_PASSWORD_LEN`), then unlocks as usual. The keyfile
-   still comes from config.
+2. It sends the request again with the password in it, base64-encoded:
+   `{"op":"unlock","db":"personal","password":"<base64>"}`. That is one
+   line, like every other request.
+3. The daemon decodes the field into the same fixed, zeroizing buffer as
+   the prompt's output (`MAX_PASSWORD_LEN`), then unlocks as usual. The
+   keyfile still comes from config.
 4. The CLI marks itself non-dumpable and zeroizes its copy.
 
-`--tty` skips the first round trip. Without a controlling terminal, `kpa
-unlock` reports `no_display` and exits non-zero.
+The first request is a plain `unlock`, and only `no_display` makes the CLI
+read the terminal. So a terminal on the desktop still gets the graphical
+prompt. `--tty` skips that first round trip, and is how a desktop terminal
+asks for the terminal read. Without a controlling terminal, `kpa unlock`
+reports `no_display` and exits non-zero. A request that carries a password
+never raises a prompt, wherever it comes from.
 
-A request with `"password": true` never raises a prompt, wherever it comes
-from. `--tty` is how a terminal on the desktop asks for that.
+**Why base64 rather than a JSON string.** A JSON string can contain escapes
+(`\"`, `\\`, `\u…`), and `serde_json` unescapes them into an internal
+scratch buffer that kpa can't zeroize. Base64 never needs escaping, so
+`serde_json` hands the field over as a slice of the request buffer
+(`visit_borrowed_str`), and kpa decodes it straight into its own buffer. A
+`password` that would need unescaping is refused as malformed. `base64` is
+already a dependency.
+
+**The request line gets the same care.** The daemon reads it into a fixed,
+zeroizing buffer of `MAX_REQUEST_LEN`, with no `BufReader` and no growing
+`Vec`, so no unwiped copy of the line survives the request. Decode errors
+carry no request content, and requests are never logged (T-4).
 
 **Wrong passwords** fail with `wrong_credentials`, as from the prompt. kpa
 adds no backoff: any same-uid process can already read the `.kdbx` and
@@ -131,27 +145,28 @@ guess offline (NG-6), so the socket is no better an oracle.
 
 ## 5. Copying
 
-`copy` succeeds only while there is a display session that is active and
-whose `LockedHint` is false. Otherwise it fails with `no_display` and the
-clipboard is left alone. A locker that only sends the `Lock` signal never
+`copy` succeeds only when both of these hold:
+
+- the requester is on the desktop (§ 3);
+- the display session is active and its `LockedHint` is false.
+
+Otherwise it fails with `no_display` and the clipboard is left alone. A locker that only sends the `Lock` signal never
 reports the unlock (ASM-7), so kpa can't track its state. With such a
 locker, `copy` behaves as it does today. The `Lock` signal still locks
 every database, so nothing is copied until the next unlock anyway.
 
-The rule follows the desk, not the requester:
+Why:
 
-- **An unlocked, unattended desk adds no exposure.** Anyone sitting at it
-  already holds the whole session, including `kpa copy` (ACT-7 with an
-  unlocked session). A secret copied there from a remote shell is no worse
-  off.
-- **A locked desk, or none, is where a copy would sit unseen.** That's the
-  case the rule refuses.
-- **A shared terminal server keeps working at the desk.** A requester-based
-  rule would refuse its shells there (§ 3).
-
-From outside the desktop a successful copy lands on the desk's clipboard,
-which the remote user can't paste from. The CLI says where the secret went
-("copied to the desktop clipboard") instead of implying it is at hand.
+- **A copy from outside the desktop can't help its requester.** The
+  clipboard is the desk's, and the requester isn't there to paste. At best
+  the copy is useless. At worst it leaves a secret on the clipboard of an
+  unattended machine for `clipboard_timeout`.
+- **A locked desk is where a copy would sit unseen**, even for a desktop
+  requester such as a timer.
+- **The cost falls on a shared terminal server used at the desk**, whose
+  shells count as outside (§ 3). `kpa copy` there is refused, and the
+  launcher or a desktop terminal does the job. Open question 1 covers an
+  override.
 
 Remote use of a secret means a vault client on the machine you sit at, over
 the same synced vault. kpa adds no channel for it.
@@ -229,7 +244,8 @@ stays refused while it is locked (§ 5).
     client, for an unlock from outside the desktop.
   - **G-3**: "A-1 never leaves the process" holds. A-1 now also enters it
     from the CLI, which holds it for one request and zeroizes it.
-    `copy` offers only to an active, unlocked display session.
+    `copy` offers only for a requester on the desktop, while the display
+    session is active and unlocked.
   - **G-5** gains: "A lock ends any prompt in flight. A prompt ends after
     `prompt_timeout`."
   - **New goal: no prompt where nobody can see it.** A request from outside
@@ -252,32 +268,33 @@ stays refused while it is locked (§ 5).
 | ------------- | -------------------------------------------------------------------------------------------------------- |
 | `origin.rs`   | Peer pidfd or pid → cgroup path → `Origin::{Desktop, Outside}`. The cgroup-path classifier is pure and table-tested |
 | `policy.rs`   | Also publishes the desk's state (no session, locked, unlocked), which `copy` and classification read      |
-| `proto/unlock.rs` | `UnlockRequest` gains `password: bool`; `no_display` joins the error codes                           |
-| `server.rs`   | Reads the trailing password into the zeroizing buffer; prompt timeout; lock kills prompts; `copy` gated on the desk's state |
+| `proto/unlock.rs` | `UnlockRequest` gains `password: Option<Password>`: a zeroizing newtype, decoded from base64 by a borrowing visitor, with a redacting `Debug`. `no_display` joins the error codes |
+| `server.rs`   | Reads request lines into a fixed zeroizing buffer; prompt timeout; lock kills prompts; `copy` gated on origin and the desk's state |
 | `main.rs`     | `kpa unlock` handles `no_display` with a `/dev/tty` read, and gains `--tty`                              |
 
 **Tests**
 
 - Classifier: cgroup paths for a compositor child, a session scope, an SSH
   scope, a system service, and malformed input.
-- `tests/`: unlock with a password following the request, against the
-  fixture database; a wrong password; an oversized one refused; `copy`
-  refused while the fake desk state is locked or absent.
+- `tests/`: unlock with a password in the request, against the fixture
+  database; a wrong password; an oversized one, invalid base64, and an
+  escaped `password` string all refused; `copy` refused from outside the
+  desktop, and while the fake desk state is locked or absent.
 - The terminal read: a pty-driven test of `kpa unlock --tty`, echo off,
   password delivered.
-- Fuzzing: the request decoder already covers the JSON line. The trailing
-  password read gets the same length and timeout bounds as the prompt.
+- Fuzzing: the request decoder's target gains the `password` field.
 
 **Phases**, each leaving a usable state:
 
 1. Prompt timeout and lock kills prompts. These help the desktop today.
 2. Classification, `no_display`, terminal unlock.
-3. `copy` gated on the desk's state.
+3. `copy` gated on origin and the desk's state.
 
 ## 10. Open questions
 
 1. **Shared terminal servers.** Should config be able to name a service
-   whose shells count as the desktop? That would bring the graphical prompt
-   back for those shells at the desk, at the cost of raising it unseen for
-   the same server's remote clients.
+   whose shells count as the desktop? That would bring back the graphical
+   prompt and `copy` for those shells at the desk. The cost: for the same
+   server's remote clients, prompts appear unseen and copies land on the
+   desk's clipboard.
 2. **OSC 52** (§ 5), if a real need appears.
