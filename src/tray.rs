@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{StandardItem, SubMenu};
-use ksni::{MenuItem, ToolTip};
+use ksni::{MenuItem, OfflineReason, ToolTip};
 
 use crate::log;
 use crate::proto::{
@@ -44,17 +44,22 @@ fn run(server: Arc<Server>) {
         handle: None,
         last_error: None,
     };
-    let handle = match item.spawn() {
+    // `assume_sni_available` routes a missing StatusNotifierWatcher to
+    // `TrayItem::watcher_offline` instead of failing `spawn` outright, so
+    // `kpa serve` started ahead of a tray host (e.g. by systemd) keeps
+    // waiting instead of giving up on the tray for the daemon's life.
+    let handle = match item.assume_sni_available(true).spawn() {
         Ok(handle) => handle,
-        // No StatusNotifierWatcher / no session bus. Not fatal: the tray
-        // isn't a security goal (`docs/threat-model.md` § 2).
+        // No session bus at all, or a D-Bus error other than the missing
+        // watcher. Not fatal: the tray isn't a security goal
+        // (`docs/threat-model.md` § 2); it just never appears.
         Err(err) => {
             log::warn(format_args!("tray not started: {err}"));
             return;
         }
     };
 
-    log::debug(format_args!("tray registered"));
+    log::debug(format_args!("tray service started"));
 
     // Give the item its own handle, so a finished background unlock
     // (`TrayItem::start_unlock`) can tell `ksni` to refresh.
@@ -105,6 +110,32 @@ impl ksni::Tray for TrayItem {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         build_menu(&self.server.snapshot(), self.last_error.as_ref())
+    }
+
+    // A watcher coming and going (no tray host at all, or a panel
+    // restarting) is a normal lifecycle event, not a failure: `run`'s
+    // poll loop keeps the service alive either way, and `ksni`
+    // re-registers the item on its own once a watcher reappears. Only a
+    // real "Quit" (`build_menu`'s `std::process::exit`) ends the daemon.
+    fn watcher_online(&self) {
+        log::info(format_args!("tray registered"));
+    }
+
+    fn watcher_offline(&self, reason: OfflineReason) -> bool {
+        match reason {
+            OfflineReason::No => {
+                log::info(format_args!("no tray host; waiting for one"));
+            }
+            OfflineReason::Error(err) => {
+                log::info(format_args!("no tray host yet: {err}"));
+            }
+            // `OfflineReason` is `#[non_exhaustive]`; treat anything
+            // future versions of `ksni` add the same as `No`.
+            _ => {
+                log::info(format_args!("no tray host; waiting for one"));
+            }
+        }
+        true
     }
 }
 
@@ -646,5 +677,34 @@ mod tests {
             ksni::Tray::icon_pixmap(&item)[0].data,
             fallback_icon(&[], true)[0].data
         );
+    }
+
+    /// No session bus, a missing watcher, and any future `OfflineReason`
+    /// `ksni` might add must all keep the daemon alive — only a real
+    /// "Quit" from the menu may end it.
+    #[test]
+    fn a_missing_tray_host_never_shuts_the_service_down() {
+        use crate::config::Config;
+
+        let item = TrayItem {
+            server: Arc::new(Server::new(
+                Config::parse("").expect("empty config is valid"),
+            )),
+            handle: None,
+            last_error: None,
+        };
+
+        assert!(ksni::Tray::watcher_offline(&item, OfflineReason::No));
+        assert!(ksni::Tray::watcher_offline(
+            &item,
+            OfflineReason::Error(ksni::Error::WontShow)
+        ));
+        assert!(ksni::Tray::watcher_offline(
+            &item,
+            OfflineReason::Error(ksni::Error::Watcher(zbus::fdo::Error::ServiceUnknown(
+                "The name org.kde.StatusNotifierWatcher was not provided by any .service files"
+                    .to_string()
+            )))
+        ));
     }
 }

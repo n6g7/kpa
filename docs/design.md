@@ -105,8 +105,8 @@ stamps its own.
 
 | Level   | What it carries                                                           |
 | ------- | ------------------------------------------------------------------------- |
-| `info`  | Every unlock, lock (including idle, screen-lock and suspend), and copy (field, entry title, database) |
-| `warn`  | Failed or refused requests and connections, and the tray or logind failing |
+| `info`  | Every unlock, lock (including idle, screen-lock and suspend), and copy (field, entry title, database); the tray registering, losing its host and re-registering |
+| `warn`  | Failed or refused requests and connections, and logind failing, or a tray failure beyond a missing host (no session bus, or an unexpected D-Bus error) |
 | `debug` | Why: prompt launches, logind subscription, sleep inhibitor, tray start    |
 
 **What a line may contain.** The operation, the database name, the error
@@ -347,6 +347,10 @@ tooltips. Any StatusNotifierItem host (waybar, quickshell, a KDE/GNOME panel,
 
 This satisfies "autostarts, lives in the background until needed" directly
 rather than by proxy through another application's tray.
+
+No tray host at all — including `kpa serve` starting before one exists, or
+one disappearing and coming back later — is a normal, non-fatal state: kpa
+keeps running and registers (or re-registers) as soon as a host is there.
 
 ## Security
 
