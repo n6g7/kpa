@@ -4,9 +4,11 @@
 
 - [ ] Add macOS support
 - [ ] Document assumptions (Linux only, logind, etc)
-- [ ] SSH agent?
+- [ ] SSH agent (continued from https://github.com/n6g7/kpa/pull/22)
 - [ ] Find out why `cargo run -- ...` rebuilds on each run, even with no changes
 - [ ] `kpa list` returns a list of copyable fields for each entry
+- [ ] Passkey provider
+- [ ] Support headless use (no window manager or GUI)
 
 ## Done
 
