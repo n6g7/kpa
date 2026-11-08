@@ -6,10 +6,8 @@
 - [ ] Document assumptions (Linux only, logind, etc)
 - [ ] SSH agent (continued from https://github.com/n6g7/kpa/pull/22)
 - [ ] Find out why `cargo run -- ...` rebuilds on each run, even with no changes
-- [ ] `kpa list` returns a list of copyable fields for each entry
 - [ ] Passkey provider
 - [ ] Support headless use (no window manager or GUI)
-- [ ] Triage the low and informational findings from the latest security audit
 
 ## Done
 
@@ -20,3 +18,5 @@
 - [x] `kpa version` reports the server's version too, and `kpa serve` prints its version on start
 - [x] One more security audit
 - [x] Fix the high and medium findings from the latest security audit
+- [x] `kpa list` returns a list of copyable fields for each entry
+- [x] Triage the low and informational findings from the latest security audit
