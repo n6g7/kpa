@@ -20,8 +20,9 @@ kpa is a long-lived daemon (`kpa serve`) that holds one or more `.kdbx`
 files decrypted in memory, plus short-lived clients (`kpa <subcommand>`,
 or anything speaking the socket protocol). Clients can ask for status,
 unlock, lock, an entry index (`list`), and to copy one field of one entry
-to the clipboard (`copy`). There is no operation that returns a secret to
-the caller, and none that writes a database.
+to the clipboard (`copy`). An `unlock` can carry the master password from
+the client, instead of the daemon prompting for it. There is no operation
+that returns a secret to the caller, and none that writes a database.
 
 ```mermaid
 graph LR
@@ -70,7 +71,7 @@ The keyfile is plaintext at rest: its protection is the filesystem's
 
 | ID   | Boundary                                                                                       | Untrusted side |
 | ---- | ---------------------------------------------------------------------------------------------- | -------------- |
-| TB-1 | The Unix socket under `$XDG_RUNTIME_DIR`: uid separation via filesystem permissions             | Request bytes (ACT-1, ACT-6 must not reach it; ACT-5 clients may be buggy); for a client, whoever answers at the path (ACT-1 must not) |
+| TB-1 | The Unix socket under `$XDG_RUNTIME_DIR`: uid separation via filesystem permissions. Inbound A-1 crosses it: the master password in an `unlock` from a same-uid client | Request bytes (ACT-1, ACT-6 must not reach it; ACT-5 clients may be buggy); for a client, whoever answers at the path (ACT-1 must not) |
 | TB-2 | Reading `.kdbx` and keyfile: header and KDF parameters before authentication, payload after     | File bytes (ACT-3) |
 | TB-3 | Decrypted entry content flowing out to clients, terminals, launchers, the tray                 | Entry content (ACT-4) |
 | TB-4 | The clipboard (Wayland data-control): visible to every client of the compositor                | Readers (ACT-5) |
@@ -129,7 +130,10 @@ failing for an in-scope actor.
   peer can issue requests, read responses, receive a client's requests in
   kpa's place, or obtain A-1–A-3 from kpa by any channel.
 - **G-3 Secrets leave only by explicit `copy`, only to the clipboard.** A-1
-  never leaves the process. A-2 is never in a socket response, stdout,
+  never leaves the process. It can also enter it over the socket, in an
+  `unlock` that carries the master password: the daemon holds the request
+  line and the decoded password in zeroizing buffers, for that one request
+  only. A-2 is never in a socket response, stdout,
   stderr, a log, an error string, the tray, a child's argv or environment —
   only in the clipboard offer, after a `copy` naming that exact field.
   `list` omits every protected field and Notes rather than de-protecting
@@ -214,11 +218,13 @@ change, or long-held fd.
 **T-4 · Secret leaks through an output channel** (I) — ACT-5 · TB-1, TB-5, TB-7 · A-1, A-2 → G-3  
 Response: no `get` op; `list` is an index with protected fields and Notes
 omitted; errors carry codes, not vault content; the prompt gets its own
-stderr, never the daemon's. In scope: a protected field in any response,
-error message, `Debug`/`Display` output, panic message, log line, tray
-tooltip, or a child process's argv/env; the prompt's stdout, stderr, or
-exit status reaching a response, an error string, or kpa's own
-stdout/stderr/log.
+stderr, never the daemon's; requests are never logged, decode errors carry
+no request content, and a request's password has a redacting `Debug`. In
+scope: a protected field in any response, error message, `Debug`/`Display`
+output, panic message, log line, tray tooltip, or a child process's
+argv/env; the prompt's stdout, stderr, or exit status reaching a response,
+an error string, or kpa's own stdout/stderr/log; the same for a password
+carried in a request.
 
 **T-5 · Secret persisted to disk** (I) — ACT-5, ACT-7 · TB-7 · A-1, A-2 → G-4  
 Response: `PR_SET_DUMPABLE=0` before config or unlock; secret-holding

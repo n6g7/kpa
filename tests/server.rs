@@ -1,14 +1,15 @@
 //! Integration test for `docs/plan.md` step 2: runs the daemon against a
 //! temp socket and config, then drives it through the actual `kpa` client
 //! subcommands — not a hand-rolled socket client — so this exercises the
-//! real protocol round-trip an operator would see. One raw-socket test
-//! (`version_mismatch_is_rejected`) is the exception: there is no client
-//! subcommand that sends a wrong `v` on purpose.
+//! real protocol round-trip an operator would see. The raw-socket tests are
+//! the exception: they send requests no client subcommand sends, such as a
+//! wrong `v` or a password in the request.
 //!
-//! Tests that unlock run the daemon in-process (`common::InProcessDaemon`),
-//! where every connection counts as coming from the desktop: a test runner
-//! is rarely in the display session, and the spawned `kpa serve` would
-//! answer its `unlock` with `no_display`. The rest spawn the real binary.
+//! Tests that unlock through the prompt run the daemon in-process
+//! (`common::InProcessDaemon`), where every connection counts as coming
+//! from the desktop: a test runner is rarely in the display session, and
+//! the spawned `kpa serve` would answer its `unlock` with `no_display`. The
+//! rest spawn the real binary.
 
 mod common;
 
@@ -304,6 +305,87 @@ fn malformed_request_is_rejected_without_crashing_the_daemon() {
 
     // The daemon is still alive and serving normally.
     assert_eq!(daemon.run(&["status"])["ok"], true);
+}
+
+/// A daemon whose prompt always fails, so any `unlock` that prompts comes
+/// back `prompt_cancelled`: getting anything else proves it didn't.
+fn no_prompt_daemon() -> Daemon {
+    Daemon::spawn("exit 1", Stdio::null())
+}
+
+/// Sends `line` straight to the socket and decodes the one-line reply.
+fn send_raw(daemon: &Daemon, line: &str) -> Value {
+    let mut stream =
+        UnixStream::connect(&daemon.socket).expect("failed to connect to daemon socket");
+    writeln!(stream, "{line}").expect("failed to write request");
+    let mut reply = String::new();
+    BufReader::new(stream)
+        .read_line(&mut reply)
+        .expect("failed to read response");
+    serde_json::from_str(reply.trim())
+        .unwrap_or_else(|err| panic!("could not decode response {reply:?}: {err}"))
+}
+
+fn unlock_line(password: &str) -> String {
+    format!(r#"{{"v":1,"op":"unlock","db":"personal","password":"{password}"}}"#)
+}
+
+fn base64(bytes: impl AsRef<[u8]>) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[test]
+fn an_unlock_carrying_the_password_unlocks_without_prompting() {
+    let daemon = no_prompt_daemon();
+
+    let unlocked = send_raw(&daemon, &unlock_line(&base64(common::PASSWORD)));
+    assert_eq!(unlocked["ok"], true, "{unlocked}");
+    assert_eq!(unlocked["db"], "personal");
+
+    let listed = daemon.run(&["list", "personal"]);
+    assert_eq!(listed["entries"][0]["title"], "Example", "{listed}");
+}
+
+#[test]
+fn an_unlock_carrying_a_wrong_password_is_wrong_credentials() {
+    let daemon = no_prompt_daemon();
+
+    let unlocked = send_raw(&daemon, &unlock_line(&base64("not-the-real-password")));
+    assert_eq!(unlocked["ok"], false);
+    assert_eq!(unlocked["error"], "wrong_credentials", "{unlocked}");
+    assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], true);
+
+    // No backoff: the right password straight after still works.
+    let unlocked = send_raw(&daemon, &unlock_line(&base64(common::PASSWORD)));
+    assert_eq!(unlocked["ok"], true, "{unlocked}");
+}
+
+/// An oversized password, one that isn't base64, and one whose JSON string
+/// needs unescaping are all refused before anything is tried, and the
+/// daemon keeps serving. The escaped one is the right password with its
+/// first character written as a `\u` escape, so only the escape is wrong.
+#[test]
+fn an_unlock_carrying_an_unusable_password_is_malformed() {
+    let daemon = no_prompt_daemon();
+    let encoded = base64(common::PASSWORD);
+    let first = encoded.chars().next().expect("non-empty");
+    let escaped = format!("{}u{:04x}{}", '\u{5c}', u32::from(first), &encoded[1..]);
+
+    for (what, password) in [
+        (
+            "oversized",
+            base64("a".repeat(kpa::proto::MAX_PASSWORD_LEN + 1)),
+        ),
+        ("invalid base64", "not base64!".to_string()),
+        ("escaped", escaped),
+    ] {
+        let reply = send_raw(&daemon, &unlock_line(&password));
+        assert_eq!(reply["ok"], false, "{what}: {reply}");
+        assert_eq!(reply["error"], "malformed_request", "{what}: {reply}");
+    }
+
+    assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], true);
 }
 
 /// A `lock` issued while an `unlock` is still prompting wins: the unlock

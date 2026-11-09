@@ -6,6 +6,7 @@
 //! at the point they arise, which op was asked for isn't known.
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use super::VERSION;
 use super::copy::CopyRequest;
@@ -47,32 +48,53 @@ pub enum Op {
 /// `serde_json`'s own error text is never forwarded to the client.
 #[derive(Debug)]
 pub enum DecodeError {
-    /// Not valid JSON, missing/non-numeric `v`, or an `op` shape this build
-    /// doesn't recognize.
+    /// Not valid JSON, missing/non-numeric `v`, an `op` shape this build
+    /// doesn't recognize, or a `password` that `Password` refuses.
     MalformedRequest,
     /// The request's own `v` didn't match `VERSION`. Carries the client's
     /// claimed version so the response can name both.
     VersionMismatch(u64),
 }
 
-/// Decode one request line. Two-stage on purpose: `v` is read out of a
-/// generic `serde_json::Value` first, before the rest of the request is
-/// asked to match `Op`'s shape at all — a client running a different
-/// protocol version may not even have a compatible `op` shape, and the
-/// version mismatch is the more useful thing to report in that case.
-pub fn decode_request(line: &str) -> Result<Request, DecodeError> {
-    let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|_| DecodeError::MalformedRequest)?;
+/// The fields `decode_request` reads before the request is matched against
+/// `Op`. Every other field is skipped without being copied.
+#[derive(Deserialize)]
+struct Envelope<'a> {
+    v: u64,
+    /// Raw JSON text, never unescaped: `serde_json` only finds where it
+    /// ends.
+    #[serde(borrow, default)]
+    password: Option<&'a RawValue>,
+}
 
-    let v = value
-        .get("v")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or(DecodeError::MalformedRequest)?;
-    if v != u64::from(VERSION) {
-        return Err(DecodeError::VersionMismatch(v));
+/// Decode one request line. Two passes over `line`, both straight from the
+/// text:
+///
+/// 1. `v` first, before the rest of the request is asked to match `Op`'s
+///    shape at all — a client running a different protocol version may not
+///    even have a compatible `op` shape, and the version mismatch is the
+///    more useful thing to report in that case. The same pass refuses a
+///    `password` with escapes in it, before anything has unescaped it into
+///    a buffer kpa can't wipe (see `Password`).
+/// 2. The whole request. Strings arrive as slices of `line`, so the only
+///    copy of a password is the zeroizing one `Password` decodes into.
+///
+/// Never through a `serde_json::Value`, which would copy every string in
+/// the request, the password's base64 included, into a plain `String`.
+pub fn decode_request(line: &str) -> Result<Request, DecodeError> {
+    let envelope: Envelope =
+        serde_json::from_str(line).map_err(|_| DecodeError::MalformedRequest)?;
+    if envelope.v != u64::from(VERSION) {
+        return Err(DecodeError::VersionMismatch(envelope.v));
+    }
+    if envelope
+        .password
+        .is_some_and(|raw| raw.get().contains('\\'))
+    {
+        return Err(DecodeError::MalformedRequest);
     }
 
-    serde_json::from_value(value).map_err(|_| DecodeError::MalformedRequest)
+    serde_json::from_str(line).map_err(|_| DecodeError::MalformedRequest)
 }
 
 /// Failures that precede dispatch. Unlike an op's error type, this one
@@ -105,10 +127,13 @@ impl ProtocolError {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
     use serde_json::json;
     use uuid::Uuid;
 
     use super::super::copy::Field;
+    use super::super::unlock::{MAX_PASSWORD_LEN, Password};
     use super::*;
 
     /// The nil uuid, used everywhere below a request needs one — these
@@ -129,6 +154,7 @@ mod tests {
             (
                 Op::Unlock(UnlockRequest {
                     db: "personal".to_string(),
+                    password: None,
                 }),
                 json!({"v": 1, "op": "unlock", "db": "personal"}),
             ),
@@ -191,6 +217,7 @@ mod tests {
                 r#"{"v":1,"op":"unlock","db":"personal"}"#,
                 Op::Unlock(UnlockRequest {
                     db: "personal".to_string(),
+                    password: None,
                 }),
             ),
             (
@@ -237,6 +264,7 @@ mod tests {
             Op::Status,
             Op::Unlock(UnlockRequest {
                 db: "personal".to_string(),
+                password: None,
             }),
             Op::Lock(LockRequest { db: None }),
             Op::Lock(LockRequest {
@@ -306,5 +334,109 @@ mod tests {
                 field: Field::Custom("notes_dump".to_string()),
             })
         );
+    }
+
+    fn unlock_with(password: &str) -> String {
+        format!(r#"{{"v":1,"op":"unlock","db":"personal","password":"{password}"}}"#)
+    }
+
+    /// The decoded password only compares equal if it came through
+    /// `PasswordVisitor::visit_borrowed_str`, the only path that accepts
+    /// it: this also pins that `#[serde(flatten)]` and `#[serde(tag)]`
+    /// hand the string over borrowed.
+    #[test]
+    fn decodes_an_unlock_that_carries_a_password() {
+        let request = decode_request(&unlock_with("aHVudGVyMg==")).expect("should decode");
+        assert_eq!(
+            request.op,
+            Op::Unlock(UnlockRequest {
+                db: "personal".to_string(),
+                password: Some(Password::new(zeroize::Zeroizing::new(
+                    "hunter2".to_string()
+                ))),
+            })
+        );
+
+        // An explicit null reads the same as omitting it.
+        let line = r#"{"v":1,"op":"unlock","db":"personal","password":null}"#;
+        let request = decode_request(line).expect("should decode");
+        assert_eq!(
+            request.op,
+            Op::Unlock(UnlockRequest {
+                db: "personal".to_string(),
+                password: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_password_round_trips() {
+        let request = Request {
+            v: VERSION,
+            op: Op::Unlock(UnlockRequest {
+                db: "personal".to_string(),
+                password: Some(Password::new(zeroize::Zeroizing::new(
+                    "pa\"ss\\wörd\n".to_string(),
+                ))),
+            }),
+        };
+        let text = serde_json::to_string(&request).expect("request should serialize");
+        assert!(!text.contains('\\'), "base64 never needs escaping: {text}");
+        assert_eq!(decode_request(&text).expect("should decode"), request);
+    }
+
+    #[test]
+    fn rejects_a_password_it_cannot_use() {
+        let oversized = STANDARD.encode("a".repeat(MAX_PASSWORD_LEN + 1));
+        for line in [
+            unlock_with("not base64!"),
+            unlock_with(&oversized),
+            unlock_with(&STANDARD.encode(b"\xff")),
+            r#"{"v":1,"op":"unlock","db":"personal","password":42}"#.to_string(),
+            r#"{"v":1,"op":"unlock","db":"personal","password":["aGk="]}"#.to_string(),
+        ] {
+            assert!(
+                matches!(decode_request(&line), Err(DecodeError::MalformedRequest)),
+                "should have been rejected: {line:?}"
+            );
+        }
+    }
+
+    /// For building the JSON escapes below.
+    const BACKSLASH: char = '\u{5c}';
+
+    /// Each of these unescapes to valid base64 (`aHVudGVyMg==`, `aGk=`), so
+    /// only the escape gets them refused.
+    #[test]
+    fn rejects_a_password_with_escapes() {
+        let b = BACKSLASH;
+        for line in [
+            unlock_with(&format!("aHVudGVy{b}u004dg==")),
+            unlock_with(&format!("aHVudGVyMg{b}u003d{b}u003d")),
+            unlock_with(&format!("aHVu{b}/dGVyMg==")),
+            // The escape check reads the raw field wherever it sits, and an
+            // escaped key still names it.
+            format!(r#"{{"password":"aGk{b}u003d","v":1,"op":"unlock","db":"personal"}}"#),
+            format!(r#"{{"v":1,"op":"unlock","db":"personal","pass{b}u0077ord":"aGk{b}u003d"}}"#),
+        ] {
+            assert!(
+                matches!(decode_request(&line), Err(DecodeError::MalformedRequest)),
+                "should have been rejected: {line:?}"
+            );
+        }
+    }
+
+    /// The `v` check still comes first, so a client on another protocol
+    /// version hears about that rather than about its password.
+    #[test]
+    fn a_mismatched_version_is_reported_before_a_bad_password() {
+        let line = format!(
+            r#"{{"v":2,"op":"unlock","db":"personal","password":"{}u0041"}}"#,
+            BACKSLASH
+        );
+        assert!(matches!(
+            decode_request(&line),
+            Err(DecodeError::VersionMismatch(2))
+        ));
     }
 }

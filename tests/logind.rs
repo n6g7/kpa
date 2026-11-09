@@ -540,6 +540,7 @@ fn the_desk_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         server.unlock(
             &UnlockRequest {
                 db: "personal".to_string(),
+                password: None,
             },
             Origin::Desktop,
         )
