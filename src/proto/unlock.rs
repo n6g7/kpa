@@ -117,9 +117,18 @@ impl<'de> Deserialize<'de> for Password {
     }
 }
 
-/// Accepts only a string borrowed from the input. `visit_str` is what a
-/// deserializer calls with a string it had to copy first, typically to
-/// unescape it, and that copy is already out of reach.
+/// How serde builds a `Password`. A serde `Visitor` is the callback object
+/// a deserializer hands each value to: it calls the `visit_*` method that
+/// matches what it found in the input (`visit_u64` for a number, a string
+/// method for a string, and so on), and the visitor turns that into the
+/// target type or an error. Methods left out refuse that kind of value.
+///
+/// Written by hand rather than derived because which string method gets
+/// called matters here. `visit_borrowed_str` gets a slice of the request
+/// line itself, so the only copy made is the zeroizing one `from_base64`
+/// decodes into. `visit_str` gets a string the deserializer had to copy
+/// first, typically to unescape it, and that copy is already out of reach,
+/// so it is refused.
 struct PasswordVisitor;
 
 impl<'de> Visitor<'de> for PasswordVisitor {
