@@ -13,8 +13,10 @@ pub struct UnlockRequest {
     pub db: String,
 }
 
-/// Everything `unlock` can fail with. Every variant names a database,
-/// because every one of them is about one specific database.
+/// Everything `unlock` can fail with. Every variant names the database the
+/// unlock was for, so the error says which request failed, even when the
+/// cause isn't about the database itself (a dismissed prompt, a locked
+/// screen).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnlockError {
     UnknownDb {
