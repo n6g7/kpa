@@ -232,15 +232,15 @@ sends nothing is dropped.
 request is read. The daemon takes the peer's pidfd (`SO_PEERPIDFD`, or the
 `SO_PEERCRED` pid on kernels without it) and reads its
 `/proc/<pid>/cgroup`. The peer is **on the desktop** when the user has a
-display session (`User.Display` is not `/`) and the unified hierarchy's
+display session (`User.Display` is not `/`, § Lock policy) and the unified hierarchy's
 path is under `/user.slice/user-<uid>.slice/`, in `user@<uid>.service` or
 in the display session's `session-<id>.scope`. Everything else is
 **outside**: another session's scope (an SSH login), a system service (a
 cron job, a terminal server's shells), no display session at all, and any
 peer whose cgroup can't be read or parsed, including one that exited
-first. The origin is logged at `debug` and changes no request's behaviour
-yet. It decides where to ask, not who may ask: a same-uid process can
-start work in another cgroup.
+first. The origin is logged at `debug`, and no op's answer depends on it.
+It decides where to ask, not who may ask: a same-uid process can start
+work in another cgroup.
 
 **`list` never returns secrets** — it is an index. That holds for any field
 the user marked protected in their KeePass client, not just `Password`: a
@@ -371,7 +371,8 @@ The logind watch publishes **the desk's state** to the server: no display
 session, or the display session's id with its `LockedHint` (locked or
 unlocked). It is read on subscribing, whenever `User.Display` changes, and
 on each `LockedHint` change, and is "no display session" while the watch is
-down. The prompt gate above reads whether it is locked.
+down. The prompt gate above reads whether it is locked; the classification
+in § Protocol reads the session's id.
 
 The prompt runs in its own process group, and killing it kills the whole
 group, so a wrapper script's own prompt window goes too.

@@ -34,6 +34,7 @@ use zeroize::Zeroizing;
 use crate::clip::{self, Clipboard};
 use crate::config::Config;
 use crate::log;
+use crate::origin;
 use crate::policy;
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
@@ -164,7 +165,8 @@ pub struct Server {
     clip_db: Arc<Mutex<Option<String>>>,
     /// The desk's state, as the lock policy last published it
     /// (`policy::Event::Desk`). `unlock` raises no prompt while it is
-    /// locked.
+    /// locked, and each connection is classified against its display
+    /// session (`origin`).
     desk: Mutex<policy::Desk>,
 }
 
@@ -1130,6 +1132,11 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
             return;
         }
     }
+
+    // Where the peer runs (`docs/headless.md` § 3). Logged only: no op's
+    // answer depends on it.
+    let origin = origin::of_peer(&stream, owner, server.desk().session());
+    log::debug(format_args!("connection from {origin:?}"));
 
     let mut line = Vec::new();
     let read = BufReader::new((&stream).take(MAX_REQUEST_LEN)).read_until(b'\n', &mut line);
