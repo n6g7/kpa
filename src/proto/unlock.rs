@@ -60,6 +60,11 @@ pub enum UnlockError {
     Stale {
         db: String,
     },
+    /// The screen is known to be locked, so no prompt was raised: nobody
+    /// could answer it behind the locker.
+    NoDisplay {
+        db: String,
+    },
 }
 
 impl UnlockError {
@@ -87,6 +92,9 @@ impl UnlockError {
             UnlockError::Stale { db } => ErrorFields::new(ErrorCode::Stale)
                 .db(db)
                 .detail("database changed on disk"),
+            UnlockError::NoDisplay { db } => ErrorFields::new(ErrorCode::NoDisplay)
+                .db(db)
+                .detail("the screen is locked"),
         }
     }
 }

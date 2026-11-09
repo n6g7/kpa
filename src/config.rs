@@ -31,6 +31,12 @@ pub struct Config {
     #[serde(default = "default_prompt")]
     pub prompt: Vec<String>,
 
+    /// How long a prompt may stay open unanswered. Past this the prompt is
+    /// killed and the unlock fails with `prompt_cancelled`, so a prompt
+    /// raised where nobody is looking doesn't wait there indefinitely.
+    #[serde(with = "humantime_serde", default = "default_prompt_timeout")]
+    pub prompt_timeout: Duration,
+
     /// How long a copied secret stays on the clipboard before kpa drops
     /// its own clipboard offer (see § Clipboard).
     #[serde(with = "humantime_serde", default = "default_clipboard_timeout")]
@@ -66,6 +72,10 @@ pub struct DatabaseConfig {
 
 fn default_idle_timeout() -> Duration {
     Duration::from_secs(30 * 60)
+}
+
+fn default_prompt_timeout() -> Duration {
+    Duration::from_secs(60)
 }
 
 fn default_clipboard_timeout() -> Duration {
@@ -203,6 +213,7 @@ mod tests {
         let input = r#"
             idle_timeout = "30m"
             prompt = ["fuzzel", "--dmenu", "--password", "--prompt"]
+            prompt_timeout = "60s"
             clipboard_timeout = "30s"
 
             [[database]]
@@ -222,6 +233,7 @@ mod tests {
             config.prompt,
             vec!["fuzzel", "--dmenu", "--password", "--prompt"]
         );
+        assert_eq!(config.prompt_timeout, Duration::from_secs(60));
         assert_eq!(config.clipboard_timeout, Duration::from_secs(30));
 
         assert_eq!(config.databases.len(), 2);
@@ -244,11 +256,13 @@ mod tests {
     fn parses_short_human_durations() {
         let input = r#"
             idle_timeout = "10s"
+            prompt_timeout = "2m"
             clipboard_timeout = "5s"
         "#;
 
         let config = Config::parse(input).expect("valid config should parse");
         assert_eq!(config.idle_timeout, Duration::from_secs(10));
+        assert_eq!(config.prompt_timeout, Duration::from_secs(120));
         assert_eq!(config.clipboard_timeout, Duration::from_secs(5));
         assert!(config.databases.is_empty());
     }
@@ -260,6 +274,7 @@ mod tests {
         let config = Config::parse("").expect("empty config should parse");
 
         assert_eq!(config.idle_timeout, Duration::from_secs(30 * 60));
+        assert_eq!(config.prompt_timeout, Duration::from_secs(60));
         assert_eq!(config.clipboard_timeout, Duration::from_secs(30));
         assert_eq!(
             config.prompt,

@@ -14,7 +14,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod common;
+
+use kpa::config::Config;
 use kpa::policy::{self, Bus, Locks};
+use kpa::proto::{Unlock, UnlockError, UnlockRequest};
+use kpa::server::Server;
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::zvariant::{self, OwnedObjectPath, Value};
@@ -295,6 +300,7 @@ impl MockLogind {
 #[derive(Default)]
 struct Recorder {
     unlocked: AtomicBool,
+    desk_locked: AtomicBool,
     log: Mutex<Vec<&'static str>>,
 }
 
@@ -305,6 +311,9 @@ impl Locks for Recorder {
     }
     fn any_unlocked(&self) -> bool {
         self.unlocked.load(Ordering::SeqCst)
+    }
+    fn set_desk_locked(&self, locked: bool) {
+        self.desk_locked.store(locked, Ordering::SeqCst);
     }
 }
 
@@ -357,10 +366,20 @@ fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
     assert_eq!(recorder.locks(), 1, "one Lock signal, one lock");
     recorder.log.lock().unwrap().clear();
 
-    // 2. LockedHint turning true locks; turning false does not.
+    assert!(
+        !recorder.desk_locked.load(Ordering::SeqCst),
+        "a Lock signal alone doesn't mark the desk locked"
+    );
+
+    // 2. LockedHint turning true locks and marks the desk locked; turning
+    //    false unmarks it and locks nothing.
     mock.set_hint(SESSION_1, true);
     eventually("LockedHint=true to lock", || recorder.locks() == 1);
+    assert!(recorder.desk_locked.load(Ordering::SeqCst));
     mock.set_hint(SESSION_1, false);
+    eventually("LockedHint=false to unmark the desk", || {
+        !recorder.desk_locked.load(Ordering::SeqCst)
+    });
     quiet();
     assert_eq!(recorder.locks(), 1, "LockedHint=false is not a lock");
     recorder.log.lock().unwrap().clear();
@@ -405,4 +424,81 @@ fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
     recorder.unlocked.store(true, Ordering::SeqCst);
     bus.kill();
     eventually("a lost bus to lock", || recorder.locks() == 1);
+}
+
+/// The real server behind the policy: while the display session's
+/// `LockedHint` is true, an unlock raises no prompt; once it clears, the
+/// prompt runs and the fixture unlocks; and a `Lock` signal ends a prompt
+/// still open.
+#[test]
+fn the_desk_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
+    let bus = PrivateBus::start();
+    let mock = MockLogind::start(&bus.address);
+    // Locked before kpa subscribes, so it reads the hint on subscribing.
+    mock.set_hint(SESSION_1, true);
+
+    let dir = tempfile::tempdir().unwrap();
+    // The prompt records that it ran, waits while `hang` exists, then
+    // answers with the fixture's password.
+    let prompted = dir.path().join("prompted");
+    let hang = dir.path().join("hang");
+    let script = format!(
+        "touch '{}'; while [ -e '{}' ]; do sleep 0.1; done; printf %s '{}'",
+        prompted.display(),
+        hang.display(),
+        common::PASSWORD
+    );
+    let config = Config::parse(&format!(
+        "prompt = [\"/bin/sh\", \"-c\", {script:?}]\n\
+         [[database]]\nname = \"personal\"\npath = {:?}\n",
+        common::password_db().display().to_string()
+    ))
+    .unwrap();
+    let server = Arc::new(Server::new(config));
+    server.set_policy_events(policy::start(
+        server.clone(),
+        Bus::Address(bus.address.clone()),
+    ));
+    let unlock = || {
+        server.unlock(&UnlockRequest {
+            db: "personal".to_string(),
+        })
+    };
+    let refused = Err(UnlockError::NoDisplay {
+        db: "personal".to_string(),
+    });
+
+    // 1. While the desk is known locked, no prompt runs. Until kpa has
+    //    subscribed it doesn't know, so the marker is cleared before each
+    //    try: only the last, refused, one counts.
+    eventually("a locked desk to refuse the unlock", || {
+        let _ = std::fs::remove_file(&prompted);
+        unlock() == refused
+    });
+    assert!(!prompted.exists(), "a prompt ran behind the locker");
+
+    // 2. Once the hint clears, the prompt runs and the fixture unlocks.
+    mock.set_hint(SESSION_1, false);
+    eventually("an unlocked desk to allow the prompt", || unlock().is_ok());
+    assert!(prompted.exists());
+
+    // 3. A Lock signal ends a prompt still open.
+    mock.lock_signal(SESSION_1);
+    eventually("the Lock signal to lock", || !server.any_unlocked());
+    std::fs::write(&hang, b"").unwrap();
+    std::fs::remove_file(&prompted).unwrap();
+    thread::scope(|scope| {
+        let unlocking = scope.spawn(unlock);
+        eventually("the prompt to start", || prompted.exists());
+        mock.lock_signal(SESSION_1);
+        let locked_at = Instant::now();
+        assert_eq!(
+            unlocking.join().unwrap(),
+            Err(UnlockError::LockedDuringUnlock {
+                db: "personal".to_string()
+            })
+        );
+        assert!(locked_at.elapsed() < Duration::from_secs(5));
+    });
+    assert!(!server.any_unlocked());
 }

@@ -4,11 +4,12 @@
 //! Two halves, joined by one channel of [`Event`]s:
 //!
 //! - [`watch_forever`] owns a D-Bus connection to logind. It turns signals
-//!   and property changes into events: a `Lock` signal or `LockedHint`
-//!   turning true on the user's display session, `PrepareForSleep`, and a
+//!   and property changes into events: a `Lock` signal on the user's
+//!   display session, that session's `LockedHint`, `PrepareForSleep`, and a
 //!   lost subscription.
-//! - [`Policy`] decides what to do with an event: lock, and hold or release
-//!   a `delay` sleep inhibitor. It sees only the [`Locks`] and
+//! - [`Policy`] decides what to do with an event: lock, tell the server
+//!   whether the desk is known to be locked, and hold or release a `delay`
+//!   sleep inhibitor. It sees only the [`Locks`] and
 //!   [`SleepInhibitor`] traits, so it can be tested with injected events and
 //!   no bus at all.
 //!
@@ -56,9 +57,14 @@ const RETRY_DELAY: Duration = Duration::from_secs(5);
 /// Something the lock policy reacts to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
-    /// The user's screen is locked: the display session's `Lock` signal, or
-    /// its `LockedHint` turned true.
+    /// The display session's `Lock` signal. A locker that only sends this
+    /// never reports the unlock (ASM-7), so it locks without marking the
+    /// desk locked.
     ScreenLocked,
+    /// The display session's `LockedHint`, read on subscribing, whenever
+    /// the display session changes, and on each change of the hint. `false`
+    /// when there is no display session. `true` locks.
+    DeskLocked(bool),
     /// logind's `PrepareForSleep`: `true` just before sleep, `false` on resume.
     Sleeping(bool),
     /// A database was unlocked; the inhibitor may need to be taken.
@@ -76,6 +82,9 @@ pub trait Locks: Send + Sync {
     fn lock_all(&self);
     /// Whether any database is currently unlocked.
     fn any_unlocked(&self) -> bool;
+    /// Whether the desk is known to be locked. No prompt is raised while
+    /// it is.
+    fn set_desk_locked(&self, locked: bool);
 }
 
 impl<T: Locks + ?Sized> Locks for Arc<T> {
@@ -84,6 +93,9 @@ impl<T: Locks + ?Sized> Locks for Arc<T> {
     }
     fn any_unlocked(&self) -> bool {
         (**self).any_unlocked()
+    }
+    fn set_desk_locked(&self, locked: bool) {
+        (**self).set_desk_locked(locked);
     }
 }
 
@@ -118,7 +130,17 @@ impl<L: Locks, I: SleepInhibitor> Policy<L, I> {
                 self.locks.lock_all();
                 crate::log::info(format_args!("locked all databases (screen lock)"));
             }
+            Event::DeskLocked(true) => {
+                // Marked first, so an unlock that starts after `lock_all`
+                // can't raise a prompt behind the locker.
+                self.locks.set_desk_locked(true);
+                self.locks.lock_all();
+                crate::log::info(format_args!("locked all databases (screen lock)"));
+            }
+            Event::DeskLocked(false) => self.locks.set_desk_locked(false),
             Event::WatchLost => {
+                // The desk's state is unknown until the watch is back.
+                self.locks.set_desk_locked(false);
                 self.locks.lock_all();
                 crate::log::warn(format_args!(
                     "locked all databases (logind subscription lost)"
@@ -251,14 +273,11 @@ fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut b
     };
     *subscribed = true;
     crate::log::debug(format_args!("subscribed to logind"));
-    if let Some(path) = &session {
-        match locked_hint(conn, path.as_str()) {
-            Ok(true) => {
-                let _ = events.send(Event::ScreenLocked);
-            }
-            Ok(false) => {}
-            Err(err) => return err,
+    match desk_locked(conn, session.as_ref()) {
+        Ok(locked) => {
+            let _ = events.send(Event::DeskLocked(locked));
         }
+        Err(err) => return err,
     }
 
     for message in messages {
@@ -273,14 +292,11 @@ fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut b
             }
             Step::DisplayChanged(path) => {
                 session = path;
-                if let Some(path) = &session {
-                    match locked_hint(conn, path.as_str()) {
-                        Ok(true) => {
-                            let _ = events.send(Event::ScreenLocked);
-                        }
-                        Ok(false) => {}
-                        Err(err) => return err,
+                match desk_locked(conn, session.as_ref()) {
+                    Ok(locked) => {
+                        let _ = events.send(Event::DeskLocked(locked));
                     }
+                    Err(err) => return err,
                 }
             }
             Step::Ignore => {}
@@ -335,8 +351,8 @@ fn interpret(message: &Message, user: &str, session: Option<&str>) -> Step {
                 let hint = changed
                     .get("LockedHint")
                     .and_then(|v| bool::try_from(v).ok());
-                if hint == Some(true) {
-                    return Step::Event(Event::ScreenLocked);
+                if let Some(locked) = hint {
+                    return Step::Event(Event::DeskLocked(locked));
                 }
             }
             Step::Ignore
@@ -375,6 +391,14 @@ fn get_user(conn: &Connection, uid: u32) -> Result<OwnedObjectPath, String> {
 fn display_session(conn: &Connection, user: &str) -> Result<Option<OwnedObjectPath>, String> {
     let value = get_property(conn, user, USER_IFACE, "Display")?;
     parse_display(&value).ok_or_else(|| "unexpected User.Display value".to_string())
+}
+
+/// The display session's `LockedHint`, or `false` with no display session.
+fn desk_locked(conn: &Connection, session: Option<&OwnedObjectPath>) -> Result<bool, String> {
+    match session {
+        Some(path) => locked_hint(conn, path.as_str()),
+        None => Ok(false),
+    }
 }
 
 fn locked_hint(conn: &Connection, session: &str) -> Result<bool, String> {
@@ -466,6 +490,7 @@ mod tests {
     /// Records calls into a shared log so tests can check ordering.
     struct FakeLocks {
         unlocked: AtomicBool,
+        desk_locked: AtomicBool,
         log: Arc<Mutex<Vec<&'static str>>>,
     }
 
@@ -476,6 +501,14 @@ mod tests {
         }
         fn any_unlocked(&self) -> bool {
             self.unlocked.load(Ordering::SeqCst)
+        }
+        fn set_desk_locked(&self, locked: bool) {
+            self.desk_locked.store(locked, Ordering::SeqCst);
+            self.log.lock().unwrap().push(if locked {
+                "desk locked"
+            } else {
+                "desk unlocked"
+            });
         }
     }
 
@@ -512,6 +545,7 @@ mod tests {
             let log = Arc::new(Mutex::new(Vec::new()));
             let locks = Arc::new(FakeLocks {
                 unlocked: AtomicBool::new(false),
+                desk_locked: AtomicBool::new(false),
                 log: log.clone(),
             });
             let inhibitor = FakeInhibitor {
@@ -556,6 +590,45 @@ mod tests {
         h.policy.handle(Event::ScreenLocked);
         assert!(!h.locks.any_unlocked());
         assert!(!h.held());
+    }
+
+    /// The desk is marked locked before anything is locked, so an unlock
+    /// starting in between can't raise a prompt behind the locker.
+    #[test]
+    fn a_locked_hint_marks_the_desk_locked_then_locks_everything() {
+        let mut h = Harness::new();
+        h.unlock();
+        h.policy.handle(Event::DeskLocked(true));
+        assert!(!h.locks.any_unlocked());
+        assert!(h.locks.desk_locked.load(Ordering::SeqCst));
+        assert_eq!(h.log(), vec!["hold", "desk locked", "lock", "release"]);
+    }
+
+    #[test]
+    fn a_cleared_locked_hint_unmarks_the_desk_and_locks_nothing() {
+        let mut h = Harness::new();
+        h.policy.handle(Event::DeskLocked(true));
+        h.unlock();
+        h.policy.handle(Event::DeskLocked(false));
+        assert!(!h.locks.desk_locked.load(Ordering::SeqCst));
+        assert!(h.locks.any_unlocked());
+    }
+
+    /// A locker that only sends `Lock` never reports the unlock, so the
+    /// signal alone must not leave the desk marked locked.
+    #[test]
+    fn a_lock_signal_does_not_mark_the_desk_locked() {
+        let mut h = Harness::new();
+        h.policy.handle(Event::ScreenLocked);
+        assert!(!h.locks.desk_locked.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_lost_subscription_forgets_the_desk_state() {
+        let mut h = Harness::new();
+        h.policy.handle(Event::DeskLocked(true));
+        h.policy.handle(Event::WatchLost);
+        assert!(!h.locks.desk_locked.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -686,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_hint_turning_true_is_a_screen_lock_and_false_is_not() {
+    fn locked_hint_changes_report_the_desk_state() {
         let on = properties_changed(SESSION, SESSION_IFACE, "LockedHint", OwnedValue::from(true));
         let off = properties_changed(
             SESSION,
@@ -696,9 +769,12 @@ mod tests {
         );
         assert_eq!(
             interpret(&on, USER, Some(SESSION)),
-            Step::Event(Event::ScreenLocked)
+            Step::Event(Event::DeskLocked(true))
         );
-        assert_eq!(interpret(&off, USER, Some(SESSION)), Step::Ignore);
+        assert_eq!(
+            interpret(&off, USER, Some(SESSION)),
+            Step::Event(Event::DeskLocked(false))
+        );
     }
 
     #[test]
