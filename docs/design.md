@@ -69,6 +69,7 @@ speak the socket protocol directly works.
 ```toml
 idle_timeout = "30m"
 prompt = ["fuzzel", "--dmenu", "--password", "--prompt"]
+prompt_timeout = "60s"         # an unanswered prompt is killed after this
 clipboard_timeout = "30s"
 log_level = "info"             # error | warn | info | debug
 
@@ -214,7 +215,11 @@ and a KDF) and happens outside the vault mutex:
   prompt; retry once the first resolves.
 - **`locked`** from `unlock` — a `lock` arrived while this `unlock` was
   prompting or deriving. The lock wins: the database the unlock opened is
-  discarded rather than silently reopening a vault the user just locked.
+  discarded rather than silently reopening a vault the user just locked,
+  and a prompt still open is killed.
+
+`unlock` fails with `no_display`, without prompting, while the screen is
+known to be locked (§ Lock policy).
 
 A request line is capped at 64 KiB and must arrive within 5 seconds; a
 line over the cap is answered `malformed_request`, and a connection that
@@ -333,7 +338,22 @@ strongest argument for owning it natively rather than shelling out.
 Locking means: drop the `Database`, zeroize what can be zeroized, end any
 clipboard offer that database's `copy` started, and update the tray icon.
 A lock also cancels any `unlock` still in flight for that database (see §
-Protocol). "What can be zeroized" is narrower than it sounds:
+Protocol), and kills its prompt if one is still open.
+
+Prompts are bounded too:
+
+- **Timeout.** A prompt left unanswered for `prompt_timeout` (default
+  60 s) is killed, and the unlock fails with `prompt_cancelled`.
+- **No prompt while the screen is known to be locked**, that is while the
+  display session's `LockedHint` is true. The unlock fails with
+  `no_display` instead. A locker that only sends the `Lock` signal never
+  reports the unlock (threat model ASM-7), so kpa doesn't know the screen
+  is locked, and the timeout bounds the cost.
+
+The prompt runs in its own process group, and killing it kills the whole
+group, so a wrapper script's own prompt window goes too.
+
+"What can be zeroized" is narrower than it sounds:
 
 - **Cleared:** protected field values (`secrecy` types), `DatabaseKey`'s
   own copies of the password and keyfile, and every copy kpa itself makes
