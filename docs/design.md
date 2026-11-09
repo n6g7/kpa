@@ -227,6 +227,21 @@ A request line is capped at 64 KiB and must arrive within 5 seconds; a
 line over the cap is answered `malformed_request`, and a connection that
 sends nothing is dropped.
 
+**Every connection is classified by where it comes from** (`origin.rs`,
+[`headless.md`](./headless.md) § 3), after the uid check and before the
+request is read. The daemon takes the peer's pidfd (`SO_PEERPIDFD`, or the
+`SO_PEERCRED` pid on kernels without it) and reads its
+`/proc/<pid>/cgroup`. The peer is **on the desktop** when the user has a
+display session (`User.Display` is not `/`) and the unified hierarchy's
+path is under `/user.slice/user-<uid>.slice/`, in `user@<uid>.service` or
+in the display session's `session-<id>.scope`. Everything else is
+**outside**: another session's scope (an SSH login), a system service (a
+cron job, a terminal server's shells), no display session at all, and any
+peer whose cgroup can't be read or parsed, including one that exited
+first. The origin is logged at `debug` and changes no request's behaviour
+yet. It decides where to ask, not who may ask: a same-uid process can
+start work in another cgroup.
+
 **`list` never returns secrets** — it is an index. That holds for any field
 the user marked protected in their KeePass client, not just `Password`: a
 protected `Title`/`UserName`/`URL` is omitted, not de-protected — protection
@@ -462,7 +477,8 @@ overnight, secrets in shell scrollback — and that is the whole claim.
 
 `keepass` (KDBX + Argon2 + TOTP via its `totp` feature;
 `challenge_response` feature off in v1), `serde`/`serde_json`, `toml`,
-`clap`, `zbus` (logind), `ksni` (tray), `wl-clipboard-rs`, `zeroize`.
+`clap`, `zbus` (logind), `ksni` (tray), `wl-clipboard-rs`, `zeroize`, `rustix`
+and `libc` (`SO_PEERPIDFD`, which `rustix` lacks).
 Threads over async unless `ksni`'s runtime choice makes tokio simpler.
 
 ## Staging
