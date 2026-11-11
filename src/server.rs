@@ -446,10 +446,15 @@ impl Unlock for Server {
         // `InProgress` without installing anything.
         self.drop_stale([name]);
 
-        let (cancel, cancelled) = UnixStream::pair().map_err(|err| UnlockError::PromptFailed {
-            db: db(),
-            detail: err.to_string(),
-        })?;
+        // How a lock ends this unlock's prompt. The slot keeps
+        // `prompt_cancel`, and `Slot::lock` drops it. The prompt loop polls
+        // `cancel_watch`, which hangs up once its other end is gone, and
+        // kills the prompt then.
+        let (prompt_cancel, cancel_watch) =
+            UnixStream::pair().map_err(|err| UnlockError::PromptFailed {
+                db: db(),
+                detail: err.to_string(),
+            })?;
 
         let epoch = {
             let mut dbs = slots(&self.dbs);
@@ -472,7 +477,7 @@ impl Unlock for Server {
                 return Err(UnlockError::InProgress { db: db() });
             }
             slot.unlocking = true;
-            slot.prompt_cancel = Some(cancel);
+            slot.prompt_cancel = Some(prompt_cancel);
             slot.lock_epoch
         };
         // Declared before `dbs` below, so it drops after that guard has
@@ -484,7 +489,7 @@ impl Unlock for Server {
 
         log::debug(format_args!("prompting for {name:?}"));
         let timeout = self.config.prompt_timeout;
-        let password = match prompt_password(&self.config.prompt, timeout, &cancelled) {
+        let password = match prompt_password(&self.config.prompt, timeout, &cancel_watch) {
             Ok(PromptOutcome::Cancelled) => return Err(UnlockError::PromptCancelled { db: db() }),
             Ok(PromptOutcome::TimedOut) => {
                 log::info(format_args!(
@@ -785,7 +790,7 @@ enum PromptOutcome {
 ///
 /// The prompt runs in its own process group. It is killed, with everything
 /// it started, once `timeout` passes without it finishing, or as soon as
-/// the other end of `cancel` is dropped.
+/// the other end of `cancel_watch` is dropped.
 ///
 /// The output is read into a zeroizing buffer of fixed size that never
 /// grows. That's the point: `Command::output()` collects into a `Vec` that
@@ -800,7 +805,7 @@ enum PromptOutcome {
 fn prompt_password(
     argv: &[String],
     timeout: Duration,
-    cancel: &UnixStream,
+    cancel_watch: &UnixStream,
 ) -> std::io::Result<PromptOutcome> {
     use std::io::{Error, ErrorKind};
     use std::os::unix::process::CommandExt;
@@ -823,7 +828,7 @@ fn prompt_password(
         .spawn()?;
 
     let mut buf = Zeroizing::new(vec![0u8; MAX_PASSWORD_LEN]);
-    let len = match read_prompt(&mut child, &mut buf, deadline, cancel) {
+    let len = match read_prompt(&mut child, &mut buf, deadline, cancel_watch) {
         Ok(Ok(len)) => len,
         Ok(Err(ended)) => {
             kill_prompt(&mut child);
@@ -854,14 +859,14 @@ fn prompt_password(
 
 /// Read the child's stdout into `buf` until EOF, returning how much was
 /// read. Errors rather than growing when `buf` fills up. Stops early with
-/// `TimedOut` at `deadline`, or `Interrupted` once `cancel` is readable or
+/// `TimedOut` at `deadline`, or `Interrupted` once `cancel_watch` is readable or
 /// hung up: either beats the output, so a lock wins over a prompt that
 /// answers at the same moment.
 fn read_prompt(
     child: &mut Child,
     buf: &mut [u8],
     deadline: Option<Instant>,
-    cancel: &UnixStream,
+    cancel_watch: &UnixStream,
 ) -> std::io::Result<Result<usize, PromptOutcome>> {
     use rustix::event::{PollFd, PollFlags, Timespec, poll};
     use std::io::{Error, ErrorKind};
@@ -894,7 +899,7 @@ fn read_prompt(
         let (output, cancelled) = {
             let mut fds = [
                 PollFd::new(&stdout, PollFlags::IN),
-                PollFd::new(cancel, PollFlags::IN),
+                PollFd::new(cancel_watch, PollFlags::IN),
             ];
             match poll(&mut fds, left.as_ref()) {
                 Ok(_) => {}
@@ -1214,8 +1219,8 @@ mod tests {
     /// Runs `script` as the prompt, with a timeout long enough never to
     /// fire and nobody to cancel it.
     fn prompt(script: &str) -> std::io::Result<PromptOutcome> {
-        let (_cancel, cancelled) = UnixStream::pair().expect("socket pair");
-        prompt_password(&sh(script), Duration::from_secs(60), &cancelled)
+        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
+        prompt_password(&sh(script), Duration::from_secs(60), &cancel_watch)
     }
 
     #[test]
@@ -1245,12 +1250,12 @@ mod tests {
     #[test]
     fn an_unanswered_prompt_times_out() {
         let _spawning = spawn_lock();
-        let (_cancel, cancelled) = UnixStream::pair().expect("socket pair");
+        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
         let started = Instant::now();
         let outcome = prompt_password(
             &sh("sleep 30; printf hunter2"),
             Duration::from_millis(200),
-            &cancelled,
+            &cancel_watch,
         );
         assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -1259,17 +1264,17 @@ mod tests {
     #[test]
     fn dropping_the_cancel_end_interrupts_the_prompt() {
         let _spawning = spawn_lock();
-        let (cancel, cancelled) = UnixStream::pair().expect("socket pair");
+        let (prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
         let started = Instant::now();
         let outcome = thread::scope(|scope| {
             scope.spawn(move || {
                 thread::sleep(Duration::from_millis(200));
-                drop(cancel);
+                drop(prompt_cancel);
             });
             prompt_password(
                 &sh("sleep 30; printf hunter2"),
                 Duration::from_secs(60),
-                &cancelled,
+                &cancel_watch,
             )
         });
         assert!(matches!(outcome, Ok(PromptOutcome::Interrupted)));
@@ -1284,8 +1289,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("survived");
         let script = format!("(sleep 1; touch '{}') & sleep 30", marker.display());
-        let (_cancel, cancelled) = UnixStream::pair().expect("socket pair");
-        let outcome = prompt_password(&sh(&script), Duration::from_millis(200), &cancelled);
+        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
+        let outcome = prompt_password(&sh(&script), Duration::from_millis(200), &cancel_watch);
         assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
         thread::sleep(Duration::from_millis(1500));
         assert!(!marker.exists(), "the prompt's child outlived it");
