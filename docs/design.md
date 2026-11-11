@@ -235,8 +235,10 @@ request is read. The daemon takes the peer's pidfd (`SO_PEERPIDFD`, or the
 display session (`User.Display` is not `/`, § Lock policy) and the unified hierarchy's
 path is under `/user.slice/user-<uid>.slice/`, in `user@<uid>.service` or
 in the display session's `session-<id>.scope`. Everything else is
-**outside**: another session's scope (an SSH login), a system service (a
-cron job, a terminal server's shells), no display session at all, and any
+**outside**: another session's scope (an SSH login, or a terminal server
+that registers each connection as a remote logind session), a system
+service (a cron job, a terminal server's shells), no display session at
+all, and any
 peer whose cgroup can't be read or parsed, including one that exited
 first. The origin is logged at `debug`, and no op's answer depends on it.
 It decides where to ask, not who may ask: a same-uid process can start

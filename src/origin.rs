@@ -218,6 +218,10 @@ mod tests {
             // even one used at the desk.
             "0::/system.slice/cron.service\n",
             "0::/system.slice/terminal-server.service/shell-7.scope\n",
+            // A terminal server registered as a logind session: each
+            // connection is its own remote session under the user's slice,
+            // with a scope that isn't the display session's.
+            "0::/user.slice/user-1000.slice/session-12.scope/shell.scope\n",
             // Another user's service manager and session.
             "0::/user.slice/user-1001.slice/user@1001.service/app.slice/a.scope\n",
             "0::/user.slice/user-1001.slice/session-3.scope\n",
