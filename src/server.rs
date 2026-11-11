@@ -824,6 +824,8 @@ fn prompt_password(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        // Its own process group, so `kill_prompt` can kill everything it
+        // started too, such as a wrapper script's real prompt window.
         .process_group(0)
         .spawn()?;
 
@@ -903,6 +905,8 @@ fn read_prompt(
             ];
             match poll(&mut fds, left.as_ref()) {
                 Ok(_) => {}
+                // A signal interrupted the wait: wait again, for the time
+                // left until the same `deadline`.
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(err) => return Err(err.into()),
             }
