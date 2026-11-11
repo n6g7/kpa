@@ -185,7 +185,7 @@ fn unlock_error_code(err: &UnlockError) -> &'static str {
         UnlockError::InProgress { .. } => "unlock_in_progress",
         UnlockError::LockedDuringUnlock { .. } => "locked",
         UnlockError::Stale { .. } => "stale",
-        UnlockError::NoDisplay { .. } => "no_display",
+        UnlockError::NoDisplay => "no_display",
     }
 }
 
@@ -535,7 +535,7 @@ mod tests {
             (UnlockError::InProgress { db: db() }, "unlock_in_progress"),
             (UnlockError::LockedDuringUnlock { db: db() }, "locked"),
             (UnlockError::Stale { db: db() }, "stale"),
-            (UnlockError::NoDisplay { db: db() }, "no_display"),
+            (UnlockError::NoDisplay, "no_display"),
         ];
         for (err, code) in cases {
             let got = unlock_error_code(&err);

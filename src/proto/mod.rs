@@ -326,9 +326,9 @@ mod tests {
                 None,
             ),
             (
-                Response::Unlock(Err(UnlockError::NoDisplay { db: owned() })),
+                Response::Unlock(Err(UnlockError::NoDisplay)),
                 "no_display",
-                Some(db),
+                None,
                 Some("the screen is locked"),
             ),
             (

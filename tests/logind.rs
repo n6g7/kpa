@@ -464,9 +464,7 @@ fn the_desk_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
             db: "personal".to_string(),
         })
     };
-    let refused = Err(UnlockError::NoDisplay {
-        db: "personal".to_string(),
-    });
+    let refused = Err(UnlockError::NoDisplay);
 
     // 1. While the desk is known locked, no prompt runs. Until kpa has
     //    subscribed it doesn't know, so the marker is cleared before each

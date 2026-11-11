@@ -459,7 +459,7 @@ impl Unlock for Server {
             // `lock_all` takes it, so either this sees the mark or that
             // lock sees `prompt_cancel` below and ends the prompt.
             if self.desk_locked.load(Ordering::SeqCst) {
-                return Err(UnlockError::NoDisplay { db: db() });
+                return Err(UnlockError::NoDisplay);
             }
             if slot.unlocking {
                 return Err(UnlockError::InProgress { db: db() });
@@ -2196,12 +2196,7 @@ mod tests {
         let server = prompt_server(&format!("touch '{}'; exit 1", marker.display()));
 
         policy::Locks::set_desk_locked(&server, true);
-        assert_eq!(
-            unlock(&server, "personal"),
-            Err(UnlockError::NoDisplay {
-                db: "personal".to_string()
-            })
-        );
+        assert_eq!(unlock(&server, "personal"), Err(UnlockError::NoDisplay));
         assert!(!marker.exists(), "a prompt ran behind the locker");
 
         policy::Locks::set_desk_locked(&server, false);
