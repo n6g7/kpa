@@ -482,6 +482,9 @@ impl Unlock for Server {
         slot.install(opened, stamp);
         drop(dbs);
         self.notify_unlocked();
+        // Logged here rather than in `log_response`: only this path knows
+        // the database was actually opened, as opposed to already unlocked.
+        log::info(format_args!("unlocked {name:?}"));
         Ok(db())
     }
 }
@@ -907,7 +910,9 @@ fn watch_idle(server: &Server) {
 /// knows how.
 pub(crate) fn log_response(response: &Response) {
     match response {
-        Response::Unlock(Ok(db)) => log::info(format_args!("unlocked {db:?}")),
+        // Success is logged by `Unlock::unlock` itself, and only when it
+        // actually opened the database.
+        Response::Unlock(Ok(_)) => {}
         Response::Unlock(Err(err)) => log::warn(format_args!("unlock failed: {err:?}")),
 
         Response::Lock(Ok(Some(db))) => log::info(format_args!("locked {db:?}")),
