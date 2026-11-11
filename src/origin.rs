@@ -116,6 +116,9 @@ fn peer_cgroup_by_pid(stream: &UnixStream) -> io::Result<String> {
 fn peer_pidfd(stream: &UnixStream) -> io::Result<OwnedFd> {
     let mut fd: libc::c_int = -1;
     let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+    // TODO: once https://github.com/bytecodealliance/rustix/pull/1474 ships,
+    // rustix's `socket_peerpidfd` replaces this `unsafe`, and the direct
+    // `libc` dependency can go if nothing else uses it.
     // SAFETY: `fd` and `len` are live locals of the size passed in `len`,
     // and the kernel writes at most that many bytes.
     let rc = unsafe {
