@@ -363,6 +363,25 @@ fn a_second_unlock_does_not_open_a_second_prompt() {
     );
 }
 
+/// Unlocking an already-unlocked database succeeds without opening
+/// anything, so it logs nothing.
+#[test]
+fn unlocking_twice_logs_one_unlocked_line() {
+    use std::io::Read;
+
+    let mut daemon = Daemon::spawn(&format!("printf %s '{}'", common::PASSWORD), Stdio::piped());
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+
+    let mut stderr = daemon.child.stderr.take().expect("piped stderr");
+    daemon.child.kill().expect("kill");
+    daemon.child.wait().expect("wait");
+    let mut log = String::new();
+    stderr.read_to_string(&mut log).expect("read log");
+
+    assert_eq!(log.matches(" INFO  unlocked").count(), 1, "{log}");
+}
+
 /// Nobody reading the daemon's log must not kill it or cost a client
 /// its reply (docs/review-2026-09-robustness.md finding 4).
 #[test]
