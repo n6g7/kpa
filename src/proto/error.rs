@@ -37,6 +37,9 @@ pub enum ErrorCode {
     /// `copy`'s uuid names a real entry, but the requested field is absent
     /// or empty on it — there is nothing to put on the clipboard.
     FieldEmpty,
+    /// Nobody can answer a prompt where the daemon would raise it: the
+    /// screen is known to be locked.
+    NoDisplay,
 }
 
 /// What an error response puts on the wire, however it arose. Each op
@@ -134,6 +137,7 @@ mod tests {
             (ErrorCode::Stale, "stale"),
             (ErrorCode::UnknownUuid, "unknown_uuid"),
             (ErrorCode::FieldEmpty, "field_empty"),
+            (ErrorCode::NoDisplay, "no_display"),
         ];
 
         for (code, expected) in cases {

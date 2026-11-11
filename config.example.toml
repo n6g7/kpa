@@ -41,6 +41,11 @@ log_level = "info"
 prompt = ["/bin/sh", "-c", "printf %s testpass123"]
 # prompt = ["fuzzel", "--dmenu", "--password", "--prompt"]
 
+# A prompt left unanswered this long is killed, with everything it started,
+# and the unlock fails with `prompt_cancelled`. Any lock also ends a prompt
+# in flight, and no prompt is raised while the screen is known to be locked.
+prompt_timeout = "60s"
+
 # Both entries deliberately point at the same fixture: two names is what
 # makes the multi-database behaviour testable — `status` listing two rows,
 # `list` tagging each entry with the database it came from, and `lock`

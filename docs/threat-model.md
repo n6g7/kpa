@@ -160,7 +160,8 @@ failing for an in-scope actor.
   it (each database has its own idle timer, so using one does not keep
   another unlocked), on explicit request, and when its file changes.
   `status`, `lock`, and refused or malformed requests are not activity. Locked means kpa has dropped that database and serves
-  nothing from it. A lock that races an unlock wins. A copied secret
+  nothing from it. A lock that races an unlock wins. A lock ends any
+  prompt in flight. A prompt ends after `prompt_timeout`. A copied secret
   expires after `clipboard_timeout`.
 - **G-6 Lock clears what kpa owns.** On lock, every copy of A-1/A-2 that kpa
   itself made or controls is zeroized. (Copies inside dependencies: NG-4.)
@@ -256,8 +257,8 @@ the user's graphical one; suspending before the lock completes; an idle
 timer reset by `status`, `lock`, a refused or malformed request, or
 anything other than a request; a database's idle timer reset by activity
 on a different database; a request served after lock; an unlock
-that installs after a lock; a clipboard offer outliving its database's
-lock.
+that installs after a lock; a prompt outliving a lock or
+`prompt_timeout`; a clipboard offer outliving its database's lock.
 
 **T-9 · Plaintext survives a lock in kpa-owned memory** (I) — ACT-7 · TB-7 · A-1, A-2 → G-6  
 Response: protected values and every kpa-made copy (prompt buffer,

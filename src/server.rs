@@ -82,14 +82,19 @@ struct Slot {
     /// An unlock is prompting or deriving the key right now. A second one
     /// is refused rather than opening a second prompt.
     unlocking: bool,
+    /// While an unlock is prompting: the other end of the socket pair its
+    /// prompt watches (`read_prompt`). Dropping it ends the prompt.
+    prompt_cancel: Option<UnixStream>,
 }
 
 impl Slot {
-    /// Drops the database, if any, and bumps the epoch so an unlock that is
-    /// still prompting for it cannot install what it opened.
+    /// Drops the database, if any, ends a prompt in flight for it, and
+    /// bumps the epoch so an unlock that is still prompting or deriving
+    /// the key cannot install what it opened.
     fn lock(&mut self) {
         self.db = None;
         self.stamp = None;
+        self.prompt_cancel = None;
         self.lock_epoch = self.lock_epoch.wrapping_add(1);
     }
 
@@ -121,6 +126,7 @@ impl Default for Slot {
             last_activity: Instant::now(),
             lock_epoch: 0,
             unlocking: false,
+            prompt_cancel: None,
         }
     }
 }
@@ -156,6 +162,10 @@ pub struct Server {
     /// outlives the request, same as `clip` above) can clear it too, once
     /// its natural timeout fires with nothing newer having replaced it.
     clip_db: Arc<Mutex<Option<String>>>,
+    /// The desk's state, as the lock policy last published it
+    /// (`policy::Event::Desk`). `unlock` raises no prompt while it is
+    /// locked.
+    desk: Mutex<policy::Desk>,
 }
 
 impl Server {
@@ -184,6 +194,7 @@ impl Server {
             policy_events: OnceLock::new(),
             clip: Arc::new(Clipboard::new(backend)),
             clip_db: Arc::new(Mutex::new(None)),
+            desk: Mutex::new(policy::Desk::NoSession),
         }
     }
 
@@ -279,6 +290,12 @@ impl Server {
         dropped
     }
 
+    /// The desk's state, as the lock policy last published it. No display
+    /// session until the logind watch says otherwise.
+    pub fn desk(&self) -> policy::Desk {
+        self.desk.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// Where to report unlocks. Called once, before the server takes requests.
     pub fn set_policy_events(&self, events: Sender<policy::Event>) {
         let _ = self.policy_events.set(events);
@@ -353,6 +370,10 @@ impl policy::Locks for Server {
     fn any_unlocked(&self) -> bool {
         Server::any_unlocked(self)
     }
+
+    fn set_desk(&self, desk: policy::Desk) {
+        *self.desk.lock().unwrap_or_else(|e| e.into_inner()) = desk;
+    }
 }
 
 /// The poisoned case recovers rather than propagating: a panic on one
@@ -392,9 +413,10 @@ impl Status for Server {
     }
 }
 
-/// Clears a slot's `unlocking` flag when dropped, so every way out of
-/// `unlock` — early returns and panics alike — releases it. A flag left set
-/// would refuse every later unlock of that database until a restart.
+/// Clears a slot's `unlocking` flag and its prompt's cancel channel when
+/// dropped, so every way out of `unlock` — early returns and panics alike —
+/// releases them. A flag left set would refuse every later unlock of that
+/// database until a restart.
 struct UnlockingFlag<'a> {
     dbs: &'a Mutex<HashMap<String, Slot>>,
     name: &'a str,
@@ -404,6 +426,7 @@ impl Drop for UnlockingFlag<'_> {
     fn drop(&mut self) {
         if let Some(slot) = slots(self.dbs).get_mut(self.name) {
             slot.unlocking = false;
+            slot.prompt_cancel = None;
         }
     }
 }
@@ -423,6 +446,16 @@ impl Unlock for Server {
         // `InProgress` without installing anything.
         self.drop_stale([name]);
 
+        // How a lock ends this unlock's prompt. The slot keeps
+        // `prompt_cancel`, and `Slot::lock` drops it. The prompt loop polls
+        // `cancel_watch`, which hangs up once its other end is gone, and
+        // kills the prompt then.
+        let (prompt_cancel, cancel_watch) =
+            UnixStream::pair().map_err(|err| UnlockError::PromptFailed {
+                db: db(),
+                detail: err.to_string(),
+            })?;
+
         let epoch = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
@@ -434,10 +467,17 @@ impl Unlock for Server {
             if slot.db.is_some() {
                 return Ok(db());
             }
+            // Read under the mutex: the policy marks the desk before its
+            // `lock_all` takes it, so either this sees the mark or that
+            // lock sees `prompt_cancel` below and ends the prompt.
+            if self.desk().is_locked() {
+                return Err(UnlockError::NoDisplay);
+            }
             if slot.unlocking {
                 return Err(UnlockError::InProgress { db: db() });
             }
             slot.unlocking = true;
+            slot.prompt_cancel = Some(prompt_cancel);
             slot.lock_epoch
         };
         // Declared before `dbs` below, so it drops after that guard has
@@ -448,8 +488,20 @@ impl Unlock for Server {
         };
 
         log::debug(format_args!("prompting for {name:?}"));
-        let password = match prompt_password(&self.config.prompt) {
+        let timeout = self.config.prompt_timeout;
+        let password = match prompt_password(&self.config.prompt, timeout, &cancel_watch) {
             Ok(PromptOutcome::Cancelled) => return Err(UnlockError::PromptCancelled { db: db() }),
+            Ok(PromptOutcome::TimedOut) => {
+                log::info(format_args!(
+                    "prompt for {name:?} unanswered after {timeout:?}"
+                ));
+                return Err(UnlockError::PromptCancelled { db: db() });
+            }
+            // A lock ended the prompt, and has already told its own client
+            // the database is locked.
+            Ok(PromptOutcome::Interrupted) => {
+                return Err(UnlockError::LockedDuringUnlock { db: db() });
+            }
             // Empty means "no password" — the only way to reach a
             // keyfile-only database from a prompt that always asks.
             Ok(PromptOutcome::Password(password)) if password.is_empty() => None,
@@ -729,11 +781,19 @@ enum PromptOutcome {
     /// The command exited unsuccessfully — e.g. the user dismissed a
     /// dmenu-style prompt — rather than printing a password.
     Cancelled,
+    /// Nothing was entered within `prompt_timeout`; the prompt was killed.
+    TimedOut,
+    /// A lock ended the prompt (`Slot::prompt_cancel`); it was killed.
+    Interrupted,
     Password(Zeroizing<String>),
 }
 
 /// Run the configured prompt command (`docs/design.md` decision #9,
 /// `Config::prompt`) and capture its stdout as a password.
+///
+/// The prompt runs in its own process group. It is killed, with everything
+/// it started, once `timeout` passes without it finishing, or as soon as
+/// the other end of `cancel_watch` is dropped.
 ///
 /// The output is read into a zeroizing buffer of fixed size that never
 /// grows. That's the point: `Command::output()` collects into a `Vec` that
@@ -745,8 +805,13 @@ enum PromptOutcome {
 /// Trailing `\n`/`\r` are stripped, since dmenu-style prompts
 /// newline-terminate their output. The copies kpa can't reach are the ones
 /// inside the prompt program itself.
-fn prompt_password(argv: &[String]) -> std::io::Result<PromptOutcome> {
+fn prompt_password(
+    argv: &[String],
+    timeout: Duration,
+    cancel_watch: &UnixStream,
+) -> std::io::Result<PromptOutcome> {
     use std::io::{Error, ErrorKind};
+    use std::os::unix::process::CommandExt;
 
     let Some((program, args)) = argv.split_first() else {
         return Err(Error::new(
@@ -755,19 +820,27 @@ fn prompt_password(argv: &[String]) -> std::io::Result<PromptOutcome> {
         ));
     };
 
+    // `None` for a timeout too large to add: a deadline that never arrives.
+    let deadline = Instant::now().checked_add(timeout);
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        // Its own process group, so `kill_prompt` can kill everything it
+        // started too, such as a wrapper script's real prompt window.
+        .process_group(0)
         .spawn()?;
 
     let mut buf = Zeroizing::new(vec![0u8; MAX_PASSWORD_LEN]);
-    let len = match read_prompt(&mut child, &mut buf) {
-        Ok(len) => len,
+    let len = match read_prompt(&mut child, &mut buf, deadline, cancel_watch) {
+        Ok(Ok(len)) => len,
+        Ok(Err(ended)) => {
+            kill_prompt(&mut child);
+            return Ok(ended);
+        }
         Err(err) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_prompt(&mut child);
             return Err(err);
         }
     };
@@ -790,8 +863,17 @@ fn prompt_password(argv: &[String]) -> std::io::Result<PromptOutcome> {
 }
 
 /// Read the child's stdout into `buf` until EOF, returning how much was
-/// read. Errors rather than growing when `buf` fills up.
-fn read_prompt(child: &mut Child, buf: &mut [u8]) -> std::io::Result<usize> {
+/// read. Errors rather than growing when `buf` fills up. Stops early with
+/// `TimedOut` at `deadline`, or `Interrupted` once `cancel_watch` is readable or
+/// hung up: either beats the output, so a lock wins over a prompt that
+/// answers at the same moment.
+fn read_prompt(
+    child: &mut Child,
+    buf: &mut [u8],
+    deadline: Option<Instant>,
+    cancel_watch: &UnixStream,
+) -> std::io::Result<Result<usize, PromptOutcome>> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
     use std::io::{Error, ErrorKind};
 
     let mut stdout = child
@@ -806,13 +888,59 @@ fn read_prompt(child: &mut Child, buf: &mut [u8]) -> std::io::Result<usize> {
                 format!("prompt output exceeds {MAX_PASSWORD_LEN} bytes"),
             ));
         }
+        let left = match deadline {
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Ok(Err(PromptOutcome::TimedOut));
+                }
+                Some(Timespec {
+                    tv_sec: left.as_secs().try_into().unwrap_or(i64::MAX),
+                    tv_nsec: left.subsec_nanos().into(),
+                })
+            }
+            None => None,
+        };
+        let (output, cancelled) = {
+            let mut fds = [
+                PollFd::new(&stdout, PollFlags::IN),
+                PollFd::new(cancel_watch, PollFlags::IN),
+            ];
+            match poll(&mut fds, left.as_ref()) {
+                Ok(_) => {}
+                // A signal interrupted the wait: wait again, for the time
+                // left until the same `deadline`.
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(err) => return Err(err.into()),
+            }
+            (!fds[0].revents().is_empty(), !fds[1].revents().is_empty())
+        };
+        if cancelled {
+            return Ok(Err(PromptOutcome::Interrupted));
+        }
+        if !output {
+            continue;
+        }
         match stdout.read(&mut buf[len..]) {
-            Ok(0) => return Ok(len),
+            Ok(0) => return Ok(Ok(len)),
             Ok(n) => len += n,
             Err(err) if err.kind() == ErrorKind::Interrupted => {}
             Err(err) => return Err(err),
         }
     }
+}
+
+/// Kill the prompt's whole process group, so a wrapper's own prompt window
+/// goes too, then reap the prompt. The group is signalled before the reap:
+/// until then the prompt holds the group's id, so the signal can't reach a
+/// recycled one.
+fn kill_prompt(child: &mut Child) {
+    use rustix::process::{Pid, Signal, kill_process_group};
+
+    if let Some(pid) = i32::try_from(child.id()).ok().and_then(Pid::from_raw) {
+        let _ = kill_process_group(pid, Signal::KILL);
+    }
+    let _ = child.wait();
 }
 
 /// Holds one of the `MAX_CONNECTIONS` slots; releases it when dropped,
@@ -1097,11 +1225,17 @@ mod tests {
         vec!["/bin/sh".into(), "-c".into(), script.into()]
     }
 
+    /// Runs `script` as the prompt, with a timeout long enough never to
+    /// fire and nobody to cancel it.
+    fn prompt(script: &str) -> std::io::Result<PromptOutcome> {
+        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
+        prompt_password(&sh(script), Duration::from_secs(60), &cancel_watch)
+    }
+
     #[test]
     fn prompt_output_has_its_line_ending_stripped() {
         let _spawning = spawn_lock();
-        let Ok(PromptOutcome::Password(password)) = prompt_password(&sh("printf 'hunter2\\r\\n'"))
-        else {
+        let Ok(PromptOutcome::Password(password)) = prompt("printf 'hunter2\\r\\n'") else {
             panic!("expected a password");
         };
         assert_eq!(password.as_str(), "hunter2");
@@ -1110,10 +1244,7 @@ mod tests {
     #[test]
     fn a_failing_prompt_is_a_cancellation() {
         let _spawning = spawn_lock();
-        assert!(matches!(
-            prompt_password(&sh("exit 1")),
-            Ok(PromptOutcome::Cancelled)
-        ));
+        assert!(matches!(prompt("exit 1"), Ok(PromptOutcome::Cancelled)));
     }
 
     /// The buffer never grows, so over-long output is an error rather than
@@ -1122,7 +1253,56 @@ mod tests {
     fn over_long_prompt_output_is_refused() {
         let _spawning = spawn_lock();
         let script = format!("head -c {} /dev/zero | tr '\\0' a", MAX_PASSWORD_LEN + 1);
-        assert!(prompt_password(&sh(&script)).is_err());
+        assert!(prompt(&script).is_err());
+    }
+
+    #[test]
+    fn an_unanswered_prompt_times_out() {
+        let _spawning = spawn_lock();
+        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
+        let started = Instant::now();
+        let outcome = prompt_password(
+            &sh("sleep 30; printf hunter2"),
+            Duration::from_millis(200),
+            &cancel_watch,
+        );
+        assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn dropping_the_cancel_end_interrupts_the_prompt() {
+        let _spawning = spawn_lock();
+        let (prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
+        let started = Instant::now();
+        let outcome = thread::scope(|scope| {
+            scope.spawn(move || {
+                thread::sleep(Duration::from_millis(200));
+                drop(prompt_cancel);
+            });
+            prompt_password(
+                &sh("sleep 30; printf hunter2"),
+                Duration::from_secs(60),
+                &cancel_watch,
+            )
+        });
+        assert!(matches!(outcome, Ok(PromptOutcome::Interrupted)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A prompt can be a wrapper that starts the real prompt window. Ending
+    /// the prompt ends what it started too, so no window stays on screen.
+    #[test]
+    fn ending_a_prompt_kills_what_it_started() {
+        let _spawning = spawn_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("survived");
+        let script = format!("(sleep 1; touch '{}') & sleep 30", marker.display());
+        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
+        let outcome = prompt_password(&sh(&script), Duration::from_millis(200), &cancel_watch);
+        assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
+        thread::sleep(Duration::from_millis(1500));
+        assert!(!marker.exists(), "the prompt's child outlived it");
     }
 
     #[test]
@@ -1982,6 +2162,151 @@ mod tests {
         assert!(
             offer.is_live(),
             "dropping a different database's staleness must not touch this offer"
+        );
+    }
+
+    /// Two configured, locked databases whose prompt runs `script`.
+    fn prompt_server(script: &str) -> Server {
+        Server::new(
+            Config::parse(&format!(
+                "prompt = [\"/bin/sh\", \"-c\", \"{script}\"]\n\
+                 [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
+                 [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n"
+            ))
+            .expect("valid config"),
+        )
+    }
+
+    fn unlock(server: &Server, name: &str) -> Result<String, UnlockError> {
+        Unlock::unlock(
+            server,
+            &UnlockRequest {
+                db: name.to_string(),
+            },
+        )
+    }
+
+    /// Starts unlocking `name` on another thread, runs `then` once its
+    /// prompt is up, and returns what the unlock ended with and how long
+    /// it took after `then`.
+    fn unlock_then(
+        server: &Server,
+        name: &str,
+        then: impl FnOnce(),
+    ) -> (Result<String, UnlockError>, Duration) {
+        thread::scope(|scope| {
+            let unlocking = scope.spawn(|| unlock(server, name));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while slots(&server.dbs)[name].prompt_cancel.is_none() {
+                assert!(Instant::now() < deadline, "the prompt never started");
+                thread::sleep(Duration::from_millis(10));
+            }
+            thread::sleep(Duration::from_millis(100));
+            then();
+            let started = Instant::now();
+            let result = unlocking.join().expect("unlock thread panicked");
+            (result, started.elapsed())
+        })
+    }
+
+    #[test]
+    fn no_prompt_is_raised_while_the_desk_is_locked() {
+        let _spawning = spawn_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("prompted");
+        let server = prompt_server(&format!("touch '{}'; exit 1", marker.display()));
+
+        policy::Locks::set_desk(
+            &server,
+            policy::Desk::Locked {
+                session: "1".to_string(),
+            },
+        );
+        assert_eq!(unlock(&server, "personal"), Err(UnlockError::NoDisplay));
+        assert!(!marker.exists(), "a prompt ran behind the locker");
+
+        policy::Locks::set_desk(
+            &server,
+            policy::Desk::Unlocked {
+                session: "1".to_string(),
+            },
+        );
+        assert_eq!(
+            unlock(&server, "personal"),
+            Err(UnlockError::PromptCancelled {
+                db: "personal".to_string()
+            })
+        );
+        assert!(
+            marker.exists(),
+            "the prompt runs again once the desk is unlocked"
+        );
+    }
+
+    #[test]
+    fn lock_all_ends_a_prompt_in_flight() {
+        let _spawning = spawn_lock();
+        let server = prompt_server("sleep 30");
+
+        let (result, took) = unlock_then(&server, "personal", || {
+            policy::Locks::lock_all(&server);
+        });
+
+        assert_eq!(
+            result,
+            Err(UnlockError::LockedDuringUnlock {
+                db: "personal".to_string()
+            })
+        );
+        assert!(took < Duration::from_secs(5), "took {took:?}");
+        assert!(slots(&server.dbs)["personal"].prompt_cancel.is_none());
+    }
+
+    #[test]
+    fn locking_the_database_ends_its_prompt() {
+        let _spawning = spawn_lock();
+        let server = prompt_server("sleep 30");
+
+        let (result, took) = unlock_then(&server, "personal", || {
+            let _ = Lock::lock(
+                &server,
+                &LockRequest {
+                    db: Some("personal".to_string()),
+                },
+            );
+        });
+
+        assert_eq!(
+            result,
+            Err(UnlockError::LockedDuringUnlock {
+                db: "personal".to_string()
+            })
+        );
+        assert!(took < Duration::from_secs(5), "took {took:?}");
+    }
+
+    /// Locking another database leaves this one's prompt open; it ends
+    /// on its own, by timing out here.
+    #[test]
+    fn locking_another_database_leaves_the_prompt_alone() {
+        let _spawning = spawn_lock();
+        let mut server = prompt_server("sleep 30");
+        server.config.prompt_timeout = Duration::from_millis(500);
+
+        let (result, _) = unlock_then(&server, "personal", || {
+            let _ = Lock::lock(
+                &server,
+                &LockRequest {
+                    db: Some("work".to_string()),
+                },
+            );
+        });
+
+        assert_eq!(
+            result,
+            Err(UnlockError::PromptCancelled {
+                db: "personal".to_string()
+            })
         );
     }
 }

@@ -318,12 +318,18 @@ mod tests {
         let owned = || db.to_string();
 
         // (response, expected code, expected `db`, expected `detail`)
-        let cases: [(Response, &str, Option<&str>, Option<&str>); 21] = [
+        let cases: [(Response, &str, Option<&str>, Option<&str>); 22] = [
             (
                 Response::Unlock(Err(UnlockError::InProgress { db: owned() })),
                 "unlock_in_progress",
                 Some(db),
                 None,
+            ),
+            (
+                Response::Unlock(Err(UnlockError::NoDisplay)),
+                "no_display",
+                None,
+                Some("the screen is locked"),
             ),
             (
                 Response::Unlock(Err(UnlockError::Stale { db: owned() })),

@@ -14,7 +14,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kpa::policy::{self, Bus, Locks};
+mod common;
+
+use kpa::config::Config;
+use kpa::policy::{self, Bus, Desk, Locks};
+use kpa::proto::{Unlock, UnlockError, UnlockRequest};
+use kpa::server::Server;
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::zvariant::{self, OwnedObjectPath, Value};
@@ -24,6 +29,28 @@ const USER: &str = "/org/freedesktop/login1/user/_1000";
 const SESSION_1: &str = "/org/freedesktop/login1/session/_31";
 const SESSION_2: &str = "/org/freedesktop/login1/session/_32";
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The logind session id behind each mock session's object path, as
+/// `User.Display` reports it. logind's "no display session" is `("", "/")`.
+fn session_id(path: &str) -> &'static str {
+    match path {
+        SESSION_1 => "31",
+        SESSION_2 => "32",
+        _ => "",
+    }
+}
+
+fn unlocked(session: &str) -> Desk {
+    Desk::Unlocked {
+        session: session.to_string(),
+    }
+}
+
+fn locked(session: &str) -> Desk {
+    Desk::Locked {
+        session: session.to_string(),
+    }
+}
 
 /// A `dbus-daemon` on a socket inside a temp directory, killed on drop.
 struct PrivateBus {
@@ -146,8 +173,10 @@ impl User {
     #[zbus(property)]
     fn display(&self) -> (String, OwnedObjectPath) {
         let display = self.0.lock().unwrap().display.clone();
-        let id = if display == SESSION_1 { "31" } else { "32" };
-        (id.to_string(), OwnedObjectPath::try_from(display).unwrap())
+        (
+            session_id(&display).to_string(),
+            OwnedObjectPath::try_from(display).unwrap(),
+        )
     }
 }
 
@@ -228,7 +257,7 @@ impl MockLogind {
     fn set_display(&self, session: &'static str) {
         self.state.lock().unwrap().display = session.to_string();
         let value = Value::from((
-            if session == SESSION_1 { "31" } else { "32" },
+            session_id(session),
             OwnedObjectPath::try_from(session).unwrap(),
         ));
         self.properties_changed(USER, "org.freedesktop.login1.User", "Display", value);
@@ -295,6 +324,7 @@ impl MockLogind {
 #[derive(Default)]
 struct Recorder {
     unlocked: AtomicBool,
+    desk: Mutex<Desk>,
     log: Mutex<Vec<&'static str>>,
 }
 
@@ -306,9 +336,16 @@ impl Locks for Recorder {
     fn any_unlocked(&self) -> bool {
         self.unlocked.load(Ordering::SeqCst)
     }
+    fn set_desk(&self, desk: Desk) {
+        *self.desk.lock().unwrap() = desk;
+    }
 }
 
 impl Recorder {
+    fn desk(&self) -> Desk {
+        self.desk.lock().unwrap().clone()
+    }
+
     fn locks(&self) -> usize {
         self.log
             .lock()
@@ -357,10 +394,20 @@ fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
     assert_eq!(recorder.locks(), 1, "one Lock signal, one lock");
     recorder.log.lock().unwrap().clear();
 
-    // 2. LockedHint turning true locks; turning false does not.
+    assert!(
+        !recorder.desk().is_locked(),
+        "a Lock signal alone doesn't mark the desk locked"
+    );
+
+    // 2. LockedHint turning true locks and marks the desk locked; turning
+    //    false unmarks it and locks nothing.
     mock.set_hint(SESSION_1, true);
     eventually("LockedHint=true to lock", || recorder.locks() == 1);
+    assert!(recorder.desk().is_locked());
     mock.set_hint(SESSION_1, false);
+    eventually("LockedHint=false to unmark the desk", || {
+        !recorder.desk().is_locked()
+    });
     quiet();
     assert_eq!(recorder.locks(), 1, "LockedHint=false is not a lock");
     recorder.log.lock().unwrap().clear();
@@ -405,4 +452,128 @@ fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
     recorder.unlocked.store(true, Ordering::SeqCst);
     bus.kill();
     eventually("a lost bus to lock", || recorder.locks() == 1);
+}
+
+/// The desk's state as published to the server: the display session's id
+/// and `LockedHint`, following display changes, with no session when
+/// logind reports none or the watch is lost.
+#[test]
+fn the_desk_state_follows_logind_over_a_bus() {
+    let mut bus = PrivateBus::start();
+    let mock = MockLogind::start(&bus.address);
+    let recorder = Arc::new(Recorder::default());
+    let _events = policy::start(recorder.clone(), Bus::Address(bus.address.clone()));
+
+    // 1. Subscribing reads the display session and its hint.
+    eventually("the first desk state", || recorder.desk() == unlocked("31"));
+
+    // 2. LockedHint changes on the display session move it between locked
+    //    and unlocked.
+    mock.set_hint(SESSION_1, true);
+    eventually("LockedHint=true", || recorder.desk() == locked("31"));
+    mock.set_hint(SESSION_1, false);
+    eventually("LockedHint=false", || recorder.desk() == unlocked("31"));
+
+    // 3. Neither a Lock signal nor another session's hint changes it.
+    mock.lock_signal(SESSION_1);
+    mock.set_hint(SESSION_2, true);
+    eventually("the Lock signal to lock", || recorder.locks() > 0);
+    quiet();
+    assert_eq!(recorder.desk(), unlocked("31"));
+
+    // 4. A display change reads the new session's hint.
+    mock.set_display(SESSION_2);
+    eventually("the new display session", || {
+        recorder.desk() == locked("32")
+    });
+
+    // 5. No display session.
+    mock.set_display("/");
+    eventually("no display session", || recorder.desk() == Desk::NoSession);
+    mock.set_display(SESSION_1);
+    eventually("the display session back", || {
+        recorder.desk() == unlocked("31")
+    });
+
+    // 6. A lost watch can't say, so there is no session until it's back.
+    bus.kill();
+    eventually("a lost bus to forget the desk", || {
+        recorder.desk() == Desk::NoSession
+    });
+}
+
+/// The real server behind the policy: while the display session's
+/// `LockedHint` is true, an unlock raises no prompt; once it clears, the
+/// prompt runs and the fixture unlocks; and a `Lock` signal ends a prompt
+/// still open.
+#[test]
+fn the_desk_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
+    let bus = PrivateBus::start();
+    let mock = MockLogind::start(&bus.address);
+    // Locked before kpa subscribes, so it reads the hint on subscribing.
+    mock.set_hint(SESSION_1, true);
+
+    let dir = tempfile::tempdir().unwrap();
+    // The prompt records that it ran, waits while `hang` exists, then
+    // answers with the fixture's password.
+    let prompted = dir.path().join("prompted");
+    let hang = dir.path().join("hang");
+    let script = format!(
+        "touch '{}'; while [ -e '{}' ]; do sleep 0.1; done; printf %s '{}'",
+        prompted.display(),
+        hang.display(),
+        common::PASSWORD
+    );
+    let config = Config::parse(&format!(
+        "prompt = [\"/bin/sh\", \"-c\", {script:?}]\n\
+         [[database]]\nname = \"personal\"\npath = {:?}\n",
+        common::password_db().display().to_string()
+    ))
+    .unwrap();
+    let server = Arc::new(Server::new(config));
+    server.set_policy_events(policy::start(
+        server.clone(),
+        Bus::Address(bus.address.clone()),
+    ));
+    let unlock = || {
+        server.unlock(&UnlockRequest {
+            db: "personal".to_string(),
+        })
+    };
+    let refused = Err(UnlockError::NoDisplay);
+
+    // 1. While the desk is known locked, no prompt runs. Until kpa has
+    //    subscribed it doesn't know, so the marker is cleared before each
+    //    try: only the last, refused, one counts.
+    eventually("a locked desk to refuse the unlock", || {
+        let _ = std::fs::remove_file(&prompted);
+        unlock() == refused
+    });
+    assert!(!prompted.exists(), "a prompt ran behind the locker");
+
+    // 2. Once the hint clears, the prompt runs and the fixture unlocks.
+    mock.set_hint(SESSION_1, false);
+    eventually("an unlocked desk to allow the prompt", || unlock().is_ok());
+    assert!(prompted.exists());
+    assert_eq!(server.desk(), unlocked("31"));
+
+    // 3. A Lock signal ends a prompt still open.
+    mock.lock_signal(SESSION_1);
+    eventually("the Lock signal to lock", || !server.any_unlocked());
+    std::fs::write(&hang, b"").unwrap();
+    std::fs::remove_file(&prompted).unwrap();
+    thread::scope(|scope| {
+        let unlocking = scope.spawn(unlock);
+        eventually("the prompt to start", || prompted.exists());
+        mock.lock_signal(SESSION_1);
+        let locked_at = Instant::now();
+        assert_eq!(
+            unlocking.join().unwrap(),
+            Err(UnlockError::LockedDuringUnlock {
+                db: "personal".to_string()
+            })
+        );
+        assert!(locked_at.elapsed() < Duration::from_secs(5));
+    });
+    assert!(!server.any_unlocked());
 }

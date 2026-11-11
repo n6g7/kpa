@@ -13,8 +13,10 @@ pub struct UnlockRequest {
     pub db: String,
 }
 
-/// Everything `unlock` can fail with. Every variant names a database,
-/// because every one of them is about one specific database.
+/// Everything `unlock` can fail with. Every variant but `NoDisplay` names
+/// the database the unlock was for, even when the cause isn't about the
+/// database itself (a dismissed prompt). `NoDisplay` is about where the
+/// request came from, not about any database, so it names none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnlockError {
     UnknownDb {
@@ -60,6 +62,9 @@ pub enum UnlockError {
     Stale {
         db: String,
     },
+    /// The screen is known to be locked, so no prompt was raised: nobody
+    /// could answer it behind the locker.
+    NoDisplay,
 }
 
 impl UnlockError {
@@ -87,6 +92,9 @@ impl UnlockError {
             UnlockError::Stale { db } => ErrorFields::new(ErrorCode::Stale)
                 .db(db)
                 .detail("database changed on disk"),
+            UnlockError::NoDisplay => {
+                ErrorFields::new(ErrorCode::NoDisplay).detail("the screen is locked")
+            }
         }
     }
 }

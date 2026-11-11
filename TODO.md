@@ -7,7 +7,12 @@
 - [ ] SSH agent (continued from https://github.com/n6g7/kpa/pull/22)
 - [ ] Find out why `cargo run -- ...` rebuilds on each run, even with no changes
 - [ ] Passkey provider
-- [ ] Support headless use (no window manager or GUI)
+- [ ] Support headless use (no window manager or GUI), per `docs/headless.md`
+  - [x] Prompt safety nets: prompt timeout, a lock kills open prompts, no prompt while the screen is locked
+  - [ ] Zeroizing request buffer
+  - [ ] Origin classifier
+  - [ ] Terminal unlock
+  - [ ] Copy gated on origin and the desk's state
 
 ## Done
 

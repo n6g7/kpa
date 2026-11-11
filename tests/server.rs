@@ -340,6 +340,57 @@ fn a_lock_during_an_unlock_is_not_undone() {
     assert_eq!(status["databases"][0]["locked"], true);
 }
 
+/// A lock doesn't wait for the prompt to be answered: it ends the prompt,
+/// and the unlock reports the lock at once.
+#[test]
+fn a_lock_ends_the_prompt_in_flight() {
+    let daemon = Daemon::spawn(
+        &format!("sleep 30; printf %s '{}'", common::PASSWORD),
+        Stdio::null(),
+    );
+
+    std::thread::scope(|scope| {
+        let unlocking = scope.spawn(|| daemon.run(&["unlock", "personal"]));
+        std::thread::sleep(Duration::from_millis(300));
+
+        assert_eq!(daemon.run(&["lock"])["ok"], true);
+        let locked_at = Instant::now();
+
+        let unlocked = unlocking.join().expect("unlock thread panicked");
+        assert_eq!(unlocked["error"], "locked", "{unlocked}");
+        assert!(
+            locked_at.elapsed() < Duration::from_secs(5),
+            "the unlock waited for the prompt"
+        );
+    });
+
+    assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], true);
+}
+
+/// A prompt nobody answers ends after `prompt_timeout`, and the unlock
+/// fails as if it had been dismissed.
+#[test]
+fn an_unanswered_prompt_times_out() {
+    let config = format!(
+        "prompt_timeout = \"1s\"\n{}",
+        config_toml(
+            &format!("sleep 30; printf %s '{}'", common::PASSWORD),
+            &common::password_db().display().to_string(),
+        )
+    );
+    let daemon = Daemon::spawn_config(&config, None, Stdio::null());
+
+    let started = Instant::now();
+    let unlocked = daemon.run(&["unlock", "personal"]);
+    assert_eq!(unlocked["error"], "prompt_cancelled", "{unlocked}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], true);
+}
+
 /// A second `unlock` while the first is prompting is refused rather than
 /// opening a second prompt; the first still succeeds.
 #[test]

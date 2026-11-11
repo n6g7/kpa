@@ -30,8 +30,8 @@ in
       description = ''
         Settings written to kpa's config file, in the shape documented by
         `config.example.toml` in the kpa repository (`idle_timeout`,
-        `clipboard_timeout`, `prompt`, and one `[[database]]` table per
-        vault).
+        `clipboard_timeout`, `prompt`, `prompt_timeout`, and one
+        `[[database]]` table per vault).
       '';
       example = lib.literalExpression ''
         {
