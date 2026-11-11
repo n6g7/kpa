@@ -15,6 +15,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+base64 = "0.22"
 
 [dependencies.kpa]
 path = ".."

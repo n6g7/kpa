@@ -149,11 +149,22 @@ restarting it costs one re-unlock.
 ```json
 {"v":1,"op":"status"}
 {"v":1,"op":"unlock","db":"personal"}
+{"v":1,"op":"unlock","db":"personal","password":"<base64>"}  // no prompt
 {"v":1,"op":"lock","db":"personal"}          // db omitted = lock all
 {"v":1,"op":"list"}                          // db omitted = all unlocked
 {"v":1,"op":"copy","db":"personal","uuid":"…","field":"password"}
 {"v":1,"op":"copy","db":"personal","uuid":"…","field":"custom:Password"}
 ```
+
+An `unlock` that carries `password` unlocks with it and never runs the
+prompt, so it goes ahead from outside the desktop and while the screen is
+locked, where an `unlock` without one gets `no_display` (below). A wrong
+one fails with `wrong_credentials`, with no backoff. The
+password is base64 (standard alphabet, padded) so that its JSON string
+never needs escaping: the daemon decodes it straight from the request line
+into a zeroizing buffer, and refuses one longer than 4096 bytes, one that
+isn't valid base64 or UTF-8, or one written with JSON escapes, as
+`malformed_request`.
 
 `field` accepts any name `list`'s `fields` array returns for that entry
 (below): `username`, `password`, `url`, `notes`, `totp`, or a custom
@@ -219,13 +230,13 @@ and a KDF) and happens outside the vault mutex:
   discarded rather than silently reopening a vault the user just locked,
   and a prompt still open is killed.
 
-`unlock` fails with `no_display`, without prompting, when nobody could
-answer the prompt: the request comes from outside the desktop (below), or
-the screen is known to be locked (§ Lock policy). It names no database: the
-refusal is about where the request can be answered, not about the
-database. `kpa unlock` reports it and exits non-zero; reading the password
-on the client's terminal instead is the next step of
-[`headless.md`](./headless.md) § 4. The tray's menu is clicked at the desk,
+An `unlock` without a password fails with `no_display`, without
+prompting, when nobody could answer the prompt: the request comes from
+outside the desktop (below), or the screen is known to be locked (§ Lock
+policy). It names no database: the refusal is about where the request can
+be answered, not about the database. `kpa unlock` reports it and exits
+non-zero; reading the password on the client's terminal and sending it in
+the request is the next step of [`headless.md`](./headless.md) § 4. The tray's menu is clicked at the desk,
 so its unlocks count as from the desktop.
 
 A request line is capped at 64 KiB and must arrive within 5 seconds; a
@@ -449,10 +460,14 @@ Held while unlocked:
 ¹The password arrives on the prompt command's stdout, which kpa reads into
 a fixed-size `Zeroizing` buffer that never grows (a growing buffer would
 leave unwiped copies behind each time it reallocates), then into a
-`Zeroizing<String>`. `DatabaseKey` zeroizes its own copy. Two copies are
-outside kpa's reach: whatever the prompt program itself held, and
-`keepass`'s key-derivation intermediates (e.g. the SHA-256 of the
-password, which is password-equivalent), which are not zeroized upstream.
+`Zeroizing<String>`. A password carried in an `unlock` request takes the
+same path: the request line is read into a fixed-size `Zeroizing` buffer
+of its own, and its base64 decoded from there. Both buffers are wiped once
+the request is handled. `DatabaseKey` zeroizes its own copy. Two copies are
+outside kpa's reach: whatever the prompt program (or the client) itself
+held, and `keepass`'s key-derivation intermediates (e.g. the SHA-256 of
+the password, which is password-equivalent), which are not zeroized
+upstream.
 
 ²`DatabaseKey`'s keyfile bytes are zeroized, but `keepass`'s XML keyfile
 parser makes several unzeroized intermediate copies, which together can

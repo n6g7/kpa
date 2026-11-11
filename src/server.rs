@@ -17,7 +17,7 @@
 //! take it down. See `docs/review-2026-09-robustness.md` findings 1–4, 7, 9.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -38,16 +38,16 @@ use crate::origin::{self, Origin};
 use crate::policy;
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
-    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
-    UnlockError, UnlockRequest, WireEntry,
+    ListError, ListRequest, Lock, LockError, LockRequest, MAX_PASSWORD_LEN, ProtocolError,
+    Response, Status, Unlock, UnlockError, UnlockRequest, WireEntry,
 };
 use crate::socket;
 use crate::vault::{self, Fingerprint, VaultError};
 
-/// Longest request line accepted. The largest legitimate request is well
-/// under 200 bytes; this only exists so that a line with no newline can't
-/// grow a buffer until the process aborts.
-const MAX_REQUEST_LEN: u64 = 64 * 1024;
+/// Longest request line accepted, and the size of the zeroizing buffer
+/// each one is read into. The largest legitimate request is an `unlock`
+/// carrying a `MAX_PASSWORD_LEN` password, about 5.5 KiB of base64.
+const MAX_REQUEST_LEN: usize = 64 * 1024;
 
 /// How long a client gets to send its request, and to take its response.
 /// An `unlock` can take much longer end to end — the user is typing — but
@@ -58,11 +58,6 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// closing them. Each holds a thread, and a flood should degrade into
 /// refusals rather than into the host refusing a thread spawn.
 const MAX_CONNECTIONS: usize = 64;
-
-/// Longest prompt output accepted, in bytes — the prompt's stdout is read
-/// into a buffer of exactly this size, which never grows (see
-/// `prompt_password` for why that matters).
-const MAX_PASSWORD_LEN: usize = 4096;
 
 /// One configured database's state.
 struct Slot {
@@ -494,8 +489,10 @@ impl Unlock for Server {
             // desktop, or behind a locker. Read under the mutex: the policy
             // marks the desk before its `lock_all` takes it, so either this
             // sees the mark or that lock sees `prompt_cancel` below and
-            // ends the prompt.
-            if !self.desk().may_prompt(origin) {
+            // ends the prompt. A request that carries its password needs no
+            // prompt, so it goes ahead from anywhere: that is how an
+            // unlock from outside the desktop is answered.
+            if request.password.is_none() && !self.desk().may_prompt(origin) {
                 return Err(UnlockError::NoDisplay);
             }
             if slot.unlocking {
@@ -512,38 +509,50 @@ impl Unlock for Server {
             name,
         };
 
-        log::debug(format_args!("prompting for {name:?}"));
-        let timeout = self.config.prompt_timeout;
-        let password = match prompt_password(&self.config.prompt, timeout, &cancel_watch) {
-            Ok(PromptOutcome::Cancelled) => return Err(UnlockError::PromptCancelled { db: db() }),
-            Ok(PromptOutcome::TimedOut) => {
-                log::info(format_args!(
-                    "prompt for {name:?} unanswered after {timeout:?}"
-                ));
-                return Err(UnlockError::PromptCancelled { db: db() });
-            }
-            // A lock ended the prompt, and has already told its own client
-            // the database is locked.
-            Ok(PromptOutcome::Interrupted) => {
-                return Err(UnlockError::LockedDuringUnlock { db: db() });
-            }
-            // Empty means "no password" — the only way to reach a
-            // keyfile-only database from a prompt that always asks.
-            Ok(PromptOutcome::Password(password)) if password.is_empty() => None,
-            Ok(PromptOutcome::Password(password)) => Some(password),
-            Err(err) => {
-                return Err(UnlockError::PromptFailed {
-                    db: db(),
-                    detail: err.to_string(),
-                });
+        let prompted;
+        let password = match &request.password {
+            // A request that carries a password never prompts. A wrong one
+            // fails like a wrong one typed at the prompt, with no backoff:
+            // any same-uid process can read the `.kdbx` and guess offline.
+            Some(password) => password.as_zeroizing(),
+            None => {
+                log::debug(format_args!("prompting for {name:?}"));
+                let timeout = self.config.prompt_timeout;
+                prompted = match prompt_password(&self.config.prompt, timeout, &cancel_watch) {
+                    Ok(PromptOutcome::Cancelled) => {
+                        return Err(UnlockError::PromptCancelled { db: db() });
+                    }
+                    Ok(PromptOutcome::TimedOut) => {
+                        log::info(format_args!(
+                            "prompt for {name:?} unanswered after {timeout:?}"
+                        ));
+                        return Err(UnlockError::PromptCancelled { db: db() });
+                    }
+                    // A lock ended the prompt, and has already told its own
+                    // client the database is locked.
+                    Ok(PromptOutcome::Interrupted) => {
+                        return Err(UnlockError::LockedDuringUnlock { db: db() });
+                    }
+                    Ok(PromptOutcome::Password(password)) => password,
+                    Err(err) => {
+                        return Err(UnlockError::PromptFailed {
+                            db: db(),
+                            detail: err.to_string(),
+                        });
+                    }
+                };
+                &prompted
             }
         };
+        // Empty means "no password" — the only way to reach a keyfile-only
+        // database from a prompt that always asks.
+        let password = Some(password).filter(|password| !password.is_empty());
 
         // Note: a file with pathological KDF parameters can make this hang
         // indefinitely or abort the process — upstream in `keepass`, which
         // applies no ceilings; see the note on `vault::open`. The unlocking
         // flag at least bounds it to one stuck thread per database.
-        let (opened, stamp) = vault::open(&cfg.path, password.as_ref(), cfg.keyfile.as_deref())
+        let (opened, stamp) = vault::open(&cfg.path, password, cfg.keyfile.as_deref())
             .map_err(|err| unlock_error(name, err))?;
 
         let mut dbs = slots(&self.dbs);
@@ -1126,6 +1135,44 @@ fn write_response(stream: &mut UnixStream, response: &Response) {
     let _ = stream.write_all(&buf);
 }
 
+/// What `read_request` found on the socket.
+enum RequestLine {
+    /// The client closed the connection without sending anything.
+    Closed,
+    /// `MAX_REQUEST_LEN` bytes with no newline among them.
+    TooLong,
+    /// The line's length, newline excluded. A client that closes its end
+    /// without a newline has still sent a line.
+    Line(usize),
+}
+
+/// Read one request line into `buf`, which never grows.
+///
+/// Read straight from the socket rather than through a `BufReader`: an
+/// `unlock` line can carry the master password, and a `BufReader`'s own
+/// buffer (like a `Vec` grown as the line arrives) would be freed without
+/// being wiped. Whatever is read past the newline lands in `buf` too, and
+/// is ignored: a connection carries one request.
+fn read_request(mut stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<RequestLine> {
+    let mut len = 0;
+    loop {
+        if len == buf.len() {
+            return Ok(RequestLine::TooLong);
+        }
+        let n = match stream.read(&mut buf[len..]) {
+            Ok(0) if len == 0 => return Ok(RequestLine::Closed),
+            Ok(0) => return Ok(RequestLine::Line(len)),
+            Ok(n) => n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        if let Some(newline) = buf[len..len + n].iter().position(|&byte| byte == b'\n') {
+            return Ok(RequestLine::Line(len + newline));
+        }
+        len += n;
+    }
+}
+
 /// One connection: read exactly one request line, respond with exactly one
 /// response line, done (`docs/design.md` § Protocol — one-shot connections
 /// by design, not a limitation).
@@ -1159,23 +1206,25 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
     let origin = server.origin_of(&stream, owner);
     log::debug(format_args!("connection from {origin:?}"));
 
-    let mut line = Vec::new();
-    let read = BufReader::new((&stream).take(MAX_REQUEST_LEN)).read_until(b'\n', &mut line);
-
-    let response = match read {
-        Ok(0) | Err(_) => return,
-        Ok(n) if n as u64 == MAX_REQUEST_LEN && !line.ends_with(b"\n") => {
-            Response::Protocol(ProtocolError::MalformedRequest)
+    // The request, and the buffer it was read into, are dropped (and so
+    // wiped) at the end of this block, before the response goes anywhere.
+    let response = {
+        let mut buf = Zeroizing::new(vec![0u8; MAX_REQUEST_LEN]);
+        match read_request(&stream, &mut buf) {
+            Ok(RequestLine::Closed) | Err(_) => return,
+            Ok(RequestLine::TooLong) => Response::Protocol(ProtocolError::MalformedRequest),
+            Ok(RequestLine::Line(len)) => {
+                match std::str::from_utf8(&buf[..len]).map(proto::decode_request) {
+                    Ok(Ok(request)) => proto::dispatch(server, &request, origin),
+                    Ok(Err(DecodeError::VersionMismatch(client_v))) => {
+                        Response::Protocol(ProtocolError::VersionMismatch { client_v })
+                    }
+                    Ok(Err(DecodeError::MalformedRequest)) | Err(_) => {
+                        Response::Protocol(ProtocolError::MalformedRequest)
+                    }
+                }
+            }
         }
-        Ok(_) => match std::str::from_utf8(&line).map(proto::decode_request) {
-            Ok(Ok(request)) => proto::dispatch(server, &request, origin),
-            Ok(Err(DecodeError::VersionMismatch(client_v))) => {
-                Response::Protocol(ProtocolError::VersionMismatch { client_v })
-            }
-            Ok(Err(DecodeError::MalformedRequest)) | Err(_) => {
-                Response::Protocol(ProtocolError::MalformedRequest)
-            }
-        },
     };
 
     // Log first: once a client has seen the response, the operation is
@@ -1235,6 +1284,48 @@ mod tests {
     fn a_non_utf8_request_gets_an_answer() {
         let reply = exchange(b"\xff\xfe\n");
         assert!(reply.contains("malformed_request"), "got {reply:?}");
+    }
+
+    /// Runs `read_request` on a socket pair whose other end writes
+    /// `pieces` a moment apart, so each tends to arrive as its own read.
+    fn read_written(pieces: &[&[u8]], buf_len: usize) -> (std::io::Result<RequestLine>, Vec<u8>) {
+        let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
+        let mut buf = vec![0u8; buf_len];
+        let read = thread::scope(|scope| {
+            scope.spawn(move || {
+                for piece in pieces {
+                    let _ = ours.write_all(piece);
+                    thread::sleep(Duration::from_millis(20));
+                }
+            });
+            read_request(&theirs, &mut buf)
+        });
+        (read, buf)
+    }
+
+    #[test]
+    fn read_request_stops_at_the_first_newline() {
+        let (read, buf) = read_written(&[b"{\"v\":1,", b"\"op\":\"status\"}\nrest\n"], 64);
+        let Ok(RequestLine::Line(len)) = read else {
+            panic!("expected a line");
+        };
+        assert_eq!(&buf[..len], b"{\"v\":1,\"op\":\"status\"}");
+    }
+
+    #[test]
+    fn read_request_accepts_a_newline_in_the_last_byte_and_no_further() {
+        let (read, _) = read_written(&[b"abc\n"], 4);
+        assert!(matches!(read, Ok(RequestLine::Line(3))));
+        let (read, _) = read_written(&[b"abcd\n"], 4);
+        assert!(matches!(read, Ok(RequestLine::TooLong)));
+    }
+
+    #[test]
+    fn read_request_takes_an_unterminated_line_at_eof() {
+        let (read, _) = read_written(&[b"abc"], 64);
+        assert!(matches!(read, Ok(RequestLine::Line(3))));
+        let (read, _) = read_written(&[], 64);
+        assert!(matches!(read, Ok(RequestLine::Closed)));
     }
 
     #[test]
@@ -2056,6 +2147,7 @@ mod tests {
             &server,
             &UnlockRequest {
                 db: "personal".to_string(),
+                password: None,
             },
             Origin::Desktop,
         );
@@ -2103,6 +2195,7 @@ mod tests {
             &server,
             &UnlockRequest {
                 db: "personal".to_string(),
+                password: None,
             },
             Origin::Desktop,
         );
@@ -2216,6 +2309,7 @@ mod tests {
             server,
             &UnlockRequest {
                 db: name.to_string(),
+                password: None,
             },
             origin,
         )
@@ -2304,6 +2398,43 @@ mod tests {
             })
         );
         assert!(marker.exists(), "the prompt runs for the desktop");
+    }
+
+    /// A request that carries its password needs no prompt, so neither
+    /// gate applies: it goes ahead from outside the desktop, and behind a
+    /// locker. Here it reaches the vault, whose file doesn't exist.
+    #[test]
+    fn a_request_carrying_its_password_goes_ahead_from_anywhere() {
+        let _spawning = spawn_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("prompted");
+        let server = prompt_server(&format!("touch '{}'; exit 1", marker.display()));
+
+        for desk in [
+            policy::Desk::NoSession,
+            policy::Desk::Locked {
+                session: "1".to_string(),
+            },
+        ] {
+            policy::Locks::set_desk(&server, desk);
+            let result = Unlock::unlock(
+                &server,
+                &UnlockRequest {
+                    db: "personal".to_string(),
+                    password: Some(crate::proto::Password::new(Zeroizing::new(
+                        "hunter2".to_string(),
+                    ))),
+                },
+                Origin::Outside,
+            );
+            assert_eq!(
+                result,
+                Err(UnlockError::NotFound {
+                    db: "personal".to_string()
+                })
+            );
+        }
+        assert!(!marker.exists(), "a request with a password prompted");
     }
 
     #[test]

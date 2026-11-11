@@ -25,7 +25,7 @@ pub use list::{List, ListError, ListRequest, WireEntry};
 pub use lock::{Lock, LockError, LockRequest};
 pub use request::{DecodeError, Op, ProtocolError, Request, decode_request};
 pub use status::{DatabaseStatus, Status};
-pub use unlock::{Unlock, UnlockError, UnlockRequest};
+pub use unlock::{MAX_PASSWORD_LEN, Password, PasswordError, Unlock, UnlockError, UnlockRequest};
 
 use serde::Serialize;
 

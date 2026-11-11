@@ -95,7 +95,10 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Serve { log_level } => run_serve(&socket_path, cli.config, log_level),
         Command::Status => run_client(&socket_path, Op::Status),
-        Command::Unlock { db } => run_client(&socket_path, Op::Unlock(UnlockRequest { db })),
+        Command::Unlock { db } => run_client(
+            &socket_path,
+            Op::Unlock(UnlockRequest { db, password: None }),
+        ),
         Command::Lock { db } => run_client(&socket_path, Op::Lock(LockRequest { db })),
         Command::List { db } => run_client(&socket_path, Op::List(ListRequest { db })),
         Command::Copy { db, uuid, field } => {

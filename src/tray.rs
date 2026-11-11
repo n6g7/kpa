@@ -160,7 +160,13 @@ impl TrayItem {
         let name = name.to_string();
         let _ = thread::Builder::new().spawn(move || {
             // The tray's menu is clicked at the desk.
-            let result = server.unlock(&UnlockRequest { db: name.clone() }, Origin::Desktop);
+            let result = server.unlock(
+                &UnlockRequest {
+                    db: name.clone(),
+                    password: None,
+                },
+                Origin::Desktop,
+            );
             server::log_response(&Response::Unlock(result.clone()));
             let Some(handle) = handle else { return };
             handle.update(move |item| {
