@@ -27,76 +27,20 @@ mod common;
 
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
-use serde_json::Value;
+use common::InProcessDaemon;
 
-struct Daemon {
-    child: Child,
-    socket: PathBuf,
-    _dir: tempfile::TempDir,
-}
-
-impl Daemon {
-    fn start(password: &str) -> Daemon {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
-        let socket = dir.path().join("sock");
-        let config_path = dir.path().join("config.toml");
-        let config = format!(
-            "prompt = [\"/bin/sh\", \"-c\", \"printf %s {password}\"]\n\n\
-             [[database]]\n\
-             name = \"personal\"\n\
-             path = \"{}\"\n",
-            common::password_db().display()
-        );
-        std::fs::write(&config_path, config).expect("failed to write config");
-
-        let child = Command::new(env!("CARGO_BIN_EXE_kpa"))
-            .arg("serve")
-            .arg("--socket")
-            .arg(&socket)
-            .arg("--config")
-            .arg(&config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("failed to spawn kpa serve");
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !socket.exists() {
-            assert!(
-                Instant::now() < deadline,
-                "kpa serve did not create its socket in time"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-
-        Daemon {
-            child,
-            socket,
-            _dir: dir,
-        }
-    }
-
-    fn run(&self, args: &[&str]) -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_kpa"))
-            .arg("--socket")
-            .arg(&self.socket)
-            .args(args)
-            .output()
-            .expect("failed to spawn kpa client");
-        let text = String::from_utf8(output.stdout).expect("client stdout is not valid UTF-8");
-        serde_json::from_str(text.trim())
-            .unwrap_or_else(|err| panic!("could not decode response {text:?}: {err}"))
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
+/// An in-process daemon (`common::InProcessDaemon`) for
+/// `common::password_db()`, whose prompt echoes `password`. In-process
+/// because these tests unlock, and a spawned `kpa serve` answers an
+/// `unlock` from outside the desktop with `no_display`.
+fn start(password: &str) -> InProcessDaemon {
+    InProcessDaemon::start(&common::config_toml(
+        &format!("printf %s {password}"),
+        &common::password_db().display().to_string(),
+    ))
 }
 
 /// Whether a Wayland compositor is actually reachable — not just whether
@@ -117,7 +61,7 @@ fn wayland_available() -> bool {
 /// given, read back through `list` rather than hardcoded — this test
 /// shouldn't also be the one place that knows the fixture's internal
 /// uuid.
-fn fixture_entry_uuid(daemon: &Daemon) -> String {
+fn fixture_entry_uuid(daemon: &InProcessDaemon) -> String {
     let listed = daemon.run(&["list"]);
     listed["entries"][0]["uuid"]
         .as_str()
@@ -140,7 +84,7 @@ fn copy_fails_cleanly_without_a_wayland_compositor() {
         return;
     }
 
-    let daemon = Daemon::start(common::PASSWORD);
+    let daemon = start(common::PASSWORD);
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let uuid = fixture_entry_uuid(&daemon);
 
@@ -174,7 +118,7 @@ fn copy_reaches_a_reachable_compositor() {
         return;
     }
 
-    let daemon = Daemon::start(common::PASSWORD);
+    let daemon = start(common::PASSWORD);
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let uuid = fixture_entry_uuid(&daemon);
 
@@ -218,46 +162,14 @@ fn surviving_a_takeover_past_the_timeout() {
         return;
     }
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let socket = dir.path().join("sock");
-    let config_path = dir.path().join("config.toml");
-    let config = format!(
-        "clipboard_timeout = \"1s\"\n\
-         prompt = [\"/bin/sh\", \"-c\", \"printf %s {}\"]\n\n\
-         [[database]]\n\
-         name = \"personal\"\n\
-         path = \"{}\"\n",
-        common::PASSWORD,
-        common::password_db().display()
-    );
-    std::fs::write(&config_path, config).expect("write config");
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_kpa"))
-        .arg("serve")
-        .arg("--socket")
-        .arg(&socket)
-        .arg("--config")
-        .arg(&config_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn kpa serve");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !socket.exists() {
-        assert!(Instant::now() < deadline, "socket never appeared");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-
-    let run = |args: &[&str]| -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_kpa"))
-            .arg("--socket")
-            .arg(&socket)
-            .args(args)
-            .output()
-            .expect("spawn kpa client");
-        let text = String::from_utf8(output.stdout).expect("utf8 stdout");
-        serde_json::from_str(text.trim()).expect("valid JSON response")
-    };
+    let daemon = InProcessDaemon::start(&format!(
+        "clipboard_timeout = \"1s\"\n{}",
+        common::config_toml(
+            &format!("printf %s {}", common::PASSWORD),
+            &common::password_db().display().to_string(),
+        )
+    ));
+    let run = |args: &[&str]| daemon.run(args);
 
     assert_eq!(run(&["unlock", "personal"])["ok"], true);
     let listed = run(&["list"]);
@@ -284,7 +196,4 @@ fn surviving_a_takeover_past_the_timeout() {
         "hello",
         "kpa's belated drop clobbered a later, unrelated clipboard write"
     );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }

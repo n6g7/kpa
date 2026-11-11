@@ -188,7 +188,7 @@ by its bare key.
 {"ok":false,"v":1,"error":"locked","db":"personal"}
 {"ok":false,"v":1,"error":"unlock_in_progress","db":"personal"}
 {"ok":false,"v":1,"error":"stale","db":"personal","detail":"database changed on disk"}
-{"ok":false,"v":1,"error":"no_display","detail":"the screen is locked"}
+{"ok":false,"v":1,"error":"no_display","detail":"no display to prompt on"}
 
 {"ok":false,"v":2,"error":"version_mismatch","detail":"client sent v1; restart the daemon or upgrade the client"}
 ```
@@ -219,9 +219,14 @@ and a KDF) and happens outside the vault mutex:
   discarded rather than silently reopening a vault the user just locked,
   and a prompt still open is killed.
 
-`unlock` fails with `no_display`, without prompting, while the screen is
-known to be locked (§ Lock policy). It names no database: the refusal is
-about where the request can be answered, not about the database.
+`unlock` fails with `no_display`, without prompting, when nobody could
+answer the prompt: the request comes from outside the desktop (below), or
+the screen is known to be locked (§ Lock policy). It names no database: the
+refusal is about where the request can be answered, not about the
+database. `kpa unlock` reports it and exits non-zero; reading the password
+on the client's terminal instead is the next step of
+[`headless.md`](./headless.md) § 4. The tray's menu is clicked at the desk,
+so its unlocks count as from the desktop.
 
 A request line is capped at 64 KiB and must arrive within 5 seconds; a
 line over the cap is answered `malformed_request`, and a connection that
@@ -240,9 +245,9 @@ that registers each connection as a remote logind session), a system
 service (a cron job, a terminal server's shells), no display session at
 all, and any
 peer whose cgroup can't be read or parsed, including one that exited
-first. The origin is logged at `debug`, and no op's answer depends on it.
-It decides where to ask, not who may ask: a same-uid process can start
-work in another cgroup.
+first. The origin is logged at `debug`, and decides whether `unlock` may
+prompt on screen (`Desk::may_prompt`). It decides where to ask, not who may
+ask: a same-uid process can start work in another cgroup.
 
 **`list` never returns secrets** — it is an index. That holds for any field
 the user marked protected in their KeePass client, not just `Password`: a
@@ -373,8 +378,9 @@ The logind watch publishes **the desk's state** to the server: no display
 session, or the display session's id with its `LockedHint` (locked or
 unlocked). It is read on subscribing, whenever `User.Display` changes, and
 on each `LockedHint` change, and is "no display session" while the watch is
-down. The prompt gate above reads whether it is locked; the classification
-in § Protocol reads the session's id.
+down. The classification in § Protocol reads the session's id, and the
+prompt gate reads both: a prompt only for a requester on the desktop, and
+not while the desk is locked.
 
 The prompt runs in its own process group, and killing it kills the whole
 group, so a wrapper script's own prompt window goes too.

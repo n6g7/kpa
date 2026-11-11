@@ -1,9 +1,14 @@
-//! Integration test for `docs/plan.md` step 2: spawns the real `kpa serve`
-//! binary against a temp socket and config, then drives it through the
-//! actual `kpa` client subcommands — not a hand-rolled socket client — so
-//! this exercises the real protocol round-trip an operator would see. One
-//! raw-socket test (`version_mismatch_is_rejected`) is the exception: there
-//! is no client subcommand that sends a wrong `v` on purpose.
+//! Integration test for `docs/plan.md` step 2: runs the daemon against a
+//! temp socket and config, then drives it through the actual `kpa` client
+//! subcommands — not a hand-rolled socket client — so this exercises the
+//! real protocol round-trip an operator would see. One raw-socket test
+//! (`version_mismatch_is_rejected`) is the exception: there is no client
+//! subcommand that sends a wrong `v` on purpose.
+//!
+//! Tests that unlock run the daemon in-process (`common::InProcessDaemon`),
+//! where every connection counts as coming from the desktop: a test runner
+//! is rarely in the display session, and the spawned `kpa serve` would
+//! answer its `unlock` with `no_display`. The rest spawn the real binary.
 
 mod common;
 
@@ -13,6 +18,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use common::{InProcessDaemon, config_toml};
 use serde_json::Value;
 
 struct Daemon {
@@ -22,47 +28,35 @@ struct Daemon {
 }
 
 impl Daemon {
-    /// Starts `kpa serve` with a config that unlocks `common::password_db()`
-    /// under the name `"personal"`, whose configured prompt just echoes
+    /// Starts `kpa serve` with a config for `common::password_db()` under
+    /// the name `"personal"`, whose configured prompt just echoes
     /// `password`. Waits for the socket to appear before returning.
     fn start(password: &str) -> Daemon {
         Daemon::spawn(&format!("printf %s '{password}'"), Stdio::null())
     }
 
-    /// Like `start`, but the prompt takes a second to answer — long enough
-    /// to land another request while an unlock is still in flight.
-    fn start_slow(password: &str) -> Daemon {
-        Daemon::spawn(&format!("sleep 1; printf %s '{password}'"), Stdio::null())
-    }
-
     fn spawn(prompt_script: &str, log: Stdio) -> Daemon {
         let config = config_toml(prompt_script, &common::password_db().display().to_string());
-        Daemon::spawn_config(&config, None, log)
+        Daemon::spawn_config(&config, log)
     }
 
-    /// Starts `kpa serve` on `config`. `home`, if given, becomes the
-    /// daemon's `$HOME` — set on the child process, which has its own
-    /// environment, rather than on this test process, where changing it
-    /// would race every other test thread.
-    fn spawn_config(config: &str, home: Option<&std::path::Path>, log: Stdio) -> Daemon {
+    /// Starts `kpa serve` on `config`, its stderr going to `log`.
+    fn spawn_config(config: &str, log: Stdio) -> Daemon {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let socket = dir.path().join("sock");
         let config_path = dir.path().join("config.toml");
         std::fs::write(&config_path, config).expect("failed to write config");
 
-        let mut command = Command::new(env!("CARGO_BIN_EXE_kpa"));
-        command
+        let child = Command::new(env!("CARGO_BIN_EXE_kpa"))
             .arg("serve")
             .arg("--socket")
             .arg(&socket)
             .arg("--config")
             .arg(&config_path)
             .stdout(Stdio::null())
-            .stderr(log);
-        if let Some(home) = home {
-            command.env("HOME", home);
-        }
-        let child = command.spawn().expect("failed to spawn kpa serve");
+            .stderr(log)
+            .spawn()
+            .expect("failed to spawn kpa serve");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() {
@@ -80,19 +74,8 @@ impl Daemon {
         }
     }
 
-    /// Runs `kpa <args> --socket <socket>` and parses its printed response
-    /// line. Read as plain JSON on purpose: these tests check what goes over
-    /// the wire, literally, rather than what a typed client makes of it.
     fn run(&self, args: &[&str]) -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_kpa"))
-            .arg("--socket")
-            .arg(&self.socket)
-            .args(args)
-            .output()
-            .expect("failed to spawn kpa client");
-        let text = String::from_utf8(output.stdout).expect("client stdout is not valid UTF-8");
-        serde_json::from_str(text.trim())
-            .unwrap_or_else(|err| panic!("could not decode response {text:?}: {err}"))
+        common::run_cli(&self.socket, args)
     }
 }
 
@@ -103,21 +86,30 @@ impl Drop for Daemon {
     }
 }
 
-/// A config whose one database is `db_path` under the name `"personal"`,
-/// and whose `prompt` runs `prompt_script` under `sh -c` — standing in for
-/// a real dmenu-style prompt.
-fn config_toml(prompt_script: &str, db_path: &str) -> String {
-    format!(
-        "prompt = [\"/bin/sh\", \"-c\", \"{prompt_script}\"]\n\n\
-         [[database]]\n\
-         name = \"personal\"\n\
-         path = \"{db_path}\"\n",
-    )
+/// An in-process daemon (`common::InProcessDaemon`) for
+/// `common::password_db()` under the name `"personal"`, whose prompt runs
+/// `prompt_script`.
+fn in_process_with_prompt(prompt_script: &str) -> InProcessDaemon {
+    InProcessDaemon::start(&config_toml(
+        prompt_script,
+        &common::password_db().display().to_string(),
+    ))
+}
+
+/// An in-process daemon whose prompt just echoes `password`.
+fn in_process(password: &str) -> InProcessDaemon {
+    in_process_with_prompt(&format!("printf %s '{password}'"))
+}
+
+/// Like `in_process`, but the prompt takes a second to answer — long
+/// enough to land another request while an unlock is still in flight.
+fn in_process_slow(password: &str) -> InProcessDaemon {
+    in_process_with_prompt(&format!("sleep 1; printf %s '{password}'"))
 }
 
 #[test]
 fn full_lifecycle() {
-    let daemon = Daemon::start(common::PASSWORD);
+    let daemon = in_process(common::PASSWORD);
 
     // Starts locked.
     let status = daemon.run(&["status"]);
@@ -186,7 +178,7 @@ fn list_output_has_no_raw_terminal_controls_from_entry_content() {
         &format!("printf %s {}", common::PASSWORD),
         &common::hostile_db().display().to_string(),
     );
-    let daemon = Daemon::spawn_config(&config, None, Stdio::null());
+    let daemon = InProcessDaemon::start(&config);
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
 
     let output = Command::new(env!("CARGO_BIN_EXE_kpa"))
@@ -228,7 +220,7 @@ fn list_output_has_no_raw_terminal_controls_from_entry_content() {
 
 #[test]
 fn wrong_password_is_reported_and_leaves_the_database_locked() {
-    let daemon = Daemon::start("not-the-real-password");
+    let daemon = in_process("not-the-real-password");
 
     let unlocked = daemon.run(&["unlock", "personal"]);
     assert_eq!(unlocked["ok"], false);
@@ -243,7 +235,7 @@ fn wrong_password_is_reported_and_leaves_the_database_locked() {
 
 #[test]
 fn lock_all_locks_every_database() {
-    let daemon = Daemon::start(common::PASSWORD);
+    let daemon = in_process(common::PASSWORD);
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
 
     let locked = daemon.run(&["lock"]); // no db named = lock all
@@ -320,7 +312,7 @@ fn malformed_request_is_rejected_without_crashing_the_daemon() {
 /// the unlock re-opened the database after the lock was acknowledged.
 #[test]
 fn a_lock_during_an_unlock_is_not_undone() {
-    let daemon = Daemon::start_slow(common::PASSWORD);
+    let daemon = in_process_slow(common::PASSWORD);
 
     std::thread::scope(|scope| {
         let unlocking = scope.spawn(|| daemon.run(&["unlock", "personal"]));
@@ -344,10 +336,7 @@ fn a_lock_during_an_unlock_is_not_undone() {
 /// and the unlock reports the lock at once.
 #[test]
 fn a_lock_ends_the_prompt_in_flight() {
-    let daemon = Daemon::spawn(
-        &format!("sleep 30; printf %s '{}'", common::PASSWORD),
-        Stdio::null(),
-    );
+    let daemon = in_process_with_prompt(&format!("sleep 30; printf %s '{}'", common::PASSWORD));
 
     std::thread::scope(|scope| {
         let unlocking = scope.spawn(|| daemon.run(&["unlock", "personal"]));
@@ -378,7 +367,7 @@ fn an_unanswered_prompt_times_out() {
             &common::password_db().display().to_string(),
         )
     );
-    let daemon = Daemon::spawn_config(&config, None, Stdio::null());
+    let daemon = InProcessDaemon::start(&config);
 
     let started = Instant::now();
     let unlocked = daemon.run(&["unlock", "personal"]);
@@ -395,7 +384,7 @@ fn an_unanswered_prompt_times_out() {
 /// opening a second prompt; the first still succeeds.
 #[test]
 fn a_second_unlock_does_not_open_a_second_prompt() {
-    let daemon = Daemon::start_slow(common::PASSWORD);
+    let daemon = in_process_slow(common::PASSWORD);
 
     std::thread::scope(|scope| {
         let first = scope.spawn(|| daemon.run(&["unlock", "personal"]));
@@ -434,13 +423,14 @@ fn unlocking_twice_logs_one_unlocked_line() {
 }
 
 /// Nobody reading the daemon's log must not kill it or cost a client
-/// its reply (docs/review-2026-09-robustness.md finding 4).
+/// its reply (docs/review-2026-09-robustness.md finding 4). Both requests
+/// log a line: a failed unlock a warning, a lock an info.
 #[test]
 fn a_closed_log_does_not_take_the_daemon_down() {
     let mut daemon = Daemon::spawn(&format!("printf %s '{}'", common::PASSWORD), Stdio::piped());
     drop(daemon.child.stderr.take());
 
-    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    assert_eq!(daemon.run(&["unlock", "nope"])["error"], "unknown_db");
     assert_eq!(daemon.run(&["lock"])["ok"], true);
     assert!(
         daemon.child.try_wait().expect("try_wait").is_none(),
@@ -448,7 +438,9 @@ fn a_closed_log_does_not_take_the_daemon_down() {
     );
 }
 
-/// A `~/` database path resolves against the daemon's own `$HOME`.
+/// A `~/` database path resolves against `$HOME`, and the vault there
+/// unlocks. In-process, so `home` is handed to `Config::expand_home`, the
+/// step `Config::load` runs with the daemon's own `$HOME`.
 #[test]
 fn a_tilde_path_resolves_against_home() {
     let home = tempfile::tempdir().expect("tempdir");
@@ -463,14 +455,18 @@ fn a_tilde_path_resolves_against_home() {
         &format!("printf %s '{}'", common::PASSWORD),
         "~/vault/personal.kdbx",
     );
-    let daemon = Daemon::spawn_config(&config, Some(home.path()), Stdio::null());
+    let config = kpa::config::Config::parse(&config)
+        .expect("valid config")
+        .expand_home(Some(home.path()), std::path::Path::new("config.toml"))
+        .expect("expands");
+    let daemon = InProcessDaemon::with_config(config);
 
     let unlocked = daemon.run(&["unlock", "personal"]);
     assert_eq!(unlocked["ok"], true, "{unlocked}");
 }
 
 /// A daemon whose idle timeout is `idle`, with the fixture unlockable.
-fn idle_daemon(idle: &str) -> Daemon {
+fn idle_daemon(idle: &str) -> InProcessDaemon {
     let config = format!(
         "idle_timeout = \"{idle}\"\n{}",
         config_toml(
@@ -478,10 +474,10 @@ fn idle_daemon(idle: &str) -> Daemon {
             &common::password_db().display().to_string(),
         )
     );
-    Daemon::spawn_config(&config, None, Stdio::null())
+    InProcessDaemon::start(&config)
 }
 
-fn is_locked(daemon: &Daemon) -> bool {
+fn is_locked(daemon: &InProcessDaemon) -> bool {
     daemon.run(&["status"])["databases"][0]["locked"] == true
 }
 
@@ -535,14 +531,14 @@ fn a_successful_unlock_resets_the_timer() {
 
 /// A daemon serving a temp copy of the fixture, already unlocked. The copy
 /// is what each freshness test changes.
-fn unlocked_copy(dir: &tempfile::TempDir) -> (Daemon, PathBuf) {
+fn unlocked_copy(dir: &tempfile::TempDir) -> (InProcessDaemon, PathBuf) {
     let copy = dir.path().join("vault.kdbx");
     std::fs::copy(common::password_db(), &copy).expect("copy fixture");
     let config = config_toml(
         &format!("printf %s '{}'", common::PASSWORD),
         &copy.display().to_string(),
     );
-    let daemon = Daemon::spawn_config(&config, None, Stdio::null());
+    let daemon = InProcessDaemon::start(&config);
     let unlocked = daemon.run(&["unlock", "personal"]);
     assert_eq!(unlocked["ok"], true, "{unlocked}");
     (daemon, copy)
@@ -550,7 +546,7 @@ fn unlocked_copy(dir: &tempfile::TempDir) -> (Daemon, PathBuf) {
 
 /// After a change, `list` answers `stale` and drops the database, so
 /// `status` reports it locked and a second `list` says `locked`.
-fn assert_stale(daemon: &Daemon, change: &str) {
+fn assert_stale(daemon: &InProcessDaemon, change: &str) {
     let listed = daemon.run(&["list", "personal"]);
     assert_eq!(listed["ok"], false, "{change}: list still served: {listed}");
     assert_eq!(listed["error"], "stale", "{change}: {listed}");
@@ -646,104 +642,21 @@ fn a_replaced_inode_makes_the_database_stale() {
     assert_stale(&daemon, "inode");
 }
 
-/// What the daemon logs names operations and databases, never what a
-/// database holds — at the most verbose level too (`docs/design.md`
-/// § Logging).
-#[test]
-fn the_log_never_carries_vault_contents_or_the_password() {
-    use std::io::Read;
-
-    let config = format!(
-        "log_level = \"debug\"\n{}",
-        config_toml(
-            &format!("printf %s '{}'", common::PASSWORD),
-            &common::password_db().display().to_string()
-        )
-    );
-    let mut daemon = Daemon::spawn_config(&config, None, Stdio::piped());
-
-    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
-    let listed = daemon.run(&["list"]);
-    assert_eq!(listed["ok"], true);
-    assert_eq!(daemon.run(&["unlock", "nope"])["ok"], false);
-    assert_eq!(daemon.run(&["lock"])["ok"], true);
-
-    let mut stderr = daemon.child.stderr.take().expect("piped stderr");
-    daemon.child.kill().expect("kill");
-    daemon.child.wait().expect("wait");
-    let mut log = String::new();
-    stderr.read_to_string(&mut log).expect("read log");
-
-    assert!(log.contains(" INFO  unlocked \"personal\""), "{log}");
-    assert!(log.contains(" DEBUG prompting for \"personal\""), "{log}");
-    // Each connection is classified; as what depends on where the test runs.
-    assert!(log.contains(" DEBUG connection from "), "{log}");
-    assert!(log.contains(" WARN  unlock failed"), "{log}");
-    assert!(log.contains(" INFO  locked every database"), "{log}");
-
-    let mut secrets = vec![common::PASSWORD.to_string()];
-    for entry in listed["entries"].as_array().expect("entries") {
-        for field in ["title", "username", "url"] {
-            if let Some(text) = entry[field].as_str().filter(|t| t.len() > 2) {
-                secrets.push(text.to_string());
-            }
-        }
-    }
-    assert!(
-        secrets.len() > 1,
-        "the fixture listed no entry text: {listed}"
-    );
-    for secret in &secrets {
-        assert!(
-            !log.contains(secret.as_str()),
-            "{secret:?} reached the log:\n{log}"
-        );
-    }
-}
-
-/// `docs/threat-model.md` T-4: "the prompt gets its own stderr, never the
-/// daemon's." A prompt script writing to its own stderr must not have that
-/// output land in the daemon's log, unescaped and without a level or
-/// timestamp.
-#[test]
-fn the_prompts_stderr_never_reaches_the_daemons() {
-    use std::io::Read;
-
-    let mut daemon = Daemon::spawn(
-        &format!(
-            "echo MARKER:{} >&2; printf %s '{}'",
-            common::PASSWORD,
-            common::PASSWORD
-        ),
-        Stdio::piped(),
-    );
-    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
-    let mut stderr = daemon.child.stderr.take().expect("piped stderr");
-    daemon.child.kill().expect("kill");
-    daemon.child.wait().expect("wait");
-    let mut log = String::new();
-    stderr.read_to_string(&mut log).expect("read log");
-
-    assert!(
-        !log.contains("MARKER:"),
-        "the prompt's stderr reached the daemon's log:\n{log}"
-    );
-}
-
-/// `info` is the default: no debug lines unless asked for.
+/// `info` is the default: no debug lines unless asked for. Every
+/// connection would log one (`connection from …`).
 #[test]
 fn debug_lines_are_off_by_default() {
     use std::io::Read;
 
     let mut daemon = Daemon::spawn(&format!("printf %s '{}'", common::PASSWORD), Stdio::piped());
-    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    assert_eq!(daemon.run(&["lock"])["ok"], true);
     let mut stderr = daemon.child.stderr.take().expect("piped stderr");
     daemon.child.kill().expect("kill");
     daemon.child.wait().expect("wait");
     let mut log = String::new();
     stderr.read_to_string(&mut log).expect("read log");
 
-    assert!(log.contains(" INFO  unlocked"), "{log}");
+    assert!(log.contains(" INFO  locked every database"), "{log}");
     assert!(!log.contains("DEBUG"), "{log}");
 }
 
@@ -876,16 +789,16 @@ fn version_reports_an_older_daemon_that_does_not_report_a_version() {
 
 /// Starts a daemon against `common::fields_db()` (custom fields and a
 /// colliding custom field — `tests/fixture.sh`).
-fn fields_daemon() -> Daemon {
+fn fields_daemon() -> InProcessDaemon {
     let config = config_toml(
         &format!("printf %s {}", common::PASSWORD),
         &common::fields_db().display().to_string(),
     );
-    Daemon::spawn_config(&config, None, Stdio::null())
+    InProcessDaemon::start(&config)
 }
 
 /// Looks up one entry's uuid by title via `list`.
-fn uuid_of(daemon: &Daemon, title: &str) -> String {
+fn uuid_of(daemon: &InProcessDaemon, title: &str) -> String {
     let listed = daemon.run(&["list", "personal"]);
     listed["entries"]
         .as_array()

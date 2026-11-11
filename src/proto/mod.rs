@@ -29,6 +29,8 @@ pub use unlock::{Unlock, UnlockError, UnlockRequest};
 
 use serde::Serialize;
 
+use crate::origin::Origin;
+
 use error::serialize_error;
 
 /// Protocol version this build speaks. Every `Response` carries this,
@@ -54,7 +56,7 @@ impl<T: Status + Unlock + Lock + List + CopyEntry> Handler for T {}
 /// the pairing — `Op::Lock` to `Response::Lock` to `LockError` — is stated
 /// once, here, rather than being a convention each handler has to remember
 /// to follow.
-pub fn dispatch<H>(handler: &H, request: &Request) -> Response
+pub fn dispatch<H>(handler: &H, request: &Request, origin: Origin) -> Response
 where
     H: Handler + ?Sized,
 {
@@ -63,7 +65,7 @@ where
             databases: handler.status(),
             version: handler.daemon_version(),
         },
-        Op::Unlock(request) => Response::Unlock(handler.unlock(request)),
+        Op::Unlock(request) => Response::Unlock(handler.unlock(request, origin)),
         Op::Lock(request) => Response::Lock(handler.lock(request)),
         Op::List(request) => Response::List(handler.list(request)),
         Op::Copy(request) => Response::Copy(handler.copy(request)),
@@ -329,7 +331,7 @@ mod tests {
                 Response::Unlock(Err(UnlockError::NoDisplay)),
                 "no_display",
                 None,
-                Some("the screen is locked"),
+                Some("no display to prompt on"),
             ),
             (
                 Response::Unlock(Err(UnlockError::Stale { db: owned() })),

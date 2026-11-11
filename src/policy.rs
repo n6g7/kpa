@@ -36,6 +36,8 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Message;
 use zbus::zvariant::{self, OwnedObjectPath, OwnedValue};
 
+use crate::origin::Origin;
+
 const LOGIND: &str = "org.freedesktop.login1";
 const MANAGER_PATH: &str = "/org/freedesktop/login1";
 const MANAGER_IFACE: &str = "org.freedesktop.login1.Manager";
@@ -116,6 +118,13 @@ impl Desk {
             Desk::NoSession => None,
             Desk::Locked { session } | Desk::Unlocked { session } => Some(session),
         }
+    }
+
+    /// Whether an unlock from `origin` may raise the graphical prompt: only
+    /// for a requester on the desktop, and not while the desk is known to
+    /// be locked (`docs/headless.md` § 2). Anything else gets `no_display`.
+    pub fn may_prompt(&self, origin: Origin) -> bool {
+        origin == Origin::Desktop && !self.is_locked()
     }
 }
 
@@ -710,6 +719,15 @@ mod tests {
         h.policy.handle(Event::Desk(locked_desk()));
         h.policy.handle(Event::WatchLost);
         assert_eq!(h.locks.desk(), Desk::NoSession);
+    }
+
+    #[test]
+    fn only_a_requester_on_the_desktop_may_prompt_and_not_while_locked() {
+        assert!(unlocked_desk().may_prompt(Origin::Desktop));
+        assert!(!locked_desk().may_prompt(Origin::Desktop));
+        assert!(!unlocked_desk().may_prompt(Origin::Outside));
+        assert!(!locked_desk().may_prompt(Origin::Outside));
+        assert!(!Desk::NoSession.may_prompt(Origin::Outside));
     }
 
     #[test]

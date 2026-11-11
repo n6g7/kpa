@@ -25,6 +25,7 @@ use ksni::menu::{StandardItem, SubMenu};
 use ksni::{MenuItem, OfflineReason, ToolTip};
 
 use crate::log;
+use crate::origin::Origin;
 use crate::proto::{
     DatabaseStatus, Lock, LockRequest, Response, Unlock, UnlockError, UnlockRequest,
 };
@@ -158,7 +159,8 @@ impl TrayItem {
         let handle = self.handle.clone();
         let name = name.to_string();
         let _ = thread::Builder::new().spawn(move || {
-            let result = server.unlock(&UnlockRequest { db: name.clone() });
+            // The tray's menu is clicked at the desk.
+            let result = server.unlock(&UnlockRequest { db: name.clone() }, Origin::Desktop);
             server::log_response(&Response::Unlock(result.clone()));
             let Some(handle) = handle else { return };
             handle.update(move |item| {

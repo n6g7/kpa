@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 static FIXTURES_INIT: Once = Once::new();
 
@@ -77,4 +77,75 @@ pub fn hostile_db() -> PathBuf {
 /// field; `"NoOtp"` has none; `"BadOtp"`'s `otp` field doesn't parse.
 pub fn fields_db() -> PathBuf {
     ensure_fixtures().join("fixture-fields.kdbx")
+}
+
+/// A config whose one database is `db_path` under the name `"personal"`,
+/// and whose `prompt` runs `prompt_script` under `sh -c`, standing in for a
+/// real dmenu-style prompt.
+pub fn config_toml(prompt_script: &str, db_path: &str) -> String {
+    format!(
+        "prompt = [\"/bin/sh\", \"-c\", \"{prompt_script}\"]\n\n\
+         [[database]]\n\
+         name = \"personal\"\n\
+         path = \"{db_path}\"\n",
+    )
+}
+
+/// Runs `kpa --socket <socket> <args>` with the real binary and parses its
+/// printed response line. Read as plain JSON on purpose: these tests check
+/// what goes over the wire, literally, rather than what a typed client
+/// makes of it.
+pub fn run_cli(socket: &Path, args: &[&str]) -> serde_json::Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_kpa"))
+        .arg("--socket")
+        .arg(socket)
+        .args(args)
+        .output()
+        .expect("failed to spawn kpa client");
+    let text = String::from_utf8(output.stdout).expect("client stdout is not valid UTF-8");
+    serde_json::from_str(text.trim())
+        .unwrap_or_else(|err| panic!("could not decode response {text:?}: {err}"))
+}
+
+/// The daemon, run on threads of the test process rather than as a
+/// spawned `kpa serve`, and driven with the real `kpa` CLI over its socket.
+///
+/// Every connection counts as coming from the desktop
+/// (`Server::assume_origin`), so `unlock` raises the configured prompt
+/// wherever the tests run: a test runner is rarely in the display
+/// session. No logind watch and no tray are started. The daemon's threads
+/// run until the test binary exits.
+///
+/// What this doesn't cover, and the tests on the spawned binary do:
+/// `kpa serve`'s argument and config-file handling, its startup
+/// (`PR_SET_DUMPABLE`, the logind watch, the tray), and logging to a
+/// stderr of its own.
+pub struct InProcessDaemon {
+    pub socket: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl InProcessDaemon {
+    /// Starts a daemon on `config`, TOML as in a config file.
+    pub fn start(config: &str) -> InProcessDaemon {
+        InProcessDaemon::with_config(kpa::config::Config::parse(config).expect("valid config"))
+    }
+
+    pub fn with_config(config: kpa::config::Config) -> InProcessDaemon {
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let socket = dir.path().join("sock");
+        let server = Arc::new(kpa::server::Server::new(config));
+        server.assume_origin(kpa::origin::Origin::Desktop);
+        // Not `socket::bind_socket`: it sets the process-wide umask for the
+        // bind, and a directory another test thread created meanwhile
+        // would come out without its search bit.
+        let listener =
+            std::os::unix::net::UnixListener::bind(&socket).expect("failed to bind socket");
+        std::thread::spawn(move || kpa::server::serve(server, listener));
+        InProcessDaemon { socket, _dir: dir }
+    }
+
+    pub fn run(&self, args: &[&str]) -> serde_json::Value {
+        run_cli(&self.socket, args)
+    }
 }
