@@ -290,13 +290,13 @@ impl Server {
         dropped
     }
 
-    /// Where to report unlocks. Called once, before the server takes requests.
     /// The desk's state, as the lock policy last published it. No display
     /// session until the logind watch says otherwise.
     pub fn desk(&self) -> policy::Desk {
         self.desk.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Where to report unlocks. Called once, before the server takes requests.
     pub fn set_policy_events(&self, events: Sender<policy::Event>) {
         let _ = self.policy_events.set(events);
     }
