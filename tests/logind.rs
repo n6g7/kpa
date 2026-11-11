@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 mod common;
 
 use kpa::config::Config;
-use kpa::policy::{self, Bus, Locks};
+use kpa::policy::{self, Bus, Desk, Locks};
 use kpa::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::server::Server;
 use zbus::blocking::Connection;
@@ -29,6 +29,28 @@ const USER: &str = "/org/freedesktop/login1/user/_1000";
 const SESSION_1: &str = "/org/freedesktop/login1/session/_31";
 const SESSION_2: &str = "/org/freedesktop/login1/session/_32";
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The logind session id behind each mock session's object path, as
+/// `User.Display` reports it. logind's "no display session" is `("", "/")`.
+fn session_id(path: &str) -> &'static str {
+    match path {
+        SESSION_1 => "31",
+        SESSION_2 => "32",
+        _ => "",
+    }
+}
+
+fn unlocked(session: &str) -> Desk {
+    Desk::Unlocked {
+        session: session.to_string(),
+    }
+}
+
+fn locked(session: &str) -> Desk {
+    Desk::Locked {
+        session: session.to_string(),
+    }
+}
 
 /// A `dbus-daemon` on a socket inside a temp directory, killed on drop.
 struct PrivateBus {
@@ -151,8 +173,10 @@ impl User {
     #[zbus(property)]
     fn display(&self) -> (String, OwnedObjectPath) {
         let display = self.0.lock().unwrap().display.clone();
-        let id = if display == SESSION_1 { "31" } else { "32" };
-        (id.to_string(), OwnedObjectPath::try_from(display).unwrap())
+        (
+            session_id(&display).to_string(),
+            OwnedObjectPath::try_from(display).unwrap(),
+        )
     }
 }
 
@@ -233,7 +257,7 @@ impl MockLogind {
     fn set_display(&self, session: &'static str) {
         self.state.lock().unwrap().display = session.to_string();
         let value = Value::from((
-            if session == SESSION_1 { "31" } else { "32" },
+            session_id(session),
             OwnedObjectPath::try_from(session).unwrap(),
         ));
         self.properties_changed(USER, "org.freedesktop.login1.User", "Display", value);
@@ -300,7 +324,7 @@ impl MockLogind {
 #[derive(Default)]
 struct Recorder {
     unlocked: AtomicBool,
-    desk_locked: AtomicBool,
+    desk: Mutex<Desk>,
     log: Mutex<Vec<&'static str>>,
 }
 
@@ -312,12 +336,16 @@ impl Locks for Recorder {
     fn any_unlocked(&self) -> bool {
         self.unlocked.load(Ordering::SeqCst)
     }
-    fn set_desk_locked(&self, locked: bool) {
-        self.desk_locked.store(locked, Ordering::SeqCst);
+    fn set_desk(&self, desk: Desk) {
+        *self.desk.lock().unwrap() = desk;
     }
 }
 
 impl Recorder {
+    fn desk(&self) -> Desk {
+        self.desk.lock().unwrap().clone()
+    }
+
     fn locks(&self) -> usize {
         self.log
             .lock()
@@ -367,7 +395,7 @@ fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
     recorder.log.lock().unwrap().clear();
 
     assert!(
-        !recorder.desk_locked.load(Ordering::SeqCst),
+        !recorder.desk().is_locked(),
         "a Lock signal alone doesn't mark the desk locked"
     );
 
@@ -375,10 +403,10 @@ fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
     //    false unmarks it and locks nothing.
     mock.set_hint(SESSION_1, true);
     eventually("LockedHint=true to lock", || recorder.locks() == 1);
-    assert!(recorder.desk_locked.load(Ordering::SeqCst));
+    assert!(recorder.desk().is_locked());
     mock.set_hint(SESSION_1, false);
     eventually("LockedHint=false to unmark the desk", || {
-        !recorder.desk_locked.load(Ordering::SeqCst)
+        !recorder.desk().is_locked()
     });
     quiet();
     assert_eq!(recorder.locks(), 1, "LockedHint=false is not a lock");
@@ -424,6 +452,54 @@ fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
     recorder.unlocked.store(true, Ordering::SeqCst);
     bus.kill();
     eventually("a lost bus to lock", || recorder.locks() == 1);
+}
+
+/// The desk's state as published to the server: the display session's id
+/// and `LockedHint`, following display changes, with no session when
+/// logind reports none or the watch is lost.
+#[test]
+fn the_desk_state_follows_logind_over_a_bus() {
+    let mut bus = PrivateBus::start();
+    let mock = MockLogind::start(&bus.address);
+    let recorder = Arc::new(Recorder::default());
+    let _events = policy::start(recorder.clone(), Bus::Address(bus.address.clone()));
+
+    // 1. Subscribing reads the display session and its hint.
+    eventually("the first desk state", || recorder.desk() == unlocked("31"));
+
+    // 2. LockedHint changes on the display session move it between locked
+    //    and unlocked.
+    mock.set_hint(SESSION_1, true);
+    eventually("LockedHint=true", || recorder.desk() == locked("31"));
+    mock.set_hint(SESSION_1, false);
+    eventually("LockedHint=false", || recorder.desk() == unlocked("31"));
+
+    // 3. Neither a Lock signal nor another session's hint changes it.
+    mock.lock_signal(SESSION_1);
+    mock.set_hint(SESSION_2, true);
+    eventually("the Lock signal to lock", || recorder.locks() > 0);
+    quiet();
+    assert_eq!(recorder.desk(), unlocked("31"));
+
+    // 4. A display change reads the new session's hint.
+    mock.set_display(SESSION_2);
+    eventually("the new display session", || {
+        recorder.desk() == locked("32")
+    });
+
+    // 5. No display session.
+    mock.set_display("/");
+    eventually("no display session", || recorder.desk() == Desk::NoSession);
+    mock.set_display(SESSION_1);
+    eventually("the display session back", || {
+        recorder.desk() == unlocked("31")
+    });
+
+    // 6. A lost watch can't say, so there is no session until it's back.
+    bus.kill();
+    eventually("a lost bus to forget the desk", || {
+        recorder.desk() == Desk::NoSession
+    });
 }
 
 /// The real server behind the policy: while the display session's
@@ -479,6 +555,7 @@ fn the_desk_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
     mock.set_hint(SESSION_1, false);
     eventually("an unlocked desk to allow the prompt", || unlock().is_ok());
     assert!(prompted.exists());
+    assert_eq!(server.desk(), unlocked("31"));
 
     // 3. A Lock signal ends a prompt still open.
     mock.lock_signal(SESSION_1);

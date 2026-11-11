@@ -21,7 +21,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
@@ -162,9 +162,10 @@ pub struct Server {
     /// outlives the request, same as `clip` above) can clear it too, once
     /// its natural timeout fires with nothing newer having replaced it.
     clip_db: Arc<Mutex<Option<String>>>,
-    /// The screen is known to be locked (`policy::Event::DeskLocked`).
-    /// `unlock` raises no prompt while it is.
-    desk_locked: AtomicBool,
+    /// The desk's state, as the lock policy last published it
+    /// (`policy::Event::Desk`). `unlock` raises no prompt while it is
+    /// locked.
+    desk: Mutex<policy::Desk>,
 }
 
 impl Server {
@@ -193,7 +194,7 @@ impl Server {
             policy_events: OnceLock::new(),
             clip: Arc::new(Clipboard::new(backend)),
             clip_db: Arc::new(Mutex::new(None)),
-            desk_locked: AtomicBool::new(false),
+            desk: Mutex::new(policy::Desk::NoSession),
         }
     }
 
@@ -290,6 +291,12 @@ impl Server {
     }
 
     /// Where to report unlocks. Called once, before the server takes requests.
+    /// The desk's state, as the lock policy last published it. No display
+    /// session until the logind watch says otherwise.
+    pub fn desk(&self) -> policy::Desk {
+        self.desk.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     pub fn set_policy_events(&self, events: Sender<policy::Event>) {
         let _ = self.policy_events.set(events);
     }
@@ -364,8 +371,8 @@ impl policy::Locks for Server {
         Server::any_unlocked(self)
     }
 
-    fn set_desk_locked(&self, locked: bool) {
-        self.desk_locked.store(locked, Ordering::SeqCst);
+    fn set_desk(&self, desk: policy::Desk) {
+        *self.desk.lock().unwrap_or_else(|e| e.into_inner()) = desk;
     }
 }
 
@@ -458,7 +465,7 @@ impl Unlock for Server {
             // Read under the mutex: the policy marks the desk before its
             // `lock_all` takes it, so either this sees the mark or that
             // lock sees `prompt_cancel` below and ends the prompt.
-            if self.desk_locked.load(Ordering::SeqCst) {
+            if self.desk().is_locked() {
                 return Err(UnlockError::NoDisplay);
             }
             if slot.unlocking {
@@ -2195,11 +2202,21 @@ mod tests {
         let marker = dir.path().join("prompted");
         let server = prompt_server(&format!("touch '{}'; exit 1", marker.display()));
 
-        policy::Locks::set_desk_locked(&server, true);
+        policy::Locks::set_desk(
+            &server,
+            policy::Desk::Locked {
+                session: "1".to_string(),
+            },
+        );
         assert_eq!(unlock(&server, "personal"), Err(UnlockError::NoDisplay));
         assert!(!marker.exists(), "a prompt ran behind the locker");
 
-        policy::Locks::set_desk_locked(&server, false);
+        policy::Locks::set_desk(
+            &server,
+            policy::Desk::Unlocked {
+                session: "1".to_string(),
+            },
+        );
         assert_eq!(
             unlock(&server, "personal"),
             Err(UnlockError::PromptCancelled {

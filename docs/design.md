@@ -352,6 +352,12 @@ Prompts are bounded too:
   reports the unlock (threat model ASM-7), so kpa doesn't know the screen
   is locked, and the timeout bounds the cost.
 
+The logind watch publishes **the desk's state** to the server: no display
+session, or the display session's id with its `LockedHint` (locked or
+unlocked). It is read on subscribing, whenever `User.Display` changes, and
+on each `LockedHint` change, and is "no display session" while the watch is
+down. The prompt gate above reads whether it is locked.
+
 The prompt runs in its own process group, and killing it kills the whole
 group, so a wrapper script's own prompt window goes too.
 
