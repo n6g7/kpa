@@ -104,3 +104,19 @@ fn the_prompts_stderr_never_reaches_the_daemons() {
         "the prompt's stderr reached the daemon's log:\n{log}"
     );
 }
+
+/// Unlocking an already-unlocked database succeeds without opening
+/// anything, so it logs nothing.
+#[test]
+fn unlocking_twice_logs_one_unlocked_line() {
+    let daemon = InProcessDaemon::start(&config_toml(
+        &format!("printf %s '{}'", common::PASSWORD),
+        &common::password_db().display().to_string(),
+    ));
+    let log = capture_stderr(|| {
+        assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+        assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    });
+
+    assert_eq!(log.matches(" INFO  unlocked").count(), 1, "{log}");
+}
