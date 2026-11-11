@@ -10,7 +10,7 @@
 - [ ] Support headless use (no window manager or GUI), per `docs/headless.md`
   - [x] Prompt safety nets: prompt timeout, a lock kills open prompts, no prompt while the screen is locked
   - [ ] Zeroizing request buffer
-  - [ ] Origin classifier
+  - [x] Origin classifier
   - [ ] Terminal unlock
   - [ ] Copy gated on origin and the desk's state
 

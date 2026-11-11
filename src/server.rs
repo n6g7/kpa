@@ -34,6 +34,7 @@ use zeroize::Zeroizing;
 use crate::clip::{self, Clipboard};
 use crate::config::Config;
 use crate::log;
+use crate::origin::{self, Origin};
 use crate::policy;
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
@@ -163,9 +164,12 @@ pub struct Server {
     /// its natural timeout fires with nothing newer having replaced it.
     clip_db: Arc<Mutex<Option<String>>>,
     /// The desk's state, as the lock policy last published it
-    /// (`policy::Event::Desk`). `unlock` raises no prompt while it is
-    /// locked.
+    /// (`policy::Event::Desk`). Each connection is classified against its
+    /// display session (`origin`), and `unlock` asks it whether a prompt
+    /// may be raised (`Desk::may_prompt`).
     desk: Mutex<policy::Desk>,
+    /// Set by `assume_origin` only.
+    assumed_origin: OnceLock<Origin>,
 }
 
 impl Server {
@@ -195,6 +199,7 @@ impl Server {
             clip: Arc::new(Clipboard::new(backend)),
             clip_db: Arc::new(Mutex::new(None)),
             desk: Mutex::new(policy::Desk::NoSession),
+            assumed_origin: OnceLock::new(),
         }
     }
 
@@ -294,6 +299,24 @@ impl Server {
     /// session until the logind watch says otherwise.
     pub fn desk(&self) -> policy::Desk {
         self.desk.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Treat every connection as coming from `origin` instead of reading
+    /// the peer's cgroup, for tests that run the daemon in-process and
+    /// drive it with the real CLI. Only code that builds its own `Server`
+    /// can call this: `main.rs` never does, and no CLI flag, environment
+    /// variable, config key or request field reaches it.
+    #[doc(hidden)]
+    pub fn assume_origin(&self, origin: Origin) {
+        let _ = self.assumed_origin.set(origin);
+    }
+
+    /// Where the peer on `stream` runs (`docs/headless.md` § 3).
+    fn origin_of(&self, stream: &UnixStream, uid: u32) -> Origin {
+        match self.assumed_origin.get() {
+            Some(origin) => *origin,
+            None => origin::of_peer(stream, uid, self.desk().session()),
+        }
     }
 
     /// Where to report unlocks. Called once, before the server takes requests.
@@ -432,7 +455,7 @@ impl Drop for UnlockingFlag<'_> {
 }
 
 impl Unlock for Server {
-    fn unlock(&self, request: &UnlockRequest) -> Result<String, UnlockError> {
+    fn unlock(&self, request: &UnlockRequest, origin: Origin) -> Result<String, UnlockError> {
         let name = request.db.as_str();
         let db = || name.to_string();
 
@@ -467,10 +490,12 @@ impl Unlock for Server {
             if slot.db.is_some() {
                 return Ok(db());
             }
-            // Read under the mutex: the policy marks the desk before its
-            // `lock_all` takes it, so either this sees the mark or that
-            // lock sees `prompt_cancel` below and ends the prompt.
-            if self.desk().is_locked() {
+            // No prompt where nobody can answer it: from outside the
+            // desktop, or behind a locker. Read under the mutex: the policy
+            // marks the desk before its `lock_all` takes it, so either this
+            // sees the mark or that lock sees `prompt_cancel` below and
+            // ends the prompt.
+            if !self.desk().may_prompt(origin) {
                 return Err(UnlockError::NoDisplay);
             }
             if slot.unlocking {
@@ -1131,6 +1156,9 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
         }
     }
 
+    let origin = server.origin_of(&stream, owner);
+    log::debug(format_args!("connection from {origin:?}"));
+
     let mut line = Vec::new();
     let read = BufReader::new((&stream).take(MAX_REQUEST_LEN)).read_until(b'\n', &mut line);
 
@@ -1140,7 +1168,7 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
             Response::Protocol(ProtocolError::MalformedRequest)
         }
         Ok(_) => match std::str::from_utf8(&line).map(proto::decode_request) {
-            Ok(Ok(request)) => proto::dispatch(server, &request),
+            Ok(Ok(request)) => proto::dispatch(server, &request, origin),
             Ok(Err(DecodeError::VersionMismatch(client_v))) => {
                 Response::Protocol(ProtocolError::VersionMismatch { client_v })
             }
@@ -2029,6 +2057,7 @@ mod tests {
             &UnlockRequest {
                 db: "personal".to_string(),
             },
+            Origin::Desktop,
         );
 
         assert!(
@@ -2075,6 +2104,7 @@ mod tests {
             &UnlockRequest {
                 db: "personal".to_string(),
             },
+            Origin::Desktop,
         );
 
         assert_eq!(
@@ -2178,11 +2208,16 @@ mod tests {
     }
 
     fn unlock(server: &Server, name: &str) -> Result<String, UnlockError> {
+        unlock_from(server, name, Origin::Desktop)
+    }
+
+    fn unlock_from(server: &Server, name: &str, origin: Origin) -> Result<String, UnlockError> {
         Unlock::unlock(
             server,
             &UnlockRequest {
                 db: name.to_string(),
             },
+            origin,
         )
     }
 
@@ -2241,6 +2276,34 @@ mod tests {
             marker.exists(),
             "the prompt runs again once the desk is unlocked"
         );
+    }
+
+    #[test]
+    fn no_prompt_is_raised_for_a_requester_outside_the_desktop() {
+        let _spawning = spawn_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("prompted");
+        let server = prompt_server(&format!("touch '{}'; exit 1", marker.display()));
+        policy::Locks::set_desk(
+            &server,
+            policy::Desk::Unlocked {
+                session: "1".to_string(),
+            },
+        );
+
+        assert_eq!(
+            unlock_from(&server, "personal", Origin::Outside),
+            Err(UnlockError::NoDisplay)
+        );
+        assert!(!marker.exists(), "a prompt ran for a requester outside");
+
+        assert_eq!(
+            unlock_from(&server, "personal", Origin::Desktop),
+            Err(UnlockError::PromptCancelled {
+                db: "personal".to_string()
+            })
+        );
+        assert!(marker.exists(), "the prompt runs for the desktop");
     }
 
     #[test]

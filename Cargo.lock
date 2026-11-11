@@ -1093,6 +1093,7 @@ dependencies = [
  "humantime-serde",
  "keepass",
  "ksni",
+ "libc",
  "png",
  "rustix",
  "serde",

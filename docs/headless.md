@@ -68,8 +68,10 @@ in one of two places:
 Everything else is **outside the desktop**:
 
 - an SSH login, which gets its own `session-N.scope`;
-- a terminal server's shell, which lives under that server's system
-  service;
+- a terminal server's shell. A terminal server either runs as a system
+  service, outside the user's slice, or registers each connection as its
+  own remote logind session, whose `session-N.scope` isn't the display
+  session's;
 - a cron job;
 - anything at all while there is no display session.
 
@@ -85,10 +87,10 @@ screen (NG-7), or a terminal prompt it has to answer itself.
 **Limits**
 
 - **A terminal server shared between the desk and remote clients** runs
-  every shell under its own service. Its shells count as outside even when
-  used at the desk. So `kpa unlock` there asks on the terminal, and `kpa
-  copy` there is refused. The launcher and desktop terminals are
-  unaffected.
+  every shell under its own service or in its own logind sessions. Its
+  shells count as outside even when used at the desk. So `kpa unlock`
+  there asks on the terminal, and `kpa copy` there is refused. The
+  launcher and desktop terminals are unaffected.
 - **A multiplexer started from the desktop and attached over SSH** runs in
   the desktop's cgroup. An unlock from it raises the graphical prompt on
   the desk's screen, which the remote user can't see. The prompt timeout
@@ -296,5 +298,7 @@ stays refused while it is locked (§ 5).
    whose shells count as the desktop? That would bring back the graphical
    prompt and `copy` for those shells at the desk. The cost: for the same
    server's remote clients, prompts appear unseen and copies land on the
-   desk's clipboard.
+   desk's clipboard. The override would name a server that runs as a
+   system service by its unit, and one that registers logind sessions by
+   those sessions' `Service` name.
 2. **OSC 52** (§ 5), if a real need appears.

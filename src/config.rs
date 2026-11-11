@@ -127,9 +127,14 @@ impl Config {
 
     /// `home` is a parameter, not read here, so this can be tested without
     /// touching the process environment (`set_var` is `unsafe` in Rust
-    /// 2024 for good reason, with tests on parallel threads). `load` is
-    /// the only caller, and passes the real `$HOME`.
-    fn expand_home(mut self, home: Option<&Path>, config: &Path) -> Result<Config, ConfigError> {
+    /// 2024 for good reason, with tests on parallel threads). `load` passes
+    /// the real `$HOME`; tests that build a daemon in-process pass their
+    /// own. `config` is the config file's path, for error messages.
+    pub fn expand_home(
+        mut self,
+        home: Option<&Path>,
+        config: &Path,
+    ) -> Result<Config, ConfigError> {
         let expand = |path: &Path| {
             expand(path, home).map_err(|kind| ConfigError::Path {
                 config: config.to_path_buf(),

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 mod common;
 
 use kpa::config::Config;
+use kpa::origin::Origin;
 use kpa::policy::{self, Bus, Desk, Locks};
 use kpa::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::server::Server;
@@ -536,9 +537,12 @@ fn the_desk_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         Bus::Address(bus.address.clone()),
     ));
     let unlock = || {
-        server.unlock(&UnlockRequest {
-            db: "personal".to_string(),
-        })
+        server.unlock(
+            &UnlockRequest {
+                db: "personal".to_string(),
+            },
+            Origin::Desktop,
+        )
     };
     let refused = Err(UnlockError::NoDisplay);
 

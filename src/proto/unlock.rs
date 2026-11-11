@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::error::{ErrorCode, ErrorFields};
+use crate::origin::Origin;
 
 /// What `{"op":"unlock", ...}` carries; `Op::Unlock` wraps it. `db` is
 /// required — there is no "unlock everything".
@@ -62,8 +63,8 @@ pub enum UnlockError {
     Stale {
         db: String,
     },
-    /// The screen is known to be locked, so no prompt was raised: nobody
-    /// could answer it behind the locker.
+    /// No prompt was raised, because nobody could answer it: the request
+    /// came from outside the desktop, or the screen is known to be locked.
     NoDisplay,
 }
 
@@ -93,7 +94,7 @@ impl UnlockError {
                 .db(db)
                 .detail("database changed on disk"),
             UnlockError::NoDisplay => {
-                ErrorFields::new(ErrorCode::NoDisplay).detail("the screen is locked")
+                ErrorFields::new(ErrorCode::NoDisplay).detail("no display to prompt on")
             }
         }
     }
@@ -103,6 +104,8 @@ impl UnlockError {
 /// protocol never carries a password, so nothing about *how* the
 /// implementor asks for one appears in this signature.
 pub trait Unlock {
-    /// `Ok` names the database that is now unlocked.
-    fn unlock(&self, request: &UnlockRequest) -> Result<String, UnlockError>;
+    /// `Ok` names the database that is now unlocked. `origin` is where the
+    /// request came from, which decides whether a prompt may be raised on
+    /// screen.
+    fn unlock(&self, request: &UnlockRequest, origin: Origin) -> Result<String, UnlockError>;
 }
