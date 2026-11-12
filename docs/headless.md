@@ -180,7 +180,7 @@ the same synced vault. kpa adds no channel for it.
 - **OSC 52.** kpa would write the secret to the requester's terminal as an
   `ESC ] 52 ; c ; <base64> BEL` escape sequence, and the terminal you sit at
   would put it on its own clipboard. It works over SSH and through
-  multiplexers that pass the sequence on. It is set aside for now:
+  multiplexers that pass the sequence on. It is ruled out for now:
   - It adds a second way out for secrets, which changes G-3 from "only to
     the clipboard".
   - The secret crosses every hop: the remote pty, a multiplexer or terminal
@@ -197,10 +197,10 @@ the same synced vault. kpa adds no channel for it.
     `kpa copy` followed by `wl-paste`, which T-18 already accepts, but it
     makes the scripted read one step shorter.
 
-  OSC 52 is worth revisiting if a real need appears to copy from a remote
-  session with no local vault client. The conditions would be: off by
-  default, per entry or per call, a terminal that supports clearing, and
-  the threat model naming the new channel.
+  A remote session with no local vault client has no way to copy. Any
+  future OSC 52 design would need to be off by default, per entry or per
+  call, require a terminal that supports clearing, and have the threat
+  model name the new channel.
 
 ## 6. Prompt safety nets
 
@@ -301,4 +301,11 @@ stays refused while it is locked (§ 5).
    desk's clipboard. The override would name a server that runs as a
    system service by its unit, and one that registers logind sessions by
    those sessions' `Service` name.
-2. **OSC 52** (§ 5), if a real need appears.
+2. **Remote display sessions.** The desk is the one session logind names as
+   the user's display, and the prompt starts with the daemon's own
+   environment. A graphical session that isn't the desk, such as a remote
+   desktop, is classified Outside. The prompt for a caller in such a
+   session should open in that caller's session, not on the desk's screen.
+   That needs the caller's session display environment, which logind
+   doesn't expose and which isn't per-session in the user manager. The
+   design for finding it is open.
