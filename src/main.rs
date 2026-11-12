@@ -5,13 +5,13 @@
 //! done.
 
 mod client;
+mod tty;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use client::run_client;
 use kpa::config::Config;
 use kpa::log::{self, Level};
 use kpa::output::report_error;
@@ -105,12 +105,12 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Serve { log_level } => run_serve(&socket_path, cli.config, log_level),
-        Command::Status => run_client(&socket_path, Op::Status),
+        Command::Status => client::run_client(&socket_path, Op::Status),
         Command::Unlock { db, tty } => client::run_unlock(&socket_path, db, tty),
-        Command::Lock { db } => run_client(&socket_path, Op::Lock(LockRequest { db })),
-        Command::List { db } => run_client(&socket_path, Op::List(ListRequest { db })),
+        Command::Lock { db } => client::run_client(&socket_path, Op::Lock(LockRequest { db })),
+        Command::List { db } => client::run_client(&socket_path, Op::List(ListRequest { db })),
         Command::Copy { db, uuid, field } => {
-            run_client(&socket_path, Op::Copy(CopyRequest { db, uuid, field }))
+            client::run_client(&socket_path, Op::Copy(CopyRequest { db, uuid, field }))
         }
         Command::Version => unreachable!("handled above, before socket_path is resolved"),
     }
