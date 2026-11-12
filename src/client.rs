@@ -159,8 +159,8 @@ fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientE
         .map_err(|err| ClientError::Connect(socket_path.to_path_buf(), err))?;
     check_peer_uid(socket_path, &stream, rustix::process::geteuid().as_raw())?;
 
-    let text = serde_json::to_string(request).map_err(ClientError::Encode)?;
-    writeln!(stream, "{text}").map_err(ClientError::Send)?;
+    let line = proto::encode_request(request).map_err(ClientError::Encode)?;
+    stream.write_all(&line).map_err(ClientError::Send)?;
 
     let mut line = String::new();
     let n = BufReader::new(stream)

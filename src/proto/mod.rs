@@ -23,7 +23,7 @@ pub use copy::{CopyEntry, CopyError, CopyOutcome, CopyRequest, Field};
 pub use error::ErrorCode;
 pub use list::{List, ListError, ListRequest, WireEntry};
 pub use lock::{Lock, LockError, LockRequest};
-pub use request::{DecodeError, Op, ProtocolError, Request, decode_request};
+pub use request::{DecodeError, Op, ProtocolError, Request, decode_request, encode_request};
 pub use status::{DatabaseStatus, Status};
 pub use unlock::{MAX_PASSWORD_LEN, Password, PasswordError, Unlock, UnlockError, UnlockRequest};
 

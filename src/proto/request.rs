@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+use zeroize::Zeroizing;
 
 use super::VERSION;
 use super::copy::CopyRequest;
@@ -14,6 +15,7 @@ use super::error::{ErrorCode, ErrorFields};
 use super::list::ListRequest;
 use super::lock::LockRequest;
 use super::unlock::UnlockRequest;
+use crate::io::ByteCounter;
 
 /// One request. `op` is `#[serde(flatten)]`ed so the wire shape is a single
 /// flat object (`{"v":1,"op":"unlock","db":"personal"}`) rather than
@@ -95,6 +97,24 @@ pub fn decode_request(line: &str) -> Result<Request, DecodeError> {
     }
 
     serde_json::from_str(line).map_err(|_| DecodeError::MalformedRequest)
+}
+
+/// Serialize `request` into a newline-terminated line, for `send_request`
+/// to write to the socket.
+///
+/// Serialized twice on purpose, the same technique `write_response` uses
+/// for the daemon's replies: once into a [`ByteCounter`] to measure, once
+/// into a `Zeroizing` buffer allocated at exactly that size. An `unlock`
+/// carrying the master password is the one request that holds a secret
+/// (as base64, inside `Password`'s `Serialize`), and a buffer that grows
+/// while being filled frees an unwiped copy at each reallocation.
+pub fn encode_request(request: &Request) -> Result<Zeroizing<Vec<u8>>, serde_json::Error> {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, request)?;
+    let mut buf = Zeroizing::new(Vec::with_capacity(counter.0 + 1));
+    serde_json::to_writer(&mut *buf, request)?;
+    buf.push(b'\n');
+    Ok(buf)
 }
 
 /// Failures that precede dispatch. Unlike an op's error type, this one
