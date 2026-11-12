@@ -2,17 +2,23 @@
 
 ## Open
 
-- [ ] Add macOS support
-- [ ] Document assumptions (Linux only, logind, etc)
-- [ ] SSH agent (continued from https://github.com/n6g7/kpa/pull/22)
-- [ ] Find out why `cargo run -- ...` rebuilds on each run, even with no changes
-- [ ] Passkey provider
-- [ ] Support headless use (no window manager or GUI), per `docs/headless.md`
+Roadmap, in release order. Each item gets its design written before its implementation.
+
+1. [ ] Support headless use (no window manager or GUI), per `docs/headless.md`
   - [x] Prompt safety nets: prompt timeout, a lock kills open prompts, no prompt while the screen is locked
   - [ ] Zeroizing request buffer
   - [x] Origin classifier
   - [ ] Terminal unlock
   - [ ] Copy gated on origin and the desk's state
+2. [ ] SSH agent, per `docs/ssh-agent.md` (design in review, continued from https://github.com/n6g7/kpa/pull/22)
+3. [ ] Passkey "agent" / provider (FIDO2 emulation). Shape to be decided
+4. [ ] Add macOS support (some time later)
+5. [ ] Passkey support via credentialsd (later)
+
+Unscheduled:
+
+- [ ] Document assumptions (Linux only, logind, etc)
+- [ ] Find out why `cargo run -- ...` rebuilds on each run, even with no changes
 
 ## Done
 
