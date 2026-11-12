@@ -159,11 +159,12 @@ failing for an in-scope actor.
   the KDBX decryption. The full fix is upstream: `StringValue` must
   deserialize `@ProtectInMemory` into `Value::protected`. Until then, a
   `list` that returns such a field violates G-3 and T-4 as written.
-- **G-4 Nothing persisted.** kpa itself never writes A-1–A-3 to disk or to
-  its own stdout/stderr, and prevents its own core dumps. Memory holding
-  A-1 and A-2 is locked against swap, best effort: if the locked-memory
-  limit is too small (a KDF's working memory can exceed it), kpa says so
-  and carries on.
+- **G-4 Nothing persisted.** kpa itself — the daemon and every CLI process
+  that holds A-1 — never writes A-1–A-3 to disk or to its own
+  stdout/stderr, and prevents its own core dumps. Memory holding A-1 and
+  A-2 is locked against swap, best effort: if the locked-memory limit is
+  too small (a KDF's working memory can exceed it), kpa says so and
+  carries on.
 - **G-5 Bounded exposure time.** A database locks on screen lock, on
   suspend (before the machine sleeps), after `idle_timeout` without a
   successful `list` of that database and without an unlock that installed
@@ -242,10 +243,10 @@ reaching a response, an error string, or kpa's own stdout/stderr/log; the
 same for a password carried in a request, on either end of the socket.
 
 **T-5 · Secret persisted to disk** (I) — ACT-5, ACT-7 · TB-7 · A-1, A-2 → G-4  
-Response: `PR_SET_DUMPABLE=0` before config or unlock; secret-holding
-memory locked against swap; no logging of secrets (T-4). Residual:
-hibernation, swap beyond the locked-memory limit, `fs.suid_dumpable=2`
-root-owned dumps (NG-3).
+Response: `PR_SET_DUMPABLE=0` before config or unlock, in the daemon and in
+any CLI process that holds A-1; secret-holding memory locked against swap;
+no logging of secrets (T-4). Residual: hibernation, swap beyond the
+locked-memory limit, `fs.suid_dumpable=2` root-owned dumps (NG-3).
 
 **T-6 · Clipboard read by history managers** (I) — ACT-5 · TB-4 · A-2 → G-7, G-5  
 Response: sensitivity tag; kpa owns the offer and drops it at expiry.
