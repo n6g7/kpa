@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0](https://github.com/n6g7/kpa/compare/v0.2.0...v0.3.0) (2026-11-12)
+
+
+### Features
+
+* accept the master password in an unlock request ([#40](https://github.com/n6g7/kpa/issues/40)) ([4e47bbb](https://github.com/n6g7/kpa/commit/4e47bbb6218dd3aa97759cd09a494f815ac1eebc))
+* bound password prompts with a timeout and locks ([#39](https://github.com/n6g7/kpa/issues/39)) ([ad5872e](https://github.com/n6g7/kpa/commit/ad5872eb2c6e1324cd1f508778b0857338a4b13b))
+* gate copy on origin and the desk's active, unlocked state ([#47](https://github.com/n6g7/kpa/issues/47)) ([25adbae](https://github.com/n6g7/kpa/commit/25adbaeb913ef06c69f8abca32319195893f25d9))
+* read the master password from the terminal when there's no display ([#48](https://github.com/n6g7/kpa/issues/48)) ([29dfff5](https://github.com/n6g7/kpa/commit/29dfff55729207cdbee60b2d367406dfe81ad771))
+* refuse on-screen prompts for unlocks from outside the desktop ([#41](https://github.com/n6g7/kpa/issues/41)) ([bc17bcb](https://github.com/n6g7/kpa/commit/bc17bcb5df628ae13fc97ede9e0a10e4454b448a))
+
+
+### Bug Fixes
+
+* don't log "unlocked" when the database was already unlocked ([#43](https://github.com/n6g7/kpa/issues/43)) ([7c6f81c](https://github.com/n6g7/kpa/commit/7c6f81c1c1223c7ca5a1fd83ae6c88ee36b7bc2d))
+* mark every kpa process non-dumpable before dispatch ([#52](https://github.com/n6g7/kpa/issues/52)) ([ff9f38d](https://github.com/n6g7/kpa/commit/ff9f38d48b76bb8b324c7f96999589e67deea9d7))
+* stop build.rs rerunning on every build in git worktrees ([#50](https://github.com/n6g7/kpa/issues/50)) ([4ff296b](https://github.com/n6g7/kpa/commit/4ff296be60d95e9f34aae0d400d6564e55874655))
+* zeroize the CLI's outbound request buffer ([#53](https://github.com/n6g7/kpa/issues/53)) ([118a1cb](https://github.com/n6g7/kpa/commit/118a1cbdee72b4fdf282afe5ed51a4419d75eb74))
+
 ## [0.2.0](https://github.com/n6g7/kpa/compare/v0.1.0...v0.2.0) (2026-11-08)
 
 
