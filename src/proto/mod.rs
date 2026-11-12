@@ -27,30 +27,11 @@ pub use request::{DecodeError, Op, ProtocolError, Request, decode_request, encod
 pub use status::{DatabaseStatus, Status};
 pub use unlock::{MAX_PASSWORD_LEN, Password, PasswordError, Unlock, UnlockError, UnlockRequest};
 
-use std::io::Write;
-
 use serde::Serialize;
 
 use crate::origin::Origin;
 
 use error::serialize_error;
-
-/// A `Write` that only counts, for sizing a buffer before filling it.
-/// Shared by [`encode_request`] and `server::write_response`: both
-/// serialize once to measure, then once more into a buffer allocated at
-/// exactly that size, so the real pass never reallocates.
-pub(crate) struct ByteCounter(pub(crate) usize);
-
-impl Write for ByteCounter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0 += buf.len();
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 /// Protocol version this build speaks. Every `Response` carries this,
 /// regardless of what the request asked for or which version it claimed —

@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
-use super::ByteCounter;
 use super::VERSION;
 use super::copy::CopyRequest;
 use super::error::{ErrorCode, ErrorFields};
 use super::list::ListRequest;
 use super::lock::LockRequest;
 use super::unlock::UnlockRequest;
+use crate::io::ByteCounter;
 
 /// One request. `op` is `#[serde(flatten)]`ed so the wire shape is a single
 /// flat object (`{"v":1,"op":"unlock","db":"personal"}`) rather than
