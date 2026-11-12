@@ -37,9 +37,10 @@ use crate::log;
 use crate::origin::{self, Origin};
 use crate::policy;
 use crate::proto::{
-    self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
-    ListError, ListRequest, Lock, LockError, LockRequest, MAX_PASSWORD_LEN, ProtocolError,
-    Response, Status, Unlock, UnlockError, UnlockRequest, WireEntry,
+    self, ByteCounter, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus,
+    DecodeError, Field, List, ListError, ListRequest, Lock, LockError, LockRequest,
+    MAX_PASSWORD_LEN, ProtocolError, Response, Status, Unlock, UnlockError, UnlockRequest,
+    WireEntry,
 };
 use crate::socket;
 use crate::vault::{self, Fingerprint, VaultError};
@@ -1109,27 +1110,15 @@ pub(crate) fn log_response(response: &Response) {
     }
 }
 
-/// A `Write` that only counts, for sizing a buffer before filling it.
-struct ByteCounter(usize);
-
-impl Write for ByteCounter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0 += buf.len();
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Serialize `response` and send it, newline-terminated.
 ///
-/// Serialized twice on purpose: once to measure, once into a zeroizing
-/// buffer allocated at exactly that size. A `list` response holds every
-/// entry's title, username and URL, and a buffer that grows while being
-/// filled frees an unwiped copy at each reallocation — which is what
-/// survived a lock before (`docs/review-2026-09-secrets.md` finding 5).
+/// Serialized twice on purpose: once to measure (into the shared
+/// [`ByteCounter`], also used by `proto::encode_request` for the CLI's
+/// outbound requests), once into a zeroizing buffer allocated at exactly
+/// that size. A `list` response holds every entry's title, username and
+/// URL, and a buffer that grows while being filled frees an unwiped copy
+/// at each reallocation — which is what survived a lock before
+/// (`docs/review-2026-09-secrets.md` finding 5).
 fn write_response(stream: &mut UnixStream, response: &Response) {
     let mut counter = ByteCounter(0);
     if serde_json::to_writer(&mut counter, response).is_err() {
