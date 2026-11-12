@@ -37,7 +37,7 @@ that can modify a database. `keepass` is also built without its
 | 6   | **TOTP via `keepass`'s `totp` feature, read-only**                                                       | `copy` generates the current code from the `otp` field at copy time; the seed never leaves the process. HOTP is permanently out — counters need writes.                                                                     |
 | 7   | **Idle timeout 30 min per database**, config-overridable                                                               | logind's `Lock` signal already covers screen-lock; this only catches walking away without locking.                                                                                                                            |
 | 8   | **Daemon autostarts locked**                                                                              | A tray should show state from login onward, and nothing prompts until something actually asks.                                                                                                                                |
-| 9   | **Unlock prompt: a `--dmenu`-style password prompt** (e.g. `fuzzel --password --dmenu`) in v1, config key | Trivial to wire up and fits most Wayland setups out of the box. `pinentry` is the better long-term answer for secure memory, but driving Assuan is fiddly — so the prompt is swappable from day one rather than hardcoded.    |
+| 9   | **Unlock prompt: a `--dmenu`-style password prompt** (e.g. `fuzzel --password --dmenu`) in v1, config key; the client's own terminal otherwise | Trivial to wire up and fits most Wayland setups out of the box. `pinentry` is the better long-term answer for secure memory, but driving Assuan is fiddly — so the prompt is swappable from day one rather than hardcoded. A request from outside the desktop never raises it; `kpa unlock` reads the terminal instead (`docs/headless.md` § 4). |
 | 10  | **Multiple databases**, TOML array of tables                                                              | Per-database unlock, per-database tray state.                                                                                                                                                                                 |
 
 ## Architecture
@@ -234,10 +234,14 @@ An `unlock` without a password fails with `no_display`, without
 prompting, when nobody could answer the prompt: the request comes from
 outside the desktop (below), or the screen is known to be locked (§ Lock
 policy). It names no database: the refusal is about where the request can
-be answered, not about the database. `kpa unlock` reports it and exits
-non-zero; reading the password on the client's terminal and sending it in
-the request is the next step of [`headless.md`](./headless.md) § 4. The tray's menu is clicked at the desk,
-so its unlocks count as from the desktop.
+be answered, not about the database. `kpa unlock` answers `no_display` by
+reading the password from its own controlling terminal, with echo off, and
+sending it in a second request; `--tty` reads the terminal right away
+instead of trying a plain request first, which is how a desktop terminal
+asks for the terminal read instead of the graphical prompt
+([`headless.md`](./headless.md) § 4). Without a controlling terminal,
+`kpa unlock` reports `no_display` and exits non-zero. The tray's menu is
+clicked at the desk, so its unlocks count as from the desktop.
 
 A request line is capped at 64 KiB and must arrive within 5 seconds; a
 line over the cap is answered `malformed_request`, and a connection that

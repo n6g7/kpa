@@ -133,7 +133,10 @@ failing for an in-scope actor.
   never leaves the process. It can also enter it over the socket, in an
   `unlock` that carries the master password: the daemon holds the request
   line and the decoded password in zeroizing buffers, for that one request
-  only. A-2 is never in a socket response, stdout,
+  only. On the CLI side, `kpa unlock` holds A-1 the same way, for one
+  request: read from the terminal into a zeroizing buffer, carried in a
+  `Password` the request is serialized around, and dropped once that
+  request's response comes back. A-2 is never in a socket response, stdout,
   stderr, a log, an error string, the tray, a child's argv or environment —
   only in the clipboard offer, after a `copy` naming that exact field.
   `copy` itself offers only for a requester on the desktop, while the
@@ -187,6 +190,11 @@ failing for an in-scope actor.
   entry or field a `copy` resolves to.
 - **G-11 Robust socket.** Malformed, oversized, slow, or flooding clients
   are refused without crashing the daemon or starving other clients.
+- **G-12 No prompt where nobody can see it.** A request from outside the
+  desktop, or one that arrives while the screen is known to be locked,
+  never raises the graphical prompt. `unlock` answers such a request with
+  `no_display` instead, which `kpa unlock` turns into reading the master
+  password from its own terminal.
 
 ## 7. Threats
 
@@ -222,12 +230,16 @@ change, or long-held fd.
 Response: no `get` op; `list` is an index with protected fields and Notes
 omitted; errors carry codes, not vault content; the prompt gets its own
 stderr, never the daemon's; requests are never logged, decode errors carry
-no request content, and a request's password has a redacting `Debug`. In
-scope: a protected field in any response, error message, `Debug`/`Display`
-output, panic message, log line, tray tooltip, or a child process's
-argv/env; the prompt's stdout, stderr, or exit status reaching a response,
-an error string, or kpa's own stdout/stderr/log; the same for a password
-carried in a request.
+no request content, and a request's password has a redacting `Debug`. On
+the CLI: the terminal-read password never reaches argv, an environment
+variable, stdout, stderr, or a log; `kpa unlock` reads it with the
+terminal's echo off, into a zeroizing buffer capped at `MAX_PASSWORD_LEN`
+that never grows, and zeroizes it once the second request's response
+comes back. In scope: a protected field in any response, error message,
+`Debug`/`Display` output, panic message, log line, tray tooltip, or a
+child process's argv/env; the prompt's stdout, stderr, or exit status
+reaching a response, an error string, or kpa's own stdout/stderr/log; the
+same for a password carried in a request, on either end of the socket.
 
 **T-5 · Secret persisted to disk** (I) — ACT-5, ACT-7 · TB-7 · A-1, A-2 → G-4  
 Response: `PR_SET_DUMPABLE=0` before config or unlock; secret-holding
@@ -347,6 +359,18 @@ authorization is ruled out for the reasons in NG-1, and read
 notifications (T-16) are the planned mitigation. In scope: anything that
 lets ACT-10 reach data while every database is locked, unlock without the
 user, or leave something behind in kpa that outlives it.
+
+**T-19 · Misrouted prompt** (S) — ACT-5, ACT-10 · TB-1 · A-1 → G-12  
+A prompt raised where nobody can answer it, or answer it unnoticed: on an
+unattended desk screen, or a terminal read happening somewhere other than
+where the user expects it. Response: classification errs toward the
+terminal rather than the screen (`docs/headless.md` § 3) — the worst a
+misclassification does is ask on a terminal instead of on screen, never
+the other way; an unanswered prompt times out (G-5); a lock kills any
+prompt still open. Residual: a multiplexer attached over SSH runs in the
+desktop's cgroup, so an unlock from it still raises the graphical prompt
+on the desk's screen, which the remote user can't see — bounded by the
+timeout (`docs/headless.md` § 3).
 
 ## 8. Non-goals
 

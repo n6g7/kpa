@@ -10,6 +10,7 @@
 //! structural fact, not for genuinely unused fixtures.
 #![allow(dead_code)]
 
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Once};
@@ -177,5 +178,132 @@ impl InProcessDaemon {
 
     pub fn run(&self, args: &[&str]) -> serde_json::Value {
         run_cli(&self.socket, args)
+    }
+}
+
+/// A pseudo-terminal, for driving `kpa unlock`'s terminal read
+/// (`docs/headless.md` § 4) the way a real shell would: a spawned process
+/// attaches the slave as its controlling terminal (`attach`), and the test
+/// types into and reads from the master (`type_text`, `read_until`),
+/// including checking that echo is actually off (`echoing`).
+pub struct Pty {
+    pub master: std::fs::File,
+    slave_path: std::ffi::CString,
+}
+
+impl Pty {
+    pub fn open() -> Pty {
+        use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+
+        // `NOCTTY`: opening the master must not make it *this* process's
+        // controlling terminal — only the spawned child's, via `attach`.
+        // `CLOEXEC`: otherwise every other test's spawned `kpa` inherits
+        // this master too, across `fork` — tests run as threads of one
+        // process, and `exec` is the only place a leftover fd like that
+        // gets closed.
+        let master =
+            openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).expect("openpt");
+        grantpt(&master).expect("grantpt");
+        unlockpt(&master).expect("unlockpt");
+        let slave_path = ptsname(&master, Vec::new()).expect("ptsname");
+        Pty {
+            master: std::fs::File::from(master),
+            slave_path,
+        }
+    }
+
+    /// Makes the slave `cmd`'s controlling terminal and its stdin, stdout
+    /// and stderr, so `/dev/tty` inside it resolves to this pty.
+    ///
+    /// The closure runs in the forked child, between `fork` and `exec`
+    /// (`CommandExt::pre_exec`), where only async-signal-safe calls are
+    /// safe to make — `setsid`, `open`, `ioctl` and `dup2`/`close` all
+    /// qualify. `setsid` first detaches the child from any controlling
+    /// terminal the test binary itself has, so opening the slave right
+    /// after, without `O_NOCTTY`, acquires it as this child's own;
+    /// `TIOCSCTTY` is belt and suspenders for a kernel that didn't do that
+    /// implicitly.
+    pub fn attach(&self, cmd: &mut Command) {
+        let slave_path = self.slave_path.clone();
+        // SAFETY: see the doc comment above — every call the closure makes
+        // is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let fd = libc::open(slave_path.as_ptr(), libc::O_RDWR);
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let _ = libc::ioctl(fd, libc::TIOCSCTTY as _, 0);
+                libc::dup2(fd, 0);
+                libc::dup2(fd, 1);
+                libc::dup2(fd, 2);
+                if fd > 2 {
+                    libc::close(fd);
+                }
+                Ok(())
+            });
+        }
+    }
+
+    /// Whether the pty's termios currently has `ECHO` set. Queryable from
+    /// either end of the pair, which is what lets a test check it without
+    /// opening the slave itself.
+    pub fn echoing(&self) -> bool {
+        rustix::termios::tcgetattr(&self.master)
+            .expect("tcgetattr on the pty master")
+            .local_modes
+            .contains(rustix::termios::LocalModes::ECHO)
+    }
+
+    /// Types `text` into whatever's attached to the slave.
+    pub fn type_text(&self, text: &str) {
+        use std::io::Write as _;
+        (&self.master)
+            .write_all(text.as_bytes())
+            .expect("writing to pty master");
+    }
+
+    /// Reads from the master until `needle` appears in what's been read so
+    /// far, or `timeout` passes (panicking then — a test hang is a bug,
+    /// not a slow pass). Polls with a deadline rather than blocking, so a
+    /// child that never answers shows up as a timeout instead of a hang.
+    pub fn read_until(&self, needle: &str, timeout: std::time::Duration) -> String {
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+        let deadline = std::time::Instant::now() + timeout;
+        let mut out = String::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            if out.contains(needle) {
+                return out;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !left.is_zero(),
+                "timed out waiting for {needle:?}; read so far: {out:?}"
+            );
+            let mut fds = [PollFd::new(&self.master, PollFlags::IN)];
+            let ts = Timespec {
+                tv_sec: left.as_secs().try_into().unwrap_or(i64::MAX),
+                tv_nsec: left.subsec_nanos().into(),
+            };
+            match poll(&mut fds, Some(&ts)) {
+                Ok(_) => {}
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(err) => panic!("poll on pty master: {err}"),
+            }
+            if fds[0].revents().is_empty() {
+                continue; // The poll above timed out this round.
+            }
+            match rustix::io::read(&self.master, &mut buf[..]) {
+                Ok(0) => continue,
+                Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
+                Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => continue,
+                Err(err) => panic!("reading pty master: {err}"),
+            }
+        }
     }
 }

@@ -129,6 +129,9 @@ and drive it from another:
 ```sh
 cargo run -- status            # lock state of every configured database
 cargo run -- unlock personal   # runs the configured prompt for a password
+                                # (or reads it from your terminal if there's
+                                # no display to prompt on; --tty skips
+                                # straight to that)
 cargo run -- list              # every entry in every unlocked database (alias: ls)
 cargo run -- list personal     # just the one
 cargo run -- lock personal     # lock one

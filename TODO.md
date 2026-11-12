@@ -8,7 +8,7 @@ Roadmap, in release order. Each item gets its design written before its implemen
   - [x] Prompt safety nets: prompt timeout, a lock kills open prompts, no prompt while the screen is locked
   - [ ] Zeroizing request buffer
   - [x] Origin classifier
-  - [ ] Terminal unlock
+  - [x] Terminal unlock
   - [x] Copy gated on origin and the desk's state
 2. [ ] SSH agent, per `docs/ssh-agent.md` (design in review, continued from https://github.com/n6g7/kpa/pull/22)
 3. [ ] Passkey "agent" / provider (FIDO2 emulation). Shape to be decided

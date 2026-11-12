@@ -2,14 +2,18 @@
 //! temp socket and config, then drives it through the actual `kpa` client
 //! subcommands — not a hand-rolled socket client — so this exercises the
 //! real protocol round-trip an operator would see. The raw-socket tests are
-//! the exception: they send requests no client subcommand sends, such as a
-//! wrong `v` or a password in the request.
+//! the exception: they send requests no client subcommand builds on its
+//! own, such as a wrong `v` or a password typed directly into the request
+//! rather than read from a terminal.
 //!
 //! Tests that unlock through the prompt run the daemon in-process
 //! (`common::InProcessDaemon`), where every connection counts as coming
 //! from the desktop: a test runner is rarely in the display session, and
 //! the spawned `kpa serve` would answer its `unlock` with `no_display`. The
-//! rest spawn the real binary.
+//! rest spawn the real binary — including the `terminal_unlock` module at
+//! the bottom, which drives `kpa unlock`'s terminal read
+//! (`docs/headless.md` § 4) through a real pty, and relies on exactly that
+//! `no_display` to exercise the two-step flow against a spawned daemon.
 
 mod common;
 
@@ -978,4 +982,189 @@ fn copy_of_totp_without_a_valid_otp_field_is_field_empty() {
         assert_eq!(copied["ok"], false, "{title}: {copied}");
         assert_eq!(copied["error"], "field_empty", "{title}: {copied}");
     }
+}
+
+/// `kpa unlock`'s terminal read (`docs/headless.md` § 4): `--tty` and the
+/// two-step flow it falls back to from a plain `no_display`, both driven
+/// through a real pty so the password really does go in with echo off.
+mod terminal_unlock {
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    use super::{in_process_with_prompt, no_prompt_daemon};
+    use crate::common::{self, Pty};
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Spawns `kpa --socket <socket> unlock [args]` attached to `pty` as
+    /// its controlling terminal, stdin/stdout/stderr included, so
+    /// `/dev/tty` inside it resolves to `pty`'s slave.
+    fn spawn_unlock(socket: &std::path::Path, args: &[&str], pty: &Pty) -> std::process::Child {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kpa"));
+        cmd.arg("--socket")
+            .arg(socket)
+            .arg("unlock")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        pty.attach(&mut cmd);
+        cmd.spawn().expect("failed to spawn kpa unlock")
+    }
+
+    /// `--tty` skips straight to the terminal: a prompt that would fail is
+    /// configured and never has to run for this to succeed.
+    #[test]
+    fn unlock_tty_reads_the_password_with_echo_off() {
+        let daemon = in_process_with_prompt("exit 1");
+        let pty = Pty::open();
+        let mut child = spawn_unlock(&daemon.socket, &["--tty", "personal"], &pty);
+
+        pty.read_until("Master password: ", TIMEOUT);
+        assert!(
+            !pty.echoing(),
+            "echo should be off while reading the password"
+        );
+
+        pty.type_text(&format!("{}\n", common::PASSWORD));
+
+        let output = pty.read_until(r#""ok":true"#, TIMEOUT);
+        assert!(output.contains(r#""db":"personal""#), "{output}");
+        assert!(
+            !output.contains(common::PASSWORD),
+            "the password must never be echoed back: {output}"
+        );
+        assert!(
+            child
+                .wait()
+                .expect("failed to wait for kpa unlock")
+                .success(),
+            "kpa unlock --tty should exit 0 on success"
+        );
+    }
+
+    /// The headless flow end to end: a plain request from a spawned
+    /// daemon (classified `Outside`, `docs/headless.md` § 3) gets
+    /// `no_display` without ever running its failing prompt, which is
+    /// what sends `kpa unlock` to the terminal on its own, with no
+    /// `--tty`.
+    #[test]
+    fn a_plain_unlock_falls_back_to_the_terminal_on_no_display() {
+        let daemon = no_prompt_daemon();
+        let pty = Pty::open();
+        let mut child = spawn_unlock(&daemon.socket, &["personal"], &pty);
+
+        pty.read_until("Master password: ", TIMEOUT);
+        assert!(!pty.echoing());
+
+        pty.type_text(&format!("{}\n", common::PASSWORD));
+
+        let output = pty.read_until(r#""ok":true"#, TIMEOUT);
+        assert!(output.contains(r#""db":"personal""#), "{output}");
+        assert!(
+            child
+                .wait()
+                .expect("failed to wait for kpa unlock")
+                .success()
+        );
+    }
+
+    #[test]
+    fn unlock_tty_with_a_wrong_password_is_wrong_credentials() {
+        let daemon = in_process_with_prompt("exit 1");
+        let pty = Pty::open();
+        let mut child = spawn_unlock(&daemon.socket, &["--tty", "personal"], &pty);
+
+        pty.read_until("Master password: ", TIMEOUT);
+        pty.type_text("not-the-real-password\n");
+
+        let output = pty.read_until(r#""error""#, TIMEOUT);
+        assert!(output.contains("wrong_credentials"), "{output}");
+        assert!(
+            !child
+                .wait()
+                .expect("failed to wait for kpa unlock")
+                .success()
+        );
+    }
+
+    /// No controlling terminal at all (a cron job, say): `kpa unlock`
+    /// reports `no_display` and exits non-zero, without ever touching a
+    /// terminal — `setsid` here detaches the child from whatever
+    /// controlling terminal the test binary itself might have.
+    #[test]
+    fn unlock_without_a_controlling_terminal_reports_no_display() {
+        use std::os::unix::process::CommandExt as _;
+
+        let daemon = no_prompt_daemon();
+
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kpa"));
+        cmd.arg("--socket")
+            .arg(&daemon.socket)
+            .arg("unlock")
+            .arg("personal")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // SAFETY: `setsid` alone is async-signal-safe. It puts the child
+        // in a new session with no controlling terminal, which is exactly
+        // the condition under test.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = cmd.output().expect("failed to run kpa unlock");
+
+        assert!(!output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("no_display"), "{stdout}");
+    }
+
+    /// Without `--tty`, the same `no_display` line the first request got
+    /// is what's printed — this pins it down to the exact bytes, not just
+    /// the error code.
+    #[test]
+    fn unlock_without_a_controlling_terminal_prints_the_original_no_display_line() {
+        use std::os::unix::process::CommandExt as _;
+
+        let daemon = no_prompt_daemon();
+        let direct = daemon.run(&["unlock", "personal"]);
+        assert_eq!(direct["error"], "no_display", "{direct}");
+
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kpa"));
+        cmd.arg("--socket")
+            .arg(&daemon.socket)
+            .arg("unlock")
+            .arg("personal")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = cmd.output().expect("failed to run kpa unlock");
+        let printed: serde_json::Value =
+            serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
+                .expect("printed line should be the daemon's JSON response");
+        assert_eq!(printed, direct);
+    }
+
+    // No pty test for a password that overflows `MAX_PASSWORD_LEN`: the
+    // kernel's own canonical-mode line buffer caps an unterminated line at
+    // very close to that same size, with no documented, version-stable
+    // behavior for what happens past it (deliver what's queued so far,
+    // drop the rest, or block the writer) — exactly the ambiguity that
+    // makes a real tty the wrong tool for pinning this bound down. That
+    // bound is `read_password_line`'s own, tested deterministically
+    // against a plain pipe in `src/main.rs`'s
+    // `a_line_over_the_limit_is_refused_rather_than_read_in_parts`.
 }
