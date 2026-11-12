@@ -8,6 +8,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Debuginfo makes every test binary huge; with the cached target/
+      # it has filled the runner's disk during linking. CI never reads
+      # the debuginfo.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
 
