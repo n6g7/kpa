@@ -10,7 +10,10 @@ Roadmap, in release order. Each item gets its design written before its implemen
   - [x] Origin classifier
   - [x] Terminal unlock
   - [x] Copy gated on origin and the desk's state
-2. [ ] SSH agent, per `docs/ssh-agent.md` (design in review, continued from https://github.com/n6g7/kpa/pull/22)
+2. [ ] SSH agent, per `docs/ssh-agent.md`. The release waits for `ssh-key` 0.7.0
+  - [ ] Local agent: discovery, key cache, on-screen approvals, `kpa ssh keys`, session wiring
+  - [ ] Unlock on demand, and `kpa ssh approve` for requests from outside the desktop
+  - [ ] Forwarding with per-session approvals
 3. [ ] Passkey "agent" / provider (FIDO2 emulation). Shape to be decided
 4. [ ] Add macOS support (some time later)
 5. [ ] Passkey support via credentialsd (later)
