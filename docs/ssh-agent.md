@@ -1,8 +1,8 @@
 # kpa — SSH agent (proposal)
 
-kpa serves the SSH keys stored in its databases, replacing KeePassXC's SSH
-agent integration. KeePassXC remains a vault editor if wanted, but stops
-handling SSH. Linux only, like the rest of kpa: a machine without kpa keeps
+kpa serves the SSH keys stored in its databases, replacing a KeePass
+client's SSH agent integration. The client remains a vault editor if
+wanted, but stops handling SSH. Linux only, like the rest of kpa: a machine without kpa keeps
 its own KeePass client's agent over the same synced vault (§ 2).
 
 This is a proposal: nothing here is built. It reverses one line of
@@ -104,7 +104,7 @@ machine's screen.
 
 ## 4. Approaches
 
-**A. Push keys into an existing agent** (KeePassXC's model). On unlock, kpa
+**A. Push keys into an existing agent**, as KeePass clients do. On unlock, kpa
 parses each key and sends it to `$SSH_AUTH_SOCK` with
 `SSH_AGENTC_ADD_ID_CONSTRAINED` (lifetime, confirm). On lock it sends
 `SSH_AGENTC_REMOVE_IDENTITY`.
@@ -131,7 +131,7 @@ Rejected. It stays the answer for keys that can't live in the vault (§ 2).
 | Local vs forwarded          | Only via destination constraints, fixed when the key is added                                                                                | Decided per request                                       |
 | Idle timer                  | kpa cannot see SSH use, so the idle lock removes keys mid-session                                                                            | kpa decides what counts as activity (§ 6.9)               |
 | Crypto in kpa               | Parse and decrypt the OpenSSH key file, which the agent needs in its own wire format                                                         | The same, plus calling `sign`                             |
-| Compatible agents           | OpenSSH's `ssh-agent`. Not `gpg-agent`: KeePassXC's docs note it cannot remove added keys                                                    | Any agent-protocol client                                 |
+| Compatible agents           | OpenSSH's `ssh-agent`. Not `gpg-agent`, which cannot remove added keys                                                                       | Any agent-protocol client                                 |
 
 The "Write UI, not crypto" rule in [`background.md`](./background.md) still
 holds under B. The new code is protocol framing, parsing and policy.
@@ -291,8 +291,8 @@ scans it:
    opted-in databases is served from the first one in config order.
 
 The private key is decrypted at its first signature. An encrypted key's
-passphrase is the entry's Password field, the convention KeePassXC already
-uses. The decrypted key is cached in the database's `Slot` until lock. Each
+passphrase is the entry's Password field, the convention KeePass clients
+already use. The decrypted key is cached in the database's `Slot` until lock. Each
 decryption runs bcrypt-pbkdf, so it happens outside the vault mutex, under
 the same epoch check as unlock.
 
@@ -329,9 +329,10 @@ the keys the desk keeps off forwarding (S8).
   exist. Config decides whether that database is served at all, and every
   policy setting: approvals, forwarding, `serve = false`. No vault content
   can make a key forwardable or exempt from approval.
-- **No XML parser.** KeePassXC's `KeeAgent.settings` attachment and its
-  per-entry options are ignored. A key switched off for KeePassXC's agent
-  is still served by kpa unless an override says `serve = false`.
+- **No XML parser.** Per-entry agent settings that KeePass clients store
+  in the vault, such as a `KeeAgent.settings` attachment, are ignored. A
+  key switched off for a client's agent is still served by kpa unless an
+  override says `serve = false`.
 
 `kpa ssh keys <database>` prints each key found in an unlocked database
 (type, fingerprint, entry title) with a ready-to-paste override block, and
@@ -555,21 +556,22 @@ the agent into the session (§ 8). Databases and keys stay in
 
 ## 8. Wiring a desktop
 
-The setup kpa replaces, on a typical NixOS desktop with KeePassXC:
+The setup kpa replaces, on a typical NixOS desktop with a KeePass client:
 
 - **gcr-ssh-agent owns `SSH_AUTH_SOCK`.** Some NixOS desktop modules
   enable gnome-keyring by default, and it brings gcr-ssh-agent with it.
   Its socket unit puts `SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/gcr/ssh` into the
   systemd user manager's environment, which the graphical session
   inherits.
-- **KeePassXC feeds it.** With `SSHAgent.Enabled`, KeePassXC adds its keys
-  to whatever `SSH_AUTH_SOCK` points at when a database unlocks, and
-  removes them on lock. KeePassXC is a client of the agent, not the agent.
+- **The KeePass client feeds it.** With its SSH agent integration on, the
+  client adds its keys to whatever `SSH_AUTH_SOCK` points at when a
+  database unlocks, and removes them on lock. It is a client of the agent,
+  not the agent.
 - **Sessions outside the desktop get nothing.** An SSH login or a
   terminal-server shell doesn't read the user manager's environment, so
   `SSH_AUTH_SOCK` is unset there. Even with it set, the agent is empty
-  whenever KeePassXC is locked, and KeePassXC can't be unlocked without its
-  GUI.
+  whenever the client is locked, and the client can't be unlocked without
+  its GUI.
 
 **Changes**
 
@@ -580,7 +582,7 @@ The setup kpa replaces, on a typical NixOS desktop with KeePassXC:
 2. **Turn off what kpa replaces.**
    - Set `services.gnome.gcr-ssh-agent.enable = false`. gnome-keyring keeps
      its Secret Service role.
-   - Set KeePassXC's `SSHAgent.Enabled = false`.
+   - Turn off the KeePass client's SSH agent integration.
    - gcr injects its own `SSH_AUTH_SOCK` value into the user manager, and
      it would win over step 3.
 3. **Point the desktop at kpa.** `services.kpa.sshAgent.enable` sets
@@ -787,7 +789,7 @@ programs' settings.
 
 - **Fixture**: `tests/fixture.sh` adds entries with an Ed25519 key, a
   passphrase-protected key, an RSA key, and a PEM key that must be skipped
-  (`ssh-keygen`, `keepassxc-cli attachment-import`).
+  (generated with `ssh-keygen`, imported as attachments).
 - **`tests/agent.rs`** spawns `kpa serve` and drives it with the real
   OpenSSH tools:
   - `ssh-add -L` lists the keys from the cache while the database is
@@ -823,7 +825,7 @@ once it lands.
    - `kpa ssh keys`, logging, fixtures, fuzz target, threat-model and
      design edits, `services.kpa.sshAgent.enable`.
    - The user unlocks from the launcher or tray first.
-   - Enough to switch off KeePassXC's agent on Linux.
+   - Enough to switch off a KeePass client's agent on Linux.
 2. **Unlock on demand, and requests from outside the desktop.**
    - `{message}`, backoff, unlock waiters.
    - Pending requests, `kpa ssh approve`, the hints in key comments.
