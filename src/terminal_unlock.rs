@@ -13,7 +13,7 @@ use kpa::proto::{
 };
 use zeroize::Zeroizing;
 
-use super::{ClientError, print_and_exit, send_request};
+use super::client::{ClientError, print_and_exit, send_request};
 
 /// Whether `line` is the daemon's `no_display` error: nobody could answer
 /// an on-screen prompt for this request (`docs/headless.md` § 4).
