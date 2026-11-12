@@ -657,7 +657,7 @@ impl List for Server {
 }
 
 impl CopyEntry for Server {
-    fn copy(&self, request: &CopyRequest) -> Result<CopyOutcome, CopyError> {
+    fn copy(&self, request: &CopyRequest, origin: Origin) -> Result<CopyOutcome, CopyError> {
         let name = request.db.as_str();
         let db = || name.to_string();
 
@@ -676,6 +676,14 @@ impl CopyEntry for Server {
             let Some(slot) = dbs.get_mut(name) else {
                 return Err(CopyError::UnknownDb { db: db() });
             };
+            // No secret reaches the clipboard where nobody can paste it
+            // from (`docs/headless.md` § 5) — checked here, same place
+            // `unlock` reads `Desk::may_prompt`, and before the `Locked`
+            // check below so an outside caller learns no more than an
+            // unknown database does.
+            if !self.desk().may_copy(origin) {
+                return Err(CopyError::NoDisplay { db: db() });
+            }
             let Some(database) = slot.db.as_ref() else {
                 return Err(CopyError::Locked { db: db() });
             };
@@ -1478,7 +1486,23 @@ mod tests {
              [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n"
         );
         let (backend, _offered) = clip::RecordingBackend::new();
-        Server::with_clipboard(Config::parse(&config).expect("valid config"), backend)
+        let server = Server::with_clipboard(Config::parse(&config).expect("valid config"), backend);
+        allow_copy(&server);
+        server
+    }
+
+    /// Marks the desk active and unlocked, so `CopyEntry::copy` with
+    /// `Origin::Desktop` passes its gate — every copy test below that
+    /// isn't itself about the gate calls this on its server, the same way
+    /// those tests always ran before `may_copy` existed.
+    fn allow_copy(server: &Server) {
+        policy::Locks::set_desk(
+            server,
+            policy::Desk::Unlocked {
+                session: "31".to_string(),
+                active: true,
+            },
+        );
     }
 
     /// Stands in for a successful unlock without a file or a prompt. Does not
@@ -1550,6 +1574,7 @@ mod tests {
                 .expect("valid config"),
             backend,
         );
+        allow_copy(&server);
         (server, offered)
     }
 
@@ -1563,6 +1588,7 @@ mod tests {
                 uuid: uuid::Uuid::nil(),
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect_err("no such database");
         assert_eq!(
@@ -1583,6 +1609,7 @@ mod tests {
                 uuid: uuid::Uuid::nil(),
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect_err("database is locked");
         assert_eq!(
@@ -1591,6 +1618,50 @@ mod tests {
                 db: "personal".to_string()
             }
         );
+    }
+
+    /// `docs/headless.md` § 5: `copy` is refused with `no_display` for a
+    /// requester outside the desktop, a desk that's locked, inactive, or
+    /// has no display session at all — and the gate fires before it even
+    /// gets to `Locked`, so an outside caller learns no more than that.
+    #[test]
+    fn copy_is_refused_without_a_desktop_requester_on_an_active_unlocked_desk() {
+        let request = || CopyRequest {
+            db: "personal".to_string(),
+            uuid: uuid::Uuid::nil(),
+            field: Field::Password,
+        };
+        let refused = CopyError::NoDisplay {
+            db: "personal".to_string(),
+        };
+
+        let (server, _offered) = copy_server();
+        unlock_with_entry(&server, "personal");
+
+        assert_eq!(
+            CopyEntry::copy(&server, &request(), Origin::Outside),
+            Err(refused.clone()),
+            "a requester outside the desktop"
+        );
+
+        for desk in [
+            policy::Desk::Locked {
+                session: "31".to_string(),
+                active: true,
+            },
+            policy::Desk::Unlocked {
+                session: "31".to_string(),
+                active: false,
+            },
+            policy::Desk::NoSession,
+        ] {
+            policy::Locks::set_desk(&server, desk.clone());
+            assert_eq!(
+                CopyEntry::copy(&server, &request(), Origin::Desktop),
+                Err(refused.clone()),
+                "desk {desk:?}"
+            );
+        }
     }
 
     #[test]
@@ -1605,6 +1676,7 @@ mod tests {
                 uuid: uuid::Uuid::new_v4(),
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect_err("no such entry");
         assert_eq!(
@@ -1627,6 +1699,7 @@ mod tests {
                 uuid,
                 field: Field::Url,
             },
+            Origin::Desktop,
         )
         .expect_err("url was never set");
         assert_eq!(
@@ -1653,6 +1726,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect("entry and field exist");
 
@@ -1681,6 +1755,7 @@ mod tests {
             .expect("valid config"),
             backend,
         );
+        allow_copy(&server);
         (server, offers)
     }
 
@@ -1700,6 +1775,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -1735,6 +1811,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -1767,6 +1844,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -1793,6 +1871,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -1819,6 +1898,7 @@ mod tests {
             .expect("valid config"),
             backend,
         );
+        allow_copy(&server);
         let uuid = unlock_with_entry(&server, "personal");
         CopyEntry::copy(
             &server,
@@ -1827,6 +1907,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -1857,6 +1938,7 @@ mod tests {
                     uuid,
                     field: Field::Password,
                 },
+                Origin::Desktop,
             )
             .is_ok()
         );
@@ -1879,6 +1961,7 @@ mod tests {
                 uuid: uuid::Uuid::new_v4(),
                 field: Field::Password,
             },
+            Origin::Desktop,
         );
         assert!(refused.is_err());
         assert!(idle_lock_fires(&server));
@@ -2050,6 +2133,7 @@ mod tests {
             .expect("valid config"),
             backend,
         );
+        allow_copy(&server);
         (server, offers)
     }
 
@@ -2080,6 +2164,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -2170,6 +2255,7 @@ mod tests {
                 uuid: uuid::Uuid::nil(),
                 field: Field::Password,
             },
+            Origin::Desktop,
         );
 
         assert!(
@@ -2234,6 +2320,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -2274,6 +2361,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
+            Origin::Desktop,
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -2349,6 +2437,7 @@ mod tests {
             &server,
             policy::Desk::Locked {
                 session: "1".to_string(),
+                active: true,
             },
         );
         assert_eq!(unlock(&server, "personal"), Err(UnlockError::NoDisplay));
@@ -2358,6 +2447,7 @@ mod tests {
             &server,
             policy::Desk::Unlocked {
                 session: "1".to_string(),
+                active: true,
             },
         );
         assert_eq!(
@@ -2382,6 +2472,7 @@ mod tests {
             &server,
             policy::Desk::Unlocked {
                 session: "1".to_string(),
+                active: true,
             },
         );
 
@@ -2414,6 +2505,7 @@ mod tests {
             policy::Desk::NoSession,
             policy::Desk::Locked {
                 session: "1".to_string(),
+                active: true,
             },
         ] {
             policy::Locks::set_desk(&server, desk);

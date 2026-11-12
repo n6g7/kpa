@@ -110,11 +110,18 @@ pub fn run_cli(socket: &Path, args: &[&str]) -> serde_json::Value {
 /// The daemon, run on threads of the test process rather than as a
 /// spawned `kpa serve`, and driven with the real `kpa` CLI over its socket.
 ///
-/// Every connection counts as coming from the desktop
-/// (`Server::assume_origin`), so `unlock` raises the configured prompt
-/// wherever the tests run: a test runner is rarely in the display
-/// session. No logind watch and no tray are started. The daemon's threads
-/// run until the test binary exits.
+/// Every connection counts as coming from the desktop by default
+/// (`Server::assume_origin`; `with_origin` overrides it), so `unlock`
+/// raises the configured prompt wherever the tests run: a test runner is
+/// rarely in the display session. No logind watch runs, so nothing
+/// publishes the desk's state on its own — `with_config` and `with_origin`
+/// seed it as an active, unlocked session (`policy::Locks::set_desk`),
+/// standing in for logind the same way `assume_origin` stands in for the
+/// peer's cgroup, so `copy` passes its gate the way it always did before
+/// that gate existed. A test about the gate itself (an `Outside` origin, or
+/// a locked/inactive/absent desk) overrides either through `self.server`.
+/// No tray is started either. The daemon's threads run until the test
+/// binary exits.
 ///
 /// What this doesn't cover, and the tests on the spawned binary do:
 /// `kpa serve`'s argument and config-file handling, its startup
@@ -122,6 +129,7 @@ pub fn run_cli(socket: &Path, args: &[&str]) -> serde_json::Value {
 /// stderr of its own.
 pub struct InProcessDaemon {
     pub socket: PathBuf,
+    pub server: Arc<kpa::server::Server>,
     _dir: tempfile::TempDir,
 }
 
@@ -132,17 +140,39 @@ impl InProcessDaemon {
     }
 
     pub fn with_config(config: kpa::config::Config) -> InProcessDaemon {
+        InProcessDaemon::with_origin(config, kpa::origin::Origin::Desktop)
+    }
+
+    /// Like `with_config`, but classifies every connection as `origin`
+    /// instead of the default `Desktop` — for copy-gating tests that need
+    /// an `Outside` requester.
+    pub fn with_origin(
+        config: kpa::config::Config,
+        origin: kpa::origin::Origin,
+    ) -> InProcessDaemon {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let socket = dir.path().join("sock");
         let server = Arc::new(kpa::server::Server::new(config));
-        server.assume_origin(kpa::origin::Origin::Desktop);
+        server.assume_origin(origin);
+        kpa::policy::Locks::set_desk(
+            &server,
+            kpa::policy::Desk::Unlocked {
+                session: "test".to_string(),
+                active: true,
+            },
+        );
         // Not `socket::bind_socket`: it sets the process-wide umask for the
         // bind, and a directory another test thread created meanwhile
         // would come out without its search bit.
         let listener =
             std::os::unix::net::UnixListener::bind(&socket).expect("failed to bind socket");
-        std::thread::spawn(move || kpa::server::serve(server, listener));
-        InProcessDaemon { socket, _dir: dir }
+        let serving = server.clone();
+        std::thread::spawn(move || kpa::server::serve(serving, listener));
+        InProcessDaemon {
+            socket,
+            server,
+            _dir: dir,
+        }
     }
 
     pub fn run(&self, args: &[&str]) -> serde_json::Value {

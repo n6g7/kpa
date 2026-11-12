@@ -257,8 +257,9 @@ service (a cron job, a terminal server's shells), no display session at
 all, and any
 peer whose cgroup can't be read or parsed, including one that exited
 first. The origin is logged at `debug`, and decides whether `unlock` may
-prompt on screen (`Desk::may_prompt`). It decides where to ask, not who may
-ask: a same-uid process can start work in another cgroup.
+prompt on screen (`Desk::may_prompt`) and whether `copy` may reach the
+clipboard (`Desk::may_copy`, § Clipboard). It decides where to ask, not
+who may ask: a same-uid process can start work in another cgroup.
 
 **`list` never returns secrets** — it is an index. That holds for any field
 the user marked protected in their KeePass client, not just `Password`: a
@@ -362,6 +363,17 @@ managers check to skip passwords. (`wl-copy --sensitive` offers exactly this —
 `wl-clipboard/src/types/copy-action.c:76-80` — so the CLI is a viable stage-1
 shortcut.)
 
+**`copy` needs a desktop requester on an active, unlocked display
+session** (`docs/headless.md` § 5): the requester is classified as on the
+desktop the same way `unlock` is (§ Protocol), and the desk's state
+(§ Lock policy) must be an active display session with `LockedHint`
+false. Anything else — outside the desktop, no session, inactive, or
+locked — fails with `no_display`, and the clipboard is never touched.
+`active` is logind's `Active` session property, published alongside
+`LockedHint` but never treated as a lock trigger: counting an inactive
+session (a VT switch away from it) as locked would make kpa lock the
+vault just for that.
+
 **Expiry is correct by construction because we own the source.** After
 `clipboard_timeout`, drop it. If the user copied something else meanwhile, the
 compositor already replaced our source and the drop is a no-op — no content
@@ -387,11 +399,14 @@ Prompts are bounded too:
 
 The logind watch publishes **the desk's state** to the server: no display
 session, or the display session's id with its `LockedHint` (locked or
-unlocked). It is read on subscribing, whenever `User.Display` changes, and
-on each `LockedHint` change, and is "no display session" while the watch is
-down. The classification in § Protocol reads the session's id, and the
-prompt gate reads both: a prompt only for a requester on the desktop, and
-not while the desk is locked.
+unlocked) and its `Active`. It is read on subscribing, whenever
+`User.Display` changes, and on each `LockedHint` or `Active` change, and
+is "no display session" while the watch is down. The classification in §
+Protocol reads the session's id, the prompt gate reads the session and
+`LockedHint`: a prompt only for a requester on the desktop, and not while
+the desk is locked. `copy`'s gate (§ Clipboard) also reads `Active`.
+`Active` never feeds the prompt gate and never locks anything on its
+own — only `LockedHint` does.
 
 The prompt runs in its own process group, and killing it kills the whole
 group, so a wrapper script's own prompt window goes too.

@@ -5,8 +5,8 @@
 //!
 //! - [`watch_forever`] owns a D-Bus connection to logind. It turns signals
 //!   and property changes into events: a `Lock` signal on the user's
-//!   display session, that session's `LockedHint`, `PrepareForSleep`, and a
-//!   lost subscription.
+//!   display session, that session's `LockedHint` and `Active`,
+//!   `PrepareForSleep`, and a lost subscription.
 //! - [`Policy`] decides what to do with an event: lock, tell the server
 //!   the desk's state ([`Desk`]), and hold or release a `delay` sleep
 //!   inhibitor. It sees only the [`Locks`] and
@@ -64,8 +64,9 @@ pub enum Event {
     /// desk locked.
     ScreenLocked,
     /// The desk's state: read on subscribing, whenever the display session
-    /// changes, and on each change of its `LockedHint`. [`Desk::Locked`]
-    /// locks.
+    /// changes, and on each change of its `LockedHint` or `Active`.
+    /// [`Desk::Locked`] locks; `Active` never does (`Desk`'s own doc
+    /// comment).
     Desk(Desk),
     /// logind's `PrepareForSleep`: `true` just before sleep, `false` on resume.
     Sleeping(bool),
@@ -83,7 +84,11 @@ pub enum Event {
 ///
 /// Only `LockedHint` makes the desk locked. A locker that only sends the
 /// `Lock` signal never reports the unlock (ASM-7), so its desk stays
-/// [`Desk::Unlocked`].
+/// [`Desk::Unlocked`]. `active` is a separate fact, carried alongside
+/// `LockedHint` for [`may_copy`](Desk::may_copy) alone: counting an
+/// inactive session (one a VT switch moved away from) as locked would make
+/// kpa lock the vault just for that, so `active` never touches
+/// [`is_locked`](Desk::is_locked) or [`may_prompt`](Desk::may_prompt).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Desk {
     /// No display session (`User.Display` is `/`), or no working logind
@@ -91,19 +96,48 @@ pub enum Desk {
     #[default]
     NoSession,
     /// The display session `session` (its logind id), with `LockedHint`
-    /// true.
-    Locked { session: String },
-    /// The display session `session`, with `LockedHint` false.
-    Unlocked { session: String },
+    /// true. `active` is the session's `Active` property.
+    Locked { session: String, active: bool },
+    /// The display session `session`, with `LockedHint` false. `active` is
+    /// the session's `Active` property.
+    Unlocked { session: String, active: bool },
 }
 
 impl Desk {
-    fn from_hint(session: &str, locked: bool) -> Desk {
+    fn from_state(session: &str, locked: bool, active: bool) -> Desk {
         let session = session.to_string();
         if locked {
-            Desk::Locked { session }
+            Desk::Locked { session, active }
         } else {
-            Desk::Unlocked { session }
+            Desk::Unlocked { session, active }
+        }
+    }
+
+    /// Same session and `LockedHint`, with `locked` in place of the
+    /// current one. A no-op on [`Desk::NoSession`]: there is no session to
+    /// carry a hint for.
+    fn with_locked(&self, locked: bool) -> Desk {
+        match self {
+            Desk::NoSession => Desk::NoSession,
+            Desk::Locked { session, active } | Desk::Unlocked { session, active } => {
+                Desk::from_state(session, locked, *active)
+            }
+        }
+    }
+
+    /// Same session and `LockedHint`, with `active` in place of the
+    /// current one. A no-op on [`Desk::NoSession`].
+    fn with_active(&self, active: bool) -> Desk {
+        match self {
+            Desk::NoSession => Desk::NoSession,
+            Desk::Locked { session, .. } => Desk::Locked {
+                session: session.clone(),
+                active,
+            },
+            Desk::Unlocked { session, .. } => Desk::Unlocked {
+                session: session.clone(),
+                active,
+            },
         }
     }
 
@@ -116,15 +150,25 @@ impl Desk {
     pub fn session(&self) -> Option<&str> {
         match self {
             Desk::NoSession => None,
-            Desk::Locked { session } | Desk::Unlocked { session } => Some(session),
+            Desk::Locked { session, .. } | Desk::Unlocked { session, .. } => Some(session),
         }
     }
 
     /// Whether an unlock from `origin` may raise the graphical prompt: only
     /// for a requester on the desktop, and not while the desk is known to
     /// be locked (`docs/headless.md` § 2). Anything else gets `no_display`.
+    /// Never reads `active` — see this type's own doc comment.
     pub fn may_prompt(&self, origin: Origin) -> bool {
         origin == Origin::Desktop && !self.is_locked()
+    }
+
+    /// Whether a `copy` from `origin` may reach the clipboard: only for a
+    /// requester on the desktop, with the display session active and
+    /// `LockedHint` false (`docs/headless.md` § 5). Anything else —
+    /// outside the desktop, no session, inactive, or locked — gets
+    /// `no_display`, and the clipboard is never touched.
+    pub fn may_copy(&self, origin: Origin) -> bool {
+        origin == Origin::Desktop && matches!(self, Desk::Unlocked { active: true, .. })
     }
 }
 
@@ -324,12 +368,13 @@ fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut b
     };
     *subscribed = true;
     crate::log::debug(format_args!("subscribed to logind"));
-    match desk(conn, session.as_ref()) {
-        Ok(desk) => {
-            let _ = events.send(Event::Desk(desk));
-        }
+    // The last `Desk` sent, so a single-property change (`Step::Property`)
+    // has something to merge into — `interpret` itself is stateless.
+    let mut current = match desk(conn, session.as_ref()) {
+        Ok(desk) => desk,
         Err(err) => return err,
-    }
+    };
+    let _ = events.send(Event::Desk(current.clone()));
 
     for message in messages {
         let message = match message {
@@ -342,12 +387,19 @@ fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut b
             }
             Step::DisplayChanged(display) => {
                 session = display;
-                match desk(conn, session.as_ref()) {
-                    Ok(desk) => {
-                        let _ = events.send(Event::Desk(desk));
-                    }
+                current = match desk(conn, session.as_ref()) {
+                    Ok(desk) => desk,
                     Err(err) => return err,
-                }
+                };
+                let _ = events.send(Event::Desk(current.clone()));
+            }
+            Step::Property(Property::Locked(locked)) => {
+                current = current.with_locked(locked);
+                let _ = events.send(Event::Desk(current.clone()));
+            }
+            Step::Property(Property::Active(active)) => {
+                current = current.with_active(active);
+                let _ = events.send(Event::Desk(current.clone()));
             }
             Step::Ignore => {}
         }
@@ -370,7 +422,18 @@ enum Step {
     /// The user's display session changed to this one (`None`: no display
     /// session any more).
     DisplayChanged(Option<DisplaySession>),
+    /// `LockedHint` or `Active` changed on the display session, to this new
+    /// value. `interpret` has no state to merge it into — `watch` does
+    /// that, against the `Desk` it last sent.
+    Property(Property),
     Ignore,
+}
+
+/// One property change reported for the display session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Property {
+    Locked(bool),
+    Active(bool),
 }
 
 /// Classify a message. Pure, so the matching can be tested without a bus.
@@ -406,11 +469,14 @@ fn interpret(message: &Message, user: &str, session: Option<&DisplaySession>) ->
                 }
             }
             if on_session && changed_iface == SESSION_IFACE {
-                let hint = changed
+                if let Some(locked) = changed
                     .get("LockedHint")
-                    .and_then(|v| bool::try_from(v).ok());
-                if let (Some(locked), Some(session)) = (hint, session) {
-                    return Step::Event(Event::Desk(Desk::from_hint(&session.id, locked)));
+                    .and_then(|v| bool::try_from(v).ok())
+                {
+                    return Step::Property(Property::Locked(locked));
+                }
+                if let Some(active) = changed.get("Active").and_then(|v| bool::try_from(v).ok()) {
+                    return Step::Property(Property::Active(active));
                 }
             }
             Step::Ignore
@@ -451,19 +517,29 @@ fn display_session(conn: &Connection, user: &str) -> Result<Option<DisplaySessio
     parse_display(&value).ok_or_else(|| "unexpected User.Display value".to_string())
 }
 
-/// The desk's state: the display session and its `LockedHint`.
+/// The desk's state: the display session, its `LockedHint`, and its
+/// `Active`.
 fn desk(conn: &Connection, session: Option<&DisplaySession>) -> Result<Desk, String> {
     match session {
-        Some(session) => Ok(Desk::from_hint(
-            &session.id,
-            locked_hint(conn, session.path.as_str())?,
-        )),
+        Some(session) => {
+            let locked = locked_hint(conn, session.path.as_str())?;
+            let active = active_hint(conn, session.path.as_str())?;
+            Ok(Desk::from_state(&session.id, locked, active))
+        }
         None => Ok(Desk::NoSession),
     }
 }
 
 fn locked_hint(conn: &Connection, session: &str) -> Result<bool, String> {
     let value = get_property(conn, session, SESSION_IFACE, "LockedHint")?;
+    bool::try_from(&value).map_err(|err| err.to_string())
+}
+
+/// Whether the display session is the one currently active on its seat
+/// (`docs/headless.md` § 5) — separate from `LockedHint`, and read the
+/// same way.
+fn active_hint(conn: &Connection, session: &str) -> Result<bool, String> {
+    let value = get_property(conn, session, SESSION_IFACE, "Active")?;
     bool::try_from(&value).map_err(|err| err.to_string())
 }
 
@@ -659,15 +735,28 @@ mod tests {
         assert!(!h.held());
     }
 
+    /// A locked desk, active unless `active` says otherwise.
     fn locked_desk() -> Desk {
         Desk::Locked {
             session: "31".to_string(),
+            active: true,
         }
     }
 
+    /// An unlocked desk, active unless `active` says otherwise.
     fn unlocked_desk() -> Desk {
         Desk::Unlocked {
             session: "31".to_string(),
+            active: true,
+        }
+    }
+
+    /// An unlocked desk whose display session isn't the active one — a VT
+    /// switch, say.
+    fn inactive_unlocked_desk() -> Desk {
+        Desk::Unlocked {
+            session: "31".to_string(),
+            active: false,
         }
     }
 
@@ -730,6 +819,28 @@ mod tests {
         assert!(!Desk::NoSession.may_prompt(Origin::Outside));
     }
 
+    /// `may_prompt` never reads `active` — an inactive desk (a VT switch)
+    /// is treated exactly like an active one for prompting.
+    #[test]
+    fn may_prompt_ignores_whether_the_desk_is_active() {
+        assert!(inactive_unlocked_desk().may_prompt(Origin::Desktop));
+    }
+
+    /// `docs/headless.md` § 5: `copy` needs a desktop requester, an active
+    /// display session, and `LockedHint` false — every other combination
+    /// gets `no_display`.
+    #[test]
+    fn only_a_desktop_requester_on_an_active_unlocked_desk_may_copy() {
+        assert!(unlocked_desk().may_copy(Origin::Desktop));
+        assert!(!unlocked_desk().may_copy(Origin::Outside));
+        assert!(!locked_desk().may_copy(Origin::Desktop));
+        assert!(!locked_desk().may_copy(Origin::Outside));
+        assert!(!inactive_unlocked_desk().may_copy(Origin::Desktop));
+        assert!(!inactive_unlocked_desk().may_copy(Origin::Outside));
+        assert!(!Desk::NoSession.may_copy(Origin::Desktop));
+        assert!(!Desk::NoSession.may_copy(Origin::Outside));
+    }
+
     #[test]
     fn the_desk_names_its_session_and_whether_it_is_locked() {
         assert_eq!(Desk::NoSession.session(), None);
@@ -738,6 +849,19 @@ mod tests {
         assert!(locked_desk().is_locked());
         assert_eq!(unlocked_desk().session(), Some("31"));
         assert!(!unlocked_desk().is_locked());
+    }
+
+    /// `with_locked` and `with_active` carry the session across and only
+    /// change the one property asked for; both are a no-op on
+    /// `Desk::NoSession` (there is nothing to carry).
+    #[test]
+    fn with_locked_and_with_active_change_one_property_at_a_time() {
+        assert_eq!(unlocked_desk().with_locked(true), locked_desk());
+        assert_eq!(locked_desk().with_locked(false), unlocked_desk());
+        assert_eq!(unlocked_desk().with_active(false), inactive_unlocked_desk());
+        assert_eq!(inactive_unlocked_desk().with_active(true), unlocked_desk());
+        assert_eq!(Desk::NoSession.with_locked(true), Desk::NoSession);
+        assert_eq!(Desk::NoSession.with_active(false), Desk::NoSession);
     }
 
     #[test]
@@ -878,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_hint_changes_report_the_desk_state() {
+    fn locked_hint_changes_report_the_property() {
         let on = properties_changed(SESSION, SESSION_IFACE, "LockedHint", OwnedValue::from(true));
         let off = properties_changed(
             SESSION,
@@ -888,17 +1012,44 @@ mod tests {
         );
         assert_eq!(
             interpret(&on, USER, Some(&session_at("31", SESSION))),
-            Step::Event(Event::Desk(locked_desk()))
+            Step::Property(Property::Locked(true))
         );
         assert_eq!(
             interpret(&off, USER, Some(&session_at("31", SESSION))),
-            Step::Event(Event::Desk(unlocked_desk()))
+            Step::Property(Property::Locked(false))
         );
     }
 
     #[test]
     fn locked_hint_on_another_session_is_ignored() {
         let other = properties_changed(OTHER, SESSION_IFACE, "LockedHint", OwnedValue::from(true));
+        assert_eq!(
+            interpret(&other, USER, Some(&session_at("31", SESSION))),
+            Step::Ignore
+        );
+    }
+
+    /// `Active` is watched the same way as `LockedHint`, and reported as
+    /// its own `Property` — never folded into an `Event::Desk` by
+    /// `interpret` itself, since that needs the other property's current
+    /// value, which only `watch`'s own state has.
+    #[test]
+    fn active_changes_report_the_property() {
+        let on = properties_changed(SESSION, SESSION_IFACE, "Active", OwnedValue::from(true));
+        let off = properties_changed(SESSION, SESSION_IFACE, "Active", OwnedValue::from(false));
+        assert_eq!(
+            interpret(&on, USER, Some(&session_at("31", SESSION))),
+            Step::Property(Property::Active(true))
+        );
+        assert_eq!(
+            interpret(&off, USER, Some(&session_at("31", SESSION))),
+            Step::Property(Property::Active(false))
+        );
+    }
+
+    #[test]
+    fn active_on_another_session_is_ignored() {
+        let other = properties_changed(OTHER, SESSION_IFACE, "Active", OwnedValue::from(false));
         assert_eq!(
             interpret(&other, USER, Some(&session_at("31", SESSION))),
             Step::Ignore

@@ -136,6 +136,9 @@ failing for an in-scope actor.
   only. A-2 is never in a socket response, stdout,
   stderr, a log, an error string, the tray, a child's argv or environment —
   only in the clipboard offer, after a `copy` naming that exact field.
+  `copy` itself offers only for a requester on the desktop, while the
+  display session is active and unlocked (`docs/headless.md` § 5);
+  anything else fails with `no_display` before the clipboard is touched.
   `list` omits every protected field and Notes rather than de-protecting
   them. `list`'s `fields` array is the one exception: it names which fields
   exist and are copyable, never a value, so a protected field's or a
