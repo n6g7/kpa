@@ -1,10 +1,10 @@
 //! CLI entry point: parses arguments and dispatches. `serve` runs the
-//! daemon here directly; every other subcommand goes to [`client`] (one
-//! request, the daemon's raw JSON response line printed verbatim) or,
-//! for `unlock`, to [`terminal_unlock`] first.
+//! daemon here directly; every other subcommand goes to [`client`] — one
+//! request, the daemon's raw JSON response line printed verbatim, except
+//! `unlock`, which can send a second once the terminal read it needs is
+//! done.
 
 mod client;
-mod terminal_unlock;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -106,7 +106,7 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Serve { log_level } => run_serve(&socket_path, cli.config, log_level),
         Command::Status => run_client(&socket_path, Op::Status),
-        Command::Unlock { db, tty } => terminal_unlock::run_unlock(&socket_path, db, tty),
+        Command::Unlock { db, tty } => client::run_unlock(&socket_path, db, tty),
         Command::Lock { db } => run_client(&socket_path, Op::Lock(LockRequest { db })),
         Command::List { db } => run_client(&socket_path, Op::List(ListRequest { db })),
         Command::Copy { db, uuid, field } => {
