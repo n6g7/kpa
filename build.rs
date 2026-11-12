@@ -20,8 +20,11 @@ use std::process::Command;
 use version::{VersionInputs, compute_version};
 
 fn main() {
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/index");
+    watch_git_head();
+    // `dirty` depends on the working tree, which cargo can't see through git.
+    for path in ["src", "build_support", "Cargo.toml", "Cargo.lock"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
     println!("cargo:rerun-if-env-changed=KPA_BUILD_REV");
 
     let build_rev_override = std::env::var("KPA_BUILD_REV").ok();
@@ -39,6 +42,24 @@ fn main() {
     });
 
     println!("cargo:rustc-env=KPA_VERSION={version}");
+}
+
+/// Reruns when the checked-out commit changes. Paths come from git rather
+/// than a hardcoded `.git/`, which doesn't exist in a worktree (`.git` is a
+/// file there); a watched path that's missing makes cargo rerun every build.
+fn watch_git_head() {
+    let Some(head) = run_git(&["rev-parse", "--git-path", "HEAD"]) else {
+        return;
+    };
+    println!("cargo:rerun-if-changed={head}");
+    // HEAD only names the branch; the branch's ref moves on each commit.
+    // Packed refs have no loose file, and a missing path would force a rerun.
+    if let Some(branch) = run_git(&["symbolic-ref", "-q", "HEAD"])
+        && let Some(path) = run_git(&["rev-parse", "--git-path", &branch])
+        && std::path::Path::new(&path).exists()
+    {
+        println!("cargo:rerun-if-changed={path}");
+    }
 }
 
 fn short_hash() -> Option<String> {

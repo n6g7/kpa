@@ -18,10 +18,10 @@ Roadmap, in release order. Each item gets its design written before its implemen
 Unscheduled:
 
 - [ ] Document assumptions (Linux only, logind, etc)
-- [ ] Find out why `cargo run -- ...` rebuilds on each run, even with no changes
 
 ## Done
 
+- [x] Fix `cargo run -- ...` rebuilding on each run in git worktrees
 - [x] Add release-please, similar to https://github.com/n6g7/fin/blob/main/.github/workflows/release.yml
 - [x] Flake module to make installing easy
 - [x] Better logging
