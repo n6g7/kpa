@@ -155,8 +155,7 @@ fn a_password_in_a_request_leaves_no_copy_in_freed_memory() {
 #[test]
 fn encoding_an_unlock_request_leaves_no_copy_in_freed_memory() {
     let _guard = ARM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let plaintext =
-        REQUEST_PLAINTEXT.get_or_init(|| b"kpa-zeroize-canary-f02-9d4a1b-".repeat(8));
+    let plaintext = REQUEST_PLAINTEXT.get_or_init(|| b"kpa-zeroize-canary-f02-9d4a1b-".repeat(8));
     let plaintext = String::from_utf8(plaintext.clone()).expect("canary is UTF-8");
     REQUEST_ENCODED.get_or_init(|| STANDARD.encode(&plaintext).into_bytes());
 

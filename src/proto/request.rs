@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
-use super::VERSION;
 use super::ByteCounter;
+use super::VERSION;
 use super::copy::CopyRequest;
 use super::error::{ErrorCode, ErrorFields};
 use super::list::ListRequest;

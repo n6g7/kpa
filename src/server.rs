@@ -37,10 +37,9 @@ use crate::log;
 use crate::origin::{self, Origin};
 use crate::policy;
 use crate::proto::{
-    self, ByteCounter, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus,
-    DecodeError, Field, List, ListError, ListRequest, Lock, LockError, LockRequest,
-    MAX_PASSWORD_LEN, ProtocolError, Response, Status, Unlock, UnlockError, UnlockRequest,
-    WireEntry,
+    self, ByteCounter, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError,
+    Field, List, ListError, ListRequest, Lock, LockError, LockRequest, MAX_PASSWORD_LEN,
+    ProtocolError, Response, Status, Unlock, UnlockError, UnlockRequest, WireEntry,
 };
 use crate::socket;
 use crate::vault::{self, Fingerprint, VaultError};
