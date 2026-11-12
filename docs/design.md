@@ -504,12 +504,15 @@ running kpa:
   a property of the machine's configuration, not one kpa's process can
   guarantee about itself.
 
-`kpa serve` sets `PR_SET_DUMPABLE=0` at startup, before reading its config
-or unlocking anything. That keeps a crash from writing a user-readable core
-dump of the decrypted database, and also makes `/proc/<pid>/mem` root-owned,
-which blocks same-uid ptrace regardless of the Yama setting above. One host
-caveat, like the two bullets above: with `fs.suid_dumpable = 2` the kernel
-still writes a root-owned dump.
+Every kpa process sets `PR_SET_DUMPABLE=0` at startup, before dispatching to
+any subcommand — before `kpa serve` reads its config, and before `kpa
+unlock` reads the master password from the terminal. That keeps a crash
+from writing a user-readable core dump of whatever secret the process
+holds — the decrypted database in the daemon, the master password in `kpa
+unlock` — and also makes `/proc/<pid>/mem` root-owned, which blocks
+same-uid ptrace regardless of the Yama setting above. One host caveat, like
+the two bullets above: with `fs.suid_dumpable = 2` the kernel still writes
+a root-owned dump.
 
 **Non-goals, stated explicitly:** kpa does not defend against an attacker who
 already has code execution as the user running it. Nothing at this layer can. It reduces

@@ -81,7 +81,20 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    dispatch(Cli::parse())
+}
+
+/// Everything `main` does once arguments are parsed. Marks this process
+/// non-dumpable first, before any subcommand's dispatch — including
+/// `Unlock`'s terminal read, which holds the master password — can begin.
+/// If that fails, this returns without dispatching to anything: a
+/// subcommand that holds a secret must never run dumpable, and the ones
+/// that don't lose nothing by also refusing.
+fn dispatch(cli: Cli) -> ExitCode {
+    if let Err(err) = forbid_core_dumps() {
+        report_error(format_args!("marking this process non-dumpable: {err}"));
+        return ExitCode::FAILURE;
+    }
 
     // Reports the CLI's own version unconditionally, then best-efforts the
     // daemon's — so it still works with no `$XDG_RUNTIME_DIR` set and no
@@ -141,11 +154,8 @@ fn run_serve(
     config_path: Option<PathBuf>,
     log_level: Option<Level>,
 ) -> ExitCode {
-    if let Err(err) = forbid_core_dumps() {
-        report_error(format_args!("marking the daemon non-dumpable: {err}"));
-        return ExitCode::FAILURE;
-    }
-
+    // `dispatch` already marked this process non-dumpable, before it ever
+    // reached this subcommand.
     let config = match Config::load(config_path.as_deref()) {
         Ok(config) => config,
         Err(err) => {
@@ -179,15 +189,54 @@ fn run_serve(
 
 #[cfg(test)]
 mod tests {
-    use rustix::process::{DumpableBehavior, dumpable_behavior};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
 
-    use super::forbid_core_dumps;
+    use rustix::process::{DumpableBehavior, dumpable_behavior, set_dumpable_behavior};
+
+    use super::{Cli, Command, dispatch, forbid_core_dumps};
+
+    /// `PR_SET_DUMPABLE` is process-wide, not per-thread, and `cargo test`
+    /// runs these in parallel in one process. The two tests below take
+    /// turns through this lock rather than racing each other's state.
+    static DUMPABLE_LOCK: Mutex<()> = Mutex::new(());
 
     /// `docs/design.md` § Security promises the daemon is non-dumpable;
     /// this is what makes that a fact about the code rather than the doc.
     #[test]
     fn the_daemon_marks_itself_non_dumpable() {
+        let _turn = DUMPABLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         forbid_core_dumps().expect("prctl(PR_SET_DUMPABLE) should succeed");
+        assert_eq!(
+            dumpable_behavior().expect("prctl(PR_GET_DUMPABLE) should succeed"),
+            DumpableBehavior::NotDumpable
+        );
+    }
+
+    /// `kpa unlock` holds the master password from the terminal read
+    /// onward, so it must be non-dumpable too, not just the daemon. This
+    /// drives `dispatch` down the `Unlock` arm and checks the process is
+    /// already non-dumpable by the time it gets there. The socket points
+    /// nowhere, so `send_request` fails at connect and this never reaches
+    /// the terminal read — no pty needed, and nothing to hang on if one is
+    /// attached.
+    #[test]
+    fn the_unlock_path_marks_itself_non_dumpable_before_dispatch() {
+        let _turn = DUMPABLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Known starting state, regardless of whether the other test in
+        // this process already ran.
+        set_dumpable_behavior(DumpableBehavior::Dumpable)
+            .expect("prctl(PR_SET_DUMPABLE) should succeed");
+
+        dispatch(Cli {
+            socket: Some(PathBuf::from("/nonexistent-kpa-f01-test/sock")),
+            config: None,
+            command: Command::Unlock {
+                db: "test".to_string(),
+                tty: false,
+            },
+        });
+
         assert_eq!(
             dumpable_behavior().expect("prctl(PR_GET_DUMPABLE) should succeed"),
             DumpableBehavior::NotDumpable
