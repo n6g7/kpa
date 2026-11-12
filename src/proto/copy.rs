@@ -150,7 +150,10 @@ impl std::str::FromStr for Field {
     }
 }
 
-/// Everything `copy` can fail with.
+/// Everything `copy` can fail with. Every variant but `NoDisplay` names the
+/// database the copy was for. `NoDisplay` is about where the request came
+/// from, not about any database, so it names none — same shape as
+/// `UnlockError::NoDisplay`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyError {
     UnknownDb {
@@ -187,9 +190,7 @@ pub enum CopyError {
     /// Nobody could paste the secret where it would land: the requester
     /// isn't on the desktop, or the display session isn't active and
     /// unlocked (`docs/headless.md` § 5). The clipboard is never touched.
-    NoDisplay {
-        db: String,
-    },
+    NoDisplay,
 }
 
 impl CopyError {
@@ -208,8 +209,7 @@ impl CopyError {
             CopyError::Clipboard { db, detail } => ErrorFields::new(ErrorCode::Io)
                 .db(db)
                 .detail(detail.as_str()),
-            CopyError::NoDisplay { db } => ErrorFields::new(ErrorCode::NoDisplay)
-                .db(db)
+            CopyError::NoDisplay => ErrorFields::new(ErrorCode::NoDisplay)
                 .detail("no active, unlocked display session for the requester to paste into"),
         }
     }

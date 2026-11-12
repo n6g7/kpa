@@ -682,7 +682,7 @@ impl CopyEntry for Server {
             // check below so an outside caller learns no more than an
             // unknown database does.
             if !self.desk().may_copy(origin) {
-                return Err(CopyError::NoDisplay { db: db() });
+                return Err(CopyError::NoDisplay);
             }
             let Some(database) = slot.db.as_ref() else {
                 return Err(CopyError::Locked { db: db() });
@@ -1631,9 +1631,7 @@ mod tests {
             uuid: uuid::Uuid::nil(),
             field: Field::Password,
         };
-        let refused = CopyError::NoDisplay {
-            db: "personal".to_string(),
-        };
+        let refused = CopyError::NoDisplay;
 
         let (server, _offered) = copy_server();
         unlock_with_entry(&server, "personal");

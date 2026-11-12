@@ -129,7 +129,9 @@ fn copy_from_outside_the_desktop_is_refused() {
     ]);
     assert_eq!(copied["ok"], false, "got {copied}");
     assert_eq!(copied["error"], "no_display");
-    assert_eq!(copied["db"], "personal");
+    // `no_display` names no database — it's about where the request came
+    // from, not about any database (same shape as `unlock`'s).
+    assert!(copied.get("db").is_none(), "got {copied}");
 
     // Still alive and answering other requests.
     assert_eq!(daemon.run(&["status"])["ok"], true);

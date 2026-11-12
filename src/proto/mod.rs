@@ -462,9 +462,9 @@ mod tests {
                 Some("no reachable Wayland compositor"),
             ),
             (
-                Response::Copy(Err(CopyError::NoDisplay { db: owned() })),
+                Response::Copy(Err(CopyError::NoDisplay)),
                 "no_display",
-                Some(db),
+                None,
                 Some("no active, unlocked display session for the requester to paste into"),
             ),
         ];
