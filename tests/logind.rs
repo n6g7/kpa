@@ -41,15 +41,27 @@ fn session_id(path: &str) -> &'static str {
     }
 }
 
+/// An unlocked desk, active unless the test says otherwise (the mock's
+/// `Active` property defaults to `true` — a session is active until a
+/// test says it isn't).
 fn unlocked(session: &str) -> Desk {
     Desk::Unlocked {
         session: session.to_string(),
+        active: true,
     }
 }
 
 fn locked(session: &str) -> Desk {
     Desk::Locked {
         session: session.to_string(),
+        active: true,
+    }
+}
+
+fn unlocked_inactive(session: &str) -> Desk {
+    Desk::Unlocked {
+        session: session.to_string(),
+        active: false,
     }
 }
 
@@ -130,11 +142,14 @@ impl Drop for PrivateBus {
 }
 
 /// What the mock logind is holding: the display session, each session's
-/// `LockedHint`, and the sleep inhibitors handed out.
+/// `LockedHint` and `Active`, and the sleep inhibitors handed out.
 #[derive(Default)]
 struct MockState {
     display: String,
     hints: HashMap<String, bool>,
+    /// Absent means active — a session is active until a test says
+    /// otherwise, same as real logind for the one session on a seat.
+    actives: HashMap<String, bool>,
     /// The read end of each inhibitor's pipe. Once kpa drops the write end,
     /// a read here returns EOF, which is how the test sees a release.
     inhibitors: Vec<UnixStream>,
@@ -198,6 +213,17 @@ impl Session {
             .copied()
             .unwrap_or(false)
     }
+
+    #[zbus(property)]
+    fn active(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .actives
+            .get(self.path)
+            .copied()
+            .unwrap_or(true)
+    }
 }
 
 /// The mock logind: owns `org.freedesktop.login1` on the private bus.
@@ -251,6 +277,20 @@ impl MockLogind {
             session,
             "org.freedesktop.login1.Session",
             "LockedHint",
+            Value::from(value),
+        );
+    }
+
+    fn set_active(&self, session: &'static str, value: bool) {
+        self.state
+            .lock()
+            .unwrap()
+            .actives
+            .insert(session.to_string(), value);
+        self.properties_changed(
+            session,
+            "org.freedesktop.login1.Session",
+            "Active",
             Value::from(value),
         );
     }
@@ -501,6 +541,55 @@ fn the_desk_state_follows_logind_over_a_bus() {
     eventually("a lost bus to forget the desk", || {
         recorder.desk() == Desk::NoSession
     });
+}
+
+/// `Active` is watched the same way as `LockedHint`, but turning it off
+/// (a VT switch away from the display session, say) must not lock
+/// anything — only `LockedHint` does that (`docs/headless.md` § 5:
+/// counting an inactive session as locked would make kpa lock the vault
+/// on a VT switch).
+#[test]
+fn the_active_state_follows_logind_and_never_locks() {
+    let bus = PrivateBus::start();
+    let mock = MockLogind::start(&bus.address);
+    let recorder = Arc::new(Recorder::default());
+    let _events = policy::start(recorder.clone(), Bus::Address(bus.address.clone()));
+
+    // 1. Subscribing reads the session as active.
+    eventually("the first desk state", || recorder.desk() == unlocked("31"));
+
+    // 2. Turning `Active` off is published, but locks nothing.
+    mock.set_active(SESSION_1, false);
+    eventually("Active=false", || {
+        recorder.desk() == unlocked_inactive("31")
+    });
+    quiet();
+    assert_eq!(recorder.locks(), 0, "an inactive session is not a lock");
+    assert!(
+        !recorder.desk().is_locked(),
+        "Active alone never marks the desk locked"
+    );
+
+    // 3. Turning it back on is published too.
+    mock.set_active(SESSION_1, true);
+    eventually("Active=true", || recorder.desk() == unlocked("31"));
+
+    // 4. `LockedHint` and `Active` are tracked independently: locking
+    //    while inactive keeps `active` on the published state, and it
+    //    still locks everything, same as while active.
+    mock.set_active(SESSION_1, false);
+    eventually("Active=false again", || {
+        recorder.desk() == unlocked_inactive("31")
+    });
+    mock.set_hint(SESSION_1, true);
+    eventually("LockedHint=true while inactive", || {
+        recorder.desk()
+            == Desk::Locked {
+                session: "31".to_string(),
+                active: false,
+            }
+    });
+    assert_eq!(recorder.locks(), 1, "LockedHint still locks while inactive");
 }
 
 /// The real server behind the policy: while the display session's

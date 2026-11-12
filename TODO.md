@@ -9,7 +9,7 @@ Roadmap, in release order. Each item gets its design written before its implemen
   - [ ] Zeroizing request buffer
   - [x] Origin classifier
   - [ ] Terminal unlock
-  - [ ] Copy gated on origin and the desk's state
+  - [x] Copy gated on origin and the desk's state
 2. [ ] SSH agent, per `docs/ssh-agent.md` (design in review, continued from https://github.com/n6g7/kpa/pull/22)
 3. [ ] Passkey "agent" / provider (FIDO2 emulation). Shape to be decided
 4. [ ] Add macOS support (some time later)

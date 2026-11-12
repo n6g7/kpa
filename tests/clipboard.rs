@@ -31,6 +31,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use common::InProcessDaemon;
+use kpa::origin::Origin;
+use kpa::policy::{Desk, Locks};
 
 /// An in-process daemon (`common::InProcessDaemon`) for
 /// `common::password_db()`, whose prompt echoes `password`. In-process
@@ -101,6 +103,68 @@ fn copy_fails_cleanly_without_a_wayland_compositor() {
     // connection-handling thread stuck.
     let status = daemon.run(&["status"]);
     assert_eq!(status["ok"], true);
+}
+
+/// `docs/headless.md` § 5: a requester outside the desktop never reaches
+/// the clipboard — `copy` answers `no_display` before touching it, so
+/// unlike the tests above, this needs no reachable compositor, and the
+/// database stays locked throughout (the gate is checked before `Locked`,
+/// so it fires even here).
+#[test]
+fn copy_from_outside_the_desktop_is_refused() {
+    let config = common::config_toml(
+        "printf %s unused",
+        &common::password_db().display().to_string(),
+    );
+    let daemon = InProcessDaemon::with_origin(
+        kpa::config::Config::parse(&config).expect("valid config"),
+        Origin::Outside,
+    );
+
+    let copied = daemon.run(&[
+        "copy",
+        "personal",
+        &uuid::Uuid::nil().to_string(),
+        "password",
+    ]);
+    assert_eq!(copied["ok"], false, "got {copied}");
+    assert_eq!(copied["error"], "no_display");
+    // `no_display` names no database — it's about where the request came
+    // from, not about any database (same shape as `unlock`'s).
+    assert!(copied.get("db").is_none(), "got {copied}");
+
+    // Still alive and answering other requests.
+    assert_eq!(daemon.run(&["status"])["ok"], true);
+}
+
+/// Same gate, from the desktop: a locked, inactive, or absent display
+/// session all refuse `copy` with `no_display` too — only an active,
+/// unlocked session passes (`copy_fails_cleanly_without_a_wayland_compositor`
+/// above is that passing case).
+#[test]
+fn copy_from_the_desktop_is_refused_without_an_active_unlocked_desk() {
+    let daemon = start(common::PASSWORD);
+    let cases = [
+        Desk::Locked {
+            session: "test".to_string(),
+            active: true,
+        },
+        Desk::Unlocked {
+            session: "test".to_string(),
+            active: false,
+        },
+        Desk::NoSession,
+    ];
+    for desk in cases {
+        Locks::set_desk(&*daemon.server, desk.clone());
+        let copied = daemon.run(&[
+            "copy",
+            "personal",
+            &uuid::Uuid::nil().to_string(),
+            "password",
+        ]);
+        assert_eq!(copied["error"], "no_display", "desk {desk:?}, got {copied}");
+    }
 }
 
 /// `docs/plan.md` step 3's own test plan, run against a real compositor

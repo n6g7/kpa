@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::error::{ErrorCode, ErrorFields};
+use crate::origin::Origin;
 
 /// What `{"op":"copy", ...}` carries; `Op::Copy` wraps it. `field` accepts
 /// any name a KeePass client wrote for this entry — see [`Field`].
@@ -149,7 +150,10 @@ impl std::str::FromStr for Field {
     }
 }
 
-/// Everything `copy` can fail with.
+/// Everything `copy` can fail with. Every variant but `NoDisplay` names the
+/// database the copy was for. `NoDisplay` is about where the request came
+/// from, not about any database, so it names none — same shape as
+/// `UnlockError::NoDisplay`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyError {
     UnknownDb {
@@ -183,6 +187,10 @@ pub enum CopyError {
         db: String,
         detail: String,
     },
+    /// Nobody could paste the secret where it would land: the requester
+    /// isn't on the desktop, or the display session isn't active and
+    /// unlocked (`docs/headless.md` § 5). The clipboard is never touched.
+    NoDisplay,
 }
 
 impl CopyError {
@@ -201,6 +209,8 @@ impl CopyError {
             CopyError::Clipboard { db, detail } => ErrorFields::new(ErrorCode::Io)
                 .db(db)
                 .detail(detail.as_str()),
+            CopyError::NoDisplay => ErrorFields::new(ErrorCode::NoDisplay)
+                .detail("no active, unlocked display session for the requester to paste into"),
         }
     }
 }
@@ -225,7 +235,10 @@ pub struct CopyOutcome {
 /// in scope together. `Status`/`List`/`Lock`/`Unlock` don't have this
 /// problem; this one does, so it gets a different name.
 pub trait CopyEntry {
-    fn copy(&self, request: &CopyRequest) -> Result<CopyOutcome, CopyError>;
+    /// `origin` is where the request came from, and gates the copy itself
+    /// (`docs/headless.md` § 5): only a requester on the desktop, with the
+    /// display session active and unlocked, reaches the clipboard.
+    fn copy(&self, request: &CopyRequest, origin: Origin) -> Result<CopyOutcome, CopyError>;
 }
 
 #[cfg(test)]

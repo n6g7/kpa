@@ -68,7 +68,7 @@ where
         Op::Unlock(request) => Response::Unlock(handler.unlock(request, origin)),
         Op::Lock(request) => Response::Lock(handler.lock(request)),
         Op::List(request) => Response::List(handler.list(request)),
-        Op::Copy(request) => Response::Copy(handler.copy(request)),
+        Op::Copy(request) => Response::Copy(handler.copy(request, origin)),
     }
 }
 
@@ -320,7 +320,7 @@ mod tests {
         let owned = || db.to_string();
 
         // (response, expected code, expected `db`, expected `detail`)
-        let cases: [(Response, &str, Option<&str>, Option<&str>); 22] = [
+        let cases: [(Response, &str, Option<&str>, Option<&str>); 23] = [
             (
                 Response::Unlock(Err(UnlockError::InProgress { db: owned() })),
                 "unlock_in_progress",
@@ -460,6 +460,12 @@ mod tests {
                 "io",
                 Some(db),
                 Some("no reachable Wayland compositor"),
+            ),
+            (
+                Response::Copy(Err(CopyError::NoDisplay)),
+                "no_display",
+                None,
+                Some("no active, unlocked display session for the requester to paste into"),
             ),
         ];
 
