@@ -242,7 +242,7 @@ fn unlock_from_terminal(
     db: String,
     no_display_line: Option<String>,
 ) -> ExitCode {
-    let password = match tty::read_tty_password() {
+    let password = match tty::read_tty_password(b"Master password: ") {
         Ok(password) => password,
         Err(TtyReadError::NoTty(_)) => {
             let line = no_display_line.unwrap_or_else(synthetic_no_display_line);

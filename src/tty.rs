@@ -8,10 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use kpa::proto::MAX_PASSWORD_LEN;
 use zeroize::Zeroizing;
 
-/// Written to `/dev/tty` before reading the password. No trailing
-/// newline, so the password is typed on the same line.
-const TTY_PROMPT: &[u8] = b"Master password: ";
-
 /// Why reading the password from the terminal failed.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum TtyReadError {
@@ -113,11 +109,13 @@ fn write_tty(tty: &std::fs::File, mut buf: &[u8]) -> Result<(), TtyReadError> {
     Ok(())
 }
 
-/// Opens this process's controlling terminal, disables echo, prompts, and
-/// reads one line as the master password — the way `ssh` and `sudo` read
-/// theirs (`docs/headless.md` § 4). An absent `/dev/tty` (no controlling
-/// terminal, e.g. a cron job) is `TtyReadError::NoTty`, which the caller
-/// treats as `no_display`.
+/// Opens this process's controlling terminal, disables echo, prompts with
+/// `prompt`, and reads one line as the master password — the way `ssh`
+/// and `sudo` read theirs (`docs/headless.md` § 4). `prompt` is written
+/// as-is, with no trailing newline added, so the password is typed on
+/// the same line. An absent `/dev/tty` (no controlling terminal, e.g. a
+/// cron job) is `TtyReadError::NoTty`, which the caller treats as
+/// `no_display`.
 ///
 /// The password goes straight into a zeroizing buffer of exactly
 /// `MAX_PASSWORD_LEN` bytes that never grows, as `Password::from_base64`
@@ -128,7 +126,7 @@ fn write_tty(tty: &std::fs::File, mut buf: &[u8]) -> Result<(), TtyReadError> {
 /// An empty line (just Enter) comes back as an empty password, which the
 /// daemon treats as "no password" — the one way to reach a keyfile-only
 /// database from here, same as from the graphical prompt.
-pub(super) fn read_tty_password() -> Result<Zeroizing<String>, TtyReadError> {
+pub(super) fn read_tty_password(prompt: &[u8]) -> Result<Zeroizing<String>, TtyReadError> {
     let tty = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -136,7 +134,7 @@ pub(super) fn read_tty_password() -> Result<Zeroizing<String>, TtyReadError> {
         .map_err(TtyReadError::NoTty)?;
 
     let _guard = TtyGuard::new(&tty)?;
-    write_tty(&tty, TTY_PROMPT)?;
+    write_tty(&tty, prompt)?;
     let password = read_password_line(&tty)?;
     // With echo off, the terminal never showed the Enter keypress either;
     // write the newline ourselves so whatever prints next starts its own
