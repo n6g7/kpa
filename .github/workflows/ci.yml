@@ -34,15 +34,16 @@ jobs:
       # Nix caches the toolchain itself; this caches cargo's own build
       # artifacts (registry downloads + target/) across runs, keyed on
       # Cargo.lock so a dependency bump invalidates it automatically.
+      # There is no restore-keys fallback: restoring an older cache next
+      # to a rebuild piles stale artifacts into target/ and fills the
+      # runner's disk.
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
+          key: cargo-nodebug-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: cargo fmt --check
         run: nix develop -c cargo fmt -- --check
