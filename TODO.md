@@ -4,9 +4,9 @@
 
 Roadmap, in release order. Each item gets its design written before its implementation.
 
-1. [ ] Support headless use (no window manager or GUI), per `docs/headless.md`
+1. [x] Support headless use (no window manager or GUI), per `docs/headless.md`
   - [x] Prompt safety nets: prompt timeout, a lock kills open prompts, no prompt while the screen is locked
-  - [ ] Zeroizing request buffer
+  - [x] Zeroizing request buffer
   - [x] Origin classifier
   - [x] Terminal unlock
   - [x] Copy gated on origin and the desk's state
