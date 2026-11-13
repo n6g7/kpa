@@ -32,14 +32,17 @@ log_level = "info"
 # How the daemon asks for a master password. It runs this command and reads
 # the password from stdout, so the scripted version below unlocks the
 # fixture with no GUI and nothing to type. Swap in the commented line for a
-# real dmenu-style prompt.
+# real dmenu-style prompt — the argv runs exactly as written; the daemon
+# sets $KPA_PROMPT_MESSAGE in its environment to say what the unlock is for,
+# and a program that only takes its prompt text as an argument needs a
+# wrapper like this one to pass the variable along.
 #
 # An empty stdout means "no password" — which is how a keyfile-only
 # database (tests/fixtures/fixture-kf.kdbx) gets unlocked. `prompt` is a
 # single global setting, so one prompt can't serve both that and a
 # password database at once.
 prompt = ["/bin/sh", "-c", "printf %s testpass123"]
-# prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
+# prompt = ["sh", "-c", "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""]
 
 # A prompt left unanswered this long is killed, with everything it started,
 # and the unlock fails with `prompt_cancelled`. Any lock also ends a prompt

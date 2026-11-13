@@ -68,7 +68,7 @@ speak the socket protocol directly works.
 
 ```toml
 idle_timeout = "30m"
-prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
+prompt = ["sh", "-c", "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""]
 prompt_timeout = "60s"         # an unanswered prompt is killed after this
 clipboard_timeout = "30s"
 log_level = "info"             # error | warn | info | debug
@@ -87,16 +87,17 @@ A leading `~/` in `path` or `keyfile` expands to `$HOME` when the daemon
 starts; `~user/` is refused rather than taken literally, and other relative
 paths resolve against the daemon's working directory.
 
-**`prompt`'s `{message}` placeholder** is replaced with what the unlock is
-about — `"Unlock personal"`, for `personal` above — but only where it
-stands as a whole argument right after one that looks like an option, as
-in `"--prompt", "{message}"`. Elsewhere in the argv — the program name, a
-bare positional argument, or embedded inside a longer one — it is a config
-error rather than silently left as literal text. An argv without the
-placeholder at all behaves exactly as it always has. The message itself is
-escaped the same way the CLI escapes its own terminal output and capped in
-length, since a later request-derived message (an SSH key name, once the
-agent's approval prompt exists) carries text this daemon didn't author.
+**`prompt` runs exactly as configured.** What the unlock is about —
+`"Unlock personal"`, for `personal` above — reaches the program through
+`KPA_PROMPT_MESSAGE` in its environment instead of its argv, escaped the
+same way the CLI escapes its own terminal output and capped in length,
+since a later request-derived message (an SSH key name, once the agent's
+approval prompt exists) carries text this daemon didn't author. A program
+that only takes its prompt text as an argument, as `fuzzel` does, needs a
+wrapper that reads the variable and passes it on — the `sh -c` line above.
+One thing the variable doesn't buy: a wrapper puts the message right back
+into its own argv, so it's visible to other uids via `/proc/<pid>/cmdline`
+either way. Only a program that reads the variable itself avoids that.
 
 If you manage your system declaratively (Nix, Ansible, whatever), this shape
 is meant to be generated rather than hand-edited — every setting is a plain

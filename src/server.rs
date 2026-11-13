@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::clip::{self, Clipboard};
-use crate::config::{self, Config};
+use crate::config::Config;
 use crate::io::ByteCounter;
 use crate::log;
 use crate::origin::{self, Origin};
@@ -525,9 +525,14 @@ impl Unlock for Server {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
                 let message = prompt_message(&format!("Unlock {name}"));
-                let argv = substitute_message(&self.config.prompt, &message);
-                prompted = match run_prompt(&self.prompt_queue, &argv, timeout, &cancel_watch, None)
-                {
+                prompted = match run_prompt(
+                    &self.prompt_queue,
+                    &self.config.prompt,
+                    &message,
+                    timeout,
+                    &cancel_watch,
+                    None,
+                ) {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
                     }
@@ -866,7 +871,7 @@ const MAX_PROMPT_MESSAGE_LEN: usize = 256;
 /// hostile characters a terminal would act on — bidi overrides and the
 /// like), capped at `MAX_PROMPT_MESSAGE_LEN` bytes on a character
 /// boundary. Every message `unlock` and, later, an approval prompt builds
-/// goes through here before it reaches `substitute_message`.
+/// goes through here before it reaches `run_prompt`.
 fn prompt_message(text: &str) -> String {
     let escaped = crate::output::escape_for_terminal(text);
     let mut end = escaped.len().min(MAX_PROMPT_MESSAGE_LEN);
@@ -876,22 +881,15 @@ fn prompt_message(text: &str) -> String {
     escaped[..end].to_string()
 }
 
-/// Replaces a `{message}` argv element with `message`; everything else is
-/// cloned as is. `config::check_prompt_argv` (run at config load) is what
-/// guarantees the placeholder, if present, is a whole element standing as
-/// an option's value — this just does the substitution, so an argv with no
-/// placeholder comes back unchanged, element for element.
-fn substitute_message(argv: &[String], message: &str) -> Vec<String> {
-    argv.iter()
-        .map(|arg| {
-            if arg == config::MESSAGE_PLACEHOLDER {
-                message.to_string()
-            } else {
-                arg.clone()
-            }
-        })
-        .collect()
-}
+/// The environment variable `run_prompt` sets to what the prompt is about
+/// (`docs/design.md` § Configuration, `docs/ssh-agent.md` § 6.6). A prompt
+/// program that wants it reads the variable directly; one that only takes
+/// its prompt text as an argument needs a wrapper script that reads the
+/// variable and passes it on, e.g.
+/// `["sh", "-c", "exec fuzzel --dmenu --prompt \"$KPA_PROMPT_MESSAGE\""]`.
+/// Either way the argv itself runs exactly as configured — kpa never
+/// rewrites it.
+const PROMPT_MESSAGE_ENV: &str = "KPA_PROMPT_MESSAGE";
 
 #[derive(Default)]
 struct PromptQueueState {
@@ -1022,9 +1020,12 @@ fn wait_for_wake(watch: &UnixStream, cancel_watch: &UnixStream) -> std::io::Resu
 
 /// Runs `argv` as a prompt (`docs/design.md` decision #9), queued through
 /// `queue` so only one is ever on screen, and reads its answer from
-/// stdout. `stdin`, when given, is written before anything is read — the
-/// approval prompt `ssh_agent.confirm` raises writes its `Allow`/`Deny`
-/// choices this way; `unlock`'s password prompt passes `None`.
+/// stdout. The argv runs exactly as configured; `message` (already escaped
+/// and length-capped by `prompt_message`) reaches the program through the
+/// `PROMPT_MESSAGE_ENV` environment variable instead. `stdin`, when given,
+/// is written before anything is read — the approval prompt
+/// `ssh_agent.confirm` raises writes its `Allow`/`Deny` choices this way;
+/// `unlock`'s password prompt passes `None`.
 ///
 /// The prompt runs in its own process group. It is killed, with everything
 /// it started, once `timeout` passes without it finishing, or as soon as
@@ -1044,6 +1045,7 @@ fn wait_for_wake(watch: &UnixStream, cancel_watch: &UnixStream) -> std::io::Resu
 fn run_prompt(
     queue: &PromptQueue,
     argv: &[String],
+    message: &str,
     timeout: Duration,
     cancel_watch: &UnixStream,
     stdin: Option<&[u8]>,
@@ -1060,7 +1062,14 @@ fn run_prompt(
     let Some(turn) = queue.enter(cancel_watch)? else {
         return Ok(PromptOutcome::Interrupted);
     };
-    let result = spawn_and_read(program.as_str(), args, timeout, cancel_watch, stdin);
+    let result = spawn_and_read(
+        program.as_str(),
+        args,
+        message,
+        timeout,
+        cancel_watch,
+        stdin,
+    );
     drop(turn); // release the screen as soon as this prompt is done with it
     result
 }
@@ -1071,6 +1080,7 @@ fn run_prompt(
 fn spawn_and_read(
     program: &str,
     args: &[String],
+    message: &str,
     timeout: Duration,
     cancel_watch: &UnixStream,
     stdin: Option<&[u8]>,
@@ -1082,6 +1092,7 @@ fn spawn_and_read(
     let deadline = Instant::now().checked_add(timeout);
     let mut child = Command::new(program)
         .args(args)
+        .env(PROMPT_MESSAGE_ENV, message)
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -1570,12 +1581,14 @@ mod tests {
     }
 
     /// Runs `script` as the prompt, with a timeout long enough never to
-    /// fire, nobody to cancel it, and a queue of its own.
+    /// fire, nobody to cancel it, a queue of its own, and an arbitrary
+    /// message — these tests don't care what it is.
     fn prompt(script: &str) -> std::io::Result<PromptOutcome> {
         let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
         run_prompt(
             &PromptQueue::new(),
             &sh(script),
+            "test message",
             Duration::from_secs(60),
             &cancel_watch,
             None,
@@ -1614,6 +1627,7 @@ mod tests {
         let outcome = run_prompt(
             &PromptQueue::new(),
             &sh("sleep 30; printf hunter2"),
+            "test message",
             Duration::from_millis(200),
             &cancel_watch,
             None,
@@ -1635,6 +1649,7 @@ mod tests {
             run_prompt(
                 &PromptQueue::new(),
                 &sh("sleep 30; printf hunter2"),
+                "test message",
                 Duration::from_secs(60),
                 &cancel_watch,
                 None,
@@ -1656,6 +1671,7 @@ mod tests {
         let outcome = run_prompt(
             &PromptQueue::new(),
             &sh(&script),
+            "test message",
             Duration::from_millis(200),
             &cancel_watch,
             None,
@@ -1665,29 +1681,45 @@ mod tests {
         assert!(!marker.exists(), "the prompt's child outlived it");
     }
 
+    /// `run_prompt` passes the message through the environment rather than
+    /// touching the argv: a prompt that reads `KPA_PROMPT_MESSAGE` sees it
+    /// verbatim, escaped and capped exactly as `prompt_message` left it.
     #[test]
-    fn substitute_message_replaces_only_the_placeholder_element() {
-        let argv = vec![
-            "fuzzel".to_string(),
-            "--dmenu".to_string(),
-            "--prompt".to_string(),
-            config::MESSAGE_PLACEHOLDER.to_string(),
-        ];
-        assert_eq!(
-            substitute_message(&argv, "Unlock personal"),
-            vec!["fuzzel", "--dmenu", "--prompt", "Unlock personal"]
+    fn the_message_reaches_the_prompt_as_an_environment_variable() {
+        let _spawning = spawn_lock();
+        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
+        let outcome = run_prompt(
+            &PromptQueue::new(),
+            &sh(&format!("printf %s \"${PROMPT_MESSAGE_ENV}\"")),
+            "Unlock personal",
+            Duration::from_secs(60),
+            &cancel_watch,
+            None,
         );
+        let Ok(PromptOutcome::Password(seen)) = outcome else {
+            panic!("expected the message back, got {outcome:?}");
+        };
+        assert_eq!(seen.as_str(), "Unlock personal");
     }
 
+    /// The argv runs exactly as configured: nothing in it is rewritten,
+    /// even text that looks like it could have been a placeholder.
     #[test]
-    fn substitute_message_leaves_an_argv_without_the_placeholder_unchanged() {
-        let argv = vec![
-            "fuzzel".to_string(),
-            "--dmenu".to_string(),
-            "--password".to_string(),
-            "--prompt".to_string(),
-        ];
-        assert_eq!(substitute_message(&argv, "Unlock personal"), argv);
+    fn the_prompt_argv_is_never_rewritten() {
+        let _spawning = spawn_lock();
+        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
+        let outcome = run_prompt(
+            &PromptQueue::new(),
+            &sh("printf %s '{message} literally'"),
+            "Unlock personal",
+            Duration::from_secs(60),
+            &cancel_watch,
+            None,
+        );
+        let Ok(PromptOutcome::Password(seen)) = outcome else {
+            panic!("expected a password, got {outcome:?}");
+        };
+        assert_eq!(seen.as_str(), "{message} literally");
     }
 
     #[test]
@@ -1732,6 +1764,7 @@ mod tests {
                 run_prompt(
                     &queue,
                     &sh(&script),
+                    "a",
                     Duration::from_secs(10),
                     &watch_a,
                     None,
@@ -1742,6 +1775,7 @@ mod tests {
                 run_prompt(
                     &queue,
                     &sh(&script),
+                    "b",
                     Duration::from_secs(10),
                     &watch_b,
                     None,
@@ -1781,6 +1815,7 @@ mod tests {
                 run_prompt(
                     &queue,
                     &sh("sleep 1; printf ok"),
+                    "first",
                     Duration::from_secs(10),
                     &watch_first,
                     None,
@@ -1791,6 +1826,7 @@ mod tests {
                 run_prompt(
                     &queue,
                     &second_script,
+                    "second",
                     Duration::from_secs(10),
                     &watch_second,
                     None,
