@@ -16,7 +16,7 @@
 //! nothing a client sends, and nothing the host refuses, should be able to
 //! take it down. See `docs/review-2026-09-robustness.md` findings 1–4, 7, 9.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::clip::{self, Clipboard};
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::io::ByteCounter;
 use crate::log;
 use crate::origin::{self, Origin};
@@ -166,6 +166,10 @@ pub struct Server {
     desk: Mutex<policy::Desk>,
     /// Set by `assume_origin` only.
     assumed_origin: OnceLock<Origin>,
+    /// Serializes every prompt `run_prompt` raises, across every database,
+    /// so only one is ever on screen (`docs/ssh-agent.md` § 6.7's approval
+    /// prompt will share it with `unlock`'s once it exists).
+    prompt_queue: PromptQueue,
 }
 
 impl Server {
@@ -196,6 +200,7 @@ impl Server {
             clip_db: Arc::new(Mutex::new(None)),
             desk: Mutex::new(policy::Desk::NoSession),
             assumed_origin: OnceLock::new(),
+            prompt_queue: PromptQueue::new(),
         }
     }
 
@@ -519,7 +524,10 @@ impl Unlock for Server {
             None => {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
-                prompted = match prompt_password(&self.config.prompt, timeout, &cancel_watch) {
+                let message = prompt_message(&format!("Unlock {name}"));
+                let argv = substitute_message(&self.config.prompt, &message);
+                prompted = match run_prompt(&self.prompt_queue, &argv, timeout, &cancel_watch, None)
+                {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
                     }
@@ -826,17 +834,202 @@ enum PromptOutcome {
     Cancelled,
     /// Nothing was entered within `prompt_timeout`; the prompt was killed.
     TimedOut,
-    /// A lock ended the prompt (`Slot::prompt_cancel`); it was killed.
+    /// A lock ended the prompt (`Slot::prompt_cancel`); it was killed, or —
+    /// if it was still queued, never shown at all (`PromptQueue::enter`).
     Interrupted,
     Password(Zeroizing<String>),
 }
 
-/// Run the configured prompt command (`docs/design.md` decision #9,
-/// `Config::prompt`) and capture its stdout as a password.
+/// Redacts the password, same reasoning as `UnlockRequest`'s own `Debug`
+/// (`docs/headless.md` § 9): this is cheap insurance against it ending up
+/// in a test failure message or a future `{:?}` log line.
+impl std::fmt::Debug for PromptOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PromptOutcome::Cancelled => write!(f, "Cancelled"),
+            PromptOutcome::TimedOut => write!(f, "TimedOut"),
+            PromptOutcome::Interrupted => write!(f, "Interrupted"),
+            PromptOutcome::Password(_) => write!(f, "Password(_)"),
+        }
+    }
+}
+
+/// Longest prompt message kept (`docs/ssh-agent.md` § 6.6, § 6.7):
+/// generous for "Unlock personal" and for the key names and destinations a
+/// later approval prompt adds, short enough that a hostile database or
+/// entry name can't hand the prompt program an unbounded argv element.
+const MAX_PROMPT_MESSAGE_LEN: usize = 256;
+
+/// Turns `text` into what a prompt program may safely be asked to render:
+/// the same escaping the CLI applies to its own terminal output
+/// (`output::escape_for_terminal`, since a prompt can show the same
+/// hostile characters a terminal would act on — bidi overrides and the
+/// like), capped at `MAX_PROMPT_MESSAGE_LEN` bytes on a character
+/// boundary. Every message `unlock` and, later, an approval prompt builds
+/// goes through here before it reaches `substitute_message`.
+fn prompt_message(text: &str) -> String {
+    let escaped = crate::output::escape_for_terminal(text);
+    let mut end = escaped.len().min(MAX_PROMPT_MESSAGE_LEN);
+    while !escaped.is_char_boundary(end) {
+        end -= 1;
+    }
+    escaped[..end].to_string()
+}
+
+/// Replaces a `{message}` argv element with `message`; everything else is
+/// cloned as is. `config::check_prompt_argv` (run at config load) is what
+/// guarantees the placeholder, if present, is a whole element standing as
+/// an option's value — this just does the substitution, so an argv with no
+/// placeholder comes back unchanged, element for element.
+fn substitute_message(argv: &[String], message: &str) -> Vec<String> {
+    argv.iter()
+        .map(|arg| {
+            if arg == config::MESSAGE_PLACEHOLDER {
+                message.to_string()
+            } else {
+                arg.clone()
+            }
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct PromptQueueState {
+    /// Something is running, or has just been released to run next.
+    /// `false` means the next `enter` runs immediately.
+    busy: bool,
+    /// Ticket numbers handed out by `enter`, used only so a cancelling
+    /// waiter can find and remove its own entry below.
+    next_ticket: u64,
+    /// FIFO of waiters behind whoever is running, each with the write end
+    /// `release` closes to wake it: its `enter` poll sees the read end
+    /// hang up.
+    waiting: VecDeque<(u64, UnixStream)>,
+}
+
+/// Serializes every prompt across every database, so only one is ever on
+/// screen (`docs/ssh-agent.md` § 6.7's "only one prompt is on screen at a
+/// time"). `unlock`'s password prompt is the only caller today; the
+/// approval prompt `ssh_agent.confirm` raises will share this same queue
+/// once it exists.
+struct PromptQueue {
+    state: Mutex<PromptQueueState>,
+}
+
+impl PromptQueue {
+    fn new() -> PromptQueue {
+        PromptQueue {
+            state: Mutex::new(PromptQueueState::default()),
+        }
+    }
+
+    /// Blocks until either this call's turn comes up (`Ok(Some(turn))`,
+    /// released by dropping it) or `cancel_watch` hangs up first — a lock
+    /// ending a prompt that was still queued, never shown (`Ok(None)`).
+    ///
+    /// A ticket that wins the queue-empty race in `release` (it already
+    /// popped this entry just as `cancel_watch` also hung up) still comes
+    /// back `Some`: once `release` has committed to treating a ticket as
+    /// the next to run, something must eventually call `release` again on
+    /// its behalf, which only a `PromptTurn` does. Resolving that only
+    /// under `state`'s lock — the same lock `release` pops under — is what
+    /// keeps the two from disagreeing about which ticket is still queued.
+    fn enter(&self, cancel_watch: &UnixStream) -> std::io::Result<Option<PromptTurn<'_>>> {
+        // The busy check and, if it's already taken, joining the queue
+        // happen under one lock hold: splitting them would let a release
+        // between the two find the queue empty and clear `busy` before
+        // this ticket ever gets into it, stranding it forever.
+        let (ticket, watch) = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !state.busy {
+                state.busy = true;
+                return Ok(Some(PromptTurn { queue: self }));
+            }
+            let (writer, watch) = UnixStream::pair()?;
+            let ticket = state.next_ticket;
+            state.next_ticket = state.next_ticket.wrapping_add(1);
+            state.waiting.push_back((ticket, writer));
+            (ticket, watch)
+        };
+        match wait_for_wake(&watch, cancel_watch)? {
+            Wake::Turn => Ok(Some(PromptTurn { queue: self })),
+            Wake::Cancel => {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(pos) = state.waiting.iter().position(|(t, _)| *t == ticket) {
+                    state.waiting.remove(pos);
+                    return Ok(None);
+                }
+                // `release` already popped this ticket — see the doc
+                // comment above.
+                Ok(Some(PromptTurn { queue: self }))
+            }
+        }
+    }
+
+    /// Wakes the next waiter, or marks the queue idle once none are left.
+    fn release(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.waiting.pop_front() {
+            None => state.busy = false,
+            Some((_ticket, notify)) => drop(notify), // closing it wakes the waiter; `busy` stays set
+        }
+    }
+}
+
+/// Holds `PromptQueue`'s one running slot; releases it on drop, so every
+/// return from `run_prompt` — success, timeout, interruption, or an I/O
+/// error — lets the next queued prompt proceed.
+struct PromptTurn<'a> {
+    queue: &'a PromptQueue,
+}
+
+impl Drop for PromptTurn<'_> {
+    fn drop(&mut self) {
+        self.queue.release();
+    }
+}
+
+enum Wake {
+    /// `watch`'s write end closed: `release` has handed this ticket the
+    /// turn.
+    Turn,
+    /// `cancel_watch` hung up before `watch` did.
+    Cancel,
+}
+
+/// Blocks until `watch` or `cancel_watch` hangs up, whichever comes first.
+fn wait_for_wake(watch: &UnixStream, cancel_watch: &UnixStream) -> std::io::Result<Wake> {
+    use rustix::event::{PollFd, PollFlags, poll};
+
+    loop {
+        let mut fds = [
+            PollFd::new(watch, PollFlags::IN),
+            PollFd::new(cancel_watch, PollFlags::IN),
+        ];
+        match poll(&mut fds, None) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(err) => return Err(err.into()),
+        }
+        if !fds[0].revents().is_empty() {
+            return Ok(Wake::Turn);
+        }
+        if !fds[1].revents().is_empty() {
+            return Ok(Wake::Cancel);
+        }
+    }
+}
+
+/// Runs `argv` as a prompt (`docs/design.md` decision #9), queued through
+/// `queue` so only one is ever on screen, and reads its answer from
+/// stdout. `stdin`, when given, is written before anything is read — the
+/// approval prompt `ssh_agent.confirm` raises writes its `Allow`/`Deny`
+/// choices this way; `unlock`'s password prompt passes `None`.
 ///
 /// The prompt runs in its own process group. It is killed, with everything
 /// it started, once `timeout` passes without it finishing, or as soon as
-/// the other end of `cancel_watch` is dropped.
+/// the other end of `cancel_watch` is dropped. A prompt still queued when
+/// that happens is never spawned at all.
 ///
 /// The output is read into a zeroizing buffer of fixed size that never
 /// grows. That's the point: `Command::output()` collects into a `Vec` that
@@ -848,13 +1041,14 @@ enum PromptOutcome {
 /// Trailing `\n`/`\r` are stripped, since dmenu-style prompts
 /// newline-terminate their output. The copies kpa can't reach are the ones
 /// inside the prompt program itself.
-fn prompt_password(
+fn run_prompt(
+    queue: &PromptQueue,
     argv: &[String],
     timeout: Duration,
     cancel_watch: &UnixStream,
+    stdin: Option<&[u8]>,
 ) -> std::io::Result<PromptOutcome> {
     use std::io::{Error, ErrorKind};
-    use std::os::unix::process::CommandExt;
 
     let Some((program, args)) = argv.split_first() else {
         return Err(Error::new(
@@ -863,17 +1057,51 @@ fn prompt_password(
         ));
     };
 
+    let Some(turn) = queue.enter(cancel_watch)? else {
+        return Ok(PromptOutcome::Interrupted);
+    };
+    let result = spawn_and_read(program.as_str(), args, timeout, cancel_watch, stdin);
+    drop(turn); // release the screen as soon as this prompt is done with it
+    result
+}
+
+/// The actual spawn-and-read behind `run_prompt`, split out so `run_prompt`
+/// can drop its `PromptTurn` on every path through here without repeating
+/// itself at each return.
+fn spawn_and_read(
+    program: &str,
+    args: &[String],
+    timeout: Duration,
+    cancel_watch: &UnixStream,
+    stdin: Option<&[u8]>,
+) -> std::io::Result<PromptOutcome> {
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::process::CommandExt;
+
     // `None` for a timeout too large to add: a deadline that never arrives.
     let deadline = Instant::now().checked_add(timeout);
     let mut child = Command::new(program)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         // Its own process group, so `kill_prompt` can kill everything it
         // started too, such as a wrapper script's real prompt window.
         .process_group(0)
         .spawn()?;
+
+    if let Some(bytes) = stdin {
+        // The approval prompt's whole input is two short lines
+        // (`Allow`/`Deny`) — small enough that this never blocks waiting
+        // for the child to start reading.
+        if let Some(mut child_stdin) = child.stdin.take() {
+            let _ = child_stdin.write_all(bytes);
+        }
+    }
 
     let mut buf = Zeroizing::new(vec![0u8; MAX_PASSWORD_LEN]);
     let len = match read_prompt(&mut child, &mut buf, deadline, cancel_watch) {
@@ -1342,10 +1570,16 @@ mod tests {
     }
 
     /// Runs `script` as the prompt, with a timeout long enough never to
-    /// fire and nobody to cancel it.
+    /// fire, nobody to cancel it, and a queue of its own.
     fn prompt(script: &str) -> std::io::Result<PromptOutcome> {
         let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
-        prompt_password(&sh(script), Duration::from_secs(60), &cancel_watch)
+        run_prompt(
+            &PromptQueue::new(),
+            &sh(script),
+            Duration::from_secs(60),
+            &cancel_watch,
+            None,
+        )
     }
 
     #[test]
@@ -1377,10 +1611,12 @@ mod tests {
         let _spawning = spawn_lock();
         let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
         let started = Instant::now();
-        let outcome = prompt_password(
+        let outcome = run_prompt(
+            &PromptQueue::new(),
             &sh("sleep 30; printf hunter2"),
             Duration::from_millis(200),
             &cancel_watch,
+            None,
         );
         assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -1396,10 +1632,12 @@ mod tests {
                 thread::sleep(Duration::from_millis(200));
                 drop(prompt_cancel);
             });
-            prompt_password(
+            run_prompt(
+                &PromptQueue::new(),
                 &sh("sleep 30; printf hunter2"),
                 Duration::from_secs(60),
                 &cancel_watch,
+                None,
             )
         });
         assert!(matches!(outcome, Ok(PromptOutcome::Interrupted)));
@@ -1415,10 +1653,166 @@ mod tests {
         let marker = dir.path().join("survived");
         let script = format!("(sleep 1; touch '{}') & sleep 30", marker.display());
         let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
-        let outcome = prompt_password(&sh(&script), Duration::from_millis(200), &cancel_watch);
+        let outcome = run_prompt(
+            &PromptQueue::new(),
+            &sh(&script),
+            Duration::from_millis(200),
+            &cancel_watch,
+            None,
+        );
         assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
         thread::sleep(Duration::from_millis(1500));
         assert!(!marker.exists(), "the prompt's child outlived it");
+    }
+
+    #[test]
+    fn substitute_message_replaces_only_the_placeholder_element() {
+        let argv = vec![
+            "fuzzel".to_string(),
+            "--dmenu".to_string(),
+            "--prompt".to_string(),
+            config::MESSAGE_PLACEHOLDER.to_string(),
+        ];
+        assert_eq!(
+            substitute_message(&argv, "Unlock personal"),
+            vec!["fuzzel", "--dmenu", "--prompt", "Unlock personal"]
+        );
+    }
+
+    #[test]
+    fn substitute_message_leaves_an_argv_without_the_placeholder_unchanged() {
+        let argv = vec![
+            "fuzzel".to_string(),
+            "--dmenu".to_string(),
+            "--password".to_string(),
+            "--prompt".to_string(),
+        ];
+        assert_eq!(substitute_message(&argv, "Unlock personal"), argv);
+    }
+
+    #[test]
+    fn prompt_message_escapes_hostile_characters() {
+        let message = prompt_message("Unlock personal\u{202e}evil");
+        assert!(!message.contains('\u{202e}'), "{message:?}");
+        assert!(message.contains("\\u202e"), "{message:?}");
+    }
+
+    #[test]
+    fn prompt_message_caps_its_length_on_a_char_boundary() {
+        // "é" is two bytes, so the cap lands mid-character unless
+        // `prompt_message` backs off to the nearest boundary.
+        let long = "é".repeat(MAX_PROMPT_MESSAGE_LEN);
+        let message = prompt_message(&long);
+        assert!(message.len() <= MAX_PROMPT_MESSAGE_LEN);
+        assert!(std::str::from_utf8(message.as_bytes()).is_ok());
+    }
+
+    /// Two unlocks of different databases never show their prompts at
+    /// once: the second's `run_prompt` waits for the first's to finish.
+    #[test]
+    fn only_one_prompt_at_a_time_across_a_shared_queue() {
+        let _spawning = spawn_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("marker");
+        let overlap = dir.path().join("overlap");
+        // Fails (and records an overlap) if another run is already
+        // holding `marker` when this one starts.
+        let script = format!(
+            "if [ -e '{marker}' ]; then touch '{overlap}'; exit 1; fi; \
+             touch '{marker}'; sleep 0.3; rm -f '{marker}'; printf ok",
+            marker = marker.display(),
+            overlap = overlap.display(),
+        );
+        let queue = PromptQueue::new();
+        let (_cancel_a, watch_a) = UnixStream::pair().expect("socket pair");
+        let (_cancel_b, watch_b) = UnixStream::pair().expect("socket pair");
+
+        let (first, second) = thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                run_prompt(
+                    &queue,
+                    &sh(&script),
+                    Duration::from_secs(10),
+                    &watch_a,
+                    None,
+                )
+            });
+            thread::sleep(Duration::from_millis(50));
+            let second = scope.spawn(|| {
+                run_prompt(
+                    &queue,
+                    &sh(&script),
+                    Duration::from_secs(10),
+                    &watch_b,
+                    None,
+                )
+            });
+            (
+                first.join().expect("first prompt thread panicked"),
+                second.join().expect("second prompt thread panicked"),
+            )
+        });
+
+        assert!(matches!(first, Ok(PromptOutcome::Password(_))), "{first:?}");
+        assert!(
+            matches!(second, Ok(PromptOutcome::Password(_))),
+            "{second:?}"
+        );
+        assert!(!overlap.exists(), "both prompts were on screen at once");
+    }
+
+    /// A prompt that never got the screen — still waiting its turn behind
+    /// another one — is cancelled the instant its own `cancel_watch` hangs
+    /// up, without waiting for its turn to come up.
+    #[test]
+    fn a_queued_prompt_is_cancelled_without_ever_being_shown() {
+        let _spawning = spawn_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("second-ran");
+        let second_script = sh(&format!("touch '{}'; printf ok", marker.display()));
+        let queue = PromptQueue::new();
+        let (_cancel_first, watch_first) = UnixStream::pair().expect("socket pair");
+        let (cancel_second, watch_second) = UnixStream::pair().expect("socket pair");
+
+        let (first, second) = thread::scope(|scope| {
+            // Holds the queue's one slot for long enough that the second
+            // call below is still waiting when it gets cancelled.
+            let first = scope.spawn(|| {
+                run_prompt(
+                    &queue,
+                    &sh("sleep 1; printf ok"),
+                    Duration::from_secs(10),
+                    &watch_first,
+                    None,
+                )
+            });
+            thread::sleep(Duration::from_millis(100));
+            let second = scope.spawn(|| {
+                run_prompt(
+                    &queue,
+                    &second_script,
+                    Duration::from_secs(10),
+                    &watch_second,
+                    None,
+                )
+            });
+            thread::sleep(Duration::from_millis(100));
+            let cancelled_at = Instant::now();
+            drop(cancel_second);
+            let second = second.join().expect("second prompt thread panicked");
+            assert!(
+                cancelled_at.elapsed() < Duration::from_millis(900),
+                "the queued prompt waited for its turn instead of being cancelled"
+            );
+            (first.join().expect("first prompt thread panicked"), second)
+        });
+
+        assert!(matches!(first, Ok(PromptOutcome::Password(_))), "{first:?}");
+        assert!(
+            matches!(second, Ok(PromptOutcome::Interrupted)),
+            "{second:?}"
+        );
+        assert!(!marker.exists(), "a cancelled, still-queued prompt ran");
     }
 
     #[test]

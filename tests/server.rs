@@ -489,6 +489,82 @@ fn a_second_unlock_does_not_open_a_second_prompt() {
     );
 }
 
+/// Two databases unlocking at once never show their prompts together: the
+/// shared queue (`docs/ssh-agent.md` § 6.7) serializes them even though
+/// they're different databases with no epoch or mutex relationship to each
+/// other otherwise.
+#[test]
+fn two_concurrent_unlocks_of_different_databases_show_one_prompt_at_a_time() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("marker");
+    let overlap = dir.path().join("overlap");
+    // Fails, and records an overlap, if another run already holds `marker`.
+    let script = format!(
+        "if [ -e '{marker}' ]; then touch '{overlap}'; exit 1; fi; \
+         touch '{marker}'; sleep 0.3; rm -f '{marker}'; printf %s '{password}'",
+        marker = marker.display(),
+        overlap = overlap.display(),
+        password = common::PASSWORD,
+    );
+    let db = common::password_db().display().to_string();
+    let config = format!(
+        "prompt = [\"/bin/sh\", \"-c\", \"{script}\"]\n\n\
+         [[database]]\nname = \"a\"\npath = \"{db}\"\n\n\
+         [[database]]\nname = \"b\"\npath = \"{db}\"\n"
+    );
+    let daemon = InProcessDaemon::start(&config);
+
+    std::thread::scope(|scope| {
+        let a = scope.spawn(|| daemon.run(&["unlock", "a"]));
+        std::thread::sleep(Duration::from_millis(50));
+        let b = scope.spawn(|| daemon.run(&["unlock", "b"]));
+
+        let a = a.join().expect("unlock a thread panicked");
+        let b = b.join().expect("unlock b thread panicked");
+        assert_eq!(a["ok"], true, "{a}");
+        assert_eq!(b["ok"], true, "{b}");
+    });
+
+    assert!(!overlap.exists(), "both prompts were on screen at once");
+}
+
+/// A lock on a database whose unlock is still queued behind another
+/// database's prompt ends it at once, without waiting for its turn
+/// (`docs/ssh-agent.md` § 6.6, "a queued prompt that never got the screen
+/// still respects the lock").
+#[test]
+fn a_lock_while_a_prompt_is_queued_cancels_it() {
+    let db = common::password_db().display().to_string();
+    let config = format!(
+        "{}\n\
+         [[database]]\nname = \"b\"\npath = \"{db}\"\n",
+        config_toml(&format!("sleep 1; printf %s '{}'", common::PASSWORD), &db,)
+    );
+    let daemon = InProcessDaemon::start(&config);
+
+    std::thread::scope(|scope| {
+        // Takes the queue's one slot for a second — long enough that `b`'s
+        // unlock below is still waiting its turn when it gets locked.
+        let a = scope.spawn(|| daemon.run(&["unlock", "personal"]));
+        std::thread::sleep(Duration::from_millis(200));
+        let b = scope.spawn(|| daemon.run(&["unlock", "b"]));
+        std::thread::sleep(Duration::from_millis(200));
+
+        let locked_at = Instant::now();
+        assert_eq!(daemon.run(&["lock", "b"])["ok"], true);
+
+        let unlocked_b = b.join().expect("unlock b thread panicked");
+        assert_eq!(unlocked_b["error"], "locked", "{unlocked_b}");
+        assert!(
+            locked_at.elapsed() < Duration::from_millis(700),
+            "the queued unlock waited for its turn instead of being cancelled: {:?}",
+            locked_at.elapsed()
+        );
+
+        assert_eq!(a.join().expect("unlock a thread panicked")["ok"], true);
+    });
+}
+
 /// Nobody reading the daemon's log must not kill it or cost a client
 /// its reply (docs/review-2026-09-robustness.md finding 4). Both requests
 /// log a line: a failed unlock a warning, a lock an info.

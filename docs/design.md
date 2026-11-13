@@ -68,7 +68,7 @@ speak the socket protocol directly works.
 
 ```toml
 idle_timeout = "30m"
-prompt = ["fuzzel", "--dmenu", "--password", "--prompt"]
+prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
 prompt_timeout = "60s"         # an unanswered prompt is killed after this
 clipboard_timeout = "30s"
 log_level = "info"             # error | warn | info | debug
@@ -86,6 +86,17 @@ path = "~/vault/work.kdbx"
 A leading `~/` in `path` or `keyfile` expands to `$HOME` when the daemon
 starts; `~user/` is refused rather than taken literally, and other relative
 paths resolve against the daemon's working directory.
+
+**`prompt`'s `{message}` placeholder** is replaced with what the unlock is
+about — `"Unlock personal"`, for `personal` above — but only where it
+stands as a whole argument right after one that looks like an option, as
+in `"--prompt", "{message}"`. Elsewhere in the argv — the program name, a
+bare positional argument, or embedded inside a longer one — it is a config
+error rather than silently left as literal text. An argv without the
+placeholder at all behaves exactly as it always has. The message itself is
+escaped the same way the CLI escapes its own terminal output and capped in
+length, since a later request-derived message (an SSH key name, once the
+agent's approval prompt exists) carries text this daemon didn't author.
 
 If you manage your system declaratively (Nix, Ansible, whatever), this shape
 is meant to be generated rather than hand-edited — every setting is a plain
@@ -414,6 +425,11 @@ own — only `LockedHint` does.
 
 The prompt runs in its own process group, and killing it kills the whole
 group, so a wrapper script's own prompt window goes too.
+
+**Only one prompt is on screen at a time.** Concurrent unlocks across
+different databases share a queue; a database's prompt still waiting its
+turn is cancelled the instant a lock lands on it, rather than waiting for
+its turn to come up first.
 
 "What can be zeroized" is narrower than it sounds:
 

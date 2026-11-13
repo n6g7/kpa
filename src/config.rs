@@ -7,8 +7,51 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
+use serde::de::Error as _;
 
 use crate::log::Level;
+
+/// What `prompt` (and, later, `[ssh_agent].confirm`, the same dmenu-style
+/// contract — `docs/ssh-agent.md` § 6.7) substitutes with what the prompt
+/// is about, e.g. `"Unlock personal"` (`docs/ssh-agent.md` § 6.6).
+/// `server::substitute_message` does the substitution; `check_prompt_argv`
+/// below enforces where it may appear.
+pub const MESSAGE_PLACEHOLDER: &str = "{message}";
+
+/// Rejects a `{message}` placeholder anywhere except as a whole argv
+/// element immediately after one that looks like an option (starts with
+/// `-`): not the program name, not a bare positional argument, and not
+/// embedded inside a longer argument. Those are the only placements
+/// `server::substitute_message` can turn into an option's value, so
+/// anything else is rejected at config load rather than silently left as
+/// literal text (or substituted somewhere it would break the command).
+fn check_prompt_argv(argv: &[String]) -> Result<(), String> {
+    for (i, arg) in argv.iter().enumerate() {
+        if arg == MESSAGE_PLACEHOLDER {
+            if i == 0 || !argv[i - 1].starts_with('-') {
+                return Err(format!(
+                    "{MESSAGE_PLACEHOLDER} must follow an option, e.g. \
+                     [\"--prompt\", \"{MESSAGE_PLACEHOLDER}\"] — it can't stand as the \
+                     program name or a positional argument"
+                ));
+            }
+        } else if arg.contains(MESSAGE_PLACEHOLDER) {
+            return Err(format!(
+                "{MESSAGE_PLACEHOLDER} must be its own argument, not part of {arg:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn deserialize_prompt<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let argv = Vec::<String>::deserialize(deserializer)?;
+    check_prompt_argv(&argv).map_err(D::Error::custom)?;
+    Ok(argv)
+}
 
 /// Top-level config, `$XDG_CONFIG_HOME/kpa/config.toml`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -25,10 +68,12 @@ pub struct Config {
     pub idle_timeout: Duration,
 
     /// argv for the passphrase prompt, e.g.
-    /// `["fuzzel", "--dmenu", "--password", "--prompt"]`. Swappable per
-    /// decision #9 in the design doc — `pinentry-qt` is the long-term
-    /// answer but fiddly, so this stays a plain argv rather than an enum.
-    #[serde(default = "default_prompt")]
+    /// `["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]`.
+    /// Swappable per decision #9 in the design doc — `pinentry-qt` is the
+    /// long-term answer but fiddly, so this stays a plain argv rather than
+    /// an enum. `MESSAGE_PLACEHOLDER` is optional: an argv without it
+    /// behaves exactly as if it were never introduced.
+    #[serde(default = "default_prompt", deserialize_with = "deserialize_prompt")]
     pub prompt: Vec<String>,
 
     /// How long a prompt may stay open unanswered. Past this the prompt is
@@ -407,7 +452,7 @@ mod tests {
         // really "does the design doc's own example parse".
         let input = r#"
             idle_timeout = "30m"
-            prompt = ["fuzzel", "--dmenu", "--password", "--prompt"]
+            prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
             prompt_timeout = "60s"
             clipboard_timeout = "30s"
 
@@ -426,7 +471,7 @@ mod tests {
         assert_eq!(config.idle_timeout, Duration::from_secs(30 * 60));
         assert_eq!(
             config.prompt,
-            vec!["fuzzel", "--dmenu", "--password", "--prompt"]
+            vec!["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
         );
         assert_eq!(config.prompt_timeout, Duration::from_secs(60));
         assert_eq!(config.clipboard_timeout, Duration::from_secs(30));
@@ -488,6 +533,39 @@ mod tests {
         "#;
 
         assert!(Config::parse(input).is_err());
+    }
+
+    #[test]
+    fn a_message_placeholder_as_an_options_value_is_accepted() {
+        let config = Config::parse(
+            r#"prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]"#,
+        )
+        .expect("the placeholder is a valid option value");
+        assert_eq!(
+            config.prompt,
+            vec!["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
+        );
+    }
+
+    #[test]
+    fn a_message_placeholder_as_the_program_name_is_rejected() {
+        let err = Config::parse(r#"prompt = ["{message}"]"#)
+            .expect_err("a bare placeholder can't be the program to run");
+        assert!(err.to_string().contains("{message}"), "{err}");
+    }
+
+    #[test]
+    fn a_message_placeholder_as_a_positional_argument_is_rejected() {
+        let err = Config::parse(r#"prompt = ["fuzzel", "{message}", "--dmenu"]"#)
+            .expect_err("the placeholder follows the program name, not an option, here");
+        assert!(err.to_string().contains("{message}"), "{err}");
+    }
+
+    #[test]
+    fn a_message_placeholder_embedded_in_a_larger_argument_is_rejected() {
+        let err = Config::parse(r#"prompt = ["fuzzel", "--prompt=say {message} now"]"#)
+            .expect_err("the placeholder isn't a whole argument here");
+        assert!(err.to_string().contains("{message}"), "{err}");
     }
 
     fn one_database(path: &str, keyfile: Option<&str>) -> Config {

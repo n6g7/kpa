@@ -39,7 +39,7 @@ log_level = "info"
 # single global setting, so one prompt can't serve both that and a
 # password database at once.
 prompt = ["/bin/sh", "-c", "printf %s testpass123"]
-# prompt = ["fuzzel", "--dmenu", "--password", "--prompt"]
+# prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
 
 # A prompt left unanswered this long is killed, with everything it started,
 # and the unlock fails with `prompt_cancelled`. Any lock also ends a prompt
