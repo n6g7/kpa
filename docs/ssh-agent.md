@@ -25,10 +25,11 @@ unlocking from a terminal.
   they are listed even while the database is locked. That is what makes
   unlock on demand work. Optional per-key settings under the database in
   config, matched by fingerprint, override the defaults.
-- **Each key's first use after an unlock is approved.** The approval holds
-  until the database locks. When a signature has to unlock the database
-  first, the unlock prompt names the key and counts as its approval. A key
-  can instead ask on every use, or never.
+- **Each key's first use for a given destination, after an unlock, is
+  approved.** The approval holds until the database locks. When a
+  signature has to unlock the database first, the unlock prompt names the
+  key and destination and counts as its approval. A key can instead ask on
+  every use, or never.
 - **Forwarded use is approved the same way, per forwarding session.** OpenSSH's
   `session-bind@openssh.com` tells kpa when a request arrives through
   `ssh -A`. The first forwarded signature per key, forwarding session,
@@ -143,31 +144,32 @@ to parse and decrypt the key file, so all A saves is the call to `sign`.
 
 The policy is a table over who asks and from where. "Prompt" always means a
 prompt on this machine's screen, and "approval" is the one § 6.7 describes:
-once per key until lock by default.
+once per key and destination until lock by default.
 
 | #   | Situation                                                    | Recognized by                                                           | Database locked                                                          | Database unlocked                                                                          |
 | --- | ------------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| S1  | At the desk: `ssh`, `git push`, an IDE                       | No binding, or an authentication binding from the local `ssh`           | Unlock prompt naming the key and destination. Answering it approves the key | Sign if the key is approved. Otherwise an approval prompt first                          |
+| S1  | At the desk: `ssh`, `git push`, an IDE                       | No binding, or an authentication binding from the local `ssh`           | Unlock prompt naming the key and destination. Answering it approves the key for that destination | Sign if the key is approved for that destination. Otherwise an approval prompt first                          |
 | S2  | Commit or tag signing (`ssh-keygen -Y sign`)                 | `SSHSIG` data, no binding                                               | As S1                                                                    | As S1                                                                                      |
 | S3  | `ssh -A` from here; the remote host uses the key             | First binding has `is_forwarding` (§ 6.2)                               | Unlock prompt naming the forwarding host and destination. Answering it approves the forwarding session | Sign if this forwarding session is approved for the key and destination. Otherwise an approval prompt first. SSH logins only. A key with `forwarded = false` is neither listed nor used |
-| S4  | Working on this machine from elsewhere, with no agent forwarded: an SSH login, a terminal-server shell | The requester runs outside the desktop (§ 6.8) | Refused, no prompt. `kpa unlock` in that shell asks on the terminal (§ 6.10) | Sign if approved. Otherwise refused and remembered; `kpa ssh approve` in that shell approves it, and the retry signs (§ 6.8). An `ssh -A` started from that shell works the same way |
+| S4  | Working on this machine from elsewhere, with no agent forwarded: an SSH login, a terminal-server shell | The requester runs outside the desktop (§ 6.8) | Refused, no prompt. `kpa unlock` in that shell asks on the terminal (§ 6.10) | Sign if approved for that destination. Otherwise refused and remembered; `kpa ssh approve` in that shell approves it, and the retry signs (§ 6.8). An `ssh -A` started from that shell works the same way |
 | S5  | Screen locked or machine suspended                           | logind (existing lock policy)                                           | Everything is already locked. No prompt                                  | Not possible: a screen lock locks every database                                           |
-| S6  | Background jobs: user timers, IDE auto-fetch                 | Indistinguishable from S1. Jobs outside the user manager (cron, system services) fall under S4 | Unlock prompt, with backoff after a cancel (§ 6.6)    | As S1: one approval prompt per key per unlock, with backoff after a cancel                 |
+| S6  | Background jobs: user timers, IDE auto-fetch                 | Indistinguishable from S1. Jobs outside the user manager (cron, system services) fall under S4 | Unlock prompt, with backoff after a cancel (§ 6.6)    | As S1: one approval prompt per key per destination per unlock, with backoff after a cancel |
 | S7  | Sandboxed app, container                                     | No socket unless granted (T-15)                                         | —                                                                        | —                                                                                          |
 | S8  | `ssh -A` from here to another machine that runs kpa          | As S3                                                                    | As S3                                                                   | As S3. On the remote, the forwarded agent answers for every key it lists, and the remote's own kpa answers for the rest (§ 8) |
 
-**Why local use is approved once per unlock.** Inside the uid boundary a
-per-use approval is not a security boundary (NG-1). A process that can
-talk to the agent can also wait for an unlock and `copy` every password,
-and the threat model already accepts that while unlocked (T-18). What an
-approval buys is visibility: the first use of each key after each unlock
-shows on screen, so an unexpected one stands out. Remembering it until
-lock keeps that to one prompt per key per unlock, not one per `git fetch`,
-which would train the user to accept without reading. The precedents
-converge on remembering an approval until lock: 1Password's default,
-Bitwarden's "remember until lock" option, Strongbox's approval timeout.
-`confirm = "always"` asks on every use, for a key whose every use should be
-visible (production root, say). `confirm = "never"` skips the approval.
+**Why local use is approved once per destination per unlock.** Inside the
+uid boundary a per-use approval is not a security boundary (NG-1). A
+process that can talk to the agent can also wait for an unlock and `copy`
+every password, and the threat model already accepts that while unlocked
+(T-18). What an approval buys is visibility: the first use of each key for
+each destination after each unlock shows on screen, so an unexpected one
+stands out. Remembering it until lock keeps that to one prompt per key per
+destination per unlock, not one per `git fetch`, which would train the
+user to accept without reading. The precedents converge on remembering an
+approval until lock: 1Password's default, Bitwarden's "remember until
+lock" option, Strongbox's approval timeout. `confirm = "always"` asks on
+every use, for a key whose every use should be visible (production root,
+say). `confirm = "never"` skips the approval.
 
 **Why forwarded use is scoped to the forwarding session.** The requester is
 another machine: its root, or anything there that can reach the forwarded
@@ -402,8 +404,9 @@ it.
 Two per-key settings decide when a signature needs approval:
 
 - **`confirm`**, for local use:
-  - `"once"` (default): the first signature with the key after each unlock
-    asks. The approval holds until the database locks.
+  - `"once"` (default): the first signature with the key, for a given
+    destination, after each unlock asks. The approval holds until the
+    database locks.
   - `"always"`: every signature asks, forwarded ones included.
   - `"never"`: local signatures never ask.
 - **`forwarded`**, for use through `ssh -A`:
@@ -690,8 +693,8 @@ programs' settings.
 
 | Action                                                     | What happens                                                                                                                                         |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git push` at the desk, vault locked                       | The prompt asks "Unlock personal: key github for git@github.com", then the push goes through. The key is approved until lock                         |
-| `git push` at the desk, vault unlocked, key not yet used   | An approval prompt names the key and destination. Later uses don't ask until lock                                                                    |
+| `git push` at the desk, vault locked                       | The prompt asks "Unlock personal: key github for git@github.com", then the push goes through. The key is approved for that destination until lock    |
+| `git push` at the desk, vault unlocked, key not yet used   | An approval prompt names the key and destination. Later uses of that destination don't ask until lock                                                |
 | `ssh -A` to a headless host, then `git pull` there         | The login is local use. The pull is forwarded, and the desktop asks once, naming the host, the destination, the key and the remote user. The approval covers the rest of that SSH session |
 | IDE remote session to a headless host, then a fetch        | The same: one approval per destination per connection                                                                                                |
 | From a laptop: `ssh -A` into the desktop, then `git pull`  | The laptop's forwarded agent answers. kpa on the desktop is not involved                                                                             |
@@ -816,7 +819,7 @@ programs' settings.
   - § Lock policy: lock drops cached keys and approvals, and kills open
     prompts. Local signatures are activity.
   - Settled decisions: one row for "kpa is the agent, databases opt in,
-    approval once per key per unlock".
+    approval once per key per destination per unlock".
 - **`background.md`**: the "SSH agent" row of the gap table changes. A
   full client covers SSH, but only while it runs, and only by pushing keys
   into a separate agent.

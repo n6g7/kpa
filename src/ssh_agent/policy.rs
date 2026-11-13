@@ -178,9 +178,10 @@ fn check_purpose_and_binding(
 }
 
 /// Whether `key` is already approved for use over a connection of `class`
-/// — `confirm = "never"` counts as always approved for local use; a
-/// forwarded connection is checked by its exact (key, session, host,
-/// dest) scope.
+/// — `confirm = "never"` counts as always approved for local use; a local
+/// approval is checked by its exact (key, destination) scope, a forwarded
+/// one by its exact (key, session, host, dest) scope
+/// (`docs/ssh-agent.md` § 6.7).
 fn is_approved(key: KeySettings, class: &ConnectionClass, approvals: &Approvals) -> bool {
     match class {
         ConnectionClass::Forwarded {
@@ -195,8 +196,13 @@ fn is_approved(key: KeySettings, class: &ConnectionClass, approvals: &Approvals)
             };
             approvals.is_forwarded_approved(key.fingerprint, session, host, dest)
         }
-        ConnectionClass::LocalUnbound | ConnectionClass::LocalBound { .. } => {
-            key.confirm == SshKeyConfirm::Never || approvals.is_locally_approved(key.fingerprint)
+        ConnectionClass::LocalUnbound => {
+            key.confirm == SshKeyConfirm::Never
+                || approvals.is_locally_approved(key.fingerprint, None)
+        }
+        ConnectionClass::LocalBound { dest } => {
+            key.confirm == SshKeyConfirm::Never
+                || approvals.is_locally_approved(key.fingerprint, Some(dest))
         }
     }
 }
@@ -352,7 +358,12 @@ mod tests {
                     let dest = dest.as_ref().expect("test case needs a destination");
                     approvals.grant_forwarded(case.key.fingerprint, session, host, dest);
                 }
-                _ => approvals.grant_local(case.key.fingerprint, case.key.confirm),
+                ConnectionClass::LocalBound { dest } => {
+                    approvals.grant_local(case.key.fingerprint, Some(dest), case.key.confirm);
+                }
+                ConnectionClass::LocalUnbound => {
+                    approvals.grant_local(case.key.fingerprint, None, case.key.confirm);
+                }
             }
         }
         let got = decide(
@@ -436,6 +447,59 @@ mod tests {
             backoff: false,
             expect: Decision::Refuse(Refusal::SessionMismatch),
         });
+    }
+
+    /// A local approval is scoped to its destination: approving a key for
+    /// one destination (or for unbound use) never signs for another
+    /// (`docs/ssh-agent.md` § 6.7).
+    #[test]
+    fn local_approvals_are_not_reused_across_destinations() {
+        let key = key(SshKeyConfirm::Once, true);
+        let mut approvals = Approvals::new();
+        approvals.grant_local(key.fingerprint, Some(&host_key(1)), key.confirm);
+
+        assert_eq!(
+            decide(
+                key,
+                &ConnectionClass::LocalBound { dest: host_key(2) },
+                &login(b"sid"),
+                Some(b"sid"),
+                false,
+                &approvals,
+                true,
+                false,
+            ),
+            Decision::Approve,
+            "a different destination must not reuse the approval"
+        );
+        assert_eq!(
+            decide(
+                key,
+                &ConnectionClass::LocalUnbound,
+                &login(b"sid"),
+                None,
+                false,
+                &approvals,
+                true,
+                false,
+            ),
+            Decision::Approve,
+            "a bound approval must not cover unbound use"
+        );
+        assert_eq!(
+            decide(
+                key,
+                &ConnectionClass::LocalBound { dest: host_key(1) },
+                &login(b"sid"),
+                Some(b"sid"),
+                false,
+                &approvals,
+                true,
+                false,
+            ),
+            Decision::Sign,
+            "the destination it was actually granted for still signs"
+        );
     }
 
     /// S2: "Commit or tag signing — SSHSIG data, no binding — As S1."
@@ -773,7 +837,7 @@ mod tests {
     fn confirm_always_asks_even_when_a_prior_signature_was_approved() {
         let key = key(SshKeyConfirm::Always, true);
         let mut approvals = Approvals::new();
-        approvals.grant_local(key.fingerprint, key.confirm);
+        approvals.grant_local(key.fingerprint, None, key.confirm);
         // Granting records a one-shot approval; decide() itself never
         // consumes it, so it's still visible here...
         assert_eq!(
@@ -791,7 +855,7 @@ mod tests {
         );
         // ...until the caller consumes it once that signature goes
         // through, after which the next one asks again.
-        approvals.consume_local(key.fingerprint);
+        approvals.consume_local(key.fingerprint, None);
         assert_eq!(
             decide(
                 key,
@@ -827,7 +891,7 @@ mod tests {
             ),
             Decision::Unlock
         );
-        approvals.grant_local(key.fingerprint, key.confirm);
+        approvals.grant_local(key.fingerprint, None, key.confirm);
         assert_eq!(
             decide(
                 key,

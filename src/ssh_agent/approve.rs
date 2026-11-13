@@ -41,6 +41,18 @@ enum LocalApproval {
     OneShot,
 }
 
+/// A local approval's scope: the key and its destination — the last
+/// binding's host key on a `LocalBound` connection, `None` on a
+/// `LocalUnbound` one (`ssh-keygen -Y sign`, and clients other than
+/// OpenSSH's `ssh`, which never bind at all). Approving a key for one
+/// destination never covers another, or covers unbound use, and vice
+/// versa (`docs/ssh-agent.md` § 6.7).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LocalScope {
+    key: Fingerprint,
+    destination: Option<KeyData>,
+}
+
 /// A forwarded approval's scope: the key, the forwarding session, the
 /// forwarding host, and the destination — all four, so an approval never
 /// carries over to a different forwarding session, host or destination
@@ -57,7 +69,7 @@ struct ForwardedScope {
 /// approved since the last lock.
 #[derive(Debug, Default)]
 pub struct Approvals {
-    local: std::collections::HashMap<Fingerprint, LocalApproval>,
+    local: std::collections::HashMap<LocalScope, LocalApproval>,
     forwarded: std::collections::HashSet<ForwardedScope>,
 }
 
@@ -66,32 +78,52 @@ impl Approvals {
         Approvals::default()
     }
 
-    /// Whether `key` has a local approval right now. Does not consume a
-    /// one-shot approval — [`Approvals::consume_local`] does that, once
-    /// the signature it was for has actually gone through.
-    pub fn is_locally_approved(&self, key: Fingerprint) -> bool {
-        self.local.contains_key(&key)
+    /// Whether `key` has a local approval for `destination` right now.
+    /// Does not consume a one-shot approval —
+    /// [`Approvals::consume_local`] does that, once the signature it was
+    /// for has actually gone through.
+    pub fn is_locally_approved(&self, key: Fingerprint, destination: Option<&KeyData>) -> bool {
+        self.local.contains_key(&LocalScope {
+            key,
+            destination: destination.cloned(),
+        })
     }
 
-    /// Records a local approval for `key`, scoped per `confirm`
-    /// (`docs/ssh-agent.md` § 6.7): `once` persists until lock, `always`
-    /// is good for one signature. Never call this for `confirm = "never"`
-    /// — such a key's signatures never consult an approval at all
-    /// ([`super::policy::decide`]).
-    pub fn grant_local(&mut self, key: Fingerprint, confirm: SshKeyConfirm) {
+    /// Records a local approval for (`key`, `destination`), scoped per
+    /// `confirm` (`docs/ssh-agent.md` § 6.7): `once` persists until lock,
+    /// `always` is good for one signature. Never call this for
+    /// `confirm = "never"` — such a key's signatures never consult an
+    /// approval at all ([`super::policy::decide`]).
+    pub fn grant_local(
+        &mut self,
+        key: Fingerprint,
+        destination: Option<&KeyData>,
+        confirm: SshKeyConfirm,
+    ) {
         let approval = match confirm {
             SshKeyConfirm::Always => LocalApproval::OneShot,
             SshKeyConfirm::Once | SshKeyConfirm::Never => LocalApproval::Persistent,
         };
-        self.local.insert(key, approval);
+        self.local.insert(
+            LocalScope {
+                key,
+                destination: destination.cloned(),
+            },
+            approval,
+        );
     }
 
     /// Call once the signature a local approval allowed has actually gone
     /// through: drops a one-shot (`always`) approval, leaves a persistent
-    /// (`once`) one in place. A no-op if `key` has no approval at all.
-    pub fn consume_local(&mut self, key: Fingerprint) {
-        if matches!(self.local.get(&key), Some(LocalApproval::OneShot)) {
-            self.local.remove(&key);
+    /// (`once`) one in place. A no-op if (`key`, `destination`) has no
+    /// approval at all.
+    pub fn consume_local(&mut self, key: Fingerprint, destination: Option<&KeyData>) {
+        let scope = LocalScope {
+            key,
+            destination: destination.cloned(),
+        };
+        if matches!(self.local.get(&scope), Some(LocalApproval::OneShot)) {
+            self.local.remove(&scope);
         }
     }
 
@@ -296,18 +328,18 @@ mod tests {
     #[test]
     fn a_fresh_key_has_no_local_approval() {
         let approvals = Approvals::new();
-        assert!(!approvals.is_locally_approved(fingerprint(1)));
+        assert!(!approvals.is_locally_approved(fingerprint(1), None));
     }
 
     #[test]
     fn a_once_approval_survives_being_consumed() {
         let mut approvals = Approvals::new();
         let key = fingerprint(2);
-        approvals.grant_local(key, SshKeyConfirm::Once);
-        assert!(approvals.is_locally_approved(key));
-        approvals.consume_local(key);
+        approvals.grant_local(key, None, SshKeyConfirm::Once);
+        assert!(approvals.is_locally_approved(key, None));
+        approvals.consume_local(key, None);
         assert!(
-            approvals.is_locally_approved(key),
+            approvals.is_locally_approved(key, None),
             "a once approval must survive consumption"
         );
     }
@@ -316,11 +348,11 @@ mod tests {
     fn an_always_approval_is_consumed_exactly_once() {
         let mut approvals = Approvals::new();
         let key = fingerprint(3);
-        approvals.grant_local(key, SshKeyConfirm::Always);
-        assert!(approvals.is_locally_approved(key));
-        approvals.consume_local(key);
+        approvals.grant_local(key, None, SshKeyConfirm::Always);
+        assert!(approvals.is_locally_approved(key, None));
+        approvals.consume_local(key, None);
         assert!(
-            !approvals.is_locally_approved(key),
+            !approvals.is_locally_approved(key, None),
             "an always approval must not survive consumption"
         );
     }
@@ -328,15 +360,56 @@ mod tests {
     #[test]
     fn consuming_an_ungranted_key_does_nothing() {
         let mut approvals = Approvals::new();
-        approvals.consume_local(fingerprint(4)); // must not panic
+        approvals.consume_local(fingerprint(4), None); // must not panic
     }
 
     #[test]
     fn clear_drops_every_local_approval() {
         let mut approvals = Approvals::new();
-        approvals.grant_local(fingerprint(5), SshKeyConfirm::Once);
+        approvals.grant_local(fingerprint(5), None, SshKeyConfirm::Once);
         approvals.clear();
-        assert!(!approvals.is_locally_approved(fingerprint(5)));
+        assert!(!approvals.is_locally_approved(fingerprint(5), None));
+    }
+
+    #[test]
+    fn a_local_approval_is_scoped_to_its_destination() {
+        let mut approvals = Approvals::new();
+        let key = fingerprint(16);
+        let dest_a = host_key(108);
+        let dest_b = host_key(109);
+
+        approvals.grant_local(key, Some(&dest_a), SshKeyConfirm::Once);
+
+        assert!(approvals.is_locally_approved(key, Some(&dest_a)));
+        assert!(
+            !approvals.is_locally_approved(key, Some(&dest_b)),
+            "a different destination must not be approved"
+        );
+        assert!(
+            !approvals.is_locally_approved(key, None),
+            "approving one destination must not approve unbound use"
+        );
+    }
+
+    #[test]
+    fn an_unbound_approval_does_not_cover_bound_use_or_the_reverse() {
+        let mut approvals = Approvals::new();
+        let key = fingerprint(17);
+        let dest = host_key(110);
+
+        approvals.grant_local(key, None, SshKeyConfirm::Once);
+        assert!(approvals.is_locally_approved(key, None));
+        assert!(
+            !approvals.is_locally_approved(key, Some(&dest)),
+            "an unbound approval must not cover bound use for a destination"
+        );
+
+        let mut approvals = Approvals::new();
+        approvals.grant_local(key, Some(&dest), SshKeyConfirm::Once);
+        assert!(
+            !approvals.is_locally_approved(key, None),
+            "a bound approval must not cover unbound use"
+        );
     }
 
     #[test]
