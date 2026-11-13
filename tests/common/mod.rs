@@ -95,6 +95,24 @@ pub fn ssh_db() -> PathBuf {
 /// (`tests/fixture.sh`).
 pub const SSH_KEY_PASSPHRASE: &str = "correct-horse-battery-staple";
 
+/// The fingerprint of `ssh_db()`'s entry named `title` (`"Ed25519"`,
+/// `"Ecdsa"` or `"Rsa"`) — for building a `[[database.ssh_key]]` override
+/// before a daemon that serves it has even started, since a fresh fixture
+/// has a different fingerprint every run.
+pub fn ssh_fixture_fingerprint(title: &str) -> String {
+    let password = zeroize::Zeroizing::new(PASSWORD.to_string());
+    let (db, _) =
+        kpa::vault::open(&ssh_db(), Some(&password), None).expect("ssh fixture should open");
+    let attachments = kpa::vault::list_attachments(&db);
+    kpa::ssh_agent::keys::scan(&attachments)
+        .found
+        .into_iter()
+        .find(|key| key.entry_title.as_deref() == Some(title))
+        .unwrap_or_else(|| panic!("no {title:?} key found in the ssh fixture"))
+        .fingerprint
+        .to_string()
+}
+
 /// A config whose one database is `db_path` under the name `"personal"`,
 /// and whose `prompt` runs `prompt_script` under `sh -c`, standing in for a
 /// real dmenu-style prompt.

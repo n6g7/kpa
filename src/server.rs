@@ -48,6 +48,7 @@ use crate::ssh_agent::approve::Approvals;
 use crate::ssh_agent::{bind, classify, keys, policy as ssh_policy, wire as ssh_wire};
 use crate::vault::{self, Fingerprint, VaultError};
 use ssh_key::encoding::{Decode, Encode, Reader};
+use ssh_key::known_hosts::{HostPatterns, KnownHosts};
 use ssh_key::public::KeyData;
 use ssh_key::{HashAlg, PrivateKey, PublicKey};
 
@@ -96,7 +97,7 @@ struct Slot {
 }
 
 /// The SSH-agent-specific half of a [`Slot`], split out so `Slot::lock`'s
-/// "drop everything" has one field to clear instead of three.
+/// "drop everything" has one field to clear instead of four.
 #[derive(Default)]
 struct SshSlot {
     served: Vec<keys::ServedKey>,
@@ -105,6 +106,13 @@ struct SshSlot {
     /// happens for all of them together on lock.
     decrypted: HashMap<ssh_key::Fingerprint, keys::DecryptedKey>,
     approvals: Approvals,
+    /// How a lock ends an approval prompt in flight for this database,
+    /// the same mechanism `Slot::prompt_cancel` uses for `unlock`'s own
+    /// prompt: dropping this hangs up the other end, which
+    /// `ssh_run_approval_prompt`'s `run_prompt` call is watching.
+    /// Reinstating `Slot::lock`'s wholesale `self.ssh = SshSlot::default()`
+    /// already drops it along with everything else here.
+    prompt_cancel: Option<UnixStream>,
 }
 
 impl Slot {
@@ -195,6 +203,9 @@ pub struct Server {
     /// Set by `assume_ssh_cache_dir` only — real callers get
     /// `keys::default_cache_dir()` (`ssh_cache_dir`).
     assumed_ssh_cache_dir: OnceLock<PathBuf>,
+    /// Set by `assume_known_hosts_path` only — real callers get
+    /// `$HOME/.ssh/known_hosts` (`known_hosts_path`).
+    assumed_known_hosts_path: OnceLock<PathBuf>,
     /// Serializes every prompt `run_prompt` raises, across every database,
     /// so only one is ever on screen (`docs/ssh-agent.md` § 6.7's approval
     /// prompt will share it with `unlock`'s once it exists).
@@ -230,6 +241,7 @@ impl Server {
             desk: Mutex::new(policy::Desk::NoSession),
             assumed_origin: OnceLock::new(),
             assumed_ssh_cache_dir: OnceLock::new(),
+            assumed_known_hosts_path: OnceLock::new(),
             prompt_queue: PromptQueue::new(),
         }
     }
@@ -357,6 +369,40 @@ impl Server {
             .get()
             .cloned()
             .or_else(keys::default_cache_dir)
+    }
+
+    /// Use `path` for `~/.ssh/known_hosts` instead of this process's real
+    /// `$HOME` — like `assume_ssh_cache_dir`, for tests.
+    #[doc(hidden)]
+    pub fn assume_known_hosts_path(&self, path: PathBuf) {
+        let _ = self.assumed_known_hosts_path.set(path);
+    }
+
+    /// `~/.ssh/known_hosts`, for naming an approval prompt's destination
+    /// (`docs/ssh-agent.md` § 6.7). `None` without `$HOME`.
+    fn known_hosts_path(&self) -> Option<PathBuf> {
+        if let Some(path) = self.assumed_known_hosts_path.get() {
+            return Some(path.clone());
+        }
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ssh/known_hosts"))
+    }
+
+    /// The literal hostname `~/.ssh/known_hosts` has for `dest`, if it has
+    /// one that isn't hashed (`docs/ssh-agent.md` § 6.7: "the host name
+    /// when `~/.ssh/known_hosts` has an unhashed entry for it"). A hashed
+    /// entry can't be reversed without the hostname that produced it, so
+    /// it's skipped rather than guessed at.
+    fn known_hosts_name(&self, dest: &KeyData) -> Option<String> {
+        let path = self.known_hosts_path()?;
+        KnownHosts::read_file(path)
+            .ok()?
+            .into_iter()
+            .find_map(|entry| match entry.host_patterns() {
+                HostPatterns::Patterns(patterns) if entry.public_key().key_data() == dest => {
+                    patterns.first().cloned()
+                }
+                _ => None,
+            })
     }
 
     /// Where the peer on `stream` runs (`docs/headless.md` § 3).
@@ -706,11 +752,20 @@ fn sign_with(key: &PrivateKey, data: &[u8], flags: ssh_wire::SignFlags) -> Optio
     signature.encode_vec().ok()
 }
 
-/// The approval prompt's message (`docs/ssh-agent.md` § 6.7): short, since
-/// the full destination-naming version (host-key fingerprint, `known_hosts`
-/// name) is forwarding's job (deferred to a later task).
-fn ssh_approval_message(served: &keys::ServedKey, purpose: &classify::Purpose) -> String {
-    match purpose {
+/// The approval prompt's message (`docs/ssh-agent.md` § 6.7): the key name
+/// and purpose, the remote user for a login, and — when this connection is
+/// bound to one — the destination, by host-key fingerprint, plus the
+/// literal hostname from an unhashed `~/.ssh/known_hosts` entry if there is
+/// one. `known_hosts_entry` is looked up by the caller (`Server::known_hosts_name`)
+/// rather than here, since this function has no socket or filesystem
+/// access of its own — it only assembles text.
+fn ssh_approval_message(
+    served: &keys::ServedKey,
+    purpose: &classify::Purpose,
+    destination: Option<&KeyData>,
+    known_hosts_entry: Option<&str>,
+) -> String {
+    let mut message = match purpose {
         classify::Purpose::Login(login) => {
             format!("Approve {} for {}", served.name, login.user)
         }
@@ -718,13 +773,87 @@ fn ssh_approval_message(served: &keys::ServedKey, purpose: &classify::Purpose) -
             format!("Approve {} to sign ({namespace})", served.name)
         }
         classify::Purpose::Other => format!("Approve {}", served.name),
+    };
+    if let Some(dest) = destination {
+        let fingerprint = dest.fingerprint(HashAlg::Sha256);
+        match known_hosts_entry {
+            Some(name) => message.push_str(&format!(" on {name} ({fingerprint})")),
+            None => message.push_str(&format!(" on {fingerprint}")),
+        }
+    }
+    message
+}
+
+/// A short label for a log line or an approval prompt's message — never
+/// the full `ConnectionClass` (whose `Debug` dumps a `KeyData`).
+fn connection_class_label(class: &bind::ConnectionClass) -> &'static str {
+    match class {
+        bind::ConnectionClass::LocalUnbound => "local",
+        bind::ConnectionClass::LocalBound { .. } => "local, bound",
+        bind::ConnectionClass::Forwarded { .. } => "forwarded",
     }
 }
 
-/// SSH agent support: identity listing and signing. Kept as inherent
-/// methods on `Server` rather than a separate trait — unlike `CopyEntry`
-/// and friends, nothing here is ever dispatched generically, so a trait
-/// would add indirection with no caller that needs it.
+/// A short label for a log line's purpose.
+fn purpose_label(purpose: &classify::Purpose) -> &'static str {
+    match purpose {
+        classify::Purpose::Login(_) => "login",
+        classify::Purpose::SshSig { .. } => "sshsig",
+        classify::Purpose::Other => "other",
+    }
+}
+
+/// One line per `SIGN_REQUEST` outcome (`docs/ssh-agent.md` § 11): the
+/// key's name, its purpose, the connection's class, the destination's
+/// fingerprint (if the connection is bound to one), and the decision.
+/// `REQUEST_IDENTITIES` has no equivalent call — it's never logged, like
+/// `list` on the JSON socket.
+fn log_ssh_sign(
+    served: &keys::ServedKey,
+    purpose: &classify::Purpose,
+    class: &bind::ConnectionClass,
+    destination: Option<&KeyData>,
+    decision: &str,
+) {
+    let dest = destination.map(|d| d.fingerprint(HashAlg::Sha256));
+    let log = if decision == "signed" {
+        log::info
+    } else {
+        log::warn
+    };
+    match dest {
+        Some(dest) => log(format_args!(
+            "ssh sign {decision}: {:?} ({}, {}, dest {dest})",
+            served.name,
+            purpose_label(purpose),
+            connection_class_label(class),
+        )),
+        None => log(format_args!(
+            "ssh sign {decision}: {:?} ({}, {})",
+            served.name,
+            purpose_label(purpose),
+            connection_class_label(class),
+        )),
+    }
+}
+
+/// SSH agent support: identity listing and signing, beside `CopyEntry` and
+/// friends (`docs/ssh-agent.md` § 11). `ssh_agent::serve::dispatch` takes
+/// `&impl SshSign` rather than naming `Server`, so it stays as decoupled
+/// from this module as `proto::dispatch` is from it via `Handler` — even
+/// though, unlike the JSON socket, there's only one implementor today.
+pub trait SshSign {
+    fn ssh_identities(&self, class: &bind::ConnectionClass) -> Vec<ssh_wire::Identity>;
+
+    fn ssh_sign(
+        &self,
+        class: &bind::ConnectionClass,
+        request: &ssh_wire::SignRequest,
+        login_session_id: Option<&[u8]>,
+        origin: Origin,
+    ) -> ssh_wire::AgentResponse;
+}
+
 impl Server {
     /// `cfg`'s served keys right now: scanned-and-resolved if its database
     /// is unlocked, read from the public-key cache (names falling back to
@@ -796,33 +925,6 @@ impl Server {
         None
     }
 
-    /// Every key this connection may list right now (`docs/ssh-agent.md`
-    /// § 6.4 "Which keys a connection sees"), deduped by config order and
-    /// filtered by `class` (a forwarded connection never sees a
-    /// `forwarded = false` key).
-    pub(crate) fn ssh_identities(&self, class: &bind::ConnectionClass) -> Vec<ssh_wire::Identity> {
-        let per_database: Vec<Vec<keys::ServedKey>> = self
-            .config
-            .databases
-            .iter()
-            .filter(|cfg| cfg.serve_ssh_keys)
-            .map(|cfg| self.ssh_served(cfg))
-            .collect();
-        keys::dedupe_by_config_order(per_database)
-            .into_iter()
-            .filter(|key| ssh_policy::listable(class, key.forwarded))
-            .filter_map(|key| {
-                key.public_key
-                    .to_bytes()
-                    .ok()
-                    .map(|key_blob| ssh_wire::Identity {
-                        key_blob,
-                        comment: key.name,
-                    })
-            })
-            .collect()
-    }
-
     /// Decrypts (lazily, caching the result for this database's slot until
     /// lock) the key behind `served` and signs `request.data` with it.
     /// Decryption runs outside the slots mutex — it's bcrypt-pbkdf, the
@@ -879,19 +981,46 @@ impl Server {
 
     /// Raises the approval prompt (`ssh_agent.confirm_prompt`) for `served`,
     /// through the same queue `unlock`'s prompt shares, and reports whether
-    /// it answered `Allow`.
+    /// it answered `Allow`. Stores the cancel half in `db_name`'s
+    /// `SshSlot::prompt_cancel` for the prompt's duration, so a lock on
+    /// another thread can end it exactly like it ends `unlock`'s own
+    /// prompt — cleared again once this returns, on every path, by
+    /// `SshPromptGuard`.
     fn ssh_run_approval_prompt(
         &self,
+        db_name: &str,
         served: &keys::ServedKey,
         purpose: &classify::Purpose,
+        destination: Option<&KeyData>,
     ) -> bool {
         let argv = &self.config.ssh_agent.confirm_prompt;
         if argv.is_empty() {
             return false;
         }
-        let message = prompt_message(&ssh_approval_message(served, purpose));
-        let Ok((_cancel, watch)) = UnixStream::pair() else {
+        let known_hosts_entry = destination.and_then(|dest| self.known_hosts_name(dest));
+        let message = prompt_message(&ssh_approval_message(
+            served,
+            purpose,
+            destination,
+            known_hosts_entry.as_deref(),
+        ));
+        let Ok((cancel, watch)) = UnixStream::pair() else {
             return false;
+        };
+        {
+            let mut dbs = slots(&self.dbs);
+            let Some(slot) = dbs.get_mut(db_name) else {
+                return false;
+            };
+            // The database may have locked since the caller last checked.
+            if slot.db.is_none() {
+                return false;
+            }
+            slot.ssh.prompt_cancel = Some(cancel);
+        }
+        let _guard = SshPromptGuard {
+            dbs: &self.dbs,
+            name: db_name,
         };
         matches!(
             run_prompt(
@@ -906,12 +1035,69 @@ impl Server {
         )
     }
 
+    /// Whether the SSH agent socket should run at all: at least one
+    /// database opts in.
+    pub fn ssh_agent_enabled(&self) -> bool {
+        self.config.databases.iter().any(|cfg| cfg.serve_ssh_keys)
+    }
+
+    /// Where to bind the SSH agent socket (`docs/ssh-agent.md` § 7).
+    pub fn ssh_agent_socket_path(&self, runtime_dir: Option<&Path>) -> Option<PathBuf> {
+        self.config.ssh_agent.socket_path(runtime_dir)
+    }
+}
+
+/// How a lock ends an SSH approval prompt in flight, the same way
+/// `UnlockingFlag` ends `unlock`'s own: cleared once `ssh_run_approval_prompt`
+/// returns, on every path, so a later prompt for the same database starts
+/// from a clean slot.
+struct SshPromptGuard<'a> {
+    dbs: &'a Mutex<HashMap<String, Slot>>,
+    name: &'a str,
+}
+
+impl Drop for SshPromptGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(slot) = slots(self.dbs).get_mut(self.name) {
+            slot.ssh.prompt_cancel = None;
+        }
+    }
+}
+
+impl SshSign for Server {
+    /// Every key this connection may list right now (`docs/ssh-agent.md`
+    /// § 6.4 "Which keys a connection sees"), deduped by config order and
+    /// filtered by `class` (a forwarded connection never sees a
+    /// `forwarded = false` key).
+    fn ssh_identities(&self, class: &bind::ConnectionClass) -> Vec<ssh_wire::Identity> {
+        let per_database: Vec<Vec<keys::ServedKey>> = self
+            .config
+            .databases
+            .iter()
+            .filter(|cfg| cfg.serve_ssh_keys)
+            .map(|cfg| self.ssh_served(cfg))
+            .collect();
+        keys::dedupe_by_config_order(per_database)
+            .into_iter()
+            .filter(|key| ssh_policy::listable(class, key.forwarded))
+            .filter_map(|key| {
+                key.public_key
+                    .to_bytes()
+                    .ok()
+                    .map(|key_blob| ssh_wire::Identity {
+                        key_blob,
+                        comment: key.name,
+                    })
+            })
+            .collect()
+    }
+
     /// Answers one `SIGN_REQUEST` (`docs/ssh-agent.md` § 6.1, § 6.7, § 6.9):
     /// classifies it, runs `policy::decide`, and either signs or refuses.
     /// Forwarded connections are refused outright in this build — forwarding
     /// is a later task — and a locked database is refused rather than
     /// unlocked on demand, likewise later work.
-    pub(crate) fn ssh_sign(
+    fn ssh_sign(
         &self,
         class: &bind::ConnectionClass,
         request: &ssh_wire::SignRequest,
@@ -929,18 +1115,22 @@ impl Server {
             return ssh_wire::AgentResponse::Failure;
         };
 
-        if matches!(class, bind::ConnectionClass::Forwarded { .. }) {
-            log::warn(format_args!(
-                "ssh sign refused: {:?} forwarded (not supported yet)",
-                served.name
-            ));
-            return ssh_wire::AgentResponse::Failure;
-        }
-
         let destination = match class {
             bind::ConnectionClass::LocalBound { dest } => Some(dest.clone()),
             _ => None,
         };
+
+        if matches!(class, bind::ConnectionClass::Forwarded { .. }) {
+            log_ssh_sign(
+                &served,
+                &purpose,
+                class,
+                destination.as_ref(),
+                "forwarding not supported yet",
+            );
+            return ssh_wire::AgentResponse::Failure;
+        }
+
         let key_settings = ssh_policy::KeySettings {
             fingerprint,
             confirm: served.confirm,
@@ -953,7 +1143,7 @@ impl Server {
             .is_none_or(|slot| slot.db.is_none());
         if locked {
             // Unlock on demand is a later task; refuse outright for now.
-            log::warn(format_args!("ssh sign refused: {:?} is locked", cfg.name));
+            log_ssh_sign(&served, &purpose, class, destination.as_ref(), "locked");
             return ssh_wire::AgentResponse::Failure;
         }
 
@@ -978,7 +1168,15 @@ impl Server {
         match decision {
             ssh_policy::Decision::Sign => {}
             ssh_policy::Decision::PromptApprove => {
-                if !self.ssh_run_approval_prompt(&served, &purpose) {
+                if !self.ssh_run_approval_prompt(&cfg.name, &served, &purpose, destination.as_ref())
+                {
+                    log_ssh_sign(
+                        &served,
+                        &purpose,
+                        class,
+                        destination.as_ref(),
+                        "approval denied",
+                    );
                     return ssh_wire::AgentResponse::Failure;
                 }
                 let mut dbs = slots(&self.dbs);
@@ -991,11 +1189,25 @@ impl Server {
                 }
             }
             ssh_policy::Decision::PromptUnlock | ssh_policy::Decision::Refuse(_) => {
+                log_ssh_sign(
+                    &served,
+                    &purpose,
+                    class,
+                    destination.as_ref(),
+                    "refused by policy",
+                );
                 return ssh_wire::AgentResponse::Failure;
             }
         }
 
         let Some(signature) = self.ssh_decrypt_and_sign(&cfg.name, &served, request) else {
+            log_ssh_sign(
+                &served,
+                &purpose,
+                class,
+                destination.as_ref(),
+                "decryption or signing failed",
+            );
             return ssh_wire::AgentResponse::Failure;
         };
 
@@ -1008,19 +1220,8 @@ impl Server {
                 slot.touch();
             }
         }
-        log::info(format_args!("ssh sign: {:?} ({purpose:?})", served.name));
+        log_ssh_sign(&served, &purpose, class, destination.as_ref(), "signed");
         ssh_wire::AgentResponse::SignResponse(signature)
-    }
-
-    /// Whether the SSH agent socket should run at all: at least one
-    /// database opts in.
-    pub fn ssh_agent_enabled(&self) -> bool {
-        self.config.databases.iter().any(|cfg| cfg.serve_ssh_keys)
-    }
-
-    /// Where to bind the SSH agent socket (`docs/ssh-agent.md` § 7).
-    pub fn ssh_agent_socket_path(&self, runtime_dir: Option<&Path>) -> Option<PathBuf> {
-        self.config.ssh_agent.socket_path(runtime_dir)
     }
 }
 

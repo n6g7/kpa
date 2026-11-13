@@ -2,10 +2,10 @@
 //! (`docs/ssh-agent.md` § 6.1): accepts connections, frames them with
 //! [`wire`], tracks each one's `session-bind@openssh.com` state with
 //! [`bind::Bindings`], and dispatches identities and signatures through
-//! [`Server::ssh_identities`]/[`Server::ssh_sign`].
+//! [`SshSign::ssh_identities`]/[`SshSign::ssh_sign`].
 //!
 //! Forwarding (session-bind verification aside) is out of scope here: every
-//! forwarded `SIGN_REQUEST` is refused by `Server::ssh_sign` itself, not by
+//! forwarded `SIGN_REQUEST` is refused by `SshSign::ssh_sign` itself, not by
 //! this module.
 
 use std::io::{Read, Write};
@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use crate::log;
 use crate::origin::Origin;
-use crate::server::Server;
+use crate::server::{Server, SshSign};
 use crate::socket;
 
 use super::bind::{BindOutcome, Bindings};
@@ -129,7 +129,7 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
 
 /// Answers one decoded request against `bindings`' accumulated state.
 fn dispatch(
-    server: &Server,
+    server: &impl SshSign,
     bindings: &mut Bindings,
     request: &AgentRequest,
     origin: Origin,
