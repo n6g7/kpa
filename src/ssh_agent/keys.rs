@@ -153,7 +153,7 @@ fn unsupported(algorithm: Algorithm, key_data: &KeyData) -> Option<SkipReason> {
 }
 
 /// A key kpa serves: survived its database's `serve = false` overrides, and
-/// named per config.
+/// named and policy-settinged per config.
 #[derive(Debug, Clone)]
 pub struct ServedKey {
     pub database: String,
@@ -161,12 +161,19 @@ pub struct ServedKey {
     pub fingerprint: Fingerprint,
     pub name: String,
     pub entry_uuid: Uuid,
+    /// Local approval policy (`docs/ssh-agent.md` § 6.7), from the
+    /// override if any, else the default.
+    pub confirm: crate::config::SshKeyConfirm,
+    /// Usable through `ssh -A`, from the override if any, else the
+    /// default (`true`).
+    pub forwarded: bool,
 }
 
 /// Resolves which of a database's found keys get served, applying its own
 /// `[[database.ssh_key]]` overrides (matched by fingerprint): drops
-/// anything a `serve = false` override names, and names the rest with
-/// [`key_name`].
+/// anything a `serve = false` override names, names the rest with
+/// [`key_name`], and carries each one's `confirm`/`forwarded` policy for
+/// [`super::policy::decide`].
 pub fn resolve(database: &str, found: &[FoundKey], overrides: &[SshKeyConfig]) -> Vec<ServedKey> {
     found
         .iter()
@@ -187,6 +194,8 @@ pub fn resolve(database: &str, found: &[FoundKey], overrides: &[SshKeyConfig]) -
                     key.entry_title.as_deref(),
                 ),
                 entry_uuid: key.entry_uuid,
+                confirm: over.map_or(crate::config::SshKeyConfirm::default(), |o| o.confirm),
+                forwarded: over.is_none_or(|o| o.forwarded),
             })
         })
         .collect()
@@ -617,6 +626,8 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
         assert_eq!(served.len(), 1);
         assert_eq!(served[0].name, "github");
         assert_eq!(served[0].database, "personal");
+        assert_eq!(served[0].confirm, SshKeyConfirm::Once);
+        assert!(served[0].forwarded);
 
         let not_served = SshKeyConfig {
             fingerprint: fingerprint.clone(),
@@ -636,6 +647,7 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
         };
         let served = resolve("personal", std::slice::from_ref(&key), &[renamed]);
         assert_eq!(served[0].name, "prod-root");
+        assert_eq!(served[0].confirm, SshKeyConfirm::Always);
     }
 
     #[test]
@@ -648,6 +660,8 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
             fingerprint,
             name: database.to_string(),
             entry_uuid: Uuid::new_v4(),
+            confirm: SshKeyConfirm::Once,
+            forwarded: true,
         };
 
         let deduped = dedupe_by_config_order(vec![vec![make("personal")], vec![make("work")]]);
