@@ -23,8 +23,8 @@ unlocking from a terminal.
   `ssh_agent = true` has every OpenSSH private key among its entries'
   attachments served. kpa caches their public keys, and nothing else, so
   they are listed even while the database is locked. That is what makes
-  unlock on demand work. Optional per-key settings in config, matched by
-  fingerprint, override the defaults.
+  unlock on demand work. Optional per-key settings under the database in
+  config, matched by fingerprint, override the defaults.
 - **Each key's first use after an unlock is approved.** The approval holds
   until the database locks. When a signature has to unlock the database
   first, the unlock prompt names the key and counts as its approval. A key
@@ -287,8 +287,9 @@ scans it:
    format.
 3. Read each key's public key from the file's header, which is stored
    unencrypted. Nothing is decrypted yet.
-4. Drop keys that an override marks `serve = false`. A key found in two
-   opted-in databases is served from the first one in config order.
+4. Drop keys that one of the database's overrides marks `serve = false`.
+   A key found in two opted-in databases is served from the first one in
+   config order.
 
 The private key is decrypted at its first signature. An encrypted key's
 passphrase is the entry's Password field, the convention KeePass clients
@@ -535,15 +536,17 @@ password-guessing oracle.
 | `socket` | `[ssh_agent]` | `$XDG_RUNTIME_DIR/kpa/ssh-agent` | The agent socket |
 | `confirm` | `[ssh_agent]` | none; required once a database opts in | The approval program, dmenu style (§ 6.7) |
 | `backoff` | `[ssh_agent]` | `"2m"` | How long a cancelled prompt holds back signatures from its database (§ 6.6) |
-| `fingerprint` | `[[ssh_key]]` | required | Which key the override is for, as `ssh-add -l` and `kpa ssh keys` print it |
-| `name` | `[[ssh_key]]` | the entry's title | Identity comment, shown in prompts and logs |
-| `confirm` | `[[ssh_key]]` | `"once"` | Local approval: `"once"`, `"always"` or `"never"` (§ 6.7) |
-| `forwarded` | `[[ssh_key]]` | `true` | Usable through `ssh -A`, with approval (§ 6.7) |
-| `serve` | `[[ssh_key]]` | `true` | `false` keeps the key out of the agent entirely |
+| `fingerprint` | `[[database.ssh_key]]` | required | Which key the override is for, as `ssh-add -l` and `kpa ssh keys` print it |
+| `name` | `[[database.ssh_key]]` | the entry's title | Identity comment, shown in prompts and logs |
+| `confirm` | `[[database.ssh_key]]` | `"once"` | Local approval: `"once"`, `"always"` or `"never"` (§ 6.7) |
+| `forwarded` | `[[database.ssh_key]]` | `true` | Usable through `ssh -A`, with approval (§ 6.7) |
+| `serve` | `[[database.ssh_key]]` | `true` | `false` keeps the key out of the agent entirely |
 
-An `[[ssh_key]]` whose fingerprint matches no served key is a warning in
-the log, not an error: the key may simply be absent from a database that
-is locked.
+Overrides sit under the database that holds the key, and a fingerprint is
+matched within that database only. An override that matches no key found
+there is a warning in the log, not an error: the database may not have
+been unlocked on this machine yet. Overrides under a database without
+`ssh_agent = true` are a config error.
 
 **Example.** Two databases, one of them serving SSH keys. Most keys need no
 override; the two below are the exceptions.
@@ -562,23 +565,26 @@ name = "personal"
 path = "~/vaults/personal.kdbx"
 ssh_agent = true
 
+  # A key that signs into production: ask on every use, and never forward it.
+  [[database.ssh_key]]
+  fingerprint = "SHA256:Jk2rVx…"
+  name = "prod-root"
+  confirm = "always"
+  forwarded = false
+
+  # An old key that is kept in the vault but no longer used.
+  [[database.ssh_key]]
+  fingerprint = "SHA256:9aQwLm…"
+  serve = false
+
 [[database]]
 name = "work"
 path = "~/vaults/work.kdbx"
 # No `ssh_agent`: this database's keys are never served.
-
-# A key that signs into production: ask on every use, and never forward it.
-[[ssh_key]]
-fingerprint = "SHA256:Jk2rVx…"
-name = "prod-root"
-confirm = "always"
-forwarded = false
-
-# An old key that is kept in the vault but no longer used.
-[[ssh_key]]
-fingerprint = "SHA256:9aQwLm…"
-serve = false
 ```
+
+A `[[database.ssh_key]]` table belongs to the `[[database]]` above it; the
+indentation is only for the reader.
 
 With this config:
 
@@ -600,10 +606,16 @@ services.kpa = {
     prompt = [ "fuzzel" "--dmenu" "--password" "--prompt" "{message}" ];
     ssh_agent.confirm = [ "fuzzel" "--dmenu" "--prompt" "{message}" ];
     database = [
-      { name = "personal"; path = "/home/you/vaults/personal.kdbx"; ssh_agent = true; }
-    ];
-    ssh_key = [
-      { fingerprint = "SHA256:Jk2rVx…"; name = "prod-root"; confirm = "always"; forwarded = false; }
+      {
+        name = "personal";
+        path = "/home/you/vaults/personal.kdbx";
+        ssh_agent = true;
+        ssh_key = [
+          { fingerprint = "SHA256:Jk2rVx…"; name = "prod-root"; confirm = "always"; forwarded = false; }
+          { fingerprint = "SHA256:9aQwLm…"; serve = false; }
+        ];
+      }
+      { name = "work"; path = "/home/you/vaults/work.kdbx"; }
     ];
   };
 };
@@ -630,8 +642,8 @@ The setup kpa replaces, on a typical NixOS desktop with a KeePass client:
 
 **Changes**
 
-1. **Run kpa and opt the databases in** with `ssh_agent = true`. Add an
-   `[[ssh_key]]` override for a key that must stay off forwarding
+1. **Run kpa and opt the databases in** with `ssh_agent = true`. Add a
+   `[[database.ssh_key]]` override for a key that must stay off forwarding
    (`forwarded = false`) or that needs a different approval policy.
    `kpa ssh keys <database>` prints the blocks to paste.
 2. **Turn off what kpa replaces.**
@@ -808,7 +820,7 @@ programs' settings.
   into a separate agent.
 - **`threat-model.md`**: § 9 above.
 - **`config.example.toml`**: an `[ssh_agent]` section, `ssh_agent = true`
-  on one fixture database, and one `[[ssh_key]]` against a fixture key.
+  on one fixture database, and one `[[database.ssh_key]]` against a fixture key.
 - **`nix/hm-module.nix`**: `services.kpa.sshAgent.enable` (§ 8).
 
 ## 11. Implementation
