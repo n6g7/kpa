@@ -16,6 +16,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 base64 = "0.22"
+ssh-key = { version = "=0.7.0-rc.12", default-features = false, features = ["ed25519", "alloc", "std"] }
 
 [dependencies.kpa]
 path = ".."
@@ -23,6 +24,13 @@ path = ".."
 [[bin]]
 name = "decode_request"
 path = "fuzz_targets/decode_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_request"
+path = "fuzz_targets/agent_request.rs"
 test = false
 doc = false
 bench = false
