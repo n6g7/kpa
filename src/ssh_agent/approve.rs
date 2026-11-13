@@ -1,8 +1,9 @@
 //! Approvals and pending requests (`docs/ssh-agent.md` § 6.7, § 6.8): what
 //! [`policy::decide`](super::policy::decide) consults to turn a repeat
 //! signature into [`Sign`](super::policy::Decision::Sign) instead of
-//! [`Approve`](super::policy::Decision::Approve), and what a request from
-//! outside the desktop is recorded as while it waits for `kpa ssh approve`.
+//! [`PromptApprove`](super::policy::Decision::PromptApprove), and what a
+//! request from outside the desktop is recorded as while it waits for
+//! `kpa ssh approve`.
 //!
 //! Both stores are in-memory only and cleared on lock
 //! ([`Approvals::clear`], [`PendingStore::clear`]) — nothing here survives

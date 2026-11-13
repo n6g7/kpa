@@ -40,11 +40,12 @@ pub enum Decision {
     /// Ask on screen before signing — raise the approval prompt
     /// (`ssh_agent.confirm_prompt`), then, once it answers `Allow`, grant
     /// the approval this decision was for and sign.
-    Approve,
+    PromptApprove,
     /// Unlock first — the ordinary `unlock` path. Answering its prompt
     /// counts as this signature's approval (`docs/ssh-agent.md` § 6.6):
-    /// grant it the same way `Approve` does, once unlocked, then sign.
-    Unlock,
+    /// grant it the same way `PromptApprove` does, once unlocked, then
+    /// sign.
+    PromptUnlock,
     /// Don't sign, and don't prompt. The reason is specific enough to log
     /// and, for [`Refusal::NeedsApproval`], to record as pending
     /// (`kpa ssh approve`) and hint in the identity listing.
@@ -95,9 +96,9 @@ pub enum Refusal {
 ///   connection has any binding at all (`bind::Bindings::login_session_id`).
 /// - `locked`: whether the key's database is currently locked.
 /// - `approvals`: read-only — [`decide`] never grants or consumes one. The
-///   caller grants on `Approve`/`Unlock` once the prompt (or unlock) it
-///   raised actually succeeds, and consumes a one-shot approval once the
-///   signature it allowed has gone through.
+///   caller grants on `PromptApprove`/`PromptUnlock` once the prompt (or
+///   unlock) it raised actually succeeds, and consumes a one-shot
+///   approval once the signature it allowed has gone through.
 /// - `may_prompt`: whether a prompt may appear on screen at all —
 ///   `policy::Desk::may_prompt(origin)` (`docs/ssh-agent.md` § 6.8).
 /// - `backoff`: whether the key's database is currently in backoff
@@ -121,7 +122,7 @@ pub fn decide(
         return if backoff {
             Decision::Refuse(Refusal::Backoff)
         } else if may_prompt {
-            Decision::Unlock
+            Decision::PromptUnlock
         } else {
             Decision::Refuse(Refusal::Locked)
         };
@@ -133,7 +134,7 @@ pub fn decide(
     if backoff {
         Decision::Refuse(Refusal::Backoff)
     } else if may_prompt {
-        Decision::Approve
+        Decision::PromptApprove
     } else {
         Decision::Refuse(Refusal::NeedsApproval)
     }
@@ -392,7 +393,7 @@ mod tests {
             approved: false,
             may_prompt: true,
             backoff: false,
-            expect: Decision::Unlock,
+            expect: Decision::PromptUnlock,
         });
         run(Case {
             name: "S1 unlocked, not yet approved",
@@ -404,7 +405,7 @@ mod tests {
             approved: false,
             may_prompt: true,
             backoff: false,
-            expect: Decision::Approve,
+            expect: Decision::PromptApprove,
         });
         run(Case {
             name: "S1 unlocked, approved",
@@ -469,7 +470,7 @@ mod tests {
                 true,
                 false,
             ),
-            Decision::Approve,
+            Decision::PromptApprove,
             "a different destination must not reuse the approval"
         );
         assert_eq!(
@@ -483,7 +484,7 @@ mod tests {
                 true,
                 false,
             ),
-            Decision::Approve,
+            Decision::PromptApprove,
             "a bound approval must not cover unbound use"
         );
         assert_eq!(
@@ -516,7 +517,7 @@ mod tests {
             approved: false,
             may_prompt: true,
             backoff: false,
-            expect: Decision::Unlock,
+            expect: Decision::PromptUnlock,
         });
         run(Case {
             name: "S2 unlocked, approved",
@@ -549,7 +550,7 @@ mod tests {
             approved: false,
             may_prompt: true,
             backoff: false,
-            expect: Decision::Unlock,
+            expect: Decision::PromptUnlock,
         });
         run(Case {
             name: "S3 unlocked, not yet approved",
@@ -561,7 +562,7 @@ mod tests {
             approved: false,
             may_prompt: true,
             backoff: false,
-            expect: Decision::Approve,
+            expect: Decision::PromptApprove,
         });
         run(Case {
             name: "S3 unlocked, approved",
@@ -671,7 +672,7 @@ mod tests {
                 true,
                 false,
             ),
-            Decision::Approve,
+            Decision::PromptApprove,
             "a different forwarding session must not reuse the approval"
         );
 
@@ -691,7 +692,7 @@ mod tests {
                 true,
                 false,
             ),
-            Decision::Approve,
+            Decision::PromptApprove,
             "a different destination must not reuse the approval"
         );
     }
@@ -867,13 +868,13 @@ mod tests {
                 true,
                 false,
             ),
-            Decision::Approve
+            Decision::PromptApprove
         );
     }
 
     /// An unlock prompt's answer counts as the signature's approval: once
     /// the caller grants it (simulating what happens after a successful
-    /// `Unlock`), the same key signs without asking again.
+    /// `PromptUnlock`), the same key signs without asking again.
     #[test]
     fn an_unlock_counts_as_the_approval() {
         let key = key(SshKeyConfirm::Once, true);
@@ -889,7 +890,7 @@ mod tests {
                 true,
                 false,
             ),
-            Decision::Unlock
+            Decision::PromptUnlock
         );
         approvals.grant_local(key.fingerprint, None, key.confirm);
         assert_eq!(
