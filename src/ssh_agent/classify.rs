@@ -62,7 +62,6 @@ pub struct LoginRequest {
 
 /// Classify `data` — a `SIGN_REQUEST`'s signing payload — against
 /// `signing_key`, the key the request asked to sign with.
-#[must_use]
 pub fn classify(data: &[u8], signing_key: &PublicKey) -> Purpose {
     if let Some(login) = try_login(data, signing_key) {
         return Purpose::Login(login);

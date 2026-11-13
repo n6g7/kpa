@@ -99,7 +99,6 @@ pub enum ConnectionClass {
 }
 
 impl Bindings {
-    #[must_use]
     pub fn new() -> Self {
         Self {
             verified: Vec::new(),
@@ -173,7 +172,6 @@ impl Bindings {
     }
 
     /// This connection's class, per `docs/ssh-agent.md` § 6.2.
-    #[must_use]
     pub fn class(&self) -> ConnectionClass {
         match self.verified.first() {
             Some(first) if first.is_forwarding => {

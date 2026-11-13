@@ -103,7 +103,6 @@ pub fn next_frame(buf: &[u8]) -> Result<Frame<'_>, Oversize> {
 /// If `message` is longer than [`MAX_FRAME_LEN`] — never true of anything
 /// this module builds; kept as an assertion rather than silently truncating
 /// or lying about a response's length.
-#[must_use]
 pub fn encode_frame(message: &[u8]) -> Vec<u8> {
     assert!(message.len() <= MAX_FRAME_LEN, "built an oversize frame");
     #[allow(clippy::cast_possible_truncation)] // just asserted <= MAX_FRAME_LEN
@@ -128,26 +127,22 @@ impl SignFlags {
     const RSA_SHA2_256: u32 = 0x0000_0002;
     const RSA_SHA2_512: u32 = 0x0000_0004;
 
-    #[must_use]
     pub fn new(raw: u32) -> Self {
         Self(raw)
     }
 
     /// The request asked for an `rsa-sha2-256` signature rather than the
     /// legacy SHA-1 `ssh-rsa`.
-    #[must_use]
     pub fn rsa_sha2_256(self) -> bool {
         self.0 & Self::RSA_SHA2_256 != 0
     }
 
     /// The request asked for an `rsa-sha2-512` signature.
-    #[must_use]
     pub fn rsa_sha2_512(self) -> bool {
         self.0 & Self::RSA_SHA2_512 != 0
     }
 
     /// The flags exactly as the client sent them, unknown bits included.
-    #[must_use]
     pub fn raw(self) -> u32 {
         self.0
     }
@@ -203,7 +198,6 @@ pub enum AgentRequest {
 /// included. Total: never fails. Anything this build doesn't handle, or
 /// can't parse, comes back as [`AgentRequest::Unsupported`] rather than an
 /// error, since that's exactly the one response every unhandled case gets.
-#[must_use]
 pub fn decode_request(message: &[u8]) -> AgentRequest {
     try_decode(message).unwrap_or(AgentRequest::Unsupported)
 }
@@ -273,7 +267,6 @@ pub enum AgentResponse {
 
 /// Encode `response` into the bytes to write to the socket — framed, ready
 /// to go straight to the connection.
-#[must_use]
 pub fn encode_response(response: &AgentResponse) -> Vec<u8> {
     const INFALLIBLE: &str = "encoding into a Vec<u8> never fails";
 

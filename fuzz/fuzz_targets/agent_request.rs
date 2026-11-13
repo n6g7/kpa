@@ -1,11 +1,11 @@
 #![no_main]
 
-use kpa::agent::{bind, classify, wire};
+use kpa::ssh_agent::{bind, classify, wire};
 use libfuzzer_sys::fuzz_target;
 use ssh_key::PublicKey;
 use ssh_key::public::{Ed25519PublicKey, KeyData};
 
-// Exercises the three pure modules under `src/agent/`, the same way
+// Exercises the three pure modules under `src/ssh_agent/`, the same way
 // `decode_request` exercises `src/proto/`: the property checked is that
 // arbitrary bytes only ever produce a value or a refusal, never a panic
 // and never a hang. None of `wire`, `classify` or `bind` does I/O or holds
