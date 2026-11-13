@@ -149,7 +149,7 @@ once per key until lock by default.
 | --- | ------------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
 | S1  | At the desk: `ssh`, `git push`, an IDE                       | No binding, or an authentication binding from the local `ssh`           | Unlock prompt naming the key and destination. Answering it approves the key | Sign if the key is approved. Otherwise an approval prompt first                          |
 | S2  | Commit or tag signing (`ssh-keygen -Y sign`)                 | `SSHSIG` data, no binding                                               | As S1                                                                    | As S1                                                                                      |
-| S3  | `ssh -A` from here; the remote host uses the key             | First binding has `is_forwarding` (§ 6.2)                               | Unlock prompt naming the forwarding host and destination. Answering it approves the forwarding session | Sign if this forwarding session is approved for the key and destination. Otherwise an approval prompt first. SSH logins only. A key with `forwarded = "deny"` is neither listed nor used |
+| S3  | `ssh -A` from here; the remote host uses the key             | First binding has `is_forwarding` (§ 6.2)                               | Unlock prompt naming the forwarding host and destination. Answering it approves the forwarding session | Sign if this forwarding session is approved for the key and destination. Otherwise an approval prompt first. SSH logins only. A key with `forwarded = false` is neither listed nor used |
 | S4  | Working on this machine from elsewhere, with no agent forwarded: an SSH login, a terminal-server shell | The requester runs outside the desktop (§ 6.8) | Refused, no prompt. `kpa unlock` in that shell asks on the terminal (§ 6.10) | Sign if approved. Otherwise refused and remembered; `kpa ssh approve` in that shell approves it, and the retry signs (§ 6.8). An `ssh -A` started from that shell works the same way |
 | S5  | Screen locked or machine suspended                           | logind (existing lock policy)                                           | Everything is already locked. No prompt                                  | Not possible: a screen lock locks every database                                           |
 | S6  | Background jobs: user timers, IDE auto-fetch                 | Indistinguishable from S1. Jobs outside the user manager (cron, system services) fall under S4 | Unlock prompt, with backoff after a cancel (§ 6.6)    | As S1: one approval prompt per key per unlock, with backoff after a cancel                 |
@@ -318,7 +318,7 @@ content (T-13). The name is the identity comment `ssh-add -l` shows, and
 what prompts and logs use.
 
 **Which keys a connection sees.** A local connection lists every served
-key. A forwarded connection lists only keys with `forwarded = "confirm"`,
+key. A forwarded connection lists only keys with `forwarded = true`,
 the default. So a remote host that also runs kpa uses its own agent for
 the keys the desk keeps off forwarding (S8).
 
@@ -405,11 +405,12 @@ Two per-key settings decide when a signature needs approval:
   - `"always"`: every signature asks, forwarded ones included.
   - `"never"`: local signatures never ask.
 - **`forwarded`**, for use through `ssh -A`:
-  - `"confirm"` (default): the first signature per (key, forwarding
-    session, forwarding host, destination) asks. The approval holds until
-    the database locks or the forwarding session ends, whichever comes
-    first. `confirm = "never"` doesn't exempt forwarded use.
-  - `"deny"`: the key is neither listed nor used over a forwarded
+  - `true` (default): the first signature per (key, forwarding session,
+    forwarding host, destination) asks. The approval holds until the
+    database locks or the forwarding session ends, whichever comes first.
+    Forwarded use always needs an approval: `confirm = "never"` doesn't
+    exempt it.
+  - `false`: the key is neither listed nor used over a forwarded
     connection.
 
 An unlock prompt raised by a signature counts as that signature's approval
@@ -526,33 +527,87 @@ password-guessing oracle.
 
 ## 7. Configuration
 
-```toml
-[ssh_agent]
-# socket = "$XDG_RUNTIME_DIR/kpa/ssh-agent"   (default)
-confirm = ["fuzzel", "--dmenu", "--prompt", "{message}"]
-# backoff = "2m"                              (default)
+**Settings**
 
-[[database]]
-name = "personal"
-path = "~/vault.kdbx"
-ssh_agent = true                      # serve this database's SSH keys
-
-# Optional, one per key that needs non-default settings.
-[[ssh_key]]
-fingerprint = "SHA256:3fQ…"           # as `ssh-add -l` and `kpa ssh keys` print it
-name = "github"                       # identity comment; shown in prompts and logs
-forwarded = "deny"                    # confirm (default) | deny
-confirm = "always"                    # once (default) | always | never — local use
-# serve = false                       # don't serve this key at all
-```
+| Setting | Where | Default | Meaning |
+| --- | --- | --- | --- |
+| `ssh_agent` | `[[database]]` | `false` | Serve this database's SSH keys (§ 6.4) |
+| `socket` | `[ssh_agent]` | `$XDG_RUNTIME_DIR/kpa/ssh-agent` | The agent socket |
+| `confirm` | `[ssh_agent]` | none; required once a database opts in | The approval program, dmenu style (§ 6.7) |
+| `backoff` | `[ssh_agent]` | `"2m"` | How long a cancelled prompt holds back signatures from its database (§ 6.6) |
+| `fingerprint` | `[[ssh_key]]` | required | Which key the override is for, as `ssh-add -l` and `kpa ssh keys` print it |
+| `name` | `[[ssh_key]]` | the entry's title | Identity comment, shown in prompts and logs |
+| `confirm` | `[[ssh_key]]` | `"once"` | Local approval: `"once"`, `"always"` or `"never"` (§ 6.7) |
+| `forwarded` | `[[ssh_key]]` | `true` | Usable through `ssh -A`, with approval (§ 6.7) |
+| `serve` | `[[ssh_key]]` | `true` | `false` keeps the key out of the agent entirely |
 
 An `[[ssh_key]]` whose fingerprint matches no served key is a warning in
 the log, not an error: the key may simply be absent from a database that
 is locked.
 
+**Example.** Two databases, one of them serving SSH keys. Most keys need no
+override; the two below are the exceptions.
+
+```toml
+idle_timeout = "30m"
+clipboard_timeout = "30s"
+prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
+prompt_timeout = "60s"
+
+[ssh_agent]
+confirm = ["fuzzel", "--dmenu", "--prompt", "{message}"]
+
+[[database]]
+name = "personal"
+path = "~/vaults/personal.kdbx"
+ssh_agent = true
+
+[[database]]
+name = "work"
+path = "~/vaults/work.kdbx"
+# No `ssh_agent`: this database's keys are never served.
+
+# A key that signs into production: ask on every use, and never forward it.
+[[ssh_key]]
+fingerprint = "SHA256:Jk2rVx…"
+name = "prod-root"
+confirm = "always"
+forwarded = false
+
+# An old key that is kept in the vault but no longer used.
+[[ssh_key]]
+fingerprint = "SHA256:9aQwLm…"
+serve = false
+```
+
+With this config:
+
+- every other key in `personal` is listed as soon as kpa has seen it once,
+  asks for approval at its first use after each unlock, and can be used
+  through `ssh -A` with an approval per forwarding session;
+- `prod-root` asks on every signature and is invisible to forwarded hosts;
+- nothing in `work` is served, even while it is unlocked.
+
 The home-manager module gains `services.kpa.sshAgent.enable`, which wires
 the agent into the session (§ 8). Databases and keys stay in
-`services.kpa.settings`.
+`services.kpa.settings`:
+
+```nix
+services.kpa = {
+  enable = true;
+  sshAgent.enable = true;
+  settings = {
+    prompt = [ "fuzzel" "--dmenu" "--password" "--prompt" "{message}" ];
+    ssh_agent.confirm = [ "fuzzel" "--dmenu" "--prompt" "{message}" ];
+    database = [
+      { name = "personal"; path = "/home/you/vaults/personal.kdbx"; ssh_agent = true; }
+    ];
+    ssh_key = [
+      { fingerprint = "SHA256:Jk2rVx…"; name = "prod-root"; confirm = "always"; forwarded = false; }
+    ];
+  };
+};
+```
 
 ## 8. Wiring a desktop
 
@@ -577,7 +632,7 @@ The setup kpa replaces, on a typical NixOS desktop with a KeePass client:
 
 1. **Run kpa and opt the databases in** with `ssh_agent = true`. Add an
    `[[ssh_key]]` override for a key that must stay off forwarding
-   (`forwarded = "deny"`) or that needs a different approval policy.
+   (`forwarded = false`) or that needs a different approval policy.
    `kpa ssh keys <database>` prints the blocks to paste.
 2. **Turn off what kpa replaces.**
    - Set `services.gnome.gcr-ssh-agent.enable = false`. gnome-keyring keeps
@@ -687,7 +742,7 @@ programs' settings.
   approval when the key's policy asks for one.** An on-demand unlock is a
   prompt the user answers. Vault content cannot change a key's policy.
 - **G-14 (new) · Forwarded signatures are confined.**
-  - A key with `forwarded = "deny"` is never listed or used over a
+  - A key with `forwarded = false` is never listed or used over a
     forwarded connection.
   - The others sign SSH logins only, for a session the destination has
     bound, after an approval for that (key, forwarding session, forwarding
@@ -708,7 +763,7 @@ programs' settings.
   because the key itself doesn't leave.
 - **T-20 (new) · Forwarded-agent abuse** (S, E) — ACT-11 · TB-8 · A-6 → G-14.
   - Response: logins only, approval scoped to the forwarding session and
-    destination, `forwarded = "deny"` per key, no approval path over the
+    destination, `forwarded = false` per key, no approval path over the
     agent socket.
   - In scope:
     - signing over a forwarded connection without a matching approval;
@@ -806,7 +861,7 @@ programs' settings.
 - **Forwarding**: an unprivileged `sshd` on a high port with a temporary
   host key, then `ssh -A` to localhost. This covers session-bind for real:
   a forwarded login approved by a scripted confirm, a second `ssh -A`
-  session asking again, a `forwarded = "deny"` key absent from the
+  session asking again, a `forwarded = false` key absent from the
   forwarded listing, and forwarded `SSHSIG` refused.
 - **Fuzzing**: `fuzz_targets/agent_request.rs` covers `wire`, the
   session-bind parser and `classify`.
