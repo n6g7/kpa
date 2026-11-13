@@ -171,6 +171,19 @@ impl Bindings {
         BindOutcome::Accepted
     }
 
+    /// The session identifier an SSH login signed over this connection must
+    /// equal (`docs/ssh-agent.md` § 6.3): the recorded binding's — the one
+    /// binding, for `LocalBound`, or the last one, for `Forwarded` (which,
+    /// since an authentication binding blocks every binding after it, is
+    /// the destination's exactly when [`ConnectionClass::Forwarded`]'s
+    /// `dest` is `Some`). `None` for `LocalUnbound`, where there is no
+    /// binding to check against at all.
+    pub fn login_session_id(&self) -> Option<&[u8]> {
+        self.verified
+            .last()
+            .map(|binding| binding.session_id.as_slice())
+    }
+
     /// This connection's class, per `docs/ssh-agent.md` § 6.2.
     pub fn class(&self) -> ConnectionClass {
         match self.verified.first() {
@@ -531,6 +544,47 @@ mod tests {
     #[test]
     fn default_matches_new() {
         assert_eq!(Bindings::default(), Bindings::new());
+    }
+
+    #[test]
+    fn login_session_id_is_none_when_unbound() {
+        let bindings = Bindings::new();
+        assert_eq!(bindings.login_session_id(), None);
+    }
+
+    #[test]
+    fn login_session_id_is_the_one_binding_for_local_bound() {
+        let host = test_key(22);
+        let mut bindings = Bindings::new();
+        bindings.apply(&signed_bind(&host, b"sid", false));
+        assert_eq!(bindings.login_session_id(), Some(b"sid".as_slice()));
+    }
+
+    /// The destination binding's own session id, distinct from the
+    /// forwarding session's — the one a forwarded login must actually
+    /// match (`docs/ssh-agent.md` § 6.3), not `ConnectionClass::Forwarded`'s
+    /// `session` field (the forwarding session, used for approval scoping
+    /// instead).
+    #[test]
+    fn login_session_id_is_the_destinations_for_forwarded_with_a_destination() {
+        let forwarding_host = test_key(23);
+        let dest_host = test_key(24);
+        let mut bindings = Bindings::new();
+        bindings.apply(&signed_bind(&forwarding_host, b"forwarding-sid", true));
+        bindings.apply(&signed_bind(&dest_host, b"dest-sid", false));
+        assert_eq!(bindings.login_session_id(), Some(b"dest-sid".as_slice()));
+        assert_ne!(
+            bindings.login_session_id(),
+            Some(b"forwarding-sid".as_slice())
+        );
+    }
+
+    #[test]
+    fn login_session_id_is_the_forwarding_sessions_with_no_destination_yet() {
+        let host = test_key(25);
+        let mut bindings = Bindings::new();
+        bindings.apply(&signed_bind(&host, b"sid", true));
+        assert_eq!(bindings.login_session_id(), Some(b"sid".as_slice()));
     }
 
     /// Guards against the helper itself drifting: a real `ssh` client's
