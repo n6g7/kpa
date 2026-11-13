@@ -19,6 +19,7 @@ use kpa::policy;
 use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op};
 use kpa::server::{self, Server};
 use kpa::socket;
+use kpa::ssh_agent;
 use kpa::tray;
 use uuid::Uuid;
 
@@ -183,6 +184,33 @@ fn run_serve(
     let events = policy::start(server.clone(), policy::Bus::System);
     server.set_policy_events(events);
     tray::start(server.clone());
+    if server.ssh_agent_enabled() {
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        match server.ssh_agent_socket_path(runtime_dir.as_deref()) {
+            Some(ssh_socket_path) => match socket::bind_socket(&ssh_socket_path) {
+                Ok(ssh_listener) => {
+                    log::info(format_args!(
+                        "ssh agent listening on {}",
+                        ssh_socket_path.display()
+                    ));
+                    let ssh_server = server.clone();
+                    let _ = std::thread::Builder::new()
+                        .spawn(move || ssh_agent::serve::serve(ssh_server, ssh_listener));
+                }
+                Err(err) => {
+                    report_error(format_args!("binding {}: {err}", ssh_socket_path.display()));
+                    return ExitCode::FAILURE;
+                }
+            },
+            None => {
+                report_error(
+                    "ssh_agent.socket is unset and XDG_RUNTIME_DIR is not set; \
+                     a database has serve_ssh_keys = true, so the SSH agent socket needs one",
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     server::serve(server, listener);
     ExitCode::SUCCESS
 }
