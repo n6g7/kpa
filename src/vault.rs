@@ -416,6 +416,60 @@ pub fn entry_count(db: &Database) -> usize {
     count
 }
 
+/// One attachment on a current entry: outside the recycle bin, and the
+/// entry's live version, never a historical one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryAttachment {
+    pub entry_uuid: Uuid,
+    /// The entry's title, under the same protectedness rule as `list`'s own
+    /// `title` (`unprotected_field`) — `None` if it is absent, empty, or
+    /// marked protected.
+    pub entry_title: Option<String>,
+    /// The name under which the entry stores this attachment (KeePass's
+    /// "filename").
+    pub attachment_name: String,
+    pub data: Vec<u8>,
+}
+
+/// Every attachment on every current entry, database-wide: no history, and
+/// nothing in the recycle bin. Used by the SSH agent's key discovery
+/// (`ssh_agent::keys::scan`), which only ever looks at what a database's current
+/// entries hold (`docs/ssh-agent.md` § 6.4).
+pub fn list_attachments(db: &Database) -> Vec<EntryAttachment> {
+    use keepass::db::fields;
+
+    let recycle_bin = db.recycle_bin().map(|group| group.id());
+    let mut out = Vec::new();
+    // Same explicit-worklist traversal as `collect_entries`, skipping the
+    // recycle bin's subtree entirely rather than filtering entries out of it
+    // after the fact — a group only ever has one parent, so this can't miss
+    // a path into it that isn't through its own id.
+    let mut stack = vec![db.root().id()];
+    while let Some(id) = stack.pop() {
+        if Some(id) == recycle_bin {
+            continue;
+        }
+        let Some(group) = db.group(id) else {
+            continue;
+        };
+        for entry in group.entries() {
+            let entry_title = unprotected_field(&entry, fields::TITLE)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned);
+            for (name, attachment) in entry.attachments_named() {
+                out.push(EntryAttachment {
+                    entry_uuid: entry.id().uuid(),
+                    entry_title: entry_title.clone(),
+                    attachment_name: name.to_string(),
+                    data: attachment.get().clone(),
+                });
+            }
+        }
+        stack.extend(group.groups().map(|child| child.id()));
+    }
+    out
+}
+
 /// A field's value, unless the user marked it protected in their KeePass
 /// client — a protected field is treated as absent, not de-protected. The
 /// `keepass` convenience getters (`get_title`, etc.) don't make this
@@ -658,10 +712,13 @@ fn custom_field_wire_name(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use keepass::Database;
-    use keepass::db::fields;
+    use keepass::db::{Value, fields};
     use uuid::Uuid;
 
-    use super::{entry_count, entry_exists, entry_field, entry_title, entry_totp, list_entries};
+    use super::{
+        entry_count, entry_exists, entry_field, entry_title, entry_totp, list_attachments,
+        list_entries,
+    };
 
     /// `entry_count` must agree with `list_entries` everywhere, including
     /// in nested groups and when fields are protected — it's what `status`
@@ -1001,5 +1058,102 @@ mod tests {
         assert_eq!(entry_totp(&db, no_field), Some(None));
         assert_eq!(entry_totp(&db, bad_field), Some(None));
         assert_eq!(entry_totp(&db, Uuid::new_v4()), None);
+    }
+
+    /// The basic case: one entry, one attachment, found with its name, its
+    /// data, and its entry's title.
+    #[test]
+    fn list_attachments_finds_a_current_attachment() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::TITLE, "Example");
+            entry.add_attachment("key.pub", Value::unprotected(b"ATTACHMENT".to_vec()));
+            entry.id().uuid()
+        };
+
+        let attachments = list_attachments(&db);
+        assert_eq!(attachments.len(), 1);
+        let found = &attachments[0];
+        assert_eq!(found.entry_uuid, uuid);
+        assert_eq!(found.entry_title.as_deref(), Some("Example"));
+        assert_eq!(found.attachment_name, "key.pub");
+        assert_eq!(found.data, b"ATTACHMENT");
+    }
+
+    /// Nested groups, and an entry with no title (protected or absent) —
+    /// `entry_title` comes back `None` rather than panicking.
+    #[test]
+    fn list_attachments_walks_nested_groups_and_tolerates_a_titleless_entry() {
+        let mut db = Database::new();
+        {
+            let mut root = db.root_mut();
+            let mut child = root.add_group();
+            let mut entry = child.add_entry();
+            entry.set_protected(fields::TITLE, "SECRET-TITLE");
+            entry.add_attachment("deep.key", Value::unprotected(b"DEEP".to_vec()));
+        }
+
+        let attachments = list_attachments(&db);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].entry_title, None);
+        assert_eq!(attachments[0].attachment_name, "deep.key");
+    }
+
+    /// An attachment that exists only on a historical revision of an
+    /// entry — never on its current one — is invisible to
+    /// `list_attachments`, which only ever looks at current entries.
+    #[test]
+    fn list_attachments_ignores_history() {
+        let mut db = Database::new();
+        let id = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::TITLE, "historical");
+            entry.add_attachment("old.key", Value::unprotected(b"OLD".to_vec()));
+            entry.id()
+        };
+
+        // Snapshots the attachment into history, then removes it from the
+        // live entry — the only remaining copy is historical.
+        db.entry_mut(id)
+            .expect("just-created entry must exist")
+            .edit_tracking(|e| {
+                e.as_mut().remove_attachment_by_name("old.key");
+            });
+
+        assert!(
+            db.entry(id)
+                .expect("entry still exists")
+                .history
+                .as_ref()
+                .is_some_and(|h| !h.get_entries().is_empty()),
+            "the attachment should have been pushed into history"
+        );
+        assert_eq!(list_attachments(&db), Vec::new());
+    }
+
+    /// An entry moved into the recycle bin is skipped, along with its
+    /// attachment — `list_attachments` only looks outside that subtree.
+    #[test]
+    fn list_attachments_ignores_the_recycle_bin() {
+        let mut db = Database::new();
+        let (entry_id, bin_id) = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::TITLE, "recycled");
+            entry.add_attachment("bin.key", Value::unprotected(b"BIN".to_vec()));
+            let entry_id = entry.id();
+            let bin_id = root.add_group().id();
+            (entry_id, bin_id)
+        };
+        db.meta.recyclebin_uuid = Some(bin_id.uuid());
+        db.entry_mut(entry_id)
+            .expect("just-created entry must exist")
+            .move_to(bin_id)
+            .expect("the recycle bin group exists");
+
+        assert_eq!(list_attachments(&db), Vec::new());
     }
 }

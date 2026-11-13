@@ -20,7 +20,7 @@ unlocking from a terminal.
 - **The agent is read-only.** It lists identities and signs. Every message
   that adds, removes, locks or unlocks gets `SSH_AGENT_FAILURE`.
 - **Databases opt in, and kpa finds the keys.** A database with
-  `ssh_agent = true` has every OpenSSH private key among its entries'
+  `serve_ssh_keys = true` has every OpenSSH private key among its entries'
   attachments served. kpa caches their public keys, and nothing else, so
   they are listed even while the database is locked. That is what makes
   unlock on demand work. Optional per-key settings under the database in
@@ -191,7 +191,7 @@ key never needs forwarding: each hop authenticates from the local `ssh`.
   like the JSON socket (`socket::bind_socket`, `SO_PEERCRED`, T-1). It is
   inside the directory the systemd sandbox already allows. It has its own
   connection cap, separate from the JSON socket's. It exists only while at
-  least one database has `ssh_agent = true`.
+  least one database has `serve_ssh_keys = true`.
 - **Framing**: `uint32` length, then the message. Frames over 256 KiB
   (OpenSSH's `AGENT_MAX_LEN`) close the connection. Unlike the JSON socket,
   connections are long-lived and carry many requests: `ssh` holds one open
@@ -277,7 +277,7 @@ Rules:
 
 ### 6.4 Which keys
 
-A database opts in with `ssh_agent = true` (§ 7). When it unlocks, kpa
+A database opts in with `serve_ssh_keys = true` (§ 7). When it unlocks, kpa
 scans it:
 
 1. Look at current entries only: no history, and nothing in the recycle bin.
@@ -417,14 +417,14 @@ Two per-key settings decide when a signature needs approval:
 An unlock prompt raised by a signature counts as that signature's approval
 (§ 6.6).
 
-**The approval prompt.** `ssh_agent.confirm` is an argv with the same
+**The approval prompt.** `ssh_agent.confirm_prompt` is an argv with the same
 contract as `prompt`, in dmenu style:
 
 - kpa writes the choices, `Allow` and `Deny`, on stdin and reads the chosen
   line from stdout.
 - A non-zero exit, or any other output, means deny.
 - `fuzzel --dmenu` works as is.
-- It is required once any database has `ssh_agent = true`. Without it,
+- It is required once any database has `serve_ssh_keys = true`. Without it,
   `kpa serve` refuses to start.
 
 The message carries:
@@ -532,9 +532,9 @@ password-guessing oracle.
 
 | Setting | Where | Default | Meaning |
 | --- | --- | --- | --- |
-| `ssh_agent` | `[[database]]` | `false` | Serve this database's SSH keys (§ 6.4) |
+| `serve_ssh_keys` | `[[database]]` | `false` | Serve this database's SSH keys (§ 6.4) |
 | `socket` | `[ssh_agent]` | `$XDG_RUNTIME_DIR/kpa/ssh-agent` | The agent socket |
-| `confirm` | `[ssh_agent]` | none; required once a database opts in | The approval program, dmenu style (§ 6.7) |
+| `confirm_prompt` | `[ssh_agent]` | none; required once a database opts in | The approval program, dmenu style (§ 6.7) |
 | `backoff` | `[ssh_agent]` | `"2m"` | How long a cancelled prompt holds back signatures from its database (§ 6.6) |
 | `fingerprint` | `[[database.ssh_key]]` | required | Which key the override is for, as `ssh-add -l` and `kpa ssh keys` print it |
 | `name` | `[[database.ssh_key]]` | the entry's title | Identity comment, shown in prompts and logs |
@@ -546,7 +546,7 @@ Overrides sit under the database that holds the key, and a fingerprint is
 matched within that database only. An override that matches no key found
 there is a warning in the log, not an error: the database may not have
 been unlocked on this machine yet. Overrides under a database without
-`ssh_agent = true` are a config error.
+`serve_ssh_keys = true` are a config error.
 
 **Example.** Two databases, one of them serving SSH keys. Most keys need no
 override; the two below are the exceptions.
@@ -558,12 +558,12 @@ prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
 prompt_timeout = "60s"
 
 [ssh_agent]
-confirm = ["fuzzel", "--dmenu", "--prompt", "{message}"]
+confirm_prompt = ["fuzzel", "--dmenu", "--prompt", "{message}"]
 
 [[database]]
 name = "personal"
 path = "~/vaults/personal.kdbx"
-ssh_agent = true
+serve_ssh_keys = true
 
   # A key that signs into production: ask on every use, and never forward it.
   [[database.ssh_key]]
@@ -580,7 +580,7 @@ ssh_agent = true
 [[database]]
 name = "work"
 path = "~/vaults/work.kdbx"
-# No `ssh_agent`: this database's keys are never served.
+# No `serve_ssh_keys`: this database's keys are never served.
 ```
 
 A `[[database.ssh_key]]` table belongs to the `[[database]]` above it; the
@@ -604,12 +604,12 @@ services.kpa = {
   sshAgent.enable = true;
   settings = {
     prompt = [ "fuzzel" "--dmenu" "--password" "--prompt" "{message}" ];
-    ssh_agent.confirm = [ "fuzzel" "--dmenu" "--prompt" "{message}" ];
+    ssh_agent.confirm_prompt = [ "fuzzel" "--dmenu" "--prompt" "{message}" ];
     database = [
       {
         name = "personal";
         path = "/home/you/vaults/personal.kdbx";
-        ssh_agent = true;
+        serve_ssh_keys = true;
         ssh_key = [
           { fingerprint = "SHA256:Jk2rVx…"; name = "prod-root"; confirm = "always"; forwarded = false; }
           { fingerprint = "SHA256:9aQwLm…"; serve = false; }
@@ -642,7 +642,7 @@ The setup kpa replaces, on a typical NixOS desktop with a KeePass client:
 
 **Changes**
 
-1. **Run kpa and opt the databases in** with `ssh_agent = true`. Add a
+1. **Run kpa and opt the databases in** with `serve_ssh_keys = true`. Add a
    `[[database.ssh_key]]` override for a key that must stay off forwarding
    (`forwarded = false`) or that needs a different approval policy.
    `kpa ssh keys <database>` prints the blocks to paste.
@@ -819,13 +819,13 @@ programs' settings.
   full client covers SSH, but only while it runs, and only by pushing keys
   into a separate agent.
 - **`threat-model.md`**: § 9 above.
-- **`config.example.toml`**: an `[ssh_agent]` section, `ssh_agent = true`
+- **`config.example.toml`**: an `[ssh_agent]` section, `serve_ssh_keys = true`
   on one fixture database, and one `[[database.ssh_key]]` against a fixture key.
 - **`nix/hm-module.nix`**: `services.kpa.sshAgent.enable` (§ 8).
 
 ## 11. Implementation
 
-**Modules** (new `src/agent/`):
+**Modules** (new `src/ssh_agent/`):
 
 | File          | Role                                                                                                                                            |
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |

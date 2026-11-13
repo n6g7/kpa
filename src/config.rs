@@ -52,6 +52,12 @@ pub struct Config {
     /// independently.
     #[serde(rename = "database", default)]
     pub databases: Vec<DatabaseConfig>,
+
+    /// `[ssh_agent]` — settings for the SSH agent socket
+    /// (`docs/ssh-agent.md` § 7). Present (with its own field defaults)
+    /// even when no database serves SSH keys.
+    #[serde(default)]
+    pub ssh_agent: SshAgentConfig,
 }
 
 /// One `[[database]]` entry.
@@ -68,6 +74,104 @@ pub struct DatabaseConfig {
     /// password-only.
     #[serde(default)]
     pub keyfile: Option<PathBuf>,
+
+    /// Serve this database's OpenSSH-formatted key attachments over the
+    /// SSH agent socket (`docs/ssh-agent.md` § 6.4).
+    #[serde(default)]
+    pub serve_ssh_keys: bool,
+
+    /// Per-key overrides, matched by fingerprint against the keys this
+    /// database's entries hold. A config error unless `serve_ssh_keys` is
+    /// also true (`Config::validate`).
+    #[serde(rename = "ssh_key", default)]
+    pub ssh_keys: Vec<SshKeyConfig>,
+}
+
+/// `[ssh_agent]` (`docs/ssh-agent.md` § 7).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SshAgentConfig {
+    /// The agent socket's path. `None` means the default,
+    /// `$XDG_RUNTIME_DIR/kpa/ssh-agent` — resolved by [`SshAgentConfig::socket_path`]
+    /// rather than at parse time, since the default depends on the
+    /// environment.
+    #[serde(default)]
+    pub socket: Option<PathBuf>,
+
+    /// argv for the approval prompt, dmenu style (`docs/ssh-agent.md`
+    /// § 6.7). Empty (the default) until set — required once any database
+    /// has `serve_ssh_keys = true` (`Config::validate`).
+    #[serde(default)]
+    pub confirm_prompt: Vec<String>,
+
+    /// How long a cancelled unlock or approval prompt holds back
+    /// signatures from its database (`docs/ssh-agent.md` § 6.6).
+    #[serde(with = "humantime_serde", default = "default_ssh_agent_backoff")]
+    pub backoff: Duration,
+}
+
+impl Default for SshAgentConfig {
+    fn default() -> Self {
+        SshAgentConfig {
+            socket: None,
+            confirm_prompt: Vec::new(),
+            backoff: default_ssh_agent_backoff(),
+        }
+    }
+}
+
+impl SshAgentConfig {
+    /// The socket path: `socket` if set, else `runtime_dir.join("kpa/ssh-agent")`.
+    /// `runtime_dir` is a parameter, not read from the environment here, so
+    /// this can be tested without touching the process environment — the
+    /// same reason [`Config::expand_home`] takes `home` as a parameter.
+    /// `None` if `socket` is unset and no `runtime_dir` is given.
+    pub fn socket_path(&self, runtime_dir: Option<&Path>) -> Option<PathBuf> {
+        self.socket
+            .clone()
+            .or_else(|| runtime_dir.map(|dir| dir.join("kpa/ssh-agent")))
+    }
+}
+
+/// `[[database.ssh_key]]`: an override for one key, matched by fingerprint
+/// (`docs/ssh-agent.md` § 7).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SshKeyConfig {
+    /// `SHA256:…`, as `ssh-add -l` and `kpa ssh keys` print it.
+    pub fingerprint: String,
+
+    /// Identity comment, shown in prompts and logs. Defaults to the
+    /// entry's title while unlocked, or `<database> <fingerprint>` while
+    /// locked.
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// Local approval policy (`docs/ssh-agent.md` § 6.7).
+    #[serde(default)]
+    pub confirm: SshKeyConfirm,
+
+    /// Usable through `ssh -A`, with its own approval. `false` keeps the
+    /// key off every forwarded connection.
+    #[serde(default = "default_true")]
+    pub forwarded: bool,
+
+    /// `false` keeps this key out of the agent entirely.
+    #[serde(default = "default_true")]
+    pub serve: bool,
+}
+
+/// `[[database.ssh_key]]`'s `confirm` (`docs/ssh-agent.md` § 6.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SshKeyConfirm {
+    /// The first local signature with the key after each unlock asks; the
+    /// approval holds until the database locks.
+    #[default]
+    Once,
+    /// Every signature asks, forwarded ones included.
+    Always,
+    /// Local signatures never ask. Forwarded use still needs its own
+    /// per-session approval regardless.
+    Never,
 }
 
 fn default_idle_timeout() -> Duration {
@@ -89,6 +193,14 @@ fn default_prompt() -> Vec<String> {
         "--password".to_string(),
         "--prompt".to_string(),
     ]
+}
+
+fn default_ssh_agent_backoff() -> Duration {
+    Duration::from_secs(2 * 60)
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Config {
@@ -116,7 +228,9 @@ impl Config {
             source,
         })?;
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        config.expand_home(home.as_deref(), &path)
+        let config = config.expand_home(home.as_deref(), &path)?;
+        config.validate(&path)?;
+        Ok(config)
     }
 
     /// Parse a config from a TOML string, paths exactly as written — the
@@ -150,6 +264,52 @@ impl Config {
         }
         Ok(self)
     }
+
+    /// Checks the cross-field rules TOML's own shape can't express
+    /// (`docs/ssh-agent.md` § 7): `ssh_agent.confirm_prompt` is required
+    /// once any database opts in, a `[[database.ssh_key]]` override needs
+    /// its database's `serve_ssh_keys = true`, its `fingerprint` must parse
+    /// as a `SHA256:…` fingerprint, and fingerprints are unique within one
+    /// database (the same fingerprint in two different databases is not a
+    /// conflict — that's config order deciding which one serves it). `load`
+    /// runs this after `expand_home`; `config` is the file's path, for
+    /// error messages.
+    pub fn validate(&self, config: &Path) -> Result<(), ConfigError> {
+        if self.databases.iter().any(|db| db.serve_ssh_keys)
+            && self.ssh_agent.confirm_prompt.is_empty()
+        {
+            return Err(ConfigError::SshAgentConfirmRequired {
+                config: config.to_path_buf(),
+            });
+        }
+        for db in &self.databases {
+            if !db.serve_ssh_keys && !db.ssh_keys.is_empty() {
+                return Err(ConfigError::SshKeyOverrideWithoutAgent {
+                    config: config.to_path_buf(),
+                    database: db.name.clone(),
+                });
+            }
+            let mut seen = std::collections::HashSet::new();
+            for key in &db.ssh_keys {
+                key.fingerprint
+                    .parse::<ssh_key::Fingerprint>()
+                    .map_err(|source| ConfigError::InvalidSshKeyFingerprint {
+                        config: config.to_path_buf(),
+                        database: db.name.clone(),
+                        fingerprint: key.fingerprint.clone(),
+                        source: Box::new(source),
+                    })?;
+                if !seen.insert(key.fingerprint.as_str()) {
+                    return Err(ConfigError::DuplicateSshKeyFingerprint {
+                        config: config.to_path_buf(),
+                        database: db.name.clone(),
+                        fingerprint: key.fingerprint.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_path() -> Result<PathBuf, ConfigError> {
@@ -181,6 +341,36 @@ pub enum ConfigError {
         config: PathBuf,
         path: PathBuf,
         kind: TildeError,
+    },
+    #[error(
+        "in {}: ssh_agent.confirm_prompt is required once a database has serve_ssh_keys = true",
+        config.display()
+    )]
+    SshAgentConfirmRequired { config: PathBuf },
+    #[error(
+        "in {}: database {database:?} has [[database.ssh_key]] overrides but serve_ssh_keys is not true",
+        config.display()
+    )]
+    SshKeyOverrideWithoutAgent { config: PathBuf, database: String },
+    #[error(
+        "in {}: database {database:?} has a duplicate ssh_key fingerprint: {fingerprint}",
+        config.display()
+    )]
+    DuplicateSshKeyFingerprint {
+        config: PathBuf,
+        database: String,
+        fingerprint: String,
+    },
+    #[error(
+        "in {}: database {database:?} ssh_key fingerprint {fingerprint:?} is invalid: {source}",
+        config.display()
+    )]
+    InvalidSshKeyFingerprint {
+        config: PathBuf,
+        database: String,
+        fingerprint: String,
+        #[source]
+        source: Box<ssh_key::Error>,
     },
 }
 
@@ -286,6 +476,9 @@ mod tests {
             vec!["fuzzel", "--dmenu", "--password", "--prompt"]
         );
         assert!(config.databases.is_empty());
+        assert_eq!(config.ssh_agent.socket, None);
+        assert!(config.ssh_agent.confirm_prompt.is_empty());
+        assert_eq!(config.ssh_agent.backoff, Duration::from_secs(2 * 60));
     }
 
     #[test]
@@ -415,5 +608,239 @@ mod tests {
             }
         ));
         assert!(err.to_string().contains("tilde.toml"), "{err}");
+    }
+
+    /// A real `SHA256:…` fingerprint — `ssh_key`'s own doc example
+    /// (`fingerprint.rs`), reused here rather than computed fresh, so this
+    /// test is independently checkable.
+    const FINGERPRINT: &str = "SHA256:Nh0Me49Zh9fDw/VYUfq43IJmI1T+XrjiYONPND8GzaM";
+
+    /// Verbatim from `docs/ssh-agent.md` § 7's example.
+    #[test]
+    fn parses_the_ssh_agent_example_from_the_design_doc() {
+        let input = r#"
+            idle_timeout = "30m"
+            clipboard_timeout = "30s"
+            prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
+            prompt_timeout = "60s"
+
+            [ssh_agent]
+            confirm_prompt = ["fuzzel", "--dmenu", "--prompt", "{message}"]
+
+            [[database]]
+            name = "personal"
+            path = "~/vaults/personal.kdbx"
+            serve_ssh_keys = true
+
+              # A key that signs into production: ask on every use, and never forward it.
+              [[database.ssh_key]]
+              fingerprint = "SHA256:Jk2rVx…"
+              name = "prod-root"
+              confirm = "always"
+              forwarded = false
+
+              # An old key that is kept in the vault but no longer used.
+              [[database.ssh_key]]
+              fingerprint = "SHA256:9aQwLm…"
+              serve = false
+
+            [[database]]
+            name = "work"
+            path = "~/vaults/work.kdbx"
+            # No `serve_ssh_keys`: this database's keys are never served.
+        "#;
+
+        let config = Config::parse(input).expect("the design doc's own example should parse");
+
+        assert_eq!(
+            config.ssh_agent.confirm_prompt,
+            vec!["fuzzel", "--dmenu", "--prompt", "{message}"]
+        );
+        assert_eq!(config.ssh_agent.socket, None);
+        assert_eq!(config.ssh_agent.backoff, Duration::from_secs(2 * 60));
+
+        let personal = &config.databases[0];
+        assert!(personal.serve_ssh_keys);
+        assert_eq!(personal.ssh_keys.len(), 2);
+        assert_eq!(personal.ssh_keys[0].name.as_deref(), Some("prod-root"));
+        assert_eq!(personal.ssh_keys[0].confirm, SshKeyConfirm::Always);
+        assert!(!personal.ssh_keys[0].forwarded);
+        assert!(personal.ssh_keys[0].serve);
+        assert_eq!(personal.ssh_keys[1].name, None);
+        assert_eq!(personal.ssh_keys[1].confirm, SshKeyConfirm::Once);
+        assert!(personal.ssh_keys[1].forwarded);
+        assert!(!personal.ssh_keys[1].serve);
+
+        let work = &config.databases[1];
+        assert!(!work.serve_ssh_keys);
+        assert!(work.ssh_keys.is_empty());
+
+        // The fingerprints above aren't real SHA256 digests, so this
+        // example fails `validate` — `validate_*` tests cover that path
+        // with `FINGERPRINT`, a real one.
+        assert!(config.validate(Path::new("config.toml")).is_err());
+    }
+
+    #[test]
+    fn ssh_agent_socket_defaults_to_none_and_resolves_against_runtime_dir() {
+        let config = Config::parse("").expect("empty config should parse");
+        assert_eq!(config.ssh_agent.socket_path(None), None);
+        assert_eq!(
+            config
+                .ssh_agent
+                .socket_path(Some(Path::new("/run/user/1000"))),
+            Some(PathBuf::from("/run/user/1000/kpa/ssh-agent"))
+        );
+    }
+
+    #[test]
+    fn ssh_agent_socket_override_wins_over_runtime_dir() {
+        let config = Config::parse(
+            r#"[ssh_agent]
+socket = "/custom/sock"
+"#,
+        )
+        .expect("valid config should parse");
+        assert_eq!(
+            config
+                .ssh_agent
+                .socket_path(Some(Path::new("/run/user/1000"))),
+            Some(PathBuf::from("/custom/sock"))
+        );
+    }
+
+    #[test]
+    fn database_serve_ssh_keys_defaults_to_false_and_ssh_keys_to_empty() {
+        let config = one_database("/vault.kdbx", None);
+        assert!(!config.databases[0].serve_ssh_keys);
+        assert!(config.databases[0].ssh_keys.is_empty());
+    }
+
+    #[test]
+    fn ssh_key_override_defaults_confirm_once_and_forwarded_and_serve_true() {
+        let input = format!(
+            "[[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n\n\
+             [[database.ssh_key]]\nfingerprint = \"{FINGERPRINT}\"\n"
+        );
+        let config = Config::parse(&input).expect("valid config should parse");
+        let key = &config.databases[0].ssh_keys[0];
+        assert_eq!(key.fingerprint, FINGERPRINT);
+        assert_eq!(key.name, None);
+        assert_eq!(key.confirm, SshKeyConfirm::Once);
+        assert!(key.forwarded);
+        assert!(key.serve);
+    }
+
+    #[test]
+    fn ssh_key_override_without_a_fingerprint_fails_to_parse() {
+        let input = "[[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n\n\
+             [[database.ssh_key]]\nname = \"no-fingerprint\"\n";
+        assert!(Config::parse(input).is_err());
+    }
+
+    #[test]
+    fn validate_requires_confirm_once_a_database_opts_in() {
+        let input =
+            "[[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n";
+        let config = Config::parse(input).expect("valid config should parse");
+        let err = config
+            .validate(Path::new("config.toml"))
+            .expect_err("ssh_agent.confirm_prompt is required");
+        assert!(matches!(err, ConfigError::SshAgentConfirmRequired { .. }));
+        assert!(err.to_string().contains("config.toml"), "{err}");
+    }
+
+    #[test]
+    fn validate_passes_once_confirm_is_set() {
+        let input = "[ssh_agent]\nconfirm_prompt = [\"fuzzel\", \"--dmenu\"]\n\n\
+             [[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n";
+        let config = Config::parse(input).expect("valid config should parse");
+        config
+            .validate(Path::new("config.toml"))
+            .expect("confirm_prompt is set, so validate should pass");
+    }
+
+    #[test]
+    fn validate_ignores_confirm_when_no_database_opts_in() {
+        let config = Config::parse("").expect("empty config should parse");
+        config
+            .validate(Path::new("config.toml"))
+            .expect("no database opts into serve_ssh_keys, so confirm_prompt isn't required");
+    }
+
+    #[test]
+    fn validate_rejects_an_override_without_serve_ssh_keys() {
+        let input = format!(
+            "[[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\n\n\
+             [[database.ssh_key]]\nfingerprint = \"{FINGERPRINT}\"\n"
+        );
+        let config = Config::parse(&input).expect("valid config should parse");
+        let err = config
+            .validate(Path::new("config.toml"))
+            .expect_err("an override needs serve_ssh_keys = true");
+        assert!(matches!(
+            err,
+            ConfigError::SshKeyOverrideWithoutAgent { ref database, .. } if database == "personal"
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_a_duplicate_fingerprint_within_one_database() {
+        let input = format!(
+            "[ssh_agent]\nconfirm_prompt = [\"fuzzel\"]\n\n\
+             [[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n\n\
+             [[database.ssh_key]]\nfingerprint = \"{FINGERPRINT}\"\n\n\
+             [[database.ssh_key]]\nfingerprint = \"{FINGERPRINT}\"\n"
+        );
+        let config = Config::parse(&input).expect("valid config should parse");
+        let err = config
+            .validate(Path::new("config.toml"))
+            .expect_err("a duplicate fingerprint within one database is an error");
+        assert!(matches!(
+            err,
+            ConfigError::DuplicateSshKeyFingerprint { ref database, .. } if database == "personal"
+        ));
+    }
+
+    #[test]
+    fn validate_allows_the_same_fingerprint_in_two_different_databases() {
+        let input = format!(
+            "[ssh_agent]\nconfirm_prompt = [\"fuzzel\"]\n\n\
+             [[database]]\nname = \"personal\"\npath = \"/a.kdbx\"\nserve_ssh_keys = true\n\n\
+             [[database.ssh_key]]\nfingerprint = \"{FINGERPRINT}\"\n\n\
+             [[database]]\nname = \"work\"\npath = \"/b.kdbx\"\nserve_ssh_keys = true\n\n\
+             [[database.ssh_key]]\nfingerprint = \"{FINGERPRINT}\"\n"
+        );
+        let config = Config::parse(&input).expect("valid config should parse");
+        config
+            .validate(Path::new("config.toml"))
+            .expect("the same fingerprint in two different databases is not a conflict");
+    }
+
+    #[test]
+    fn validate_rejects_an_invalid_fingerprint() {
+        let input = "[ssh_agent]\nconfirm_prompt = [\"fuzzel\"]\n\n\
+             [[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n\n\
+             [[database.ssh_key]]\nfingerprint = \"not-a-fingerprint\"\n";
+        let config = Config::parse(input).expect("valid config should parse");
+        let err = config
+            .validate(Path::new("config.toml"))
+            .expect_err("a malformed fingerprint is an error");
+        assert!(matches!(err, ConfigError::InvalidSshKeyFingerprint { .. }));
+    }
+
+    #[test]
+    fn load_runs_validate_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[database]]\nname = \"p\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n",
+        )
+        .expect("write");
+
+        let err =
+            Config::load(Some(&path)).expect_err("missing ssh_agent.confirm_prompt should fail");
+        assert!(matches!(err, ConfigError::SshAgentConfirmRequired { .. }));
     }
 }

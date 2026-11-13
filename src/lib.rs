@@ -14,6 +14,7 @@ pub mod policy;
 pub mod proto;
 pub mod server;
 pub mod socket;
+pub mod ssh_agent;
 pub mod tray;
 pub mod vault;
 

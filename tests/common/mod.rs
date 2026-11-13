@@ -80,6 +80,21 @@ pub fn fields_db() -> PathBuf {
     ensure_fixtures().join("fixture-fields.kdbx")
 }
 
+/// A database for `ssh_agent::keys` (`tests/fixture.sh`): entries `"Ed25519"`,
+/// `"Ecdsa"` and `"Rsa"` each hold one OpenSSH private-key attachment;
+/// `"Pem"` holds a PEM-format key that must be skipped; `"Historical"`'s
+/// key is reachable only through its history, and `"Recycled"`'s only
+/// through the recycle bin — both must be invisible to a scan. `Ecdsa`'s
+/// Password field is the passphrase its key was encrypted with
+/// (`SSH_KEY_PASSPHRASE`).
+pub fn ssh_db() -> PathBuf {
+    ensure_fixtures().join("fixture-ssh.kdbx")
+}
+
+/// The passphrase `ssh_db`'s `"Ecdsa"` entry's key was encrypted with
+/// (`tests/fixture.sh`).
+pub const SSH_KEY_PASSPHRASE: &str = "correct-horse-battery-staple";
+
 /// A config whose one database is `db_path` under the name `"personal"`,
 /// and whose `prompt` runs `prompt_script` under `sh -c`, standing in for a
 /// real dmenu-style prompt.
