@@ -28,6 +28,9 @@ pub struct Config {
     /// `["fuzzel", "--dmenu", "--password", "--prompt"]`. Swappable per
     /// decision #9 in the design doc — `pinentry-qt` is the long-term
     /// answer but fiddly, so this stays a plain argv rather than an enum.
+    /// Runs exactly as configured: `server::run_prompt` passes what the
+    /// prompt is about through the `KPA_PROMPT_MESSAGE` environment
+    /// variable instead of touching the argv.
     #[serde(default = "default_prompt")]
     pub prompt: Vec<String>,
 
@@ -407,7 +410,7 @@ mod tests {
         // really "does the design doc's own example parse".
         let input = r#"
             idle_timeout = "30m"
-            prompt = ["fuzzel", "--dmenu", "--password", "--prompt"]
+            prompt = ["sh", "-c", "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""]
             prompt_timeout = "60s"
             clipboard_timeout = "30s"
 
@@ -426,7 +429,11 @@ mod tests {
         assert_eq!(config.idle_timeout, Duration::from_secs(30 * 60));
         assert_eq!(
             config.prompt,
-            vec!["fuzzel", "--dmenu", "--password", "--prompt"]
+            vec![
+                "sh",
+                "-c",
+                "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""
+            ]
         );
         assert_eq!(config.prompt_timeout, Duration::from_secs(60));
         assert_eq!(config.clipboard_timeout, Duration::from_secs(30));
@@ -621,11 +628,11 @@ mod tests {
         let input = r#"
             idle_timeout = "30m"
             clipboard_timeout = "30s"
-            prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
+            prompt = ["sh", "-c", "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""]
             prompt_timeout = "60s"
 
             [ssh_agent]
-            confirm_prompt = ["fuzzel", "--dmenu", "--prompt", "{message}"]
+            confirm_prompt = ["sh", "-c", "exec fuzzel --dmenu --prompt \"$KPA_PROMPT_MESSAGE\""]
 
             [[database]]
             name = "personal"
@@ -654,7 +661,11 @@ mod tests {
 
         assert_eq!(
             config.ssh_agent.confirm_prompt,
-            vec!["fuzzel", "--dmenu", "--prompt", "{message}"]
+            vec![
+                "sh",
+                "-c",
+                "exec fuzzel --dmenu --prompt \"$KPA_PROMPT_MESSAGE\""
+            ]
         );
         assert_eq!(config.ssh_agent.socket, None);
         assert_eq!(config.ssh_agent.backoff, Duration::from_secs(2 * 60));

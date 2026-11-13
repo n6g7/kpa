@@ -8,8 +8,9 @@
 //! pre-dispatch failures, which by definition never reach an op.
 //!
 //! No tray or clipboard yet — those are later steps. Unlocking still needs a
-//! password from somewhere, so this step already runs the configured `prompt` command (`docs/design.md`
-//! decision #9) to get one; nothing about that requires the later pieces.
+//! password from somewhere, so this step already calls into `prompt::run_prompt`
+//! for one (`docs/design.md` decision #9); nothing about that requires the
+//! later pieces.
 //!
 //! The limits below (request size, I/O timeouts, concurrent connections)
 //! exist because one crashed daemon loses every unlocked database at once:
@@ -20,7 +21,6 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -37,10 +37,11 @@ use crate::io::ByteCounter;
 use crate::log;
 use crate::origin::{self, Origin};
 use crate::policy;
+use crate::prompt::{PromptOutcome, PromptQueue, prompt_message, run_prompt};
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
-    ListError, ListRequest, Lock, LockError, LockRequest, MAX_PASSWORD_LEN, ProtocolError,
-    Response, Status, Unlock, UnlockError, UnlockRequest, WireEntry,
+    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
+    UnlockError, UnlockRequest, WireEntry,
 };
 use crate::socket;
 use crate::vault::{self, Fingerprint, VaultError};
@@ -166,6 +167,10 @@ pub struct Server {
     desk: Mutex<policy::Desk>,
     /// Set by `assume_origin` only.
     assumed_origin: OnceLock<Origin>,
+    /// Serializes every prompt `run_prompt` raises, across every database,
+    /// so only one is ever on screen (`docs/ssh-agent.md` § 6.7's approval
+    /// prompt will share it with `unlock`'s once it exists).
+    prompt_queue: PromptQueue,
 }
 
 impl Server {
@@ -196,6 +201,7 @@ impl Server {
             clip_db: Arc::new(Mutex::new(None)),
             desk: Mutex::new(policy::Desk::NoSession),
             assumed_origin: OnceLock::new(),
+            prompt_queue: PromptQueue::new(),
         }
     }
 
@@ -519,7 +525,15 @@ impl Unlock for Server {
             None => {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
-                prompted = match prompt_password(&self.config.prompt, timeout, &cancel_watch) {
+                let message = prompt_message(&format!("Unlock {name}"));
+                prompted = match run_prompt(
+                    &self.prompt_queue,
+                    &self.config.prompt,
+                    &message,
+                    timeout,
+                    &cancel_watch,
+                    None,
+                ) {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
                     }
@@ -820,172 +834,6 @@ fn unlock_error(name: &str, err: VaultError) -> UnlockError {
     }
 }
 
-enum PromptOutcome {
-    /// The command exited unsuccessfully — e.g. the user dismissed a
-    /// dmenu-style prompt — rather than printing a password.
-    Cancelled,
-    /// Nothing was entered within `prompt_timeout`; the prompt was killed.
-    TimedOut,
-    /// A lock ended the prompt (`Slot::prompt_cancel`); it was killed.
-    Interrupted,
-    Password(Zeroizing<String>),
-}
-
-/// Run the configured prompt command (`docs/design.md` decision #9,
-/// `Config::prompt`) and capture its stdout as a password.
-///
-/// The prompt runs in its own process group. It is killed, with everything
-/// it started, once `timeout` passes without it finishing, or as soon as
-/// the other end of `cancel_watch` is dropped.
-///
-/// The output is read into a zeroizing buffer of fixed size that never
-/// grows. That's the point: `Command::output()` collects into a `Vec` that
-/// reallocates as it fills, and every reallocation frees an unwiped copy of
-/// what it held so far — for a long passphrase, most of it survived both
-/// unlock and lock (`docs/review-2026-09-secrets.md` finding 1). Output
-/// longer than `MAX_PASSWORD_LEN` is refused rather than accommodated.
-///
-/// Trailing `\n`/`\r` are stripped, since dmenu-style prompts
-/// newline-terminate their output. The copies kpa can't reach are the ones
-/// inside the prompt program itself.
-fn prompt_password(
-    argv: &[String],
-    timeout: Duration,
-    cancel_watch: &UnixStream,
-) -> std::io::Result<PromptOutcome> {
-    use std::io::{Error, ErrorKind};
-    use std::os::unix::process::CommandExt;
-
-    let Some((program, args)) = argv.split_first() else {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "prompt command is empty",
-        ));
-    };
-
-    // `None` for a timeout too large to add: a deadline that never arrives.
-    let deadline = Instant::now().checked_add(timeout);
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        // Its own process group, so `kill_prompt` can kill everything it
-        // started too, such as a wrapper script's real prompt window.
-        .process_group(0)
-        .spawn()?;
-
-    let mut buf = Zeroizing::new(vec![0u8; MAX_PASSWORD_LEN]);
-    let len = match read_prompt(&mut child, &mut buf, deadline, cancel_watch) {
-        Ok(Ok(len)) => len,
-        Ok(Err(ended)) => {
-            kill_prompt(&mut child);
-            return Ok(ended);
-        }
-        Err(err) => {
-            kill_prompt(&mut child);
-            return Err(err);
-        }
-    };
-
-    if !child.wait()?.success() {
-        return Ok(PromptOutcome::Cancelled);
-    }
-
-    let mut end = len;
-    while end > 0 && matches!(buf[end - 1], b'\n' | b'\r') {
-        end -= 1;
-    }
-    let text = std::str::from_utf8(&buf[..end])
-        .map_err(|_| Error::new(ErrorKind::InvalidData, "prompt output is not valid UTF-8"))?;
-
-    // Sized exactly, so `push_str` doesn't reallocate either.
-    let mut password = Zeroizing::new(String::with_capacity(text.len()));
-    password.push_str(text);
-    Ok(PromptOutcome::Password(password))
-}
-
-/// Read the child's stdout into `buf` until EOF, returning how much was
-/// read. Errors rather than growing when `buf` fills up. Stops early with
-/// `TimedOut` at `deadline`, or `Interrupted` once `cancel_watch` is readable or
-/// hung up: either beats the output, so a lock wins over a prompt that
-/// answers at the same moment.
-fn read_prompt(
-    child: &mut Child,
-    buf: &mut [u8],
-    deadline: Option<Instant>,
-    cancel_watch: &UnixStream,
-) -> std::io::Result<Result<usize, PromptOutcome>> {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    use std::io::{Error, ErrorKind};
-
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::other("prompt stdout was not captured"))?;
-    let mut len = 0;
-    loop {
-        if len == buf.len() {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("prompt output exceeds {MAX_PASSWORD_LEN} bytes"),
-            ));
-        }
-        let left = match deadline {
-            Some(deadline) => {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    return Ok(Err(PromptOutcome::TimedOut));
-                }
-                Some(Timespec {
-                    tv_sec: left.as_secs().try_into().unwrap_or(i64::MAX),
-                    tv_nsec: left.subsec_nanos().into(),
-                })
-            }
-            None => None,
-        };
-        let (output, cancelled) = {
-            let mut fds = [
-                PollFd::new(&stdout, PollFlags::IN),
-                PollFd::new(cancel_watch, PollFlags::IN),
-            ];
-            match poll(&mut fds, left.as_ref()) {
-                Ok(_) => {}
-                // A signal interrupted the wait: wait again, for the time
-                // left until the same `deadline`.
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(err) => return Err(err.into()),
-            }
-            (!fds[0].revents().is_empty(), !fds[1].revents().is_empty())
-        };
-        if cancelled {
-            return Ok(Err(PromptOutcome::Interrupted));
-        }
-        if !output {
-            continue;
-        }
-        match stdout.read(&mut buf[len..]) {
-            Ok(0) => return Ok(Ok(len)),
-            Ok(n) => len += n,
-            Err(err) if err.kind() == ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
-    }
-}
-
-/// Kill the prompt's whole process group, so a wrapper's own prompt window
-/// goes too, then reap the prompt. The group is signalled before the reap:
-/// until then the prompt holds the group's id, so the signal can't reach a
-/// recycled one.
-fn kill_prompt(child: &mut Child) {
-    use rustix::process::{Pid, Signal, kill_process_group};
-
-    if let Some(pid) = i32::try_from(child.id()).ok().and_then(Pid::from_raw) {
-        let _ = kill_process_group(pid, Signal::KILL);
-    }
-    let _ = child.wait();
-}
-
 /// Holds one of the `MAX_CONNECTIONS` slots; releases it when dropped,
 /// including when the thread it was moved into never gets to run.
 struct ConnectionSlot(Arc<AtomicUsize>);
@@ -1235,18 +1083,7 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
 mod tests {
     use super::*;
     use crate::clip::Offer as _;
-
-    /// Held by every test here that spawns a process, and by the one that
-    /// needs a socket to be genuinely dead. Spawning a child briefly
-    /// duplicates every open file descriptor into it until it execs; if a
-    /// prompt test forks at the wrong moment, the "stale" socket below is
-    /// still held open by that child, and `socket::bind_socket` rightly refuses to
-    /// delete a socket that's still live.
-    static SPAWN_LOCK: Mutex<()> = Mutex::new(());
-
-    fn spawn_lock() -> MutexGuard<'static, ()> {
-        SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    use crate::prompt::spawn_lock;
 
     fn empty_server() -> Server {
         Server::new(Config::parse("").expect("an empty config is valid"))
@@ -1335,90 +1172,6 @@ mod tests {
                 crate::VERSION
             )
         );
-    }
-
-    fn sh(script: &str) -> Vec<String> {
-        vec!["/bin/sh".into(), "-c".into(), script.into()]
-    }
-
-    /// Runs `script` as the prompt, with a timeout long enough never to
-    /// fire and nobody to cancel it.
-    fn prompt(script: &str) -> std::io::Result<PromptOutcome> {
-        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
-        prompt_password(&sh(script), Duration::from_secs(60), &cancel_watch)
-    }
-
-    #[test]
-    fn prompt_output_has_its_line_ending_stripped() {
-        let _spawning = spawn_lock();
-        let Ok(PromptOutcome::Password(password)) = prompt("printf 'hunter2\\r\\n'") else {
-            panic!("expected a password");
-        };
-        assert_eq!(password.as_str(), "hunter2");
-    }
-
-    #[test]
-    fn a_failing_prompt_is_a_cancellation() {
-        let _spawning = spawn_lock();
-        assert!(matches!(prompt("exit 1"), Ok(PromptOutcome::Cancelled)));
-    }
-
-    /// The buffer never grows, so over-long output is an error rather than
-    /// a reallocation that would strand an unwiped copy.
-    #[test]
-    fn over_long_prompt_output_is_refused() {
-        let _spawning = spawn_lock();
-        let script = format!("head -c {} /dev/zero | tr '\\0' a", MAX_PASSWORD_LEN + 1);
-        assert!(prompt(&script).is_err());
-    }
-
-    #[test]
-    fn an_unanswered_prompt_times_out() {
-        let _spawning = spawn_lock();
-        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
-        let started = Instant::now();
-        let outcome = prompt_password(
-            &sh("sleep 30; printf hunter2"),
-            Duration::from_millis(200),
-            &cancel_watch,
-        );
-        assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
-        assert!(started.elapsed() < Duration::from_secs(5));
-    }
-
-    #[test]
-    fn dropping_the_cancel_end_interrupts_the_prompt() {
-        let _spawning = spawn_lock();
-        let (prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
-        let started = Instant::now();
-        let outcome = thread::scope(|scope| {
-            scope.spawn(move || {
-                thread::sleep(Duration::from_millis(200));
-                drop(prompt_cancel);
-            });
-            prompt_password(
-                &sh("sleep 30; printf hunter2"),
-                Duration::from_secs(60),
-                &cancel_watch,
-            )
-        });
-        assert!(matches!(outcome, Ok(PromptOutcome::Interrupted)));
-        assert!(started.elapsed() < Duration::from_secs(5));
-    }
-
-    /// A prompt can be a wrapper that starts the real prompt window. Ending
-    /// the prompt ends what it started too, so no window stays on screen.
-    #[test]
-    fn ending_a_prompt_kills_what_it_started() {
-        let _spawning = spawn_lock();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let marker = dir.path().join("survived");
-        let script = format!("(sleep 1; touch '{}') & sleep 30", marker.display());
-        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
-        let outcome = prompt_password(&sh(&script), Duration::from_millis(200), &cancel_watch);
-        assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
-        thread::sleep(Duration::from_millis(1500));
-        assert!(!marker.exists(), "the prompt's child outlived it");
     }
 
     #[test]

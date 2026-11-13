@@ -11,6 +11,7 @@ pub mod log;
 pub mod origin;
 pub mod output;
 pub mod policy;
+mod prompt;
 pub mod proto;
 pub mod server;
 pub mod socket;

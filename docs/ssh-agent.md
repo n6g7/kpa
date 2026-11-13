@@ -376,16 +376,17 @@ A signature for a served key whose database is locked runs the normal
 **What the prompt says.** It names its reason, for example "Unlock
 personal: key github for git@github.com". Answering it approves that key
 (§ 6.7), and for a forwarded request, that forwarding session and
-destination. Today `prompt` runs exactly as configured, so the prompt can't
-even say which database it is for. A `{message}` placeholder in the argv
-fixes that for every unlock:
+destination. `prompt` runs exactly as configured; kpa sets
+`KPA_PROMPT_MESSAGE` in its environment instead, so a prompt program that
+reads it — directly, or through a wrapper script — can show the reason:
 
 ```toml
-prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
+prompt = ["sh", "-c", "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""]
 ```
 
-The message is always passed as an option's value, never as a positional
-argument.
+A wrapper puts the message right back into its own argv, so it's visible
+to other uids via `/proc/<pid>/cmdline` either way. Only a program that
+reads the variable itself avoids that.
 
 **Timeouts and cancels.** Prompts time out after `prompt_timeout`, and a
 lock kills an open prompt ([`headless.md`](./headless.md) § 6). On top of
@@ -427,7 +428,8 @@ contract as `prompt`, in dmenu style:
 - It is required once any database has `serve_ssh_keys = true`. Without it,
   `kpa serve` refuses to start.
 
-The message carries:
+The message, delivered the same way `prompt`'s is (`KPA_PROMPT_MESSAGE`),
+carries:
 
 - the key name and purpose;
 - for a forwarded request, the forwarding host and the destination, by
@@ -554,11 +556,11 @@ override; the two below are the exceptions.
 ```toml
 idle_timeout = "30m"
 clipboard_timeout = "30s"
-prompt = ["fuzzel", "--dmenu", "--password", "--prompt", "{message}"]
+prompt = ["sh", "-c", "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""]
 prompt_timeout = "60s"
 
 [ssh_agent]
-confirm_prompt = ["fuzzel", "--dmenu", "--prompt", "{message}"]
+confirm_prompt = ["sh", "-c", "exec fuzzel --dmenu --prompt \"$KPA_PROMPT_MESSAGE\""]
 
 [[database]]
 name = "personal"
@@ -603,8 +605,8 @@ services.kpa = {
   enable = true;
   sshAgent.enable = true;
   settings = {
-    prompt = [ "fuzzel" "--dmenu" "--password" "--prompt" "{message}" ];
-    ssh_agent.confirm_prompt = [ "fuzzel" "--dmenu" "--prompt" "{message}" ];
+    prompt = [ "sh" "-c" ''exec fuzzel --dmenu --password --prompt "$KPA_PROMPT_MESSAGE"'' ];
+    ssh_agent.confirm_prompt = [ "sh" "-c" ''exec fuzzel --dmenu --prompt "$KPA_PROMPT_MESSAGE"'' ];
     database = [
       {
         name = "personal";
@@ -842,8 +844,8 @@ programs' settings.
 - `Slot` gains the key cache and its approvals, cleared in `Slot::lock()`.
 - A `SshSign` trait sits beside `CopyEntry`.
 - Unlock waiters use a condvar.
-- The prompt and approval runner gains `{message}` and the shared queue.
-  The timeout and lock-kills-prompt come from
+- The prompt and approval runner gains `KPA_PROMPT_MESSAGE` and the shared
+  queue. The timeout and lock-kills-prompt come from
   [`headless.md`](./headless.md).
 - The JSON protocol gains three requests: `ssh_keys` (the scan behind
   `kpa ssh keys`), `ssh_pending` and `ssh_approve`. The CLI gains
@@ -894,7 +896,7 @@ once it lands.
    - The user unlocks from the launcher or tray first.
    - Enough to switch off a KeePass client's agent on Linux.
 2. **Unlock on demand, and requests from outside the desktop.**
-   - `{message}`, backoff, unlock waiters.
+   - `KPA_PROMPT_MESSAGE`, backoff, unlock waiters.
    - Pending requests, `kpa ssh approve`, the hints in key comments.
 3. **Forwarding.**
    - `forwarded`, forwarded listing, forwarding-session approvals.
