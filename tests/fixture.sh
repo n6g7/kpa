@@ -18,14 +18,15 @@ KEYFILE="$OUT/fixture-kf.keyx"
 KDBX4_DB="$OUT/fixture-kdbx4.kdbx"
 HOSTILE_DB="$OUT/fixture-hostile.kdbx"
 FIELDS_DB="$OUT/fixture-fields.kdbx"
+SSH_DB="$OUT/fixture-ssh.kdbx"
 
-if [ -f "$PASSWORD_DB" ] && [ -f "$KEYFILE_DB" ] && [ -f "$KEYFILE" ] && [ -f "$KDBX4_DB" ] && [ -f "$HOSTILE_DB" ] && [ -f "$FIELDS_DB" ]; then
+if [ -f "$PASSWORD_DB" ] && [ -f "$KEYFILE_DB" ] && [ -f "$KEYFILE" ] && [ -f "$KDBX4_DB" ] && [ -f "$HOSTILE_DB" ] && [ -f "$FIELDS_DB" ] && [ -f "$SSH_DB" ]; then
     exit 0
 fi
 
 # Some fixture is missing, so rebuild all of them: keepassxc-cli's db-create
 # refuses to overwrite an existing file, so a partial set can't be topped up.
-rm -f "$PASSWORD_DB" "$KEYFILE_DB" "$KEYFILE" "$KDBX4_DB" "$HOSTILE_DB" "$FIELDS_DB"
+rm -f "$PASSWORD_DB" "$KEYFILE_DB" "$KEYFILE" "$KDBX4_DB" "$HOSTILE_DB" "$FIELDS_DB" "$SSH_DB"
 
 # Password-only db with one group and one entry. The exact incantations
 # below are verbatim from docs/plan.md step 1 — keepassxc-cli's interactive
@@ -117,6 +118,70 @@ for e in (entry, no_otp, bad_otp):
     if auto_type is not None:
         e._element.remove(auto_type)
         e._element.append(auto_type)
+
+kp.save()
+PYEOF
+
+# SSH agent fixtures (`src/agent/keys.rs`): an Ed25519 key, a
+# passphrase-protected key, an RSA key, and a PEM-format key that must be
+# skipped — one entry each, plus one more Ed25519 key reachable only
+# through history and one only through the recycle bin, to check both are
+# ignored. Generated fresh each run, like the rest of $OUT: none of this is
+# committed.
+SSH_KEYS_DIR=$(mktemp -d)
+trap 'rm -rf "$SSH_KEYS_DIR"' EXIT
+
+ssh-keygen -q -t ed25519 -N '' -C '' -f "$SSH_KEYS_DIR/ed25519"
+ssh-keygen -q -t ecdsa -b 256 -N 'correct-horse-battery-staple' -C '' -f "$SSH_KEYS_DIR/ecdsa"
+ssh-keygen -q -t rsa -b 3072 -N '' -C '' -f "$SSH_KEYS_DIR/rsa"
+# `-m PEM`: the old PKCS#1 format, not the OpenSSH one `agent::keys` reads.
+ssh-keygen -q -t rsa -b 2048 -N '' -C '' -m PEM -f "$SSH_KEYS_DIR/pem"
+ssh-keygen -q -t ed25519 -N '' -C '' -f "$SSH_KEYS_DIR/ed25519-history"
+ssh-keygen -q -t ed25519 -N '' -C '' -f "$SSH_KEYS_DIR/ed25519-recycled"
+
+python3 - "$SSH_DB" "$SSH_KEYS_DIR" <<'PYEOF'
+import sys
+from pykeepass import create_database
+
+path, keys_dir = sys.argv[1], sys.argv[2]
+
+
+def read(name):
+    with open(f"{keys_dir}/{name}", "rb") as f:
+        return f.read()
+
+
+kp = create_database(path, password="testpass123")
+group = kp.add_group(kp.root_group, "SSH")
+
+entry = kp.add_entry(group, "Ed25519", "", "")
+entry.add_attachment(kp.add_binary(read("ed25519")), "id_ed25519")
+
+# The passphrase the key was encrypted with lives in the entry's Password
+# field, the convention a KeePass client's own SSH agent integration uses.
+entry = kp.add_entry(group, "Ecdsa", "", "correct-horse-battery-staple")
+entry.add_attachment(kp.add_binary(read("ecdsa")), "id_ecdsa")
+
+entry = kp.add_entry(group, "Rsa", "", "")
+entry.add_attachment(kp.add_binary(read("rsa")), "id_rsa")
+
+entry = kp.add_entry(group, "Pem", "", "")
+entry.add_attachment(kp.add_binary(read("pem")), "id_rsa_pem")
+
+# Held only in history: the snapshot below captures the attachment, then
+# it's removed from the live entry, leaving only a historical revision
+# that holds it — `agent::keys::scan` must not look there.
+entry = kp.add_entry(group, "Historical", "", "")
+entry.add_attachment(kp.add_binary(read("ed25519-history")), "id_ed25519_history")
+entry.save_history()
+attachment = next(a for a in entry.attachments if a.filename == "id_ed25519_history")
+entry.delete_attachment(attachment)
+
+# Held only in the recycle bin.
+entry = kp.add_entry(group, "Recycled", "", "")
+entry.add_attachment(kp.add_binary(read("ed25519-recycled")), "id_ed25519_recycled")
+recycle_bin = kp._create_or_get_recyclebin_group()
+kp.move_entry(entry, recycle_bin)
 
 kp.save()
 PYEOF

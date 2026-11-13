@@ -24,6 +24,7 @@ wl-clipboard-rs = "0.9.5"
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 png = "0.17"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ssh-key = { version = "=0.7.0-rc.12", default-features = false, features = ["ed25519", "p256", "p384", "rsa", "encryption", "alloc"] }
 
 [dev-dependencies]
 tempfile = "3"
