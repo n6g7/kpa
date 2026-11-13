@@ -433,7 +433,7 @@ pub struct EntryAttachment {
 
 /// Every attachment on every current entry, database-wide: no history, and
 /// nothing in the recycle bin. Used by the SSH agent's key discovery
-/// (`agent::keys::scan`), which only ever looks at what a database's current
+/// (`ssh_agent::keys::scan`), which only ever looks at what a database's current
 /// entries hold (`docs/ssh-agent.md` § 6.4).
 pub fn list_attachments(db: &Database) -> Vec<EntryAttachment> {
     use keepass::db::fields;

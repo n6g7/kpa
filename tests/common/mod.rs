@@ -80,7 +80,7 @@ pub fn fields_db() -> PathBuf {
     ensure_fixtures().join("fixture-fields.kdbx")
 }
 
-/// A database for `agent::keys` (`tests/fixture.sh`): entries `"Ed25519"`,
+/// A database for `ssh_agent::keys` (`tests/fixture.sh`): entries `"Ed25519"`,
 /// `"Ecdsa"` and `"Rsa"` each hold one OpenSSH private-key attachment;
 /// `"Pem"` holds a PEM-format key that must be skipped; `"Historical"`'s
 /// key is reachable only through its history, and `"Recycled"`'s only

@@ -122,7 +122,7 @@ for e in (entry, no_otp, bad_otp):
 kp.save()
 PYEOF
 
-# SSH agent fixtures (`src/agent/keys.rs`): an Ed25519 key, a
+# SSH agent fixtures (`src/ssh_agent/keys.rs`): an Ed25519 key, a
 # passphrase-protected key, an RSA key, and a PEM-format key that must be
 # skipped — one entry each, plus one more Ed25519 key reachable only
 # through history and one only through the recycle bin, to check both are
@@ -134,7 +134,7 @@ trap 'rm -rf "$SSH_KEYS_DIR"' EXIT
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$SSH_KEYS_DIR/ed25519"
 ssh-keygen -q -t ecdsa -b 256 -N 'correct-horse-battery-staple' -C '' -f "$SSH_KEYS_DIR/ecdsa"
 ssh-keygen -q -t rsa -b 3072 -N '' -C '' -f "$SSH_KEYS_DIR/rsa"
-# `-m PEM`: the old PKCS#1 format, not the OpenSSH one `agent::keys` reads.
+# `-m PEM`: the old PKCS#1 format, not the OpenSSH one `ssh_agent::keys` reads.
 ssh-keygen -q -t rsa -b 2048 -N '' -C '' -m PEM -f "$SSH_KEYS_DIR/pem"
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$SSH_KEYS_DIR/ed25519-history"
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$SSH_KEYS_DIR/ed25519-recycled"
@@ -170,7 +170,7 @@ entry.add_attachment(kp.add_binary(read("pem")), "id_rsa_pem")
 
 # Held only in history: the snapshot below captures the attachment, then
 # it's removed from the live entry, leaving only a historical revision
-# that holds it — `agent::keys::scan` must not look there.
+# that holds it — `ssh_agent::keys::scan` must not look there.
 entry = kp.add_entry(group, "Historical", "", "")
 entry.add_attachment(kp.add_binary(read("ed25519-history")), "id_ed25519_history")
 entry.save_history()

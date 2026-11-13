@@ -1,10 +1,10 @@
 //! Integration tests against `tests/fixture.sh`'s `fixture-ssh.kdbx`:
-//! `agent::keys::scan` against a real database, and `decrypt` against each
-//! of its key types.
+//! `ssh_agent::keys::scan` against a real database, and `decrypt` against
+//! each of its key types.
 
 mod common;
 
-use kpa::agent::keys::{self, SkipReason};
+use kpa::ssh_agent::keys::{self, SkipReason};
 use kpa::vault::{self, EntryAttachment};
 use zeroize::Zeroizing;
 
