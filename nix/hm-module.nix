@@ -88,14 +88,15 @@ in
           # `systemd.user.services.kpa.Service.<name> = lib.mkForce ...`.
           #
           # kpa's own daemon loop touches only AF_UNIX sockets (its client
-          # socket, the D-Bus session and system buses for the tray and the
-          # logind watcher, and — through `wl-clipboard-rs` — the Wayland
-          # socket), never execs another program itself, and needs no
-          # writable+executable memory. The one path that breaks that
-          # pattern is `unlock`, which execs the configured `prompt` command
-          # (`config.example.toml`'s `prompt`, e.g. a dmenu-style picker) as
-          # a child that inherits every directive below — each one here was
-          # checked against that child, not just against kpa itself:
+          # socket, the D-Bus session and system buses for the tray, the
+          # logind watcher and the service manager's environment, and the
+          # Wayland socket for the clipboard), never execs another program
+          # itself, and needs no writable+executable memory. The one path
+          # that breaks that pattern is `unlock`, which execs the configured
+          # `prompt` command (`config.example.toml`'s `prompt`, e.g. a
+          # dmenu-style picker) as a child that inherits every directive
+          # below — each one here was checked against that child, not just
+          # against kpa itself:
           #
           # - `MemoryDenyWriteExecute = true` blocks any prompt program that
           #   JITs at runtime (an embedded JS/Lua engine, PyPy, a browser

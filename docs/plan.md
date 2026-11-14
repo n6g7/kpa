@@ -43,7 +43,8 @@ with a clear error naming both versions. `probe` deleted.
 
 ## Step 3 — copy and clipboard
 
-`clip.rs` on `wl-clipboard-rs`, the `copy` op, timeout-based expiry.
+`clip.rs` on kpa's own data-control client, the `copy` op, timeout-based
+expiry.
 
 - **Test:** `kpa copy …`, then `wl-paste` returns it and
   `wl-paste --list-types` shows `x-kde-passwordManagerHint`. After

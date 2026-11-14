@@ -95,7 +95,14 @@ kpa (see §9).
   password: it doesn't store or send it. Where its output channels lead is
   kpa's responsibility, not the prompt's (T-4).
 - **ASM-4** — The compositor is trusted. Clipboard contents are visible to
-  the session by design; kpa can only tag and expire them.
+  the session by design; kpa can only tag and expire them. The compositor
+  is the one named by `WAYLAND_DISPLAY` in the service manager's
+  environment, read on each `copy`. kpa hands it a secret only if that
+  name is a bare socket name in the daemon's `$XDG_RUNTIME_DIR` and the
+  socket's listener is the daemon's uid and on the desktop, judged like a
+  requester (`docs/headless.md` § 3). That tells the desktop's compositor
+  from a stale or foreign socket, not from a same-uid process serving one
+  of its own (T-6).
 - **ASM-5** — Dependencies are part of kpa: a bug in one that is reachable
   through kpa is a bug in kpa. Only their memory-hygiene limits are
   accepted (NG-4). `keepass` documents no security properties and fixes
@@ -251,12 +258,19 @@ locked-memory limit, `fs.suid_dumpable=2` root-owned dumps (NG-3).
 **T-6 · Clipboard read by history managers** (I) — ACT-5 · TB-4 · A-2 → G-7, G-5  
 Response: sensitivity tag; kpa owns the offer and drops it at expiry.
 Residual: any data-control client can read the offer while it lives;
-managers that ignore the tag (NG-5). In scope: a copy without the tag, an
+managers that ignore the tag (NG-5). A same-uid process that serves a
+socket from inside the desktop and names it in the service manager's
+environment receives the secret directly, no more than `copy` followed by
+`wl-paste` gives it (T-18, NG-1). In scope: a copy without the tag, an
 offer outliving its expiry or the database's lock, the secret lingering
-after the offer is dropped.
+after the offer is dropped, a secret sent to a socket outside the
+daemon's runtime directory or served by another uid or from outside the
+desktop.
 
 **T-7 · Expiry clobbers the user's own clipboard** (T) — — · TB-4 · A-5 → G-7  
-Response: expiry drops kpa's own source; if replaced, it's a no-op.
+Response: expiry and lock destroy kpa's own source and nothing else; the
+compositor clears the selection only if that source still holds it, so a
+replaced offer's drop is a no-op.
 
 **T-8 · Lock doesn't happen, or doesn't hold** (E, I) — ACT-7, ACT-5 · TB-6 · A-2, A-3 → G-5  
 Response: logind's session `Lock` signal, and `LockedHint` becoming true
