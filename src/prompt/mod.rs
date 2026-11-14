@@ -8,8 +8,8 @@
 //! - [`cancel_pair`]: how a lock ends a prompt it no longer wants answered.
 //! - [`PromptQueue`]: one prompt on screen at a time, shared by every
 //!   caller.
-//! - `message`: what a prompt is about, escaped and length-capped here, so
-//!   callers pass plain text.
+//! - `message`: display sanitization for the untrusted text in a prompt's
+//!   message, applied by every backend, so callers pass plain text.
 //! - [`run_prompt`] and [`run_approval_prompt`]: the backend, a dmenu-style
 //!   external program.
 

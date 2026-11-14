@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
-use super::message::prompt_message;
+use super::message::sanitize_message;
 use super::{Approval, CancelWatch, PromptOutcome, PromptQueue};
 use crate::proto::MAX_PASSWORD_LEN;
 
@@ -36,7 +36,8 @@ const APPROVAL_CHOICES: &[u8] = b"Allow\nDeny\n";
 
 /// Runs `argv` as a prompt (`docs/design.md` decision #9), queued through
 /// `queue` so only one is ever on screen, and returns what it printed.
-/// `message` is plain text: it is escaped and length-capped here, then
+/// `message` is plain text: it is sanitized for display and length-capped
+/// here (`message::sanitize_message`), then
 /// reaches the program through the `KPA_PROMPT_MESSAGE` environment
 /// variable.
 ///
@@ -112,7 +113,7 @@ fn run(
             "prompt command is empty",
         ));
     };
-    let message = prompt_message(message);
+    let message = sanitize_message(message);
 
     let Some(turn) = queue.enter(cancel)? else {
         return Ok(PromptOutcome::Interrupted);
