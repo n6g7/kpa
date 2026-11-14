@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -32,19 +32,22 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::clip::{self, Clipboard};
-use crate::config::Config;
+use crate::config::{Config, DatabaseConfig};
 use crate::io::ByteCounter;
 use crate::log;
-use crate::origin::{self, Origin};
+use crate::origin::{self, Origin, PeerOrigin};
 use crate::policy;
-use crate::prompt::{PromptOutcome, PromptQueue, prompt_message, run_prompt};
+use crate::prompt::{
+    Approval, PromptOutcome, PromptQueue, prompt_message, run_approval_prompt, run_prompt,
+};
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
     UnlockError, UnlockRequest, WireEntry,
 };
 use crate::socket;
-use crate::ssh_agent::local::{SshSlot, scan_ssh_keys};
+use crate::ssh_agent::agent::{SlotView, SshHost, SshSlot};
+use crate::ssh_agent::keys;
 use crate::vault::{self, Fingerprint, VaultError};
 
 /// Longest request line accepted, and the size of the zeroizing buffer
@@ -63,8 +66,8 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONNECTIONS: usize = 64;
 
 /// One configured database's state.
-pub(crate) struct Slot {
-    pub(crate) db: Option<Database>,
+struct Slot {
+    db: Option<Database>,
     /// The configured path, and the fingerprint of the file `db` was opened
     /// from. `drop_if_stale` checks the path against it before each use.
     path: PathBuf,
@@ -77,7 +80,7 @@ pub(crate) struct Slot {
     /// it before prompting and only stores what it opened if it is still
     /// the same afterwards, so a lock issued mid-unlock can't be undone by
     /// the unlock finishing.
-    pub(crate) lock_epoch: u64,
+    lock_epoch: u64,
     /// An unlock is prompting or deriving the key right now. A second one
     /// is refused rather than opening a second prompt.
     unlocking: bool,
@@ -88,7 +91,7 @@ pub(crate) struct Slot {
     /// resolved from a scan at unlock, read lazily and cached until
     /// lock, and the approvals granted against them. Empty/default while
     /// locked, or for a database that doesn't serve SSH keys at all.
-    pub(crate) ssh: SshSlot,
+    ssh: SshSlot,
 }
 
 impl Slot {
@@ -113,7 +116,7 @@ impl Slot {
     }
 
     /// Resets this database's idle timer to now.
-    pub(crate) fn touch(&mut self) {
+    fn touch(&mut self) {
         self.last_activity = Instant::now();
     }
 
@@ -146,8 +149,8 @@ impl Default for Slot {
 /// Holding it there would stall every other request behind someone typing
 /// a password; not holding it is what makes the lock epoch necessary.
 pub struct Server {
-    pub(crate) config: Config,
-    pub(crate) dbs: Mutex<HashMap<String, Slot>>,
+    config: Config,
+    dbs: Mutex<HashMap<String, Slot>>,
     /// Told about each successful unlock, so the lock policy can take its
     /// sleep inhibitor. Set once by `set_policy_events`; absent in tests.
     policy_events: OnceLock<Sender<policy::Event>>,
@@ -178,14 +181,14 @@ pub struct Server {
     assumed_origin: OnceLock<Origin>,
     /// Set by `assume_ssh_cache_dir` only — real callers get
     /// `keys::default_cache_dir()` (`ssh_cache_dir`).
-    pub(crate) assumed_ssh_cache_dir: OnceLock<PathBuf>,
+    assumed_ssh_cache_dir: OnceLock<PathBuf>,
     /// Set by `assume_known_hosts_path` only — real callers get
     /// `$HOME/.ssh/known_hosts` (`known_hosts_path`).
-    pub(crate) assumed_known_hosts_path: OnceLock<PathBuf>,
+    assumed_known_hosts_path: OnceLock<PathBuf>,
     /// Serializes every prompt `run_prompt` raises, across every database,
     /// so only one is ever on screen (`docs/ssh-agent.md` § 6.7's approval
     /// prompt will share it with `unlock`'s once it exists).
-    pub(crate) prompt_queue: PromptQueue,
+    prompt_queue: PromptQueue,
 }
 
 impl Server {
@@ -299,7 +302,7 @@ impl Server {
     /// window: a file change after the `stat` is served exactly as it
     /// always was, and a `lock` landing between this call and that read
     /// just makes the read see a locked database instead.
-    pub(crate) fn drop_stale<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    fn drop_stale<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
         let dropped: Vec<String> = {
             let mut dbs = slots(&self.dbs);
             names
@@ -330,12 +333,31 @@ impl Server {
         let _ = self.assumed_origin.set(origin);
     }
 
-    /// Where the peer on `stream` runs (`docs/headless.md` § 3).
-    pub(crate) fn origin_of(&self, stream: &UnixStream, uid: u32) -> Origin {
-        match self.assumed_origin.get() {
-            Some(origin) => *origin,
-            None => origin::of_peer(stream, uid, self.desk().session()),
-        }
+    /// Use `dir` for the SSH key cache instead of
+    /// `keys::default_cache_dir()` — like `assume_origin`, for tests that
+    /// build their own `Server` and must not depend on this process's
+    /// real `$XDG_CACHE_HOME`/`$HOME`.
+    #[doc(hidden)]
+    pub fn assume_ssh_cache_dir(&self, dir: PathBuf) {
+        let _ = self.assumed_ssh_cache_dir.set(dir);
+    }
+
+    /// Use `path` for `~/.ssh/known_hosts` instead of this process's real
+    /// `$HOME` — like `assume_ssh_cache_dir`, for tests.
+    #[doc(hidden)]
+    pub fn assume_known_hosts_path(&self, path: PathBuf) {
+        let _ = self.assumed_known_hosts_path.set(path);
+    }
+
+    /// Whether the SSH agent socket should run at all: at least one
+    /// database opts in.
+    pub fn ssh_agent_enabled(&self) -> bool {
+        self.config.databases.iter().any(|cfg| cfg.serve_ssh_keys)
+    }
+
+    /// Where to bind the SSH agent socket (`docs/ssh-agent.md` § 7).
+    pub fn ssh_agent_socket_path(&self, runtime_dir: Option<&Path>) -> Option<PathBuf> {
+        self.config.ssh_agent.socket_path(runtime_dir)
     }
 
     /// Where to report unlocks. Called once, before the server takes requests.
@@ -420,7 +442,7 @@ impl policy::Locks for Server {
 
 /// The poisoned case recovers rather than propagating: a panic on one
 /// request thread shouldn't make every later request panic too.
-pub(crate) fn slots(dbs: &Mutex<HashMap<String, Slot>>) -> MutexGuard<'_, HashMap<String, Slot>> {
+fn slots(dbs: &Mutex<HashMap<String, Slot>>) -> MutexGuard<'_, HashMap<String, Slot>> {
     dbs.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -598,8 +620,10 @@ impl Unlock for Server {
             return Err(UnlockError::LockedDuringUnlock { db: db() });
         }
         slot.install(opened, stamp);
-        if cfg.serve_ssh_keys {
-            scan_ssh_keys(slot, cfg, self.ssh_cache_dir().as_deref());
+        if cfg.serve_ssh_keys
+            && let Some(db) = slot.db.as_ref()
+        {
+            slot.ssh.scan(db, cfg, self.ssh_cache_dir().as_deref());
         }
         drop(dbs);
         self.notify_unlocked();
@@ -607,6 +631,71 @@ impl Unlock for Server {
         // the database was actually opened, as opposed to already unlocked.
         log::info(format_args!("unlocked {name:?}"));
         Ok(db())
+    }
+}
+
+impl PeerOrigin for Server {
+    /// Where the peer on `stream` runs (`docs/headless.md` § 3).
+    fn origin_of(&self, stream: &UnixStream, owner: u32) -> Origin {
+        match self.assumed_origin.get() {
+            Some(origin) => *origin,
+            None => origin::of_peer(stream, owner, self.desk().session()),
+        }
+    }
+}
+
+impl SshHost for Server {
+    fn databases(&self) -> &[DatabaseConfig] {
+        &self.config.databases
+    }
+
+    fn ssh_cache_dir(&self) -> Option<PathBuf> {
+        self.assumed_ssh_cache_dir
+            .get()
+            .cloned()
+            .or_else(keys::default_cache_dir)
+    }
+
+    fn known_hosts_path(&self) -> Option<PathBuf> {
+        if let Some(path) = self.assumed_known_hosts_path.get() {
+            return Some(path.clone());
+        }
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ssh/known_hosts"))
+    }
+
+    fn drop_if_stale(&self, db: &str) {
+        self.drop_stale([db]);
+    }
+
+    fn with_slot<R>(&self, db: &str, f: impl FnOnce(SlotView<'_>) -> R) -> Option<R> {
+        let mut dbs = slots(&self.dbs);
+        let slot = dbs.get_mut(db)?;
+        Some(f(SlotView::new(
+            slot.db.as_ref(),
+            &mut slot.ssh,
+            &mut slot.last_activity,
+        )))
+    }
+
+    fn may_prompt(&self, origin: Origin) -> bool {
+        self.desk().may_prompt(origin)
+    }
+
+    fn confirm(&self, message: &str, cancel_watch: &UnixStream) -> bool {
+        let argv = &self.config.ssh_agent.confirm_prompt;
+        if argv.is_empty() {
+            return false;
+        }
+        matches!(
+            run_approval_prompt(
+                &self.prompt_queue,
+                argv,
+                message,
+                self.config.prompt_timeout,
+                cancel_watch,
+            ),
+            Ok(PromptOutcome::Answer(Approval::Allow))
+        )
     }
 }
 

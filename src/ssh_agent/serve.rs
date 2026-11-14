@@ -16,18 +16,16 @@ use std::thread;
 use std::time::Duration;
 
 use crate::log;
-use crate::origin::Origin;
-use crate::server::Server;
+use crate::origin::{Origin, PeerOrigin};
 use crate::socket;
 
 use super::bind::{self, BindOutcome, SessionBindState};
 use super::wire::{self, AgentRequest, AgentResponse, Frame};
 
-/// What the agent socket needs from the daemon: identity listing and
-/// signing (`docs/ssh-agent.md` § 6). `dispatch` takes `&impl SshSign`
-/// rather than naming `Server`, so the protocol loop stays decoupled from
-/// the daemon, as `proto::dispatch` is via `Handler`.
-pub trait SshSign {
+/// What the agent socket needs from the daemon: where a peer runs, identity
+/// listing and signing (`docs/ssh-agent.md` § 6). The protocol loop is
+/// generic over it, as `proto::dispatch` is over `Handler`.
+pub trait SshSign: PeerOrigin {
     fn ssh_identities(&self, class: &bind::ConnectionClass) -> Vec<wire::Identity>;
 
     fn ssh_sign(
@@ -73,7 +71,7 @@ impl Drop for ConnectionSlot {
 /// Accept connections on the SSH agent socket forever, handling each on
 /// its own thread. Mirrors `server::serve`'s shape: a stuck `accept`
 /// pauses rather than spins, and a connection over the cap is dropped.
-pub fn serve(server: Arc<Server>, listener: UnixListener) {
+pub fn serve<S: SshSign + Send + Sync + 'static>(server: Arc<S>, listener: UnixListener) {
     let active = Arc::new(AtomicUsize::new(0));
     let owner = rustix::process::geteuid().as_raw();
     for conn in listener.incoming() {
@@ -90,14 +88,14 @@ pub fn serve(server: Arc<Server>, listener: UnixListener) {
         let server = Arc::clone(&server);
         let _ = thread::Builder::new().spawn(move || {
             let _slot = slot;
-            handle_connection(&server, stream, owner);
+            handle_connection(server.as_ref(), stream, owner);
         });
     }
 }
 
 /// Serves one connection until it closes, errors, or sends an oversize
 /// frame.
-fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
+fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32) {
     let Ok(uid) = socket::peer_uid(&stream) else {
         return;
     };
