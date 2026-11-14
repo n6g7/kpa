@@ -11,8 +11,9 @@
 //! `wl-copy hello`, confirm `hello` survives past the timeout) — needs a
 //! real, reachable Wayland compositor, and drives that session's actual
 //! clipboard: anything else on it (a clipboard manager, an X11 bridge) can
-//! take the selection mid-test and fail the run. So those tests are
-//! `#[ignore]`d and only run on request, when the clipboard logic changes:
+//! take the selection mid-test and fail the run. They share that one
+//! clipboard, so they take turns on [`LIVE_CLIPBOARD`]. And they're
+//! `#[ignore]`d, run only on request when the clipboard logic changes:
 //!
 //! ```sh
 //! nix develop -c cargo test --test clipboard -- --ignored
@@ -23,20 +24,24 @@
 //! `compositor` looks it up the same way, and the `wl-paste`/`wl-copy` the
 //! tests run are pointed at it. Where none is reachable, an opted-in test
 //! prints why and skips rather than fails. The state machine those tests
-//! would exercise — supersession making a timeout a no-op, a second `copy`
-//! replacing the first — is covered without any compositor at all by
-//! `src/clip.rs`'s own unit tests.
+//! exercise — a timeout or a lock ending the current offer, a second
+//! `copy` replacing the first — is covered without any compositor at all
+//! by `src/clip.rs`'s own unit tests.
 
 mod common;
 
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use common::InProcessDaemon;
 use kpa::origin::Origin;
 use kpa::policy::{Desk, Locks};
+
+/// Held by each test that drives the live clipboard, for its whole run.
+static LIVE_CLIPBOARD: Mutex<()> = Mutex::new(());
 
 /// An in-process daemon (`common::InProcessDaemon`) for
 /// `common::password_db()`, whose prompt echoes `password`. In-process
@@ -208,6 +213,7 @@ fn copy_from_the_desktop_is_refused_without_an_active_unlocked_desk() {
 #[test]
 #[ignore = "drives the live Wayland clipboard; run with --ignored when changing clipboard logic"]
 fn copy_reaches_a_reachable_compositor() {
+    let _turn = LIVE_CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
     let (Some(display), Some(session)) = (compositor(), display_session()) else {
         eprintln!(
             "skipping: no reachable Wayland compositor in the service manager's \
@@ -261,6 +267,7 @@ fn copy_reaches_a_reachable_compositor() {
 #[test]
 #[ignore = "drives the live Wayland clipboard; run with --ignored when changing clipboard logic"]
 fn surviving_a_takeover_past_the_timeout() {
+    let _turn = LIVE_CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
     let (Some(display), Some(session)) = (compositor(), display_session()) else {
         eprintln!(
             "skipping: no reachable Wayland compositor or display session; \
@@ -315,6 +322,7 @@ fn surviving_a_takeover_past_the_timeout() {
 #[test]
 #[ignore = "drives the live Wayland clipboard; run with --ignored when changing clipboard logic"]
 fn a_lock_ends_the_offer() {
+    let _turn = LIVE_CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
     let (Some(display), Some(session)) = (compositor(), display_session()) else {
         eprintln!("skipping: no reachable Wayland compositor or display session");
         return;

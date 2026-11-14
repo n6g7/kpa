@@ -128,7 +128,12 @@ impl Offer {
 pub fn offer(stream: UnixStream, secret: Zeroizing<String>) -> Result<Offer, Error> {
     let secret = Zeroizing::new(secret.as_bytes().to_vec());
     let (queue, state) = start(stream, secret)?;
+    spawn(move |stop| serve(queue, state, stop))
+}
 
+/// Runs `serve` on a thread of its own, which ends the offer when it
+/// returns. `serve` gets the end of the stop pipe that `end` closes.
+fn spawn(serve: impl FnOnce(&UnixStream) + Send + 'static) -> Result<Offer, Error> {
     let live = Arc::new(AtomicBool::new(true));
     let (stop, stop_rx) =
         UnixStream::pair().map_err(|err| Error(format!("couldn't create a pipe: {err}")))?;
@@ -137,7 +142,7 @@ pub fn offer(stream: UnixStream, secret: Zeroizing<String>) -> Result<Offer, Err
     thread::Builder::new()
         .name("kpa-clip".to_string())
         .spawn(move || {
-            serve(queue, state, &stop_rx);
+            serve(&stop_rx);
             live_in_thread.store(false, Ordering::SeqCst);
             let _ = done_tx.send(());
         })
@@ -148,6 +153,18 @@ pub fn offer(stream: UnixStream, secret: Zeroizing<String>) -> Result<Offer, Err
         stop,
         done: Mutex::new(done_rx),
     })
+}
+
+#[cfg(test)]
+impl Offer {
+    /// An offer with no compositor behind it, for tests: live until `end`
+    /// or until it's dropped.
+    pub fn detached() -> Offer {
+        spawn(|stop| {
+            let _ = io::Read::read(&mut &*stop, &mut [0]);
+        })
+        .expect("a detached offer needs only a pipe and a thread")
+    }
 }
 
 /// Connects, binds the data-control manager and every seat, and sets one

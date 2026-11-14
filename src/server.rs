@@ -1086,7 +1086,6 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clip::Offer as _;
     use crate::prompt::spawn_lock;
 
     fn empty_server() -> Server {
@@ -1483,7 +1482,7 @@ mod tests {
     /// made so far, each independently queryable for liveness. Named so
     /// the tracking test fixtures below don't each spell out the nested
     /// generic.
-    type TrackedOffers = Arc<Mutex<Vec<Arc<clip::RecordedOffer>>>>;
+    type TrackedOffers = Arc<Mutex<Vec<Arc<clip::Offer>>>>;
 
     /// A server with two configured, locked databases and a recording
     /// clipboard backend that tracks per-offer liveness — for the
@@ -1898,7 +1897,7 @@ mod tests {
     /// `personal` holds a live clipboard offer and has just gone stale on
     /// disk; `work` is untouched. Returns the offer so a test can check
     /// whether the guard it drives ended it.
-    fn stale_copy_setup() -> (Server, TrackedOffers, Arc<clip::RecordedOffer>) {
+    fn stale_copy_setup() -> (Server, TrackedOffers, Arc<clip::Offer>) {
         let (server, offers) = stale_drop_test_server();
         let uuid = unlock_with_entry(&server, "personal");
         CopyEntry::copy(
