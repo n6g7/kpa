@@ -1,0 +1,98 @@
+# kpa — portability
+
+kpa runs on Linux. macOS support is planned (`TODO.md`); Windows is out of
+scope. Until macOS lands, kpa is written so that a macOS implementation can
+slot in behind each OS-specific part without its callers changing.
+
+## The rule
+
+- **Every interface added or changed must be OS-neutral.** Shape it around
+  what kpa needs ("who is the peer", "is the desk locked", "serve this
+  secret on the clipboard"), not around the Linux mechanism behind it
+  (`SO_PEERCRED`, logind's `LockedHint`, a Wayland data source).
+- **Linux types stay inside the module that uses them.** No pidfds, cgroup
+  paths, D-Bus object paths, `zbus` or `wayland-client` types, or `XDG_*`
+  lookups in a signature another module calls.
+- **The rule applies to code a task already touches.** Don't rewrite
+  existing code only to make it portable; the [known leaks](#known-linux-shaped-interfaces)
+  below get fixed when work next passes through them.
+- **No macOS code yet**: no `#[cfg(target_os = "macos")]`, no macOS-only
+  dependencies, no stub modules. Those come with the macOS work itself.
+
+## Structuring OS-specific code
+
+**The OS switch is a compile-time module choice, not a trait.** When macOS
+work starts, each seam becomes one module with one OS-neutral API and an
+implementation file per OS, picked with `#[cfg]`:
+
+```rust
+// src/peer/mod.rs — the API every caller uses
+pub struct Peer { pub uid: u32, pub pid: Option<u32> }
+
+pub fn peer(stream: &UnixStream) -> io::Result<Peer> {
+    imp::peer(stream)
+}
+
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod imp;   // SO_PEERCRED, SO_PEERPIDFD
+// a macOS build adds its own `imp` (getpeereid, LOCAL_PEERPID)
+```
+
+A trait isn't the right tool for the switch itself. A given build has
+exactly one implementation, so a trait adds generics or dynamic dispatch
+with nothing to choose between. It also can't check that the two
+implementations agree: neither compiles on the other OS, so only building
+for both targets does that. Until macOS work starts, a seam's Linux code
+stays where it is, behind its module's API, so the split is a move rather
+than a redesign.
+
+**Traits are for more than one implementation in the same build.** That
+covers:
+
+- a choice between backends at runtime, such as an unlock or approval
+  prompt run as an external program, or a native one where the OS has it
+  (Touch ID answers allow or deny, with no string and no child process);
+- a test double, such as `policy::Locks`, `clip::Backend`,
+  `origin::PeerOrigin` and `ssh_agent::SshHost`.
+
+These traits often sit on an OS boundary already. Keep their method
+signatures OS-neutral, like any other interface.
+
+**Answers and events are kpa's own types.** `origin::Origin`
+(desktop or outside), `policy::Event` (screen locked, sleeping, the desk's
+state) and `prompt::PromptOutcome<T>` (generic over the answer, so a prompt
+needn't return a string) are the pattern to follow.
+
+## Seams
+
+Every place kpa depends on the OS, what it uses on Linux, and what a macOS
+implementation would build on. The macOS column is there to check an
+interface's shape against, not as a plan.
+
+| Seam | Code | Linux | macOS counterpart | Keep the interface to |
+|---|---|---|---|---|
+| Socket peer identity | `socket.rs`, `origin.rs` | `SO_PEERCRED`, `SO_PEERPIDFD` | `getpeereid`, `LOCAL_PEERCRED`, `LOCAL_PEERPID` | a uid, and at most a pid. No pidfd. |
+| Request origin | `origin.rs` | the peer's cgroup, from `/proc` | no cgroups or `/proc` | `Origin`; every failure is `Outside`. |
+| File locations | `main.rs`, `config.rs`, `ssh_agent/keys.rs` | `$XDG_RUNTIME_DIR`, `$XDG_CONFIG_HOME`, `$XDG_CACHE_HOME` | `~/Library/…`, the per-user `$TMPDIR` | paths resolved in one helper per location, handed to callers as `Path`s. Socket paths stay under 104 bytes, macOS's `sun_path` limit. |
+| Lock triggers | `policy.rs` | logind over D-Bus: `Lock`, `LockedHint`, `PrepareForSleep`, a sleep inhibitor | screen-lock and sleep notifications | `policy::Event` and the `Locks` / `SleepInhibitor` traits. |
+| Clipboard | `clip.rs`, `wayland/` | kpa's own Wayland client: data-control, serving each paste | `NSPasteboard` | "serve this secret, end it after the timeout, never clear anyone else's". |
+| Tray | `tray.rs` | StatusNotifierItem over D-Bus (`ksni`) | `NSStatusItem` | database states in, menu actions out. |
+| Prompts | `prompt.rs` | an external program | the same, or a native dialog or Touch ID | `PromptOutcome<T>`; no assumption of a child process or a string answer. |
+| Process hardening | `main.rs` | `prctl(PR_SET_DUMPABLE)` | `setrlimit(RLIMIT_CORE)`, `ptrace(PT_DENY_ATTACH)` | one startup call. |
+| Service manager | `nix/hm-module.nix` | a systemd user unit | a launchd agent | `kpa serve` as a plain foreground process: no socket activation or `sd_notify`. |
+
+D-Bus itself is a Linux seam: macOS has no session or system bus by
+default. Anything reached over it (logind, the tray, the compositor lookup
+in `wayland/compositor.rs`) stays inside its own module.
+
+## Known Linux-shaped interfaces
+
+These cross a module boundary with Linux details today. Fix each one when
+work next changes that code:
+
+- `clip::Backend::start` and `Clipboard::offer` take a logind session id
+  and return `wayland::Offer`, which `clip.rs` re-exports.
+- `policy::Desk::{Locked, Unlocked}` carry the display session's logind id,
+  which the clipboard uses to find the compositor. Callers other than the
+  clipboard must treat it as opaque.
