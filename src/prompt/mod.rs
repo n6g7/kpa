@@ -1,7 +1,7 @@
 //! Prompts that ask the user something on screen, such as `unlock`'s
 //! prompt (`docs/design.md` decision #9, `Config::prompt`).
 //!
-//! - [`outcome`](PromptOutcome): how a prompt ended, generic over its
+//! - [`PromptOutcome`]: how a prompt ended, generic over its
 //!   answer.
 //! - [`cancel_pair`]: how a lock ends a prompt it no longer wants answered.
 //! - [`PromptQueue`]: one prompt on screen at a time, shared by every

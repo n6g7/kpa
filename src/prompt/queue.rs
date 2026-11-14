@@ -28,12 +28,6 @@ pub struct PromptQueue {
     state: Mutex<PromptQueueState>,
 }
 
-impl Default for PromptQueue {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl PromptQueue {
     pub fn new() -> PromptQueue {
         PromptQueue {

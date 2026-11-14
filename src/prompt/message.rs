@@ -18,8 +18,8 @@ const MAX_PROMPT_MESSAGE_LEN: usize = 256;
 /// Turns `text` into what a prompt may safely display: the characters that
 /// could spoof or drive a display (controls, tab and newline included,
 /// bidi and zero-width format characters, and the like) written as
-/// `\uXXXX`, then capped at `MAX_PROMPT_MESSAGE_LEN` bytes on a character
-/// boundary.
+/// `\uXXXX`, capped at `MAX_PROMPT_MESSAGE_LEN` bytes. The cap falls
+/// between whole characters and whole escapes, never inside one.
 ///
 /// A prompt message is one line: dmenu-style prompts and placeholders
 /// render a single line, so a newline in an untrusted name could push the
@@ -31,20 +31,24 @@ const MAX_PROMPT_MESSAGE_LEN: usize = 256;
 /// reuse is an implementation detail: the message is not meant for a
 /// terminal in particular.
 pub(super) fn sanitize_message(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for c in crate::output::escape_for_terminal(text).chars() {
+    let mut message = String::with_capacity(text.len().min(MAX_PROMPT_MESSAGE_LEN));
+    let mut piece = String::new();
+    let mut utf8 = [0u8; 4];
+    for c in text.chars() {
+        piece.clear();
         if matches!(c, '\t' | '\n') {
-            let _ = write!(escaped, "\\u{:04x}", c as u32);
+            let _ = write!(piece, "\\u{:04x}", c as u32);
         } else {
-            escaped.push(c);
+            piece.push_str(&crate::output::escape_for_terminal(
+                c.encode_utf8(&mut utf8),
+            ));
         }
+        if message.len() + piece.len() > MAX_PROMPT_MESSAGE_LEN {
+            break;
+        }
+        message.push_str(&piece);
     }
-    let mut end = escaped.len().min(MAX_PROMPT_MESSAGE_LEN);
-    while !escaped.is_char_boundary(end) {
-        end -= 1;
-    }
-    escaped.truncate(end);
-    escaped
+    message
 }
 
 #[cfg(test)]
@@ -65,6 +69,23 @@ mod tests {
             assert!(!message.contains(c), "{message:?}");
         }
         assert_eq!(message, "Approve github\\u000aApprove\\u000d\\u0009other");
+    }
+
+    /// An escape that would cross the cap is dropped whole, never cut to a
+    /// `\u00` that reads as something else.
+    #[test]
+    fn sanitize_message_never_cuts_an_escape() {
+        for pad in 0..6 {
+            let text = format!(
+                "{}{}",
+                "a".repeat(MAX_PROMPT_MESSAGE_LEN - 6 + pad),
+                "\u{202e}"
+            );
+            let message = sanitize_message(&text);
+            assert!(message.len() <= MAX_PROMPT_MESSAGE_LEN);
+            let rest = message.trim_start_matches('a');
+            assert!(rest.is_empty() || rest == "\\u202e", "{rest:?}");
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! about reaches it through the `KPA_PROMPT_MESSAGE` environment variable
 //! instead (`docs/ssh-agent.md` § 6.6).
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -58,19 +58,16 @@ pub fn run_prompt(
     timeout: Duration,
     cancel: &CancelWatch,
 ) -> std::io::Result<PromptOutcome> {
-    run(queue, argv, message, timeout, cancel, None)
+    run(queue, argv, message, timeout, cancel)
 }
 
-/// `run_prompt`'s body. `stdin`, when given, is written before anything
-/// is read — a prompt that picks among choices gets them this way, one per
-/// line.
+/// `run_prompt`'s body.
 fn run(
     queue: &PromptQueue,
     argv: &[String],
     message: &str,
     timeout: Duration,
     cancel: &CancelWatch,
-    stdin: Option<&[u8]>,
 ) -> std::io::Result<PromptOutcome> {
     use std::io::{Error, ErrorKind};
 
@@ -85,7 +82,7 @@ fn run(
     let Some(turn) = queue.enter(cancel)? else {
         return Ok(PromptOutcome::Interrupted);
     };
-    let result = spawn_and_read(program.as_str(), args, &message, timeout, cancel, stdin);
+    let result = spawn_and_read(program.as_str(), args, &message, timeout, cancel);
     drop(turn); // release the screen as soon as this prompt is done with it
     result
 }
@@ -99,7 +96,6 @@ fn spawn_and_read(
     message: &str,
     timeout: Duration,
     cancel: &CancelWatch,
-    stdin: Option<&[u8]>,
 ) -> std::io::Result<PromptOutcome> {
     use std::io::{Error, ErrorKind};
     use std::os::unix::process::CommandExt;
@@ -109,25 +105,13 @@ fn spawn_and_read(
     let mut child = Command::new(program)
         .args(args)
         .env(PROMPT_MESSAGE_ENV, message)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         // Its own process group, so `kill_prompt` can kill everything it
         // started too, such as a wrapper script's real prompt window.
         .process_group(0)
         .spawn()?;
-
-    if let Some(bytes) = stdin {
-        // Choices are a few short lines — small enough that this never
-        // blocks waiting for the child to start reading.
-        if let Some(mut child_stdin) = child.stdin.take() {
-            let _ = child_stdin.write_all(bytes);
-        }
-    }
 
     let mut buf = Zeroizing::new(vec![0u8; MAX_ANSWER_LEN]);
     let len = match read_prompt(&mut child, &mut buf, deadline, cancel) {
@@ -276,21 +260,6 @@ mod tests {
             Duration::from_secs(60),
             &watch,
         )
-    }
-
-    #[test]
-    fn a_prompt_gets_stdin_and_returns_the_line_it_prints() {
-        let _spawning = spawn_lock();
-        let (_cancel, watch) = cancel_pair().expect("cancel pair");
-        let outcome = run(
-            &PromptQueue::new(),
-            &sh("sed -n 2p"),
-            "test message",
-            Duration::from_secs(60),
-            &watch,
-            Some(b"Allow\nDeny\n"),
-        );
-        assert!(matches!(outcome, Ok(PromptOutcome::Answer(answer)) if answer.as_str() == "Deny"));
     }
 
     #[test]
