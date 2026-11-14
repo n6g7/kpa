@@ -1,7 +1,7 @@
 //! The SSH agent socket's listener and per-connection protocol loop
 //! (`docs/ssh-agent.md` § 6.1): accepts connections, frames them with
 //! [`wire`], tracks each one's `session-bind@openssh.com` state with
-//! [`bind::Bindings`], and dispatches identities and signatures through
+//! [`bind::SessionBindState`], and dispatches identities and signatures through
 //! [`SshSign::ssh_identities`]/[`SshSign::ssh_sign`].
 //!
 //! Forwarding (session-bind verification aside) is out of scope here: every
@@ -20,7 +20,7 @@ use crate::origin::Origin;
 use crate::server::{Server, SshSign};
 use crate::socket;
 
-use super::bind::{BindOutcome, Bindings};
+use super::bind::{BindOutcome, SessionBindState};
 use super::wire::{self, AgentRequest, AgentResponse, Frame};
 
 /// Connections handled at once — separate from the JSON socket's own cap
@@ -91,7 +91,7 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
     }
     let origin = server.origin_of(&stream, owner);
 
-    let mut bindings = Bindings::new();
+    let mut bindings = SessionBindState::new();
     let mut buf = Vec::new();
     loop {
         loop {
@@ -130,7 +130,7 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
 /// Answers one decoded request against `bindings`' accumulated state.
 fn dispatch(
     server: &impl SshSign,
-    bindings: &mut Bindings,
+    bindings: &mut SessionBindState,
     request: &AgentRequest,
     origin: Origin,
 ) -> AgentResponse {
