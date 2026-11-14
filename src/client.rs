@@ -79,7 +79,10 @@ pub(super) fn run_version(socket_path: Option<PathBuf>) -> ExitCode {
     println!("client: {}", kpa::VERSION);
 
     let Some(socket_path) = socket_path else {
-        println!("server: not running (XDG_RUNTIME_DIR is not set; pass --socket to check)");
+        println!(
+            "server: not running (XDG_RUNTIME_DIR is not set to an absolute path; \
+             pass --socket to check)"
+        );
         return ExitCode::SUCCESS;
     };
 

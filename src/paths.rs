@@ -1,10 +1,12 @@
-//! Where kpa's sockets, caches and OpenSSH's `known_hosts` live on this
-//! machine. [`Paths::from_env`] reads them from the environment once, at
-//! startup, and the code that needs one is handed the `Paths` it resolved;
-//! a test builds its own `Paths` rather than depending on this process's
-//! environment. Two locations are looked up by their own subsystems
-//! instead: the config file (`config`) and the Wayland compositor's socket
-//! (`wayland`).
+//! Where kpa's sockets and caches live on this machine.
+//! [`Paths::from_env`] reads them from the environment once, at startup,
+//! and the code that needs one is handed the `Paths` it resolved; a test
+//! builds its own `Paths` rather than depending on this process's
+//! environment. Two lookups stay with their own subsystems, outside this
+//! module's empty-or-relative rule: `config` reads `$XDG_CONFIG_HOME` and
+//! `$HOME` itself, for the config file's path and for `~/` expansion in
+//! the config, and `wayland` reads `$XDG_RUNTIME_DIR` for the
+//! compositor's socket.
 //!
 //! These are the per-user base directories, not kpa's own files: each
 //! caller joins its own name under `kpa/` (the main socket in `main.rs`,
@@ -27,8 +29,6 @@ pub struct Paths {
     /// The per-user cache directory: `$XDG_CACHE_HOME`, or `$HOME/.cache`
     /// if that's unset.
     pub cache_dir: Option<PathBuf>,
-    /// OpenSSH's known-hosts file: `$HOME/.ssh/known_hosts`.
-    pub known_hosts: Option<PathBuf>,
 }
 
 impl Paths {
@@ -44,9 +44,7 @@ impl Paths {
         let home = dir("HOME");
         Paths {
             runtime_dir: dir("XDG_RUNTIME_DIR"),
-            cache_dir: dir("XDG_CACHE_HOME")
-                .or_else(|| home.as_ref().map(|home| home.join(".cache"))),
-            known_hosts: home.map(|home| home.join(".ssh/known_hosts")),
+            cache_dir: dir("XDG_CACHE_HOME").or_else(|| home.map(|home| home.join(".cache"))),
         }
     }
 }
@@ -82,10 +80,6 @@ mod tests {
         ]);
         assert_eq!(paths.runtime_dir, Some(PathBuf::from("/run/user/1000")));
         assert_eq!(paths.cache_dir, Some(PathBuf::from("/var/cache/me")));
-        assert_eq!(
-            paths.known_hosts,
-            Some(PathBuf::from("/home/me/.ssh/known_hosts"))
-        );
     }
 
     #[test]

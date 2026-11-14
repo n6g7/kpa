@@ -97,9 +97,9 @@ fn dispatch(cli: Cli) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // The socket, cache and `known_hosts` locations, read from the
-    // environment once. The config path and the Wayland socket are looked
-    // up by their own subsystems.
+    // The socket and cache locations, read from the environment once. The
+    // config path and the Wayland socket are looked up by their own
+    // subsystems.
     let paths = Paths::from_env();
 
     // Reports the CLI's own version unconditionally, then best-efforts the
@@ -141,7 +141,9 @@ fn default_socket_path(paths: &Paths) -> Result<PathBuf, String> {
         .runtime_dir
         .as_ref()
         .map(|dir| dir.join("kpa").join("sock"))
-        .ok_or_else(|| "XDG_RUNTIME_DIR is not set; pass --socket explicitly".to_string())
+        .ok_or_else(|| {
+            "XDG_RUNTIME_DIR is not set to an absolute path; pass --socket explicitly".to_string()
+        })
 }
 
 /// Mark this process non-dumpable (`PR_SET_DUMPABLE=0`), before anything
