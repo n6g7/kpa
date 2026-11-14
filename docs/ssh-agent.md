@@ -440,8 +440,9 @@ carries:
   an unhashed entry for it;
 - the remote user name from the login request.
 
-Request-derived text passes through the same escaping the CLI uses for
-terminal output (T-13) and is length-capped.
+Request-derived text passes through the escaping the CLI uses for
+terminal output (T-13), with tab and newline escaped too so the message
+stays one line, and is length-capped.
 
 Approvals live in memory only and are dropped on lock. A forwarded
 approval is remembered under (key, forwarding session identifier,

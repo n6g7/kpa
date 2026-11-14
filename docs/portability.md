@@ -78,7 +78,7 @@ interface's shape against, not as a plan.
 | Lock triggers | `policy.rs` | logind over D-Bus: `Lock`, `LockedHint`, `PrepareForSleep`, a sleep inhibitor | screen-lock and sleep notifications | `policy::Event` and the `Locks` / `SleepInhibitor` traits. |
 | Clipboard | `clip.rs`, `wayland/` | kpa's own Wayland client: data-control, serving each paste | `NSPasteboard` | "serve this secret, end it after the timeout, never clear anyone else's". |
 | Tray | `tray.rs` | StatusNotifierItem over D-Bus (`ksni`) | `NSStatusItem` | database states in, menu actions out. |
-| Prompts | `prompt.rs` | an external program | the same, or a native dialog or Touch ID | `PromptOutcome<T>`; no assumption of a child process or a string answer. |
+| Prompts | `prompt/` | an external program (`prompt/program.rs`), cancelled through `prompt/cancel.rs`'s socket pair | the same, or a native dialog or Touch ID | `PromptOutcome<T>`; no assumption of a child process or a string answer; `PromptCancel` and `CancelWatch` to end one. |
 | Process hardening | `main.rs` | `prctl(PR_SET_DUMPABLE)` | `setrlimit(RLIMIT_CORE)`, `ptrace(PT_DENY_ATTACH)` | one startup call. |
 | Service manager | `nix/hm-module.nix` | a systemd user unit | a launchd agent | `kpa serve` as a plain foreground process: no socket activation or `sd_notify`. |
 
