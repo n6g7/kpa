@@ -48,6 +48,10 @@
             (python3.withPackages (ps: [ ps.pykeepass ]))
             # tests/logind.rs starts a private dbus-daemon for its mock logind.
             dbus
+            # ssh-keygen and ssh-add: tests/fixture.sh generates the SSH
+            # agent fixture's keys with ssh-keygen, and the SSH agent's
+            # integration tests drive kpa with ssh-add and ssh-keygen -Y.
+            openssh
             # wl-copy/wl-paste, for driving docs/plan.md step 3's manual
             # clipboard test by hand — kpa itself doesn't use them (its own
             # client is src/wayland/).

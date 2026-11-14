@@ -7,29 +7,30 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # A self-hosted runner with Nix installed. The repository is public,
+    # and a pull request from a fork runs code its author controls: never
+    # on this machine. Only pushes and pull requests from branches of this
+    # repository run here.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64]
     env:
       # Debuginfo makes every test binary huge; with the cached target/
       # it has filled the runner's disk during linking. CI never reads
       # the debuginfo.
       CARGO_PROFILE_DEV_DEBUG: "0"
+      # `nix develop` needs flakes, whatever the runner's own nix.conf
+      # enables.
+      NIX_CONFIG: "experimental-features = nix-command flakes"
     steps:
       - uses: actions/checkout@v4
 
       # Nix is the single source of truth for the toolchain (see
-      # flake.nix): cargo/rustc/clippy/rustfmt, plus keepassxc-cli and
-      # python3+pykeepass for tests/fixture.sh. Using `nix develop` here
-      # instead of a separate Rust-only action means CI runs the exact
-      # same versions as `nix develop -c cargo test` locally — nothing to
-      # keep in sync by hand.
-      - uses: DeterminateSystems/nix-installer-action@v23
-      # The dev shell is all public nixpkgs, which Nix already fetches from
-      # cache.nixos.org. The GitHub Actions cache adds nothing here, and
-      # uploading to it costs minutes per run: it stores one entry per
-      # store path, uploads them one at a time, and is rate-limited.
-      - uses: DeterminateSystems/magic-nix-cache-action@v15
-        with:
-          use-gha-cache: disabled
+      # flake.nix): cargo/rustc/clippy/rustfmt, plus keepassxc-cli,
+      # python3+pykeepass and OpenSSH for the tests. The runner already
+      # has Nix, and every step runs through `nix develop`, so CI runs the
+      # exact same versions as `nix develop -c cargo test` locally —
+      # nothing to keep in sync by hand. The dev shell is all public
+      # nixpkgs, fetched from cache.nixos.org.
 
       # Nix caches the toolchain itself; this caches cargo's own build
       # artifacts (registry downloads + target/) across runs, keyed on
