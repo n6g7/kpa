@@ -163,7 +163,10 @@ impl InProcessDaemon {
     ) -> InProcessDaemon {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let socket = dir.path().join("sock");
-        let server = Arc::new(kpa::server::Server::new(config));
+        let server = Arc::new(kpa::server::Server::new(
+            config,
+            kpa::paths::Paths::default(),
+        ));
         server.assume_origin(origin);
         kpa::policy::Locks::set_desk(
             &server,

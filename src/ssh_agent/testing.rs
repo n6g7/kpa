@@ -1,11 +1,13 @@
-//! Test helpers shared by this subsystem's unit tests: throwaway keys and
-//! real `session-bind@openssh.com` messages.
+//! Test helpers shared by this subsystem's unit tests: throwaway keys,
+//! real `session-bind@openssh.com` messages, and databases and configs
+//! that serve keys.
 
 use signature::Signer;
 use ssh_key::encoding::Encode;
-use ssh_key::{Algorithm, PrivateKey, Signature};
+use ssh_key::{Algorithm, LineEnding, PrivateKey, Signature};
 
 use super::wire::SessionBind;
+use crate::config::{DatabaseConfig, SshKeyConfig};
 
 /// A deterministic, non-cryptographic stand-in for `OsRng`: these tests
 /// only need *a* valid keypair, the same one for the same seed.
@@ -60,5 +62,35 @@ pub(super) fn signed_bind(
         session_id: session_id.to_vec(),
         signature: signature.encode_vec().expect("signature encodes"),
         is_forwarding,
+    }
+}
+
+/// A database whose root holds one entry per `(title, key)`, each with the
+/// key as an OpenSSH attachment, the way a KeePass client stores one.
+pub(super) fn key_database(keys: &[(&str, &PrivateKey)]) -> keepass::Database {
+    use keepass::db::{Value, fields};
+
+    let mut db = keepass::Database::new();
+    {
+        let mut root = db.root_mut();
+        for (title, key) in keys {
+            let pem = key.to_openssh(LineEnding::LF).expect("key encodes");
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::TITLE, *title);
+            entry.add_attachment("id_ed25519", Value::unprotected(pem.as_bytes().to_vec()));
+        }
+    }
+    db
+}
+
+/// A `serve_ssh_keys` database named `name`, with `ssh_keys` as its
+/// `[[database.ssh_key]]` overrides.
+pub(super) fn database(name: &str, ssh_keys: Vec<SshKeyConfig>) -> DatabaseConfig {
+    DatabaseConfig {
+        name: name.to_string(),
+        path: format!("/{name}.kdbx").into(),
+        keyfile: None,
+        serve_ssh_keys: true,
+        ssh_keys,
     }
 }

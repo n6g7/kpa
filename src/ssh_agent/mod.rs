@@ -10,7 +10,13 @@
 //! socket: it accepts connections and answers each request through
 //! [`serve::SshSign`], the interface it defines for whatever lists and
 //! signs.
+//!
+//! `agent` is the agent's own logic, crate-private: an `Agent` over an
+//! `SshHost`, the small interface the daemon implements. The daemon
+//! runs it through `server::serve_ssh_agent`; this module never names
+//! `server`.
 
+mod agent;
 pub mod approve;
 pub mod bind;
 pub mod classify;
@@ -20,3 +26,5 @@ pub mod serve;
 #[cfg(test)]
 mod testing;
 pub mod wire;
+
+pub(crate) use agent::{Agent, SlotView, SshHost, SshSlot};

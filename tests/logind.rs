@@ -18,6 +18,7 @@ mod common;
 
 use kpa::config::Config;
 use kpa::origin::Origin;
+use kpa::paths::Paths;
 use kpa::policy::{self, Bus, Desk, Locks};
 use kpa::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::server::Server;
@@ -620,7 +621,7 @@ fn the_desk_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         common::password_db().display().to_string()
     ))
     .unwrap();
-    let server = Arc::new(Server::new(config));
+    let server = Arc::new(Server::new(config, Paths::default()));
     server.set_policy_events(policy::start(
         server.clone(),
         Bus::Address(bus.address.clone()),

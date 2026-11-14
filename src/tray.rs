@@ -370,6 +370,7 @@ fn build_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths::Paths;
 
     fn locked(name: &str) -> DatabaseStatus {
         DatabaseStatus {
@@ -413,6 +414,7 @@ mod tests {
         let item = TrayItem {
             server: Arc::new(Server::new(
                 Config::parse("").expect("empty config is valid"),
+                Paths::default(),
             )),
             handle: None,
             last_error: None,
@@ -658,7 +660,7 @@ mod tests {
         let config = Config::parse("[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n")
             .expect("valid config");
         let item = TrayItem {
-            server: Arc::new(Server::new(config)),
+            server: Arc::new(Server::new(config, Paths::default())),
             handle: None,
             last_error: None,
         };
@@ -678,7 +680,7 @@ mod tests {
 
         let config = Config::parse("").expect("empty config is valid");
         let item = TrayItem {
-            server: Arc::new(Server::new(config)),
+            server: Arc::new(Server::new(config, Paths::default())),
             handle: None,
             last_error: Some(("personal".to_string(), "wrong_credentials")),
         };
@@ -699,6 +701,7 @@ mod tests {
         let item = TrayItem {
             server: Arc::new(Server::new(
                 Config::parse("").expect("empty config is valid"),
+                Paths::default(),
             )),
             handle: None,
             last_error: None,
