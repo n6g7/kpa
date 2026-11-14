@@ -37,7 +37,7 @@ use crate::io::ByteCounter;
 use crate::log;
 use crate::origin::{self, Origin};
 use crate::policy;
-use crate::prompt::{PromptOutcome, PromptQueue, prompt_message, run_prompt};
+use crate::prompt::{PromptCancel, PromptOutcome, PromptQueue, cancel_pair, run_prompt};
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
@@ -80,9 +80,9 @@ struct Slot {
     /// An unlock is prompting or deriving the key right now. A second one
     /// is refused rather than opening a second prompt.
     unlocking: bool,
-    /// While an unlock is prompting: the other end of the socket pair its
-    /// prompt watches (`read_prompt`). Dropping it ends the prompt.
-    prompt_cancel: Option<UnixStream>,
+    /// While an unlock is prompting: the cancel end of its prompt
+    /// (`prompt::cancel_pair`). Dropping it ends the prompt.
+    prompt_cancel: Option<PromptCancel>,
 }
 
 impl Slot {
@@ -168,8 +168,7 @@ pub struct Server {
     /// Set by `assume_origin` only.
     assumed_origin: OnceLock<Origin>,
     /// Serializes every prompt `run_prompt` raises, across every database,
-    /// so only one is ever on screen (`docs/ssh-agent.md` § 6.7's approval
-    /// prompt will share it with `unlock`'s once it exists).
+    /// so only one is ever on screen (`docs/ssh-agent.md` § 6.7).
     prompt_queue: PromptQueue,
 }
 
@@ -472,11 +471,10 @@ impl Unlock for Server {
         self.drop_stale([name]);
 
         // How a lock ends this unlock's prompt. The slot keeps
-        // `prompt_cancel`, and `Slot::lock` drops it. The prompt loop polls
-        // `cancel_watch`, which hangs up once its other end is gone, and
-        // kills the prompt then.
+        // `prompt_cancel`, and `Slot::lock` drops it. The prompt watches
+        // `cancel_watch`, and is killed once its cancel end is gone.
         let (prompt_cancel, cancel_watch) =
-            UnixStream::pair().map_err(|err| UnlockError::PromptFailed {
+            cancel_pair().map_err(|err| UnlockError::PromptFailed {
                 db: db(),
                 detail: err.to_string(),
             })?;
@@ -525,14 +523,12 @@ impl Unlock for Server {
             None => {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
-                let message = prompt_message(&format!("Unlock {name}"));
                 prompted = match run_prompt(
                     &self.prompt_queue,
                     &self.config.prompt,
-                    &message,
+                    &format!("Unlock {name}"),
                     timeout,
                     &cancel_watch,
-                    None,
                 ) {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
@@ -548,7 +544,7 @@ impl Unlock for Server {
                     Ok(PromptOutcome::Interrupted) => {
                         return Err(UnlockError::LockedDuringUnlock { db: db() });
                     }
-                    Ok(PromptOutcome::Password(password)) => password,
+                    Ok(PromptOutcome::Answer(password)) => password,
                     Err(err) => {
                         return Err(UnlockError::PromptFailed {
                             db: db(),
