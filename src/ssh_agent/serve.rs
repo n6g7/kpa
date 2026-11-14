@@ -13,7 +13,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::log;
 use crate::origin::{Origin, PeerOrigin};
@@ -26,7 +26,7 @@ use super::wire::{self, AgentRequest, AgentResponse, Frame};
 /// listing and signing (`docs/ssh-agent.md` § 6). The protocol loop is
 /// generic over it, as `proto::dispatch` is over `Handler`.
 pub trait SshSign: PeerOrigin {
-    fn ssh_identities(&self, class: &bind::ConnectionClass) -> Vec<wire::Identity>;
+    fn ssh_identities(&self, class: &bind::ConnectionClass, origin: Origin) -> Vec<wire::Identity>;
 
     fn ssh_sign(
         &self,
@@ -41,28 +41,50 @@ pub trait SshSign: PeerOrigin {
 /// (`docs/ssh-agent.md` § 6.1).
 const MAX_CONNECTIONS: usize = 64;
 
-/// Once any byte of a new frame has arrived, each further read on it must
-/// land within this. There is no deadline at all while nothing of a new
-/// frame has arrived yet — connections are long-lived and often idle for
-/// a long time (`docs/ssh-agent.md` § 6.1).
+/// Of [`MAX_CONNECTIONS`], how many may be forwarded ones at once, so
+/// remote hosts can't take every slot from local `ssh` and `git`.
+const MAX_FORWARDED_CONNECTIONS: usize = 16;
+
+/// How long a frame may take to arrive, from its first byte to its last.
+/// There is no deadline at all while nothing of a new frame has arrived
+/// yet — connections are long-lived and often idle for a long time
+/// (`docs/ssh-agent.md` § 6.1).
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Holds one of the [`MAX_CONNECTIONS`] slots; releases it when dropped.
-/// A near-duplicate of `server::ConnectionSlot` — this socket has its own
-/// cap, and the two are small enough not to share.
-struct ConnectionSlot(Arc<AtomicUsize>);
+/// What every connection on one agent socket shares: the counters behind
+/// its two caps, and the frame deadline (shorter in tests).
+struct Limits {
+    connections: Arc<AtomicUsize>,
+    forwarded: Arc<AtomicUsize>,
+    frame_timeout: Duration,
+}
 
-impl ConnectionSlot {
-    fn acquire(active: &Arc<AtomicUsize>) -> Option<ConnectionSlot> {
-        if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-            active.fetch_sub(1, Ordering::SeqCst);
-            return None;
+impl Limits {
+    fn new() -> Limits {
+        Limits {
+            connections: Arc::new(AtomicUsize::new(0)),
+            forwarded: Arc::new(AtomicUsize::new(0)),
+            frame_timeout: FRAME_TIMEOUT,
         }
-        Some(ConnectionSlot(Arc::clone(active)))
     }
 }
 
-impl Drop for ConnectionSlot {
+/// Holds one place under a cap of `cap` counted by `count`; gives it back
+/// when dropped. A near-duplicate of `server::ConnectionSlot`: this socket
+/// has caps of its own, and the two are small enough not to share.
+struct CapSlot(Arc<AtomicUsize>);
+
+impl CapSlot {
+    fn acquire(count: &Arc<AtomicUsize>, cap: usize) -> Option<CapSlot> {
+        if count.fetch_add(1, Ordering::SeqCst) >= cap {
+            count.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(CapSlot(Arc::clone(count)))
+    }
+}
+
+impl Drop for CapSlot {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
@@ -72,7 +94,7 @@ impl Drop for ConnectionSlot {
 /// its own thread. Mirrors `server::serve`'s shape: a stuck `accept`
 /// pauses rather than spins, and a connection over the cap is dropped.
 pub fn serve<S: SshSign + Send + Sync + 'static>(server: Arc<S>, listener: UnixListener) {
-    let active = Arc::new(AtomicUsize::new(0));
+    let limits = Arc::new(Limits::new());
     let owner = rustix::process::geteuid().as_raw();
     for conn in listener.incoming() {
         let stream = match conn {
@@ -82,20 +104,25 @@ pub fn serve<S: SshSign + Send + Sync + 'static>(server: Arc<S>, listener: UnixL
                 continue;
             }
         };
-        let Some(slot) = ConnectionSlot::acquire(&active) else {
+        let Some(slot) = CapSlot::acquire(&limits.connections, MAX_CONNECTIONS) else {
+            log::warn(format_args!(
+                "ssh agent: {MAX_CONNECTIONS} connections already open; closed a new one"
+            ));
             continue;
         };
         let server = Arc::clone(&server);
+        let limits = Arc::clone(&limits);
         let _ = thread::Builder::new().spawn(move || {
             let _slot = slot;
-            handle_connection(server.as_ref(), stream, owner);
+            handle_connection(server.as_ref(), stream, owner, &limits);
         });
     }
 }
 
-/// Serves one connection until it closes, errors, or sends an oversize
-/// frame.
-fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32) {
+/// Serves one connection until it closes, errors, sends an oversize frame,
+/// lets a frame take longer than `limits.frame_timeout`, or becomes
+/// forwarded while the forwarded cap is full.
+fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32, limits: &Limits) {
     let Ok(uid) = socket::peer_uid(&stream) else {
         return;
     };
@@ -106,7 +133,13 @@ fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32) 
     let origin = server.origin_of(&stream, owner);
 
     let mut bindings = SessionBindState::new();
+    // Held from the session-bind that makes this connection forwarded
+    // until it closes.
+    let mut forwarded_slot = None;
     let mut buf = Vec::new();
+    // When the frame now arriving must be complete: set at its first byte,
+    // cleared once it is.
+    let mut frame_deadline: Option<Instant> = None;
     loop {
         loop {
             match wire::next_frame(&buf) {
@@ -116,6 +149,21 @@ fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32) 
                     let request = wire::decode_request(message);
                     let response = dispatch(server, &mut bindings, &request, origin);
                     buf.drain(..consumed);
+                    frame_deadline = None;
+                    if forwarded_slot.is_none()
+                        && matches!(bindings.class(), bind::ConnectionClass::Forwarded { .. })
+                    {
+                        let Some(slot) =
+                            CapSlot::acquire(&limits.forwarded, MAX_FORWARDED_CONNECTIONS)
+                        else {
+                            log::warn(format_args!(
+                                "ssh agent: {MAX_FORWARDED_CONNECTIONS} forwarded connections \
+                                 already open; closed one that became forwarded"
+                            ));
+                            return;
+                        };
+                        forwarded_slot = Some(slot);
+                    }
                     if stream.write_all(&wire::encode_response(&response)).is_err() {
                         return;
                     }
@@ -123,10 +171,20 @@ fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32) 
             }
         }
 
-        let timeout = if buf.is_empty() {
-            None
-        } else {
-            Some(FRAME_TIMEOUT)
+        if buf.is_empty() {
+            frame_deadline = None;
+        } else if frame_deadline.is_none() {
+            frame_deadline = Some(Instant::now() + limits.frame_timeout);
+        }
+        let timeout = match frame_deadline {
+            None => None,
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return;
+                }
+                Some(left)
+            }
         };
         if stream.set_read_timeout(timeout).is_err() {
             return;
@@ -150,7 +208,7 @@ fn dispatch(
 ) -> AgentResponse {
     match request {
         AgentRequest::RequestIdentities => {
-            AgentResponse::IdentitiesAnswer(server.ssh_identities(&bindings.class()))
+            AgentResponse::IdentitiesAnswer(server.ssh_identities(&bindings.class(), origin))
         }
         AgentRequest::SignRequest(sign_request) => {
             let class = bindings.class();
@@ -186,10 +244,12 @@ mod tests {
     }
 
     /// Lists one identity, signs everything with a fixed blob, and records
-    /// what each signature request came with.
+    /// what each request came with.
     struct FakeSigner {
         origin: Origin,
         calls: Mutex<Vec<SignCall>>,
+        listed_for: Mutex<Vec<Origin>>,
+        origin_asked: AtomicUsize,
     }
 
     impl FakeSigner {
@@ -197,6 +257,8 @@ mod tests {
             FakeSigner {
                 origin,
                 calls: Mutex::new(Vec::new()),
+                listed_for: Mutex::new(Vec::new()),
+                origin_asked: AtomicUsize::new(0),
             }
         }
 
@@ -207,12 +269,14 @@ mod tests {
 
     impl PeerOrigin for FakeSigner {
         fn origin_of(&self, _: &UnixStream, _: u32) -> Origin {
+            self.origin_asked.fetch_add(1, Ordering::SeqCst);
             self.origin
         }
     }
 
     impl SshSign for FakeSigner {
-        fn ssh_identities(&self, _: &bind::ConnectionClass) -> Vec<wire::Identity> {
+        fn ssh_identities(&self, _: &bind::ConnectionClass, origin: Origin) -> Vec<wire::Identity> {
+            self.listed_for.lock().unwrap().push(origin);
             vec![Identity {
                 key_blob: b"key".to_vec(),
                 comment: "github".to_string(),
@@ -244,26 +308,27 @@ mod tests {
     }
 
     #[test]
-    fn identities_come_from_the_signer() {
-        let signer = FakeSigner::new(Origin::Desktop);
+    fn identities_come_from_the_signer_with_the_connections_origin() {
+        let signer = FakeSigner::new(Origin::Outside);
         let mut state = SessionBindState::new();
         let response = dispatch(
             &signer,
             &mut state,
             &AgentRequest::RequestIdentities,
-            Origin::Desktop,
+            Origin::Outside,
         );
         assert!(matches!(
             response,
             AgentResponse::IdentitiesAnswer(ids) if ids.len() == 1 && ids[0].comment == "github"
         ));
+        assert_eq!(*signer.listed_for.lock().unwrap(), [Origin::Outside]);
     }
 
     /// A verified `session-bind` changes the class every later signature
     /// on the connection is asked with, and supplies its session id.
     #[test]
     fn a_session_bind_reaches_later_signatures() {
-        let signer = FakeSigner::new(Origin::Desktop);
+        let signer = FakeSigner::new(Origin::Outside);
         let mut state = SessionBindState::new();
 
         dispatch(&signer, &mut state, &sign_request(), Origin::Outside);
@@ -354,7 +419,7 @@ mod tests {
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
 
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, owner));
+            scope.spawn(|| handle_connection(&signer, theirs, owner, &Limits::new()));
             let mut sign = vec![13u8];
             for field in [b"key".as_slice(), b"data".as_slice()] {
                 sign.extend_from_slice(&u32::try_from(field.len()).unwrap().to_be_bytes());
@@ -381,12 +446,156 @@ mod tests {
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
 
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, owner));
+            scope.spawn(|| handle_connection(&signer, theirs, owner, &Limits::new()));
             let len = u32::try_from(wire::MAX_FRAME_LEN + 1).unwrap();
             ours.write_all(&len.to_be_bytes()).expect("write");
             let mut rest = Vec::new();
             ours.read_to_end(&mut rest).expect("read");
             assert!(rest.is_empty(), "an oversize frame got a reply");
         });
+    }
+
+    /// Writes a framed `message` to `stream`.
+    fn send(stream: &mut UnixStream, message: &[u8]) {
+        stream
+            .write_all(&wire::encode_frame(message))
+            .expect("write");
+    }
+
+    /// Whether `stream`'s other end closed without replying, waiting at
+    /// most a few seconds for it.
+    fn closed_unanswered(stream: &mut UnixStream) -> bool {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        let mut rest = Vec::new();
+        let closed = match stream.read_to_end(&mut rest) {
+            Ok(_) => true,
+            Err(err) => err.kind() == std::io::ErrorKind::ConnectionReset,
+        };
+        closed && rest.is_empty()
+    }
+
+    /// A peer of another uid is closed before anything is read or asked
+    /// about it.
+    #[test]
+    fn a_peer_of_another_uid_is_closed_unanswered() {
+        let signer = FakeSigner::new(Origin::Desktop);
+        let other = rustix::process::geteuid().as_raw().wrapping_add(1);
+        let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
+        send(&mut ours, &[11]); // REQUEST_IDENTITIES
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| handle_connection(&signer, theirs, other, &Limits::new()));
+            // The connection closes with the request unread, so the
+            // kernel may reset it rather than end it: either way, no reply.
+            let mut reply = Vec::new();
+            let _ = ours.read_to_end(&mut reply);
+            assert!(reply.is_empty(), "a refused peer got {reply:?}");
+        });
+        assert_eq!(signer.origin_asked.load(Ordering::SeqCst), 0);
+    }
+
+    /// The frame deadline runs from a frame's first byte, so a peer that
+    /// trickles a frame one byte at a time is closed once it passes, however
+    /// promptly each byte arrives.
+    #[test]
+    fn a_frame_that_trickles_in_is_closed_at_its_deadline() {
+        let signer = FakeSigner::new(Origin::Desktop);
+        let owner = rustix::process::geteuid().as_raw();
+        let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
+        let limits = Limits {
+            frame_timeout: Duration::from_millis(200),
+            ..Limits::new()
+        };
+
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| handle_connection(&signer, theirs, owner, &limits));
+            let mut writer = ours.try_clone().expect("clone");
+            scope.spawn(move || {
+                let _ = writer.write_all(&100u32.to_be_bytes());
+                for _ in 0..100 {
+                    thread::sleep(Duration::from_millis(20));
+                    if writer.write_all(&[0]).is_err() {
+                        return;
+                    }
+                }
+            });
+            assert!(closed_unanswered(&mut ours));
+        });
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "closed after {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A connection that a session-bind makes forwarded takes one of the
+    /// forwarded places, and is closed unanswered when none is left.
+    #[test]
+    fn the_forwarded_cap_closes_a_connection_that_becomes_forwarded() {
+        let signer = FakeSigner::new(Origin::Desktop);
+        let owner = rustix::process::geteuid().as_raw();
+        // SSH_AGENTC_EXTENSION carrying a real forwarding session-bind.
+        let forwarding_bind = || {
+            let bind = signed_bind(&test_key(1), b"sid", true);
+            let mut message = vec![27];
+            for field in [
+                b"session-bind@openssh.com".as_slice(),
+                &bind.hostkey,
+                &bind.session_id,
+                &bind.signature,
+            ] {
+                message.extend_from_slice(&u32::try_from(field.len()).unwrap().to_be_bytes());
+                message.extend_from_slice(field);
+            }
+            message.push(1); // is_forwarding
+            message
+        };
+
+        let full = Limits::new();
+        full.forwarded
+            .store(MAX_FORWARDED_CONNECTIONS, Ordering::SeqCst);
+        let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
+        std::thread::scope(|scope| {
+            scope.spawn(|| handle_connection(&signer, theirs, owner, &full));
+            send(&mut ours, &forwarding_bind());
+            assert!(closed_unanswered(&mut ours));
+        });
+        assert_eq!(
+            full.forwarded.load(Ordering::SeqCst),
+            MAX_FORWARDED_CONNECTIONS
+        );
+
+        let room = Limits::new();
+        room.forwarded
+            .store(MAX_FORWARDED_CONNECTIONS - 1, Ordering::SeqCst);
+        let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
+        std::thread::scope(|scope| {
+            scope.spawn(|| handle_connection(&signer, theirs, owner, &room));
+            send(&mut ours, &forwarding_bind());
+            assert_eq!(read_response(&mut ours), [6]); // SUCCESS
+            assert_eq!(
+                room.forwarded.load(Ordering::SeqCst),
+                MAX_FORWARDED_CONNECTIONS
+            );
+            drop(ours);
+        });
+        assert_eq!(
+            room.forwarded.load(Ordering::SeqCst),
+            MAX_FORWARDED_CONNECTIONS - 1
+        );
+    }
+
+    #[test]
+    fn a_cap_refuses_once_full_and_frees_a_place_on_drop() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let first = CapSlot::acquire(&count, 2).expect("room");
+        let _second = CapSlot::acquire(&count, 2).expect("room");
+        assert!(CapSlot::acquire(&count, 2).is_none());
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        drop(first);
+        assert!(CapSlot::acquire(&count, 2).is_some());
     }
 }
