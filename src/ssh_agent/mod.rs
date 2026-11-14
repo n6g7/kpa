@@ -7,12 +7,14 @@
 //! is where that wiring starts: config, key discovery and the key cache.
 //! [`policy`] decides what a signature request may do, and [`approve`]
 //! holds the approvals and pending requests it consults. [`serve`] is the
-//! socket: accepting connections and dispatching into `server::Server`.
+//! socket: accepting connections and dispatching through [`serve::SshSign`],
+//! which [`local`] implements for `server::Server`.
 
 pub mod approve;
 pub mod bind;
 pub mod classify;
 pub mod keys;
+pub mod local;
 pub mod policy;
 pub mod serve;
 pub mod wire;

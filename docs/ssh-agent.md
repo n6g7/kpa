@@ -847,12 +847,14 @@ programs' settings.
 | `policy.rs`   | (key settings, connection class, purpose, database state, approvals, prompt availability) → `Sign`, `Approve`, `Unlock`, `Refuse(reason)`. Pure, with exhaustive tests like `policy::Policy` |
 | `keys.rs`     | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                    |
 | `approve.rs`  | Approvals and pending requests: their scopes, limits and expiry                                                                                 |
-| `serve.rs`    | Listener, per-connection thread, connection cap                                                                                                 |
+| `local.rs`    | `Server`'s agent side: per-`Slot` key state, scan at unlock, identities, signing, the approval prompt (implements `SshSign`)                  |
+| `serve.rs`    | Listener, per-connection thread, connection cap, the `SshSign` trait                                                                                                 |
 
 **Server changes**
 
 - `Slot` gains the key cache and its approvals, cleared in `Slot::lock()`.
-- A `SshSign` trait sits beside `CopyEntry`.
+- A `SshSign` trait, defined in `ssh_agent/serve.rs`, is implemented for
+  `Server` in `ssh_agent/local.rs`.
 - Unlock waiters use a condvar.
 - The prompt and approval runner gains `KPA_PROMPT_MESSAGE` and the shared
   queue. The timeout and lock-kills-prompt come from

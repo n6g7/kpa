@@ -17,11 +17,27 @@ use std::time::Duration;
 
 use crate::log;
 use crate::origin::Origin;
-use crate::server::{Server, SshSign};
+use crate::server::Server;
 use crate::socket;
 
-use super::bind::{BindOutcome, SessionBindState};
+use super::bind::{self, BindOutcome, SessionBindState};
 use super::wire::{self, AgentRequest, AgentResponse, Frame};
+
+/// What the agent socket needs from the daemon: identity listing and
+/// signing (`docs/ssh-agent.md` § 6). `dispatch` takes `&impl SshSign`
+/// rather than naming `Server`, so the protocol loop stays decoupled from
+/// the daemon, as `proto::dispatch` is via `Handler`.
+pub trait SshSign {
+    fn ssh_identities(&self, class: &bind::ConnectionClass) -> Vec<wire::Identity>;
+
+    fn ssh_sign(
+        &self,
+        class: &bind::ConnectionClass,
+        request: &wire::SignRequest,
+        login_session_id: Option<&[u8]>,
+        origin: Origin,
+    ) -> wire::AgentResponse;
+}
 
 /// Connections handled at once — separate from the JSON socket's own cap
 /// (`docs/ssh-agent.md` § 6.1).
