@@ -19,8 +19,9 @@ use zeroize::Zeroizing;
 
 use crate::proto::MAX_PASSWORD_LEN;
 
-/// How a prompt ended.
-pub(crate) enum PromptOutcome {
+/// How a prompt ended. `T` is what an answered prompt yields: by default
+/// what the program printed, as [`run_prompt`] returns it.
+pub(crate) enum PromptOutcome<T = Zeroizing<String>> {
     /// The command exited unsuccessfully — e.g. the user dismissed a
     /// dmenu-style prompt — rather than printing an answer.
     Cancelled,
@@ -29,9 +30,26 @@ pub(crate) enum PromptOutcome {
     /// A lock ended the prompt (`Slot::prompt_cancel`); it was killed, or —
     /// if it was still queued, never shown at all (`PromptQueue::enter`).
     Interrupted,
-    /// What the program printed, line ending stripped. Zeroizing, since an
-    /// answer can be a secret.
-    Answer(Zeroizing<String>),
+    Answer(T),
+}
+
+impl<T> PromptOutcome<T> {
+    /// Interprets an answer, leaving the other outcomes as they are.
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> PromptOutcome<U> {
+        match self {
+            PromptOutcome::Cancelled => PromptOutcome::Cancelled,
+            PromptOutcome::TimedOut => PromptOutcome::TimedOut,
+            PromptOutcome::Interrupted => PromptOutcome::Interrupted,
+            PromptOutcome::Answer(answer) => PromptOutcome::Answer(f(answer)),
+        }
+    }
+}
+
+/// The answer to an approval prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Approval {
+    Allow,
+    Deny,
 }
 
 /// The longest answer read; one more byte is an error. An answer can be a
@@ -41,7 +59,7 @@ const MAX_ANSWER_LEN: usize = MAX_PASSWORD_LEN;
 /// Redacts the answer, same reasoning as `UnlockRequest`'s own `Debug`
 /// (`docs/headless.md` § 9): this is cheap insurance against it ending up
 /// in a test failure message or a future `{:?}` log line.
-impl std::fmt::Debug for PromptOutcome {
+impl<T> std::fmt::Debug for PromptOutcome<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PromptOutcome::Cancelled => write!(f, "Cancelled"),
@@ -265,6 +283,34 @@ pub(crate) fn run_prompt(
     result
 }
 
+/// Runs `argv` as an approval prompt: `Allow` and `Deny` go to its stdin
+/// one per line, and exactly `Allow` on stdout is [`Approval::Allow`];
+/// anything else it prints is [`Approval::Deny`]. Otherwise as
+/// [`run_prompt`].
+pub(crate) fn run_approval_prompt(
+    queue: &PromptQueue,
+    argv: &[String],
+    message: &str,
+    timeout: Duration,
+    cancel_watch: &UnixStream,
+) -> std::io::Result<PromptOutcome<Approval>> {
+    let outcome = run_prompt(
+        queue,
+        argv,
+        message,
+        timeout,
+        cancel_watch,
+        Some(b"Allow\nDeny\n"),
+    )?;
+    Ok(outcome.map(|answer| {
+        if answer.as_str() == "Allow" {
+            Approval::Allow
+        } else {
+            Approval::Deny
+        }
+    }))
+}
+
 /// The actual spawn-and-read behind `run_prompt`, split out so `run_prompt`
 /// can drop its `PromptTurn` on every path through here without repeating
 /// itself at each return.
@@ -451,6 +497,34 @@ mod tests {
             &cancel_watch,
             None,
         )
+    }
+
+    fn approval(script: &str) -> std::io::Result<PromptOutcome<Approval>> {
+        let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
+        run_approval_prompt(
+            &PromptQueue::new(),
+            &sh(script),
+            "test message",
+            Duration::from_secs(60),
+            &cancel_watch,
+        )
+    }
+
+    #[test]
+    fn an_approval_prompt_allows_only_an_exact_allow() {
+        let _spawning = spawn_lock();
+        for (script, expected) in [
+            ("sed -n 1p", Approval::Allow),
+            ("sed -n 2p", Approval::Deny),
+            ("echo allow", Approval::Deny),
+            ("echo 'Allow now'", Approval::Deny),
+        ] {
+            assert!(
+                matches!(approval(script), Ok(PromptOutcome::Answer(a)) if a == expected),
+                "{script}"
+            );
+        }
+        assert!(matches!(approval("exit 1"), Ok(PromptOutcome::Cancelled)));
     }
 
     #[test]

@@ -38,7 +38,9 @@ use crate::io::ByteCounter;
 use crate::log;
 use crate::origin::{self, Origin};
 use crate::policy;
-use crate::prompt::{PromptOutcome, PromptQueue, prompt_message, run_prompt};
+use crate::prompt::{
+    Approval, PromptOutcome, PromptQueue, prompt_message, run_approval_prompt, run_prompt,
+};
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
@@ -988,15 +990,14 @@ impl Server {
             name: db_name,
         };
         matches!(
-            run_prompt(
+            run_approval_prompt(
                 &self.prompt_queue,
                 argv,
                 &message,
                 self.config.prompt_timeout,
                 &watch,
-                Some(b"Allow\nDeny\n"),
             ),
-            Ok(PromptOutcome::Answer(choice)) if choice.as_str() == "Allow"
+            Ok(PromptOutcome::Answer(Approval::Allow))
         )
     }
 
