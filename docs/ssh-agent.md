@@ -131,14 +131,14 @@ Rejected. It stays the answer for keys that can't live in the vault (§ 2).
 | Sees each use               | No. Cannot log, approve by context, or apply per-request policy                                                                              | Yes                                                       |
 | Local vs forwarded          | Only via destination constraints, fixed when the key is added                                                                                | Decided per request                                       |
 | Idle timer                  | kpa cannot see SSH use, so the idle lock removes keys mid-session                                                                            | kpa decides what counts as activity (§ 6.9)               |
-| Crypto in kpa               | Parse and decrypt the OpenSSH key file, which the agent needs in its own wire format                                                         | The same, plus calling `sign`                             |
+| Crypto in kpa               | Parse the OpenSSH key file, which the agent needs in its own wire format                                                         | The same, plus calling `sign`                             |
 | Compatible agents           | OpenSSH's `ssh-agent`. Not `gpg-agent`, which cannot remove added keys                                                                       | Any agent-protocol client                                 |
 
 The "Write UI, not crypto" rule in [`background.md`](./background.md) still
 holds under B. The new code is protocol framing, parsing and policy.
 Signatures come from RustCrypto's `ssh-key` (backed by `ed25519-dalek`,
 `p256`, `p384`, `rsa`), and kpa implements no primitives. Both A and B have
-to parse and decrypt the key file, so all A saves is the call to `sign`.
+to parse the key file, so all A saves is the call to `sign`.
 
 ## 5. Situations
 
@@ -288,16 +288,15 @@ scans it:
    PKCS#8) are skipped. `ssh-keygen -p -f <file>` rewrites one in OpenSSH
    format.
 3. Read each key's public key from the file's header, which is stored
-   unencrypted. Nothing is decrypted yet.
+   unencrypted. Passphrase-protected keys are skipped too, since kpa has
+   no passphrase to open them with. Each skipped attachment is logged at
+   unlock with its reason.
 4. Drop keys that one of the database's overrides marks `serve = false`.
    A key found in two opted-in databases is served from the first one in
    config order.
 
-The private key is decrypted at its first signature. An encrypted key's
-passphrase is the entry's Password field, the convention KeePass clients
-already use. The decrypted key is cached in the database's `Slot` until lock. Each
-decryption runs bcrypt-pbkdf, so it happens outside the vault mutex, under
-the same epoch check as unlock.
+The private key is read at its first signature and cached in the database's
+`Slot` until lock.
 
 **The key cache.** After each scan, kpa writes the database's public keys
 to `$XDG_CACHE_HOME/kpa/ssh-keys/<database>`, where `<database>` is the
@@ -354,10 +353,9 @@ can produce: `ssh` then offers only that agent key.
   `ssh-rsa` signature gets `FAILURE`. RSA keys follow the same policy as
   every other key, forwarding included.
 - **Not supported**: `sk-*` (FIDO) keys, certificates, DSA, and private
-  keys in PEM format (§ 6.4).
-- **Dependency**: `ssh-key` 0.7 with `ed25519`, `p256`, `p384`, `rsa` and
-  `encryption` (bcrypt-pbkdf with aes256-ctr, OpenSSH's default for key
-  files). 0.7 builds on `rsa` 0.10, the first release with constant-time
+  keys in PEM format or protected by a passphrase (§ 6.4).
+- **Dependency**: `ssh-key` 0.7 with `ed25519`, `p256`, `p384`, and `rsa`.
+  0.7 builds on `rsa` 0.10, the first release with constant-time
   private-key operations (RUSTSEC-2023-0071, the Marvin attack, is patched
   there), and on `sha2` 0.11, the version kpa already uses. 0.7 is still in
   release candidates: kpa pins the current one exactly (`=0.7.0-rc.N`) and
@@ -504,7 +502,7 @@ kpa also logs each refusal.
 
 ### 6.9 Lock and idle
 
-- **Lock** drops the decrypted-key cache and every approval with the
+- **Lock** drops the private-key cache and every approval with the
   database. It zeroizes the cache and follows the same epoch rules as
   unlock.
 - **Freshness.** The freshness guard runs before each signature, as it does
@@ -722,7 +720,7 @@ programs' settings.
 
 **Assets**
 
-- **A-2** gains SSH private keys held in attachments, and their passphrases.
+- **A-2** gains SSH private keys held in attachments.
 - **A-6 (new) · Signing capability: a signature the user didn't intend.**
   It authenticates as the user elsewhere, or signs commits and files.
   Sensitivity: High.
@@ -799,7 +797,7 @@ programs' settings.
   - Fuzzed like `decode_request`.
 - **T-22 (new) · Key material in memory** (I) — ACT-7, ACT-11 · TB-7 ·
   A-2 → G-6.
-  - Decrypted keys are cached only while unlocked, and zeroized on lock.
+  - Private keys are cached only while unlocked, and zeroized on lock.
   - Private-key operations must be constant-time, so a forwarded host
     cannot recover a key from signature timing. This is why kpa needs
     `rsa` 0.10 or later (§ 6.5).
@@ -839,7 +837,7 @@ programs' settings.
 | `bind.rs`     | session-bind verification and per-connection binding state                                                                                      |
 | `classify.rs` | Data to be signed → `Purpose::{Login, SshSig, Other}`. Pure, fuzzed                                                                             |
 | `policy.rs`   | (key settings, connection class, purpose, database state, approvals, prompt availability) → `Sign`, `Approve`, `Unlock`, `Refuse(reason)`. Pure, with exhaustive tests like `policy::Policy` |
-| `keys.rs`     | Attachment scan, public-key cache file, overrides, lazy decryption, the per-`Slot` key cache                                                    |
+| `keys.rs`     | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                    |
 | `approve.rs`  | Approvals and pending requests: their scopes, limits and expiry                                                                                 |
 | `serve.rs`    | Listener, per-connection thread, connection cap                                                                                                 |
 
@@ -860,9 +858,10 @@ programs' settings.
 
 **Tests**
 
-- **Fixture**: `tests/fixture.sh` adds entries with an Ed25519 key, a
-  passphrase-protected key, an RSA key, and a PEM key that must be skipped
-  (generated with `ssh-keygen`, imported as attachments).
+- **Fixture**: `tests/fixture.sh` adds entries with an Ed25519 key, an ECDSA
+  key, an RSA key, and two keys that must be skipped: a passphrase-protected
+  one and a PEM one (generated with `ssh-keygen`, imported as
+  attachments).
 - **`tests/agent.rs`** spawns `kpa serve` and drives it with the real
   OpenSSH tools:
   - `ssh-add -L` lists the keys from the cache while the database is

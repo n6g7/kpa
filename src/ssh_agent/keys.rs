@@ -3,8 +3,9 @@
 //! config overrides, naming, and the public-key cache that lists a locked
 //! database's keys.
 //!
-//! Pure: nothing here touches a mutex or an epoch. `serve.rs` calls `scan`
-//! on unlock and `decrypt` at first signature, under its own locking.
+//! Pure: nothing here touches a mutex or an epoch. Callers run `scan` at
+//! unlock and `parse_private_key` at a key's first signature, under their
+//! own locking.
 
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -14,9 +15,8 @@ use std::path::{Path, PathBuf};
 use ssh_key::public::KeyData;
 use ssh_key::{Algorithm, EcdsaCurve, Fingerprint, HashAlg, PrivateKey, PublicKey};
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
-use crate::config::SshKeyConfig;
+use crate::config::{DatabaseConfig, SshKeyConfirm};
 use crate::paths::Paths;
 use crate::vault::EntryAttachment;
 
@@ -35,8 +35,8 @@ const MIN_RSA_BITS: u32 = 2048;
 
 /// One OpenSSH private key found among a database's current-entry
 /// attachments: its public half only, read from the attachment's
-/// unencrypted header. `decrypt` reads the private half later, lazily, and
-/// only once the key is actually used.
+/// unencrypted header. `parse_private_key` reads the private half later,
+/// lazily, and only once the key is actually used.
 #[derive(Debug, Clone)]
 pub struct FoundKey {
     pub public_key: PublicKey,
@@ -59,6 +59,8 @@ pub enum SkipReason {
     UnsupportedType(String),
     /// An RSA key under `MIN_RSA_BITS`.
     RsaTooSmall(u32),
+    /// Protected by a passphrase, which kpa has no way to ask for.
+    Encrypted,
 }
 
 /// One attachment `scan` didn't read as a served key, and why.
@@ -109,6 +111,13 @@ fn classify(attachment: &EntryAttachment, result: &mut ScanResult) {
         }
     };
 
+    if private_key.is_encrypted() {
+        result
+            .skipped
+            .push(skipped(attachment, SkipReason::Encrypted));
+        return;
+    }
+
     let public_key = private_key.public_key();
     if let Some(reason) = unsupported(private_key.algorithm(), public_key.key_data()) {
         result.skipped.push(skipped(attachment, reason));
@@ -153,8 +162,8 @@ fn unsupported(algorithm: Algorithm, key_data: &KeyData) -> Option<SkipReason> {
     }
 }
 
-/// A key kpa serves: survived its database's `serve = false` overrides, and
-/// named per config.
+/// A key kpa serves: survived its database's `serve = false` overrides,
+/// with the name and policy settings its config gives it.
 #[derive(Debug, Clone)]
 pub struct ServedKey {
     pub database: String,
@@ -162,32 +171,39 @@ pub struct ServedKey {
     pub fingerprint: Fingerprint,
     pub name: String,
     pub entry_uuid: Uuid,
+    /// Local approval policy (`docs/ssh-agent.md` § 6.7), from the
+    /// key's settings.
+    pub confirm: SshKeyConfirm,
+    /// Usable through `ssh -A`, from the key's settings.
+    pub forwarded: bool,
 }
 
-/// Resolves which of a database's found keys get served, applying its own
-/// `[[database.ssh_key]]` overrides (matched by fingerprint): drops
-/// anything a `serve = false` override names, and names the rest with
-/// [`key_name`].
-pub fn resolve(database: &str, found: &[FoundKey], overrides: &[SshKeyConfig]) -> Vec<ServedKey> {
+/// Resolves which of a database's found keys get served, applying its
+/// `[[database.ssh_key]]` settings (`DatabaseConfig::ssh_key_settings`):
+/// drops anything a `serve = false` override names, names the rest with
+/// [`key_name`], and carries each one's `confirm`/`forwarded` policy for
+/// [`super::policy::decide`].
+pub fn resolve(cfg: &DatabaseConfig, found: &[FoundKey]) -> Vec<ServedKey> {
     found
         .iter()
         .filter_map(|key| {
-            let fingerprint = key.fingerprint.to_string();
-            let over = overrides.iter().find(|o| o.fingerprint == fingerprint);
-            if over.is_some_and(|o| !o.serve) {
+            let settings = cfg.ssh_key_settings(key.fingerprint);
+            if !settings.serve {
                 return None;
             }
             Some(ServedKey {
-                database: database.to_string(),
+                database: cfg.name.clone(),
                 public_key: key.public_key.clone(),
                 fingerprint: key.fingerprint,
                 name: key_name(
-                    database,
+                    &cfg.name,
                     key.fingerprint,
-                    over.and_then(|o| o.name.as_deref()),
+                    settings.name.as_deref(),
                     key.entry_title.as_deref(),
                 ),
                 entry_uuid: key.entry_uuid,
+                confirm: settings.confirm,
+                forwarded: settings.forwarded,
             })
         })
         .collect()
@@ -224,45 +240,13 @@ pub fn dedupe_by_config_order(per_database: Vec<Vec<ServedKey>>) -> Vec<ServedKe
         .collect()
 }
 
-/// A private key decrypted from an attachment's bytes. Dropping it zeroizes
-/// the key material: `ssh_key`'s own leaf private-key types zeroize on
-/// drop, and this holds nothing beyond the `PrivateKey` itself.
-#[derive(Debug)]
-pub struct DecryptedKey(PrivateKey);
-
-impl DecryptedKey {
-    pub fn private_key(&self) -> &PrivateKey {
-        &self.0
-    }
-}
-
-/// Why `decrypt` failed.
-#[derive(Debug, thiserror::Error)]
-pub enum DecryptError {
-    #[error("not a valid OpenSSH private key")]
-    Parse(#[source] ssh_key::Error),
-    #[error("wrong passphrase, or the key is corrupt")]
-    WrongPassphrase,
-}
-
-/// Decrypts an OpenSSH private-key attachment with `passphrase` — the
-/// entry's Password field, the convention KeePass clients already use
-/// (`docs/ssh-agent.md` § 6.4). A key that isn't encrypted ignores
-/// `passphrase` and succeeds regardless of it. Pure, and potentially slow
-/// (bcrypt-pbkdf): `serve.rs` runs this outside the vault mutex, under the
-/// same epoch check as unlock.
-pub fn decrypt(
-    attachment: &[u8],
-    passphrase: &Zeroizing<String>,
-) -> Result<DecryptedKey, DecryptError> {
-    let key = PrivateKey::from_openssh(attachment).map_err(DecryptError::Parse)?;
-    if !key.is_encrypted() {
-        return Ok(DecryptedKey(key));
-    }
-    let decrypted = key
-        .decrypt(passphrase.as_bytes())
-        .map_err(|_| DecryptError::WrongPassphrase)?;
-    Ok(DecryptedKey(decrypted))
+/// The private key in an OpenSSH attachment `scan` found, read at its first
+/// signature. `None` if it doesn't parse or is encrypted. The key material
+/// zeroizes when the returned key drops.
+pub fn parse_private_key(attachment: &[u8]) -> Option<PrivateKey> {
+    PrivateKey::from_openssh(attachment)
+        .ok()
+        .filter(|key| !key.is_encrypted())
 }
 
 /// Where the public-key cache lives: `kpa/ssh-keys` under `paths`' cache
@@ -326,10 +310,9 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use uuid::Uuid;
-    use zeroize::Zeroizing;
 
     use super::*;
-    use crate::config::{SshKeyConfig, SshKeyConfirm};
+    use crate::config::SshKeyConfig;
     use crate::vault::EntryAttachment;
 
     /// `ssh-key`'s own test vector (`tests/examples/id_ed25519`):
@@ -343,8 +326,7 @@ ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
 -----END OPENSSH PRIVATE KEY-----
 ";
 
-    /// Same key as `ED25519`, encrypted under aes256-ctr with the
-    /// passphrase `hunter42` (`ssh-key`'s own
+    /// Same key as `ED25519`, encrypted under aes256-ctr (`ssh-key`'s own
     /// `tests/examples/id_ed25519.aes256-ctr.enc`).
     const ED25519_ENCRYPTED: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABBKH96ujW
@@ -355,7 +337,6 @@ N7MHSUzlkX4adBrga3f7GS4uv4ChOoxC4XsE5HsxtGsq1X8jzqLlZTmOcxkcEneYQexrUc
 bQP0o+gL5aKK8cQgiIlXeDbRjqhc4+h4EF6lY=
 -----END OPENSSH PRIVATE KEY-----
 ";
-    const ED25519_ENCRYPTED_PASSPHRASE: &str = "hunter42";
 
     /// `ssh-key`'s own test vector (`tests/examples/id_rsa_3072`):
     /// unencrypted RSA, 3072 bits.
@@ -537,43 +518,20 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
     }
 
     #[test]
-    fn decrypt_passes_through_an_unencrypted_key() {
-        let passphrase = Zeroizing::new("irrelevant".to_string());
-        let decrypted = decrypt(ED25519.as_bytes(), &passphrase).expect("unencrypted key decrypts");
-        assert!(!decrypted.private_key().is_encrypted());
+    fn scan_skips_encrypted_keys() {
+        let attachments = [attachment("encrypted", ED25519_ENCRYPTED)];
+        let result = scan(&attachments);
+        assert!(result.found.is_empty());
+        assert_eq!(result.skipped[0].reason, SkipReason::Encrypted);
     }
 
     #[test]
-    fn decrypt_opens_an_encrypted_key_with_its_passphrase() {
-        let passphrase = Zeroizing::new(ED25519_ENCRYPTED_PASSPHRASE.to_string());
-        let decrypted = decrypt(ED25519_ENCRYPTED.as_bytes(), &passphrase)
-            .expect("the right passphrase should decrypt it");
-        assert!(!decrypted.private_key().is_encrypted());
-        assert_eq!(
-            decrypted.private_key().public_key(),
-            PrivateKey::from_openssh(ED25519)
-                .expect("plaintext test vector")
-                .public_key()
-        );
-    }
-
-    #[test]
-    fn decrypt_fails_with_the_wrong_passphrase() {
-        let passphrase = Zeroizing::new("definitely not it".to_string());
-        match decrypt(ED25519_ENCRYPTED.as_bytes(), &passphrase) {
-            Err(DecryptError::WrongPassphrase) => {}
-            other => panic!("expected WrongPassphrase, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn decrypt_also_works_for_rsa() {
-        let passphrase = Zeroizing::new("irrelevant".to_string());
-        let decrypted = decrypt(RSA_3072.as_bytes(), &passphrase).expect("unencrypted RSA key");
-        assert_eq!(
-            decrypted.private_key().algorithm(),
-            Algorithm::Rsa { hash: None }
-        );
+    fn parse_private_key_reads_unencrypted_keys_only() {
+        let key = parse_private_key(ED25519.as_bytes()).expect("unencrypted key parses");
+        assert!(!key.is_encrypted());
+        assert!(parse_private_key(RSA_3072.as_bytes()).is_some());
+        assert!(parse_private_key(ED25519_ENCRYPTED.as_bytes()).is_none());
+        assert!(parse_private_key(b"garbage").is_none());
     }
 
     fn test_public_key() -> PublicKey {
@@ -610,11 +568,20 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
             attachment_name: "id_ed25519".to_string(),
         };
         let fingerprint = key.fingerprint.to_string();
+        let database = |ssh_keys: Vec<SshKeyConfig>| DatabaseConfig {
+            name: "personal".to_string(),
+            path: "/v.kdbx".into(),
+            keyfile: None,
+            serve_ssh_keys: true,
+            ssh_keys,
+        };
 
-        let served = resolve("personal", std::slice::from_ref(&key), &[]);
+        let served = resolve(&database(vec![]), std::slice::from_ref(&key));
         assert_eq!(served.len(), 1);
         assert_eq!(served[0].name, "github");
         assert_eq!(served[0].database, "personal");
+        assert_eq!(served[0].confirm, SshKeyConfirm::Once);
+        assert!(served[0].forwarded);
 
         let not_served = SshKeyConfig {
             fingerprint: fingerprint.clone(),
@@ -623,7 +590,8 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
             forwarded: true,
             serve: false,
         };
-        assert!(resolve("personal", std::slice::from_ref(&key), &[not_served]).is_empty());
+        let cfg = database(vec![not_served]);
+        assert!(resolve(&cfg, std::slice::from_ref(&key)).is_empty());
 
         let renamed = SshKeyConfig {
             fingerprint,
@@ -632,8 +600,10 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
             forwarded: true,
             serve: true,
         };
-        let served = resolve("personal", std::slice::from_ref(&key), &[renamed]);
+        let cfg = database(vec![renamed]);
+        let served = resolve(&cfg, std::slice::from_ref(&key));
         assert_eq!(served[0].name, "prod-root");
+        assert_eq!(served[0].confirm, SshKeyConfirm::Always);
     }
 
     #[test]
@@ -646,6 +616,8 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
             fingerprint,
             name: database.to_string(),
             entry_uuid: Uuid::new_v4(),
+            confirm: SshKeyConfirm::Once,
+            forwarded: true,
         };
 
         let deduped = dedupe_by_config_order(vec![vec![make("personal")], vec![make("work")]]);

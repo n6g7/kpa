@@ -122,17 +122,62 @@ for e in (entry, no_otp, bad_otp):
 kp.save()
 PYEOF
 
-# SSH agent fixtures (`src/ssh_agent/keys.rs`): an Ed25519 key, a
-# passphrase-protected key, an RSA key, and a PEM-format key that must be
-# skipped — one entry each, plus one more Ed25519 key reachable only
-# through history and one only through the recycle bin, to check both are
-# ignored. Generated fresh each run, like the rest of $OUT: none of this is
+# SSH agent fixtures (`src/ssh_agent/keys.rs`): an Ed25519 key, an ECDSA
+# key, an RSA key, and two keys that must be skipped, a passphrase-protected
+# one and a PEM-format one — one entry each, plus one more Ed25519 key
+# reachable only through history and one only through the recycle bin, to
+# check both are ignored. Generated fresh each run, like the rest of $OUT: none of this is
 # committed.
 SSH_KEYS_DIR=$(mktemp -d)
 trap 'rm -rf "$SSH_KEYS_DIR"' EXIT
 
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$SSH_KEYS_DIR/ed25519"
-ssh-keygen -q -t ecdsa -b 256 -N 'correct-horse-battery-staple' -C '' -f "$SSH_KEYS_DIR/ecdsa"
+# `ssh-key` 0.7.0-rc.12 refuses an OpenSSH P-256 private key whose scalar
+# encodes in 31 bytes, which about 1 generated key in 512 does
+# (https://github.com/RustCrypto/SSH/issues/620, fixed upstream but not
+# released). Generate until the scalar is 32 or 33 bytes long.
+attempts=0
+while :; do
+    rm -f "$SSH_KEYS_DIR/ecdsa" "$SSH_KEYS_DIR/ecdsa.pub"
+    ssh-keygen -q -t ecdsa -b 256 -N '' -C '' -f "$SSH_KEYS_DIR/ecdsa"
+    python3 - "$SSH_KEYS_DIR/ecdsa" <<'PYEOF' && break
+import base64
+import struct
+import sys
+
+# An unencrypted OpenSSH private key (PROTOCOL.key): the magic, cipher,
+# KDF, KDF options, key count and public key, then the private section:
+# two check ints, the key type, the curve, the public point and the
+# private scalar.
+with open(sys.argv[1]) as f:
+    body = "".join(line for line in f.read().splitlines() if not line.startswith("-----"))
+data = base64.b64decode(body)
+pos = len(b"openssh-key-v1\0")
+
+
+def string(buf, at):
+    (n,) = struct.unpack(">I", buf[at : at + 4])
+    return buf[at + 4 : at + 4 + n], at + 4 + n
+
+
+for _ in range(3):  # cipher, KDF, KDF options
+    _, pos = string(data, pos)
+pos += 4  # key count
+_, pos = string(data, pos)  # public key
+private, _ = string(data, pos)
+at = 8  # check ints
+for _ in range(3):  # key type, curve, public point
+    _, at = string(private, at)
+scalar, _ = string(private, at)
+sys.exit(0 if len(scalar) in (32, 33) else 1)
+PYEOF
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 20 ]; then
+        echo "fixture.sh: no usable ECDSA key after $attempts tries" >&2
+        exit 1
+    fi
+done
+ssh-keygen -q -t ed25519 -N 'correct-horse-battery-staple' -C '' -f "$SSH_KEYS_DIR/encrypted"
 ssh-keygen -q -t rsa -b 3072 -N '' -C '' -f "$SSH_KEYS_DIR/rsa"
 # `-m PEM`: the old PKCS#1 format, not the OpenSSH one `ssh_agent::keys` reads.
 ssh-keygen -q -t rsa -b 2048 -N '' -C '' -m PEM -f "$SSH_KEYS_DIR/pem"
@@ -157,10 +202,11 @@ group = kp.add_group(kp.root_group, "SSH")
 entry = kp.add_entry(group, "Ed25519", "", "")
 entry.add_attachment(kp.add_binary(read("ed25519")), "id_ed25519")
 
-# The passphrase the key was encrypted with lives in the entry's Password
-# field, the convention a KeePass client's own SSH agent integration uses.
-entry = kp.add_entry(group, "Ecdsa", "", "correct-horse-battery-staple")
+entry = kp.add_entry(group, "Ecdsa", "", "")
 entry.add_attachment(kp.add_binary(read("ecdsa")), "id_ecdsa")
+
+entry = kp.add_entry(group, "Encrypted", "", "")
+entry.add_attachment(kp.add_binary(read("encrypted")), "id_encrypted")
 
 entry = kp.add_entry(group, "Rsa", "", "")
 entry.add_attachment(kp.add_binary(read("rsa")), "id_rsa")
