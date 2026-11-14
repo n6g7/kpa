@@ -1,6 +1,6 @@
 //! Integration tests against `tests/fixture.sh`'s `fixture-ssh.kdbx`:
-//! `ssh_agent::keys::scan` against a real database, and `decrypt` against
-//! each of its key types.
+//! `ssh_agent::keys::scan` against a real database, and `parse_private_key`
+//! against each of its key types.
 
 mod common;
 
@@ -15,12 +15,12 @@ fn attachments() -> Vec<EntryAttachment> {
     vault::list_attachments(&db)
 }
 
-/// Scanning finds exactly the three OpenSSH keys (Ed25519, the
-/// passphrase-protected one, and RSA) and reports the PEM one as skipped —
+/// Scanning finds exactly the three usable OpenSSH keys (Ed25519, ECDSA
+/// and RSA) and reports the passphrase-protected and PEM ones as skipped —
 /// the key attachments on `"Historical"` and `"Recycled"` are invisible,
 /// since one lives only in history and the other only in the recycle bin.
 #[test]
-fn scan_finds_exactly_the_three_openssh_keys_and_skips_the_pem_one() {
+fn scan_finds_the_three_usable_keys_and_skips_the_encrypted_and_pem_ones() {
     let result = keys::scan(&attachments());
 
     let mut found_names: Vec<&str> = result
@@ -31,9 +31,19 @@ fn scan_finds_exactly_the_three_openssh_keys_and_skips_the_pem_one() {
     found_names.sort_unstable();
     assert_eq!(found_names, vec!["id_ecdsa", "id_ed25519", "id_rsa"]);
 
-    assert_eq!(result.skipped.len(), 1);
-    assert_eq!(result.skipped[0].attachment_name, "id_rsa_pem");
-    assert_eq!(result.skipped[0].reason, SkipReason::Pem);
+    let mut skipped: Vec<_> = result
+        .skipped
+        .iter()
+        .map(|s| (s.attachment_name.as_str(), s.reason.clone()))
+        .collect();
+    skipped.sort_by_key(|(name, _)| *name);
+    assert_eq!(
+        skipped,
+        vec![
+            ("id_encrypted", SkipReason::Encrypted),
+            ("id_rsa_pem", SkipReason::Pem),
+        ]
+    );
 
     // Neither the historical nor the recycled key attachment shows up
     // anywhere, found or skipped.
@@ -59,15 +69,11 @@ fn history_and_recycle_bin_attachments_are_never_listed() {
     assert!(names.is_empty(), "unexpected attachments: {names:?}");
 }
 
-/// `decrypt` works for all three served key types: Ed25519 and RSA are
-/// unencrypted, and the Ecdsa one needs its entry's Password field as the
-/// passphrase.
+/// `parse_private_key` reads every served key type, and refuses the
+/// encrypted one.
 #[test]
-fn decrypt_works_for_every_found_key_type() {
+fn parse_private_key_reads_every_found_key_type() {
     let attachments = attachments();
-    let result = keys::scan(&attachments);
-    assert_eq!(result.found.len(), 3);
-
     let data_for = |attachment_name: &str| {
         attachments
             .iter()
@@ -76,14 +82,8 @@ fn decrypt_works_for_every_found_key_type() {
             .unwrap_or_else(|| panic!("no attachment named {attachment_name}"))
     };
 
-    let irrelevant = Zeroizing::new("irrelevant".to_string());
-    keys::decrypt(data_for("id_ed25519"), &irrelevant).expect("Ed25519 key decrypts");
-    keys::decrypt(data_for("id_rsa"), &irrelevant).expect("RSA key decrypts");
-
-    let right_passphrase = Zeroizing::new(common::SSH_KEY_PASSPHRASE.to_string());
-    keys::decrypt(data_for("id_ecdsa"), &right_passphrase)
-        .expect("Ecdsa key decrypts with its passphrase");
-
-    let wrong_passphrase = Zeroizing::new("definitely not it".to_string());
-    assert!(keys::decrypt(data_for("id_ecdsa"), &wrong_passphrase).is_err());
+    for name in ["id_ed25519", "id_rsa", "id_ecdsa"] {
+        assert!(keys::parse_private_key(data_for(name)).is_some(), "{name}");
+    }
+    assert!(keys::parse_private_key(data_for("id_encrypted")).is_none());
 }
