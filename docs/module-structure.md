@@ -1,12 +1,12 @@
 # kpa — module structure
 
-kpa is one library crate and a CLI binary, divided into **subsystems**. Rust has no term for this, so
-this doc defines it: a subsystem is a top-level module (one declared in
-`src/lib.rs`, or in `src/main.rs` for the CLI's own `client` and `tty`)
-together with everything below it, such as `ssh_agent/`, `proto/`,
-`wayland/`, `server` or `vault`. A subsystem is kpa's unit of
-encapsulation, much like a Go package: its files work together freely, and
-the rest of the crate sees only the API it exports.
+kpa is one library crate and a CLI binary, divided into **subsystems**.
+Rust has no term for this, so this doc defines it: a subsystem is a
+top-level module (one declared in `src/lib.rs`, or in `src/main.rs` for
+the CLI's own `client` and `tty`) together with everything below it, such
+as `ssh_agent/`, `proto/`, `wayland/`, `server` or `vault`. A subsystem is
+kpa's unit of encapsulation, much like a Go package: its files work
+together freely, and the rest of the crate sees only the API it exports.
 
 ## Between subsystems
 
