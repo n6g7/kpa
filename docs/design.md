@@ -92,7 +92,8 @@ paths resolve against the daemon's working directory.
 **`prompt` runs exactly as configured.** What the unlock is about —
 `"Unlock personal"`, for `personal` above — reaches the program through
 `KPA_PROMPT_MESSAGE` in its environment instead of its argv, escaped the
-same way the CLI escapes its own terminal output and capped in length,
+way the CLI escapes its own terminal output, plus tab and newline so it
+stays one line, and capped in length,
 since a later request-derived message (an SSH key name, once the agent's
 approval prompt exists) carries text this daemon didn't author. A program
 that only takes its prompt text as an argument, as `fuzzel` does, needs a
