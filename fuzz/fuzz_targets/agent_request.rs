@@ -23,7 +23,7 @@ use ssh_key::public::{Ed25519PublicKey, KeyData};
 //   fixed, so coverage reaches past it on every run) — hostkey, session
 //   id, signature and `is_forwarding` are all attacker-controlled bytes,
 //   same as a real connection. A body that happens to decode is applied
-//   to a fresh `Bindings` twice (the second time exercises the
+//   to a fresh `SessionBindState` twice (the second time exercises the
 //   already-recorded/duplicate path) and classified.
 // - `3`: the rest becomes the `data` field of a `SIGN_REQUEST` whose key
 //   blob is fixed (so the message always decodes), pushed through
@@ -42,7 +42,7 @@ fuzz_target!(|data: &[u8]| {
         Some((2, rest)) => {
             let message = session_bind_message(rest);
             if let wire::AgentRequest::SessionBind(bind_msg) = wire::decode_request(&message) {
-                let mut bindings = bind::Bindings::new();
+                let mut bindings = bind::SessionBindState::new();
                 let _ = bindings.apply(&bind_msg);
                 let _ = bindings.apply(&bind_msg); // the duplicate-binding path
                 let _ = bindings.class();

@@ -2,8 +2,8 @@
 //! (`docs/ssh-agent.md` § 6.2).
 //!
 //! [`wire::SessionBind`](super::wire::SessionBind) is the message read
-//! structurally off the wire; [`Bindings`] is what a connection accumulates
-//! from a sequence of them, and [`Bindings::class`] is the answer every
+//! structurally off the wire; [`SessionBindState`] is what a connection accumulates
+//! from a sequence of them, and [`SessionBindState::class`] is the answer every
 //! later decision (which keys to list, what a signature is allowed to be)
 //! actually needs.
 //!
@@ -19,7 +19,7 @@
 //!   afford to, since forwarded connections are held to the stricter rules
 //!   in § 6.3 and § 6.7 — a forged first message must not be able to make
 //!   those rules disappear by failing to verify. Once anything does verify,
-//!   though, [`Bindings::class`] trusts that over the unverified claim.
+//!   though, [`SessionBindState::class`] trusts that over the unverified claim.
 
 use signature::Verifier;
 use ssh_key::Signature;
@@ -51,15 +51,20 @@ struct ForwardingClaim {
     session_id: Vec<u8>,
 }
 
-/// A connection's accumulated `session-bind@openssh.com` state.
+/// What one agent connection has proved through `session-bind@openssh.com`
+/// messages: which host keys, bound to which SSH sessions, whether
+/// forwarding is in play. A connection owns one, created empty when it is
+/// accepted and updated with [`SessionBindState::apply`] as messages
+/// arrive; [`SessionBindState::class`] turns it into the
+/// [`ConnectionClass`] that decisions are made against.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bindings {
+pub struct SessionBindState {
     verified: Vec<Binding>,
     forwarding_claim: Option<ForwardingClaim>,
     attempts: usize,
 }
 
-impl Default for Bindings {
+impl Default for SessionBindState {
     fn default() -> Self {
         Self::new()
     }
@@ -98,7 +103,7 @@ pub enum ConnectionClass {
     },
 }
 
-impl Bindings {
+impl SessionBindState {
     pub fn new() -> Self {
         Self {
             verified: Vec::new(),
@@ -234,63 +239,11 @@ fn key_data_from_bytes(bytes: &[u8]) -> ssh_key::Result<KeyData> {
 
 #[cfg(test)]
 mod tests {
-    use signature::Signer;
-    use ssh_key::encoding::Encode;
-    use ssh_key::{Algorithm, PrivateKey};
 
+    use super::super::testing::{signed_bind, test_key};
     use super::super::wire::AgentRequest;
 
     use super::*;
-
-    struct TestRng(u64);
-
-    impl TestRng {
-        fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^ (z >> 31)
-        }
-    }
-
-    impl ssh_key::rand_core::TryRng for TestRng {
-        type Error = std::convert::Infallible;
-
-        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-            #[allow(clippy::cast_possible_truncation)]
-            Ok(self.next() as u32)
-        }
-
-        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-            Ok(self.next())
-        }
-
-        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-            for chunk in dst.chunks_mut(8) {
-                chunk.copy_from_slice(&self.next().to_le_bytes()[..chunk.len()]);
-            }
-            Ok(())
-        }
-    }
-
-    impl ssh_key::rand_core::TryCryptoRng for TestRng {}
-
-    fn test_key(seed: u64) -> PrivateKey {
-        PrivateKey::random(&mut TestRng(seed), Algorithm::Ed25519).expect("key generation")
-    }
-
-    /// A real `session-bind@openssh.com` message for `session_id`, signed
-    /// by `host`.
-    fn signed_bind(host: &PrivateKey, session_id: &[u8], is_forwarding: bool) -> SessionBind {
-        let signature: Signature = host.try_sign(session_id).expect("signing should succeed");
-        SessionBind {
-            hostkey: host.public_key().to_bytes().expect("key encodes"),
-            session_id: session_id.to_vec(),
-            signature: signature.encode_vec().expect("signature encodes"),
-            is_forwarding,
-        }
-    }
 
     fn verified_host(class: &ConnectionClass) -> &KeyData {
         match class {
@@ -301,14 +254,14 @@ mod tests {
 
     #[test]
     fn a_fresh_connection_is_unbound() {
-        let bindings = Bindings::new();
+        let bindings = SessionBindState::new();
         assert_eq!(bindings.class(), ConnectionClass::LocalUnbound);
     }
 
     #[test]
     fn a_verified_authentication_binding_becomes_local_bound() {
         let host = test_key(1);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let msg = signed_bind(&host, b"session-id", false);
         assert_eq!(bindings.apply(&msg), BindOutcome::Accepted);
         assert_eq!(
@@ -322,7 +275,7 @@ mod tests {
     #[test]
     fn a_verified_forwarding_binding_becomes_forwarded_with_no_destination_yet() {
         let host = test_key(2);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let msg = signed_bind(&host, b"session-id", true);
         assert_eq!(bindings.apply(&msg), BindOutcome::Accepted);
         assert_eq!(
@@ -339,7 +292,7 @@ mod tests {
     fn a_later_non_forwarding_binding_becomes_the_forwarded_destination() {
         let forwarding_host = test_key(3);
         let dest_host = test_key(4);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         assert_eq!(
             bindings.apply(&signed_bind(&forwarding_host, b"sid", true)),
             BindOutcome::Accepted
@@ -362,7 +315,7 @@ mod tests {
     fn a_binding_after_an_authentication_binding_is_refused() {
         let first = test_key(5);
         let second = test_key(6);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         assert_eq!(
             bindings.apply(&signed_bind(&first, b"sid", false)),
             BindOutcome::Accepted
@@ -387,7 +340,7 @@ mod tests {
     #[test]
     fn an_identical_repeat_binding_is_accepted_without_growing_the_list() {
         let host = test_key(7);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let msg = signed_bind(&host, b"sid", true);
         assert_eq!(bindings.apply(&msg), BindOutcome::Accepted);
         assert_eq!(bindings.apply(&msg), BindOutcome::Accepted);
@@ -398,7 +351,7 @@ mod tests {
     fn the_same_session_id_with_a_different_key_is_refused() {
         let host = test_key(8);
         let other = test_key(9);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         assert_eq!(
             bindings.apply(&signed_bind(&host, b"sid", true)),
             BindOutcome::Accepted
@@ -412,7 +365,7 @@ mod tests {
     #[test]
     fn the_sixteenth_distinct_forwarding_binding_is_the_last_accepted() {
         let host = test_key(10);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         for i in 0..MAX_BINDINGS {
             let session_id = format!("sid-{i}").into_bytes();
             assert_eq!(
@@ -430,7 +383,7 @@ mod tests {
     fn a_signature_that_doesnt_verify_is_refused_and_not_recorded() {
         let host = test_key(11);
         let wrong_signer = test_key(12);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         // Signed by the wrong key, but claims to be `host`'s.
         let mut msg = signed_bind(&wrong_signer, b"sid", false);
         msg.hostkey = host.public_key().to_bytes().expect("key encodes");
@@ -442,7 +395,7 @@ mod tests {
     fn a_failed_first_attempt_claiming_forwarding_still_marks_the_connection_forwarded() {
         let host = test_key(13);
         let wrong_signer = test_key(14);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let mut msg = signed_bind(&wrong_signer, b"sid", true);
         msg.hostkey = host.public_key().to_bytes().expect("key encodes"); // signature now invalid for this key
         assert_eq!(bindings.apply(&msg), BindOutcome::Refused);
@@ -463,7 +416,7 @@ mod tests {
     fn a_failed_first_attempt_not_claiming_forwarding_leaves_the_connection_unbound() {
         let wrong_signer = test_key(15);
         let host = test_key(16);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let mut msg = signed_bind(&wrong_signer, b"sid", false);
         msg.hostkey = host.public_key().to_bytes().expect("key encodes");
         assert_eq!(bindings.apply(&msg), BindOutcome::Refused);
@@ -476,7 +429,7 @@ mod tests {
         // down as a key, so no claim is recorded at all; the connection
         // ends up classified by whatever verifies afterwards.
         let host = test_key(17);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let garbage = SessionBind {
             hostkey: b"not a key".to_vec(),
             session_id: b"sid".to_vec(),
@@ -501,7 +454,7 @@ mod tests {
     #[test]
     fn an_oversize_session_id_is_refused() {
         let host = test_key(18);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let huge_session_id = vec![0u8; MAX_SESSION_ID_LEN + 1];
         let msg = signed_bind(&host, &huge_session_id, false);
         assert_eq!(bindings.apply(&msg), BindOutcome::Refused);
@@ -510,7 +463,7 @@ mod tests {
     #[test]
     fn a_session_id_exactly_at_the_cap_can_still_bind() {
         let host = test_key(19);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let session_id = vec![0u8; MAX_SESSION_ID_LEN];
         let msg = signed_bind(&host, &session_id, false);
         assert_eq!(bindings.apply(&msg), BindOutcome::Accepted);
@@ -518,7 +471,7 @@ mod tests {
 
     #[test]
     fn a_malformed_hostkey_is_refused() {
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let msg = SessionBind {
             hostkey: b"garbage".to_vec(),
             session_id: b"sid".to_vec(),
@@ -531,7 +484,7 @@ mod tests {
     #[test]
     fn a_malformed_signature_is_refused() {
         let host = test_key(20);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let msg = SessionBind {
             hostkey: host.public_key().to_bytes().expect("key encodes"),
             session_id: b"sid".to_vec(),
@@ -543,19 +496,19 @@ mod tests {
 
     #[test]
     fn default_matches_new() {
-        assert_eq!(Bindings::default(), Bindings::new());
+        assert_eq!(SessionBindState::default(), SessionBindState::new());
     }
 
     #[test]
     fn login_session_id_is_none_when_unbound() {
-        let bindings = Bindings::new();
+        let bindings = SessionBindState::new();
         assert_eq!(bindings.login_session_id(), None);
     }
 
     #[test]
     fn login_session_id_is_the_one_binding_for_local_bound() {
         let host = test_key(22);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         bindings.apply(&signed_bind(&host, b"sid", false));
         assert_eq!(bindings.login_session_id(), Some(b"sid".as_slice()));
     }
@@ -569,7 +522,7 @@ mod tests {
     fn login_session_id_is_the_destinations_for_forwarded_with_a_destination() {
         let forwarding_host = test_key(23);
         let dest_host = test_key(24);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         bindings.apply(&signed_bind(&forwarding_host, b"forwarding-sid", true));
         bindings.apply(&signed_bind(&dest_host, b"dest-sid", false));
         assert_eq!(bindings.login_session_id(), Some(b"dest-sid".as_slice()));
@@ -582,7 +535,7 @@ mod tests {
     #[test]
     fn login_session_id_is_the_forwarding_sessions_with_no_destination_yet() {
         let host = test_key(25);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         bindings.apply(&signed_bind(&host, b"sid", true));
         assert_eq!(bindings.login_session_id(), Some(b"sid".as_slice()));
     }
@@ -593,7 +546,7 @@ mod tests {
     #[test]
     fn the_signed_bind_helper_produces_a_binding_that_actually_verifies() {
         let host = test_key(21);
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         let msg = signed_bind(&host, b"sid", true);
         assert_eq!(bindings.apply(&msg), BindOutcome::Accepted);
         assert_eq!(
@@ -631,7 +584,7 @@ mod tests {
             "SHA256:GPlhdYQP8NhCXJtc7h0vcH/sL2q9s5FcguM+r/ieqww"
         );
 
-        let mut bindings = Bindings::new();
+        let mut bindings = SessionBindState::new();
         assert_eq!(bindings.apply(&msg), BindOutcome::Accepted);
         assert_eq!(
             bindings.class(),
