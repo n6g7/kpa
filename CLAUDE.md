@@ -16,17 +16,22 @@ process hardening and the service manager.
 - Don't write macOS code: no `#[cfg(target_os = "macos")]`, no macOS-only
   dependencies, no stub modules. Windows is out of scope.
 
-## Keep the module graph a DAG
+## Keep subsystem dependencies a DAG
 
-Modules depend on each other in one direction only, even though Rust
-compiles cycles. Read [`docs/module-structure.md`](docs/module-structure.md)
-before adding a module or a cross-module dependency.
+A subsystem is a top-level module (declared in `src/lib.rs`) with
+everything below it. Subsystems depend on each other in one direction only,
+even though Rust compiles cycles. Read
+[`docs/module-structure.md`](docs/module-structure.md) before adding a
+subsystem or a dependency between two.
 
-- No cycles, and no child using its parent's items: `mod.rs` declares,
-  re-exports and documents, and shared items live in a child of their own.
-- A type's `impl` blocks stay in its module. No blanket impls that give
-  another module's types new behaviour.
-- When a lower module needs something from a higher one, it defines a
-  trait and the higher module implements it.
-- One responsibility per module, and a directory once it has parts.
+- No cycles between subsystems. Inside one, files and their `mod.rs` use
+  each other freely.
+- No `impl` blocks for another subsystem's types, and no blanket impl whose
+  only real implementor is one of them.
+- Export a small API. `pub(crate)` added to reach into another
+  subsystem's type is a smell.
+- Keep decisions pure (data in, decision out). Add a trait only for a
+  callback that can't be avoided or a test fake, defined by the subsystem
+  that calls it.
+- One responsibility per file, and a directory once it has parts.
 - Apply this to the code your task touches, as above.
