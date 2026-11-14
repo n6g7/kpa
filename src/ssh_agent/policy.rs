@@ -90,10 +90,12 @@ pub enum Refusal {
 /// The one decision function behind `docs/ssh-agent.md` § 5's table.
 ///
 /// - `key`: the signing key's identity and settings.
-/// - `class`: the connection's binding state (`bind::Bindings::class`).
+/// - `class`: the connection's binding state
+///   (`bind::SessionBindState::class`).
 /// - `purpose`: what the request data actually is (`classify::classify`).
 /// - `login_session_id`: the session identifier a login must match, if the
-///   connection has any binding at all (`bind::Bindings::login_session_id`).
+///   connection has any binding at all
+///   (`bind::SessionBindState::login_session_id`).
 /// - `locked`: whether the key's database is currently locked.
 /// - `approvals`: read-only — [`decide`] never grants or consumes one. The
 ///   caller grants on `PromptApprove`/`PromptUnlock` once the prompt (or

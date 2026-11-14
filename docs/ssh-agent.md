@@ -192,8 +192,10 @@ key never needs forwarding: each hop authenticates from the local `ssh`.
 - **Socket**: `$XDG_RUNTIME_DIR/kpa/ssh-agent`, bound and checked exactly
   like the JSON socket (`socket::bind_socket`, `SO_PEERCRED`, T-1). It is
   inside the directory the systemd sandbox already allows. It has its own
-  connection cap, separate from the JSON socket's. It exists only while at
-  least one database has `serve_ssh_keys = true`.
+  connection cap (64), separate from the JSON socket's, and within it at
+  most 16 forwarded connections: one that a session-bind makes forwarded
+  while 16 are open is closed. It exists only while at least one database
+  has `serve_ssh_keys = true`.
 - **Framing**: `uint32` length, then the message. Frames over 256 KiB
   (OpenSSH's `AGENT_MAX_LEN`) close the connection. Unlike the JSON socket,
   connections are long-lived and carry many requests: `ssh` holds one open

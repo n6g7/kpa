@@ -31,6 +31,13 @@ pub enum Origin {
     Outside,
 }
 
+/// What a daemon can tell about where a connection's peer runs: the one
+/// thing a socket's connection loop needs to ask it.
+pub trait PeerOrigin {
+    /// Where the peer on `stream` runs; `owner` is the daemon's own uid.
+    fn origin_of(&self, stream: &UnixStream, owner: u32) -> Origin;
+}
+
 /// Classify the peer on `stream`. `uid` is the peer's (already checked to
 /// be the daemon's own), `session` the id of the user's display session,
 /// `None` when there is none.
