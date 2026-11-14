@@ -37,7 +37,7 @@ in
         {
           idle_timeout = "30m";
           clipboard_timeout = "30s";
-          prompt = [ "fuzzel" "--dmenu" "--password" "--prompt" ];
+          prompt = [ "sh" "-c" "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\"" ];
           database = [
             { name = "personal"; path = "/home/you/passwords.kdbx"; }
           ];
