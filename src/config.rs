@@ -139,8 +139,10 @@ impl SshAgentConfig {
 /// (`docs/ssh-agent.md` § 7).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SshKeyConfig {
-    /// `SHA256:…`, as `ssh-add -l` and `kpa ssh keys` print it.
-    pub fingerprint: String,
+    /// `SHA256:…`, as `ssh-add -l` and `kpa ssh keys` print it. Parsed
+    /// as the config loads, so one that doesn't parse fails the load.
+    #[serde(deserialize_with = "deserialize_fingerprint")]
+    pub fingerprint: ssh_key::Fingerprint,
 
     /// Identity comment, shown in prompts and logs. Defaults to the
     /// entry's title while unlocked, or `<database> <fingerprint>` while
@@ -160,6 +162,18 @@ pub struct SshKeyConfig {
     /// `false` keeps this key out of the agent entirely.
     #[serde(default = "SshKeySettings::default_serve")]
     pub serve: bool,
+}
+
+/// Reads an `SshKeyConfig::fingerprint`. An invalid one is a parse error,
+/// which TOML reports at the offending line.
+fn deserialize_fingerprint<'de, D>(deserializer: D) -> Result<ssh_key::Fingerprint, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = String::deserialize(deserializer)?;
+    text.parse().map_err(|err| {
+        serde::de::Error::custom(format!("ssh_key fingerprint {text:?} is invalid: {err}"))
+    })
 }
 
 /// A key's effective settings: its `[[database.ssh_key]]` override, or the
@@ -212,7 +226,7 @@ impl DatabaseConfig {
     pub fn ssh_key_settings(&self, fingerprint: ssh_key::Fingerprint) -> SshKeySettings {
         self.ssh_keys
             .iter()
-            .find(|key| key.fingerprint.parse().ok() == Some(fingerprint))
+            .find(|key| key.fingerprint == fingerprint)
             .map(SshKeySettings::from)
             .unwrap_or_default()
     }
@@ -323,9 +337,8 @@ impl Config {
     /// Checks the cross-field rules TOML's own shape can't express
     /// (`docs/ssh-agent.md` § 7): `ssh_agent.confirm_prompt` is required
     /// once any database opts in, a `[[database.ssh_key]]` override needs
-    /// its database's `serve_ssh_keys = true`, its `fingerprint` must parse
-    /// as a `SHA256:…` fingerprint, and fingerprints are unique within one
-    /// database (the same fingerprint in two different databases is not a
+    /// its database's `serve_ssh_keys = true`, and fingerprints are unique
+    /// within one database (the same fingerprint in two different databases is not a
     /// conflict — that's config order deciding which one serves it). `load`
     /// runs this after `expand_home`; `config` is the file's path, for
     /// error messages.
@@ -346,19 +359,11 @@ impl Config {
             }
             let mut seen = std::collections::HashSet::new();
             for key in &db.ssh_keys {
-                key.fingerprint
-                    .parse::<ssh_key::Fingerprint>()
-                    .map_err(|source| ConfigError::InvalidSshKeyFingerprint {
-                        config: config.to_path_buf(),
-                        database: db.name.clone(),
-                        fingerprint: key.fingerprint.clone(),
-                        source: Box::new(source),
-                    })?;
-                if !seen.insert(key.fingerprint.as_str()) {
+                if !seen.insert(key.fingerprint) {
                     return Err(ConfigError::DuplicateSshKeyFingerprint {
                         config: config.to_path_buf(),
                         database: db.name.clone(),
-                        fingerprint: key.fingerprint.clone(),
+                        fingerprint: key.fingerprint,
                     });
                 }
             }
@@ -414,18 +419,7 @@ pub enum ConfigError {
     DuplicateSshKeyFingerprint {
         config: PathBuf,
         database: String,
-        fingerprint: String,
-    },
-    #[error(
-        "in {}: database {database:?} ssh_key fingerprint {fingerprint:?} is invalid: {source}",
-        config.display()
-    )]
-    InvalidSshKeyFingerprint {
-        config: PathBuf,
-        database: String,
-        fingerprint: String,
-        #[source]
-        source: Box<ssh_key::Error>,
+        fingerprint: ssh_key::Fingerprint,
     },
 }
 
@@ -674,7 +668,8 @@ mod tests {
     /// test is independently checkable.
     const FINGERPRINT: &str = "SHA256:Nh0Me49Zh9fDw/VYUfq43IJmI1T+XrjiYONPND8GzaM";
 
-    /// Verbatim from `docs/ssh-agent.md` § 7's example.
+    /// `docs/ssh-agent.md` § 7's example, with real fingerprints in place of
+    /// its elided ones.
     #[test]
     fn parses_the_ssh_agent_example_from_the_design_doc() {
         let input = r#"
@@ -693,14 +688,14 @@ mod tests {
 
               # A key that signs into production: ask on every use, and never forward it.
               [[database.ssh_key]]
-              fingerprint = "SHA256:Jk2rVx…"
+              fingerprint = "SHA256:Nh0Me49Zh9fDw/VYUfq43IJmI1T+XrjiYONPND8GzaM"
               name = "prod-root"
               confirm = "always"
               forwarded = false
 
               # An old key that is kept in the vault but no longer used.
               [[database.ssh_key]]
-              fingerprint = "SHA256:9aQwLm…"
+              fingerprint = "SHA256:ZMuWmr4ohuhbbvJAsN3CAUIuKhHjpBgWMPyNuDsxZ3I"
               serve = false
 
             [[database]]
@@ -738,10 +733,9 @@ mod tests {
         assert!(!work.serve_ssh_keys);
         assert!(work.ssh_keys.is_empty());
 
-        // The fingerprints above aren't real SHA256 digests, so this
-        // example fails `validate` — `validate_*` tests cover that path
-        // with `FINGERPRINT`, a real one.
-        assert!(config.validate(Path::new("config.toml")).is_err());
+        config
+            .validate(Path::new("config.toml"))
+            .expect("the design doc's own example should validate");
     }
 
     #[test]
@@ -787,7 +781,7 @@ socket = "/custom/sock"
         );
         let config = Config::parse(&input).expect("valid config should parse");
         let key = &config.databases[0].ssh_keys[0];
-        assert_eq!(key.fingerprint, FINGERPRINT);
+        assert_eq!(key.fingerprint.to_string(), FINGERPRINT);
         assert_eq!(key.name, None);
         assert_eq!(key.confirm, SshKeyConfirm::Once);
         assert!(key.forwarded);
@@ -903,15 +897,17 @@ socket = "/custom/sock"
     }
 
     #[test]
-    fn validate_rejects_an_invalid_fingerprint() {
+    fn an_invalid_fingerprint_fails_to_parse() {
         let input = "[ssh_agent]\nconfirm_prompt = [\"fuzzel\"]\n\n\
              [[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n\n\
              [[database.ssh_key]]\nfingerprint = \"not-a-fingerprint\"\n";
-        let config = Config::parse(input).expect("valid config should parse");
-        let err = config
-            .validate(Path::new("config.toml"))
-            .expect_err("a malformed fingerprint is an error");
-        assert!(matches!(err, ConfigError::InvalidSshKeyFingerprint { .. }));
+        let err = Config::parse(input).expect_err("a malformed fingerprint is an error");
+        let message = err.to_string();
+        assert!(
+            message.contains("ssh_key fingerprint \"not-a-fingerprint\" is invalid"),
+            "{message}"
+        );
+        assert!(message.contains("line 10"), "{message}");
     }
 
     #[test]

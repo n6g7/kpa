@@ -567,7 +567,7 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
             entry_title: Some("github".to_string()),
             attachment_name: "id_ed25519".to_string(),
         };
-        let fingerprint = key.fingerprint.to_string();
+        let fingerprint = key.fingerprint;
         let database = |ssh_keys: Vec<SshKeyConfig>| DatabaseConfig {
             name: "personal".to_string(),
             path: "/v.kdbx".into(),
@@ -584,7 +584,7 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
         assert!(served[0].forwarded);
 
         let not_served = SshKeyConfig {
-            fingerprint: fingerprint.clone(),
+            fingerprint,
             name: None,
             confirm: SshKeyConfirm::Once,
             forwarded: true,
