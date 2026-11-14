@@ -122,8 +122,8 @@ for e in (entry, no_otp, bad_otp):
 kp.save()
 PYEOF
 
-# SSH agent fixtures (`src/ssh_agent/keys.rs`): an Ed25519 key, a
-# passphrase-protected key, an RSA key, and a PEM-format key that must be
+# SSH agent fixtures (`src/ssh_agent/keys.rs`): an Ed25519 key, an ECDSA
+# key, an RSA key, a passphrase-protected key that must be skipped, and a PEM-format key that must be
 # skipped — one entry each, plus one more Ed25519 key reachable only
 # through history and one only through the recycle bin, to check both are
 # ignored. Generated fresh each run, like the rest of $OUT: none of this is
@@ -132,7 +132,8 @@ SSH_KEYS_DIR=$(mktemp -d)
 trap 'rm -rf "$SSH_KEYS_DIR"' EXIT
 
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$SSH_KEYS_DIR/ed25519"
-ssh-keygen -q -t ecdsa -b 256 -N 'correct-horse-battery-staple' -C '' -f "$SSH_KEYS_DIR/ecdsa"
+ssh-keygen -q -t ecdsa -b 256 -N '' -C '' -f "$SSH_KEYS_DIR/ecdsa"
+ssh-keygen -q -t ed25519 -N 'correct-horse-battery-staple' -C '' -f "$SSH_KEYS_DIR/encrypted"
 ssh-keygen -q -t rsa -b 3072 -N '' -C '' -f "$SSH_KEYS_DIR/rsa"
 # `-m PEM`: the old PKCS#1 format, not the OpenSSH one `ssh_agent::keys` reads.
 ssh-keygen -q -t rsa -b 2048 -N '' -C '' -m PEM -f "$SSH_KEYS_DIR/pem"
@@ -157,10 +158,11 @@ group = kp.add_group(kp.root_group, "SSH")
 entry = kp.add_entry(group, "Ed25519", "", "")
 entry.add_attachment(kp.add_binary(read("ed25519")), "id_ed25519")
 
-# The passphrase the key was encrypted with lives in the entry's Password
-# field, the convention a KeePass client's own SSH agent integration uses.
-entry = kp.add_entry(group, "Ecdsa", "", "correct-horse-battery-staple")
+entry = kp.add_entry(group, "Ecdsa", "", "")
 entry.add_attachment(kp.add_binary(read("ecdsa")), "id_ecdsa")
+
+entry = kp.add_entry(group, "Encrypted", "", "")
+entry.add_attachment(kp.add_binary(read("encrypted")), "id_encrypted")
 
 entry = kp.add_entry(group, "Rsa", "", "")
 entry.add_attachment(kp.add_binary(read("rsa")), "id_rsa")

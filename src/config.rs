@@ -154,12 +154,68 @@ pub struct SshKeyConfig {
 
     /// Usable through `ssh -A`, with its own approval. `false` keeps the
     /// key off every forwarded connection.
-    #[serde(default = "default_true")]
+    #[serde(default = "SshKeySettings::default_forwarded")]
     pub forwarded: bool,
 
     /// `false` keeps this key out of the agent entirely.
-    #[serde(default = "default_true")]
+    #[serde(default = "SshKeySettings::default_serve")]
     pub serve: bool,
+}
+
+/// A key's effective settings: its `[[database.ssh_key]]` override, or the
+/// defaults when none matches (`DatabaseConfig::ssh_key_settings`). The
+/// serde defaults of `SshKeyConfig` and the no-override case share these
+/// values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshKeySettings {
+    pub name: Option<String>,
+    pub confirm: SshKeyConfirm,
+    pub forwarded: bool,
+    pub serve: bool,
+}
+
+impl SshKeySettings {
+    fn default_forwarded() -> bool {
+        true
+    }
+
+    fn default_serve() -> bool {
+        true
+    }
+}
+
+impl Default for SshKeySettings {
+    fn default() -> Self {
+        SshKeySettings {
+            name: None,
+            confirm: SshKeyConfirm::default(),
+            forwarded: Self::default_forwarded(),
+            serve: Self::default_serve(),
+        }
+    }
+}
+
+impl From<&SshKeyConfig> for SshKeySettings {
+    fn from(key: &SshKeyConfig) -> Self {
+        SshKeySettings {
+            name: key.name.clone(),
+            confirm: key.confirm,
+            forwarded: key.forwarded,
+            serve: key.serve,
+        }
+    }
+}
+
+impl DatabaseConfig {
+    /// The settings for the key with `fingerprint` in this database: its
+    /// `[[database.ssh_key]]` override, or the defaults if none matches.
+    pub fn ssh_key_settings(&self, fingerprint: ssh_key::Fingerprint) -> SshKeySettings {
+        self.ssh_keys
+            .iter()
+            .find(|key| key.fingerprint.parse().ok() == Some(fingerprint))
+            .map(SshKeySettings::from)
+            .unwrap_or_default()
+    }
 }
 
 /// `[[database.ssh_key]]`'s `confirm` (`docs/ssh-agent.md` § 6.7).
@@ -200,10 +256,6 @@ fn default_prompt() -> Vec<String> {
 
 fn default_ssh_agent_backoff() -> Duration {
     Duration::from_secs(2 * 60)
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Config {
@@ -740,6 +792,28 @@ socket = "/custom/sock"
         assert_eq!(key.confirm, SshKeyConfirm::Once);
         assert!(key.forwarded);
         assert!(key.serve);
+    }
+
+    #[test]
+    fn ssh_key_settings_fall_back_to_the_defaults_without_a_matching_override() {
+        let input = format!(
+            "[[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n\n\
+             [[database.ssh_key]]\nfingerprint = \"{FINGERPRINT}\"\nforwarded = false\n"
+        );
+        let config = Config::parse(&input).expect("valid config should parse");
+        let db = &config.databases[0];
+
+        let matched = db.ssh_key_settings(FINGERPRINT.parse().expect("fingerprint"));
+        assert!(!matched.forwarded);
+        assert!(matched.serve);
+
+        let other = "SHA256:ZMuWmr4ohuhbbvJAsN3CAUIuKhHjpBgWMPyNuDsxZ3I"
+            .parse()
+            .expect("fingerprint");
+        assert_eq!(db.ssh_key_settings(other), SshKeySettings::default());
+        assert_eq!(SshKeySettings::default().confirm, SshKeyConfirm::Once);
+        assert!(SshKeySettings::default().forwarded);
+        assert!(SshKeySettings::default().serve);
     }
 
     #[test]

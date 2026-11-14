@@ -84,16 +84,11 @@ pub fn fields_db() -> PathBuf {
 /// `"Ecdsa"` and `"Rsa"` each hold one OpenSSH private-key attachment;
 /// `"Pem"` holds a PEM-format key that must be skipped; `"Historical"`'s
 /// key is reachable only through its history, and `"Recycled"`'s only
-/// through the recycle bin — both must be invisible to a scan. `Ecdsa`'s
-/// Password field is the passphrase its key was encrypted with
-/// (`SSH_KEY_PASSPHRASE`).
+/// through the recycle bin — both must be invisible to a scan. `"Encrypted"`
+/// holds a passphrase-protected key, which a scan skips.
 pub fn ssh_db() -> PathBuf {
     ensure_fixtures().join("fixture-ssh.kdbx")
 }
-
-/// The passphrase `ssh_db`'s `"Ecdsa"` entry's key was encrypted with
-/// (`tests/fixture.sh`).
-pub const SSH_KEY_PASSPHRASE: &str = "correct-horse-battery-staple";
 
 /// The fingerprint of `ssh_db()`'s entry named `title` (`"Ed25519"`,
 /// `"Ecdsa"` or `"Rsa"`) — for building a `[[database.ssh_key]]` override

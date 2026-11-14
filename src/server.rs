@@ -18,6 +18,7 @@
 //! take it down. See `docs/review-2026-09-robustness.md` findings 1–4, 7, 9.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -32,12 +33,12 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::clip::{self, Clipboard};
-use crate::config::{Config, DatabaseConfig, SshKeyConfirm};
+use crate::config::{Config, DatabaseConfig};
 use crate::io::ByteCounter;
 use crate::log;
 use crate::origin::{self, Origin};
 use crate::policy;
-use crate::prompt::{PromptOutcome, PromptQueue, prompt_message, run_prompt};
+use crate::prompt::{PromptOutcome, PromptQueue, prompt_message, run_choice_prompt, run_prompt};
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
@@ -90,7 +91,7 @@ struct Slot {
     /// prompt watches (`read_prompt`). Dropping it ends the prompt.
     prompt_cancel: Option<UnixStream>,
     /// This database's served SSH keys (`docs/ssh-agent.md` § 6.4):
-    /// resolved from a scan at unlock, decrypted lazily and cached until
+    /// resolved from a scan at unlock, read lazily and cached until
     /// lock, and the approvals granted against them. Empty/default while
     /// locked, or for a database that doesn't serve SSH keys at all.
     ssh: SshSlot,
@@ -101,10 +102,9 @@ struct Slot {
 #[derive(Default)]
 struct SshSlot {
     served: Vec<keys::ServedKey>,
-    /// Decrypted on first use, under this database's own lock epoch
-    /// (`docs/ssh-agent.md` § 6.4); zeroized by dropping the entry, which
-    /// happens for all of them together on lock.
-    decrypted: HashMap<ssh_key::Fingerprint, keys::DecryptedKey>,
+    /// Read on first use (`docs/ssh-agent.md` § 6.4); zeroized by dropping
+    /// the entry, which happens for all of them together on lock.
+    private_keys: HashMap<ssh_key::Fingerprint, PrivateKey>,
     approvals: Approvals,
     /// How a lock ends an approval prompt in flight for this database,
     /// the same mechanism `Slot::prompt_cancel` uses for `unlock`'s own
@@ -117,7 +117,7 @@ struct SshSlot {
 
 impl Slot {
     /// Drops the database, if any, ends a prompt in flight for it, drops
-    /// every SSH key decrypted for it and every approval granted against
+    /// every SSH key read for it and every approval granted against
     /// it, and bumps the epoch so an unlock that is still prompting or
     /// deriving the key cannot install what it opened.
     fn lock(&mut self) {
@@ -624,7 +624,6 @@ impl Unlock for Server {
                     &message,
                     timeout,
                     &cancel_watch,
-                    None,
                 ) {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
@@ -640,7 +639,7 @@ impl Unlock for Server {
                     Ok(PromptOutcome::Interrupted) => {
                         return Err(UnlockError::LockedDuringUnlock { db: db() });
                     }
-                    Ok(PromptOutcome::Password(password)) => password,
+                    Ok(PromptOutcome::Answer(password)) => password,
                     Err(err) => {
                         return Err(UnlockError::PromptFailed {
                             db: db(),
@@ -688,8 +687,8 @@ impl Unlock for Server {
 /// Scans `slot`'s just-unlocked database for SSH keys, resolves `cfg`'s
 /// overrides against what it finds, and writes the public-key cache —
 /// everything `docs/ssh-agent.md` § 6.4 says happens "after each scan".
-/// Scanning is header-reading only (no KDF), so unlike decryption this
-/// runs under the slots mutex without stalling anything noticeably.
+/// Scanning is header-reading only, so this runs under the slots mutex
+/// without stalling anything noticeably.
 fn scan_ssh_keys(slot: &mut Slot, cfg: &DatabaseConfig, cache_dir: Option<&Path>) {
     let Some(db) = slot.db.as_ref() else {
         return;
@@ -702,7 +701,7 @@ fn scan_ssh_keys(slot: &mut Slot, cfg: &DatabaseConfig, cache_dir: Option<&Path>
             skipped.attachment_name, cfg.name, skipped.reason
         ));
     }
-    slot.ssh.served = keys::resolve(&cfg.name, &scan.found, &cfg.ssh_keys);
+    slot.ssh.served = keys::resolve(cfg, &scan.found);
     let Some(dir) = cache_dir else {
         return;
     };
@@ -876,26 +875,18 @@ impl Server {
             .into_iter()
             .filter_map(|public_key| {
                 let fingerprint = public_key.fingerprint(HashAlg::Sha256);
-                let over = cfg
-                    .ssh_keys
-                    .iter()
-                    .find(|o| o.fingerprint.parse().ok() == Some(fingerprint));
-                if over.is_some_and(|o| !o.serve) {
+                let settings = cfg.ssh_key_settings(fingerprint);
+                if !settings.serve {
                     return None;
                 }
                 Some(keys::ServedKey {
                     database: cfg.name.clone(),
                     public_key,
                     fingerprint,
-                    name: keys::key_name(
-                        &cfg.name,
-                        fingerprint,
-                        over.and_then(|o| o.name.as_deref()),
-                        None,
-                    ),
+                    name: keys::key_name(&cfg.name, fingerprint, settings.name.as_deref(), None),
                     entry_uuid: Uuid::nil(),
-                    confirm: over.map_or(SshKeyConfirm::default(), |o| o.confirm),
-                    forwarded: over.is_none_or(|o| o.forwarded),
+                    confirm: settings.confirm,
+                    forwarded: settings.forwarded,
                 })
             })
             .collect()
@@ -925,58 +916,31 @@ impl Server {
         None
     }
 
-    /// Decrypts (lazily, caching the result for this database's slot until
+    /// Reads (lazily, caching the result for this database's slot until
     /// lock) the key behind `served` and signs `request.data` with it.
-    /// Decryption runs outside the slots mutex — it's bcrypt-pbkdf, the
-    /// same reasoning as `unlock`'s KDF — under the same epoch check.
-    fn ssh_decrypt_and_sign(
+    fn ssh_load_and_sign(
         &self,
         db_name: &str,
         served: &keys::ServedKey,
         request: &ssh_wire::SignRequest,
     ) -> Option<Vec<u8>> {
-        let epoch = {
-            let mut dbs = slots(&self.dbs);
-            let slot = dbs.get_mut(db_name)?;
-            slot.db.as_ref()?;
-            if let Some(decrypted) = slot.ssh.decrypted.get(&served.fingerprint) {
-                return sign_with(decrypted.private_key(), &request.data, request.flags);
-            }
-            slot.lock_epoch
-        };
-
-        let (attachment, passphrase) = {
-            let dbs = slots(&self.dbs);
-            let slot = dbs.get(db_name)?;
-            let db = slot.db.as_ref()?;
-            let attachment = vault::list_attachments(db)
-                .into_iter()
-                .filter(|a| a.entry_uuid == served.entry_uuid)
-                .find(|a| {
-                    keys::scan(std::slice::from_ref(a))
-                        .found
-                        .iter()
-                        .any(|k| k.fingerprint == served.fingerprint)
-                })?
-                .data;
-            let passphrase =
-                vault::entry_field(db, served.entry_uuid, keepass::db::fields::PASSWORD)
-                    .flatten()
-                    .unwrap_or_else(|| Zeroizing::new(String::new()));
-            (attachment, passphrase)
-        };
-
-        let decrypted = keys::decrypt(&attachment, &passphrase).ok()?;
-
         let mut dbs = slots(&self.dbs);
         let slot = dbs.get_mut(db_name)?;
-        if slot.lock_epoch != epoch || slot.db.is_none() {
-            // Locked while this was decrypting.
-            return None;
-        }
-        let signature = sign_with(decrypted.private_key(), &request.data, request.flags);
-        slot.ssh.decrypted.insert(served.fingerprint, decrypted);
-        signature
+        let db = slot.db.as_ref()?;
+        let private_key = match slot.ssh.private_keys.entry(served.fingerprint) {
+            Entry::Occupied(cached) => cached.into_mut(),
+            Entry::Vacant(vacant) => {
+                let attachment = vault::list_attachments(db).into_iter().find(|a| {
+                    a.entry_uuid == served.entry_uuid
+                        && keys::scan(std::slice::from_ref(a))
+                            .found
+                            .iter()
+                            .any(|k| k.fingerprint == served.fingerprint)
+                })?;
+                vacant.insert(keys::parse_private_key(&attachment.data)?)
+            }
+        };
+        sign_with(private_key, &request.data, request.flags)
     }
 
     /// Raises the approval prompt (`ssh_agent.confirm_prompt`) for `served`,
@@ -1023,15 +987,15 @@ impl Server {
             name: db_name,
         };
         matches!(
-            run_prompt(
+            run_choice_prompt(
                 &self.prompt_queue,
                 argv,
                 &message,
                 self.config.prompt_timeout,
                 &watch,
-                Some(b"Allow\nDeny\n"),
+                &["Allow", "Deny"],
             ),
-            Ok(PromptOutcome::Password(choice)) if choice.as_str() == "Allow"
+            Ok(PromptOutcome::Answer(choice)) if choice == "Allow"
         )
     }
 
@@ -1200,13 +1164,13 @@ impl SshSign for Server {
             }
         }
 
-        let Some(signature) = self.ssh_decrypt_and_sign(&cfg.name, &served, request) else {
+        let Some(signature) = self.ssh_load_and_sign(&cfg.name, &served, request) else {
             log_ssh_sign(
                 &served,
                 &purpose,
                 class,
                 destination.as_ref(),
-                "decryption or signing failed",
+                "loading or signing failed",
             );
             return ssh_wire::AgentResponse::Failure;
         };
