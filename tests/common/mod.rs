@@ -90,6 +90,24 @@ pub fn ssh_db() -> PathBuf {
     ensure_fixtures().join("fixture-ssh.kdbx")
 }
 
+/// The fingerprint of `ssh_db()`'s entry named `title` (`"Ed25519"`,
+/// `"Ecdsa"` or `"Rsa"`), for building a `[[database.ssh_key]]` override
+/// before a daemon that serves it has started: a fresh fixture has
+/// different keys every run.
+pub fn ssh_fixture_fingerprint(title: &str) -> String {
+    let password = zeroize::Zeroizing::new(PASSWORD.to_string());
+    let (db, _) =
+        kpa::vault::open(&ssh_db(), Some(&password), None).expect("ssh fixture should open");
+    let attachments = kpa::vault::list_attachments(&db);
+    kpa::ssh_agent::keys::scan(&attachments)
+        .found
+        .into_iter()
+        .find(|key| key.entry_title.as_deref() == Some(title))
+        .unwrap_or_else(|| panic!("no {title:?} key found in the ssh fixture"))
+        .fingerprint
+        .to_string()
+}
+
 /// A config whose one database is `db_path` under the name `"personal"`,
 /// and whose `prompt` runs `prompt_script` under `sh -c`, standing in for a
 /// real dmenu-style prompt.
@@ -141,6 +159,9 @@ pub fn run_cli(socket: &Path, args: &[&str]) -> serde_json::Value {
 pub struct InProcessDaemon {
     pub socket: PathBuf,
     pub server: Arc<kpa::server::Server>,
+    /// The daemon's file locations: its SSH key cache and `known_hosts`
+    /// live under its own tempdir, so a test never touches the real ones.
+    pub paths: kpa::paths::Paths,
     _dir: tempfile::TempDir,
 }
 
@@ -163,10 +184,12 @@ impl InProcessDaemon {
     ) -> InProcessDaemon {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let socket = dir.path().join("sock");
-        let server = Arc::new(kpa::server::Server::new(
-            config,
-            kpa::paths::Paths::default(),
-        ));
+        let paths = kpa::paths::Paths {
+            cache_dir: Some(dir.path().join("cache")),
+            known_hosts: Some(dir.path().join("known_hosts")),
+            ..kpa::paths::Paths::default()
+        };
+        let server = Arc::new(kpa::server::Server::new(config, paths.clone()));
         server.assume_origin(origin);
         kpa::policy::Locks::set_desk(
             &server,
@@ -185,6 +208,7 @@ impl InProcessDaemon {
         InProcessDaemon {
             socket,
             server,
+            paths,
             _dir: dir,
         }
     }

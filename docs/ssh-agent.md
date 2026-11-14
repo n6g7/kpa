@@ -435,7 +435,15 @@ contract as `prompt`, in dmenu style:
 - kpa writes the choices, `Allow` and `Deny`, on stdin and reads the chosen
   line from stdout.
 - A non-zero exit, or any other output, means deny.
-- `fuzzel --dmenu` works as is.
+- Any dmenu-style program works. Run it through `sh -c` so the message
+  reaches its argv:
+
+  ```toml
+  confirm_prompt = ["sh", "-c", "exec fuzzel --dmenu --prompt \"$KPA_PROMPT_MESSAGE\""]
+  ```
+
+  A dialog-style program (`zenity`, `kdialog`) needs a wrapper script that
+  prints `Allow` once the user confirms.
 - It is required once any database has `serve_ssh_keys = true`. Without it,
   `kpa serve` refuses to start.
 
@@ -864,9 +872,10 @@ programs' settings.
 - `Server` implements `SshHost` as a thin adapter over its database
   slots (the configured databases, slot access under the mutex behind the
   freshness guard, `may_prompt`) and `origin::PeerOrigin`. The approval
-  prompt goes through the daemon's prompt queue, which
-  `server::serve_ssh_agent` hands the agent, so only one prompt is ever
-  on screen, unlock's included. `ssh_agent` never imports `server`.
+  prompt goes through the daemon's prompt queue, so only one prompt is
+  ever on screen, unlock's included. `server::serve_ssh_agent` runs the
+  agent with that queue, and is all the binary needs. `ssh_agent` never
+  imports `server`.
 - Unlock waiters use a condvar.
 - The prompt and approval runner gains `KPA_PROMPT_MESSAGE` and the shared
   queue. The timeout and lock-kills-prompt come from
