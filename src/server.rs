@@ -92,7 +92,9 @@ impl Slot {
     fn lock(&mut self) {
         self.db = None;
         self.stamp = None;
-        self.prompt_cancel = None;
+        if let Some(cancel) = self.prompt_cancel.take() {
+            cancel.cancel();
+        }
         self.lock_epoch = self.lock_epoch.wrapping_add(1);
     }
 
@@ -450,7 +452,9 @@ impl Drop for UnlockingFlag<'_> {
     fn drop(&mut self) {
         if let Some(slot) = slots(self.dbs).get_mut(self.name) {
             slot.unlocking = false;
-            slot.prompt_cancel = None;
+            if let Some(cancel) = slot.prompt_cancel.take() {
+                cancel.cancel();
+            }
         }
     }
 }
