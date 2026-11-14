@@ -39,7 +39,7 @@ github:n6g7/kpa`) and a home-manager module:
     enable = true;
     settings = {
       idle_timeout = "30m";
-      prompt = [ "fuzzel" "--dmenu" "--password" "--prompt" ];
+      prompt = [ "sh" "-c" "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\"" ];
       database = [
         { name = "personal"; path = "/home/you/passwords.kdbx"; }
       ];
