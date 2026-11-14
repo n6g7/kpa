@@ -1,5 +1,6 @@
 //! [`SshSlot`]: the agent's per-database state, filled by a scan at unlock
-//! and dropped whole at lock.
+//! and dropped whole at lock, and [`KeyCache`], the public-key cache write
+//! that follows each scan.
 
 use keepass::Database;
 use ssh_key::PublicKey;
@@ -7,8 +8,7 @@ use ssh_key::PublicKey;
 use crate::config::DatabaseConfig;
 use crate::log;
 use crate::paths::Paths;
-use crate::ssh_agent::keys;
-use crate::vault;
+use crate::ssh_agent::keys::{self, SkipReason};
 
 /// The SSH-agent half of a database's slot (`docs/ssh-agent.md` § 6.4).
 /// Empty while locked, or for a database that doesn't serve SSH keys. The
@@ -21,35 +21,40 @@ pub struct SshSlot {
 }
 
 impl SshSlot {
-    /// Scans `db`, just unlocked, for SSH keys, resolves `cfg`'s settings
-    /// against what it finds, and writes the public-key cache under
-    /// `paths`' cache directory: everything `docs/ssh-agent.md` § 6.4 says
-    /// happens "after each scan". Scanning reads key headers only, so this
-    /// can run under the host's lock on its slots without stalling anything
-    /// noticeably.
-    pub fn scan(&mut self, db: &Database, cfg: &DatabaseConfig, paths: &Paths) {
-        let attachments = vault::list_attachments(db);
-        let scan = keys::scan(&attachments);
+    /// Scans `db`, just opened, for SSH keys and resolves `cfg`'s settings
+    /// against what it finds. Each skipped attachment is logged by entry
+    /// and reason, never by anything the vault holds. The scan parses
+    /// every key file in full, so the host runs it before taking its lock
+    /// on the slots, and installs the result after.
+    pub fn scan(db: &Database, cfg: &DatabaseConfig) -> SshSlot {
+        let scan = keys::scan(db);
         for skipped in &scan.skipped {
-            log::debug(format_args!(
-                "ssh key scan: skipped {:?} on {:?}: {:?}",
-                skipped.attachment_name, cfg.name, skipped.reason
+            let log = match skipped.reason {
+                // The user's key isn't served, and they can fix that.
+                SkipReason::ShortEcdsaScalar => log::warn,
+                _ => log::debug,
+            };
+            log(format_args!(
+                "ssh key scan: skipped an attachment on entry {} in {:?}: {}",
+                skipped.entry_uuid, cfg.name, skipped.reason
             ));
         }
-        self.served = keys::resolve(cfg, &scan.found);
-        let Some(dir) = keys::cache_dir(paths) else {
-            return;
-        };
-        let public_keys: Vec<PublicKey> = self
-            .served
-            .iter()
-            .map(|key| key.public_key.clone())
-            .collect();
-        if let Err(err) = keys::write_cache(&dir, &cfg.name, &public_keys) {
-            log::warn(format_args!(
-                "ssh key cache: failed to write {:?}: {err}",
-                cfg.name
-            ));
+        SshSlot {
+            served: keys::resolve(cfg, &scan.found),
+        }
+    }
+
+    /// The public-key cache write this scan calls for
+    /// (`docs/ssh-agent.md` § 6.4, "after each scan"), for the host to run
+    /// once it has released its lock on the slots.
+    pub fn cache(&self, database: &str) -> KeyCache {
+        KeyCache {
+            database: database.to_string(),
+            keys: self
+                .served
+                .iter()
+                .map(|key| key.public_key.clone())
+                .collect(),
         }
     }
 
@@ -60,13 +65,36 @@ impl SshSlot {
     }
 }
 
+/// One database's served public keys, to write to the cache.
+pub struct KeyCache {
+    database: String,
+    keys: Vec<PublicKey>,
+}
+
+impl KeyCache {
+    /// Writes the cache under `paths`' cache directory. Without one, there
+    /// is nowhere to write it; a failure is logged, since the database is
+    /// served all the same.
+    pub fn write(&self, paths: &Paths) {
+        let Some(dir) = keys::cache_dir(paths) else {
+            return;
+        };
+        if let Err(err) = keys::write_cache(&dir, &self.database, &self.keys) {
+            log::warn(format_args!(
+                "ssh key cache: failed to write {:?}: {err}",
+                self.database
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ssh_agent::testing::{database, key_database, test_key};
 
     #[test]
-    fn a_scan_serves_the_databases_keys_and_caches_their_public_halves() {
+    fn a_scan_serves_the_databases_keys_and_its_cache_holds_their_public_halves() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = Paths {
             cache_dir: Some(dir.path().to_path_buf()),
@@ -76,25 +104,24 @@ mod tests {
         let db = key_database(&[("github", &key)]);
         let cfg = database("personal", vec![]);
 
-        let mut slot = SshSlot::default();
-        slot.scan(&db, &cfg, &paths);
-
+        let slot = SshSlot::scan(&db, &cfg);
         assert_eq!(slot.served.len(), 1);
         assert_eq!(slot.served[0].name, "github");
-        let cached = keys::read_cache(&dir.path().join("kpa/ssh-keys"), "personal");
+
+        slot.cache("personal").write(&paths);
+        let cached = keys::read_cache(&keys::cache_dir(&paths).expect("cache dir"), "personal");
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].key_data(), key.public_key().key_data());
     }
 
     #[test]
-    fn a_scan_without_a_cache_directory_still_serves() {
+    fn a_cache_without_a_cache_directory_is_not_written() {
         let key = test_key(2);
-        let db = key_database(&[("github", &key)]);
-        let cfg = database("personal", vec![]);
-
-        let mut slot = SshSlot::default();
-        slot.scan(&db, &cfg, &Paths::default());
-        assert_eq!(slot.served.len(), 1);
+        let slot = SshSlot::scan(
+            &key_database(&[("github", &key)]),
+            &database("personal", vec![]),
+        );
         assert!(!slot.is_empty());
+        slot.cache("personal").write(&Paths::default());
     }
 }

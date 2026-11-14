@@ -7,8 +7,6 @@
 //! through [`sanitize_message`] before showing it, and callers pass plain
 //! text.
 
-use std::fmt::Write as _;
-
 /// Longest prompt message kept: generous for "Unlock personal" and for the
 /// key names and destinations an approval prompt adds, short enough that a
 /// hostile database or entry name can't hand the prompt program an
@@ -26,29 +24,12 @@ const MAX_PROMPT_MESSAGE_LEN: usize = 256;
 /// real key or destination out of view or fake a second line. Tab and
 /// newline are escaped for that reason.
 ///
-/// The rest of the escaping reuses `output::escape_for_terminal`, which
-/// covers that set but keeps tab and newline for its terminal output. The
-/// reuse is an implementation detail: the message is not meant for a
-/// terminal in particular.
+/// The escaping is `output::escape_one_line`, which SSH identity comments
+/// share; that the CLI's terminal escaping sits under it is an
+/// implementation detail, not a sign that the message is meant for a
+/// terminal.
 pub(super) fn sanitize_message(text: &str) -> String {
-    let mut message = String::with_capacity(text.len().min(MAX_PROMPT_MESSAGE_LEN));
-    let mut piece = String::new();
-    let mut utf8 = [0u8; 4];
-    for c in text.chars() {
-        piece.clear();
-        if matches!(c, '\t' | '\n') {
-            let _ = write!(piece, "\\u{:04x}", c as u32);
-        } else {
-            piece.push_str(&crate::output::escape_for_terminal(
-                c.encode_utf8(&mut utf8),
-            ));
-        }
-        if message.len() + piece.len() > MAX_PROMPT_MESSAGE_LEN {
-            break;
-        }
-        message.push_str(&piece);
-    }
-    message
+    crate::output::escape_one_line(text, MAX_PROMPT_MESSAGE_LEN)
 }
 
 #[cfg(test)]

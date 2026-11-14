@@ -45,7 +45,7 @@ impl ssh_key::rand_core::TryRng for TestRng {
 impl ssh_key::rand_core::TryCryptoRng for TestRng {}
 
 /// An Ed25519 key, the same for the same `seed`.
-pub(super) fn test_key(seed: u64) -> PrivateKey {
+pub(crate) fn test_key(seed: u64) -> PrivateKey {
     PrivateKey::random(&mut TestRng(seed), Algorithm::Ed25519).expect("key generation")
 }
 
@@ -67,7 +67,7 @@ pub(super) fn signed_bind(
 
 /// A database whose root holds one entry per `(title, key)`, each with the
 /// key as an OpenSSH attachment, the way a KeePass client stores one.
-pub(super) fn key_database(keys: &[(&str, &PrivateKey)]) -> keepass::Database {
+pub(crate) fn key_database(keys: &[(&str, &PrivateKey)]) -> keepass::Database {
     use keepass::db::{Value, fields};
 
     let mut db = keepass::Database::new();

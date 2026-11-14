@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::config::{DatabaseConfig, SshKeyConfirm};
 use crate::paths::Paths;
-use crate::vault::EntryAttachment;
+use crate::vault::{self, AttachmentView};
 
 /// Marks the one private-key format kpa reads (`docs/ssh-agent.md` § 6.4).
 const OPENSSH_MARKER: &[u8] = b"-----BEGIN OPENSSH PRIVATE KEY-----";
@@ -109,21 +109,21 @@ pub struct ScanResult {
     pub skipped: Vec<SkippedAttachment>,
 }
 
-/// Scans `attachments` — meant to be `vault::list_attachments`'s output for
-/// one database — for OpenSSH private keys, per `docs/ssh-agent.md` § 6.4:
-/// an attachment that doesn't start with either the OpenSSH or a PEM marker
-/// isn't a key at all and is silently ignored, rather than reported
-/// skipped — most attachments in a vault are not SSH keys.
-pub fn scan(attachments: &[EntryAttachment]) -> ScanResult {
+/// Scans `db`'s current-entry attachments, in tree order
+/// (`vault::for_each_attachment`), for OpenSSH private keys, per
+/// `docs/ssh-agent.md` § 6.4. Each is parsed straight from the database's
+/// own bytes, never copied. An attachment that doesn't start with either
+/// the OpenSSH or a PEM marker isn't a key at all and is silently ignored,
+/// rather than reported skipped — most attachments in a vault are not SSH
+/// keys.
+pub fn scan(db: &keepass::Database) -> ScanResult {
     let mut result = ScanResult::default();
-    for attachment in attachments {
-        classify(attachment, &mut result);
-    }
+    vault::for_each_attachment(db, |attachment| classify(attachment, &mut result));
     result
 }
 
-fn classify(attachment: &EntryAttachment, result: &mut ScanResult) {
-    let data = &attachment.data;
+fn classify(attachment: AttachmentView<'_>, result: &mut ScanResult) {
+    let data = attachment.data;
     if !data.starts_with(OPENSSH_MARKER) {
         if PEM_MARKERS.iter().any(|marker| data.starts_with(marker)) {
             result.skipped.push(skipped(attachment, SkipReason::Pem));
@@ -163,16 +163,16 @@ fn classify(attachment: &EntryAttachment, result: &mut ScanResult) {
         public_key,
         fingerprint,
         entry_uuid: attachment.entry_uuid,
-        entry_title: attachment.entry_title.clone(),
-        attachment_name: attachment.attachment_name.clone(),
+        entry_title: attachment.entry_title.map(str::to_owned),
+        attachment_name: attachment.name.to_string(),
     });
 }
 
-fn skipped(attachment: &EntryAttachment, reason: SkipReason) -> SkippedAttachment {
+fn skipped(attachment: AttachmentView<'_>, reason: SkipReason) -> SkippedAttachment {
     SkippedAttachment {
         entry_uuid: attachment.entry_uuid,
-        entry_title: attachment.entry_title.clone(),
-        attachment_name: attachment.attachment_name.clone(),
+        entry_title: attachment.entry_title.map(str::to_owned),
+        attachment_name: attachment.name.to_string(),
         reason,
     }
 }
@@ -265,26 +265,55 @@ pub fn resolve(cfg: &DatabaseConfig, found: &[FoundKey]) -> Vec<ServedKey> {
     found
         .iter()
         .filter_map(|key| {
-            let settings = cfg.ssh_key_settings(key.fingerprint);
-            if !settings.serve {
-                return None;
-            }
-            Some(ServedKey {
-                database: cfg.name.clone(),
-                public_key: key.public_key.clone(),
-                fingerprint: key.fingerprint,
-                name: key_name(
-                    &cfg.name,
-                    key.fingerprint,
-                    settings.name.as_deref(),
-                    key.entry_title.as_deref(),
-                ),
-                entry_uuid: key.entry_uuid,
-                confirm: settings.confirm,
-                forwarded: settings.forwarded,
-            })
+            served(
+                cfg,
+                key.public_key.clone(),
+                key.entry_uuid,
+                key.entry_title.as_deref(),
+            )
         })
         .collect()
+}
+
+/// [`resolve`] for the keys a locked database's cache lists
+/// ([`read_cache`]). The cache holds no titles and no entries, so a key
+/// without a `name` override is named `<database> <fingerprint>`, and its
+/// `entry_uuid` is nil.
+pub fn resolve_cached(cfg: &DatabaseConfig, cached: Vec<PublicKey>) -> Vec<ServedKey> {
+    cached
+        .into_iter()
+        .filter_map(|public_key| served(cfg, public_key, Uuid::nil(), None))
+        .collect()
+}
+
+/// One key as `cfg` serves it, or `None` if a `serve = false` override
+/// hides it: the one place the settings are applied, for scanned and
+/// cached keys alike.
+fn served(
+    cfg: &DatabaseConfig,
+    public_key: PublicKey,
+    entry_uuid: Uuid,
+    entry_title: Option<&str>,
+) -> Option<ServedKey> {
+    let fingerprint = public_key.fingerprint(HashAlg::Sha256);
+    let settings = cfg.ssh_key_settings(fingerprint);
+    if !settings.serve {
+        return None;
+    }
+    Some(ServedKey {
+        database: cfg.name.clone(),
+        public_key,
+        fingerprint,
+        name: key_name(
+            &cfg.name,
+            fingerprint,
+            settings.name.as_deref(),
+            entry_title,
+        ),
+        entry_uuid,
+        confirm: settings.confirm,
+        forwarded: settings.forwarded,
+    })
 }
 
 /// A key's display name (`docs/ssh-agent.md` § 6.4 "Names"): the override's
@@ -391,7 +420,6 @@ mod tests {
 
     use super::*;
     use crate::config::SshKeyConfig;
-    use crate::vault::EntryAttachment;
 
     /// `ssh-key`'s own test vector (`tests/examples/id_ed25519`):
     /// unencrypted Ed25519.
@@ -503,13 +531,38 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
 -----END OPENSSH PRIVATE KEY-----
 ";
 
-    fn attachment(name: &str, data: &str) -> EntryAttachment {
-        EntryAttachment {
+    /// One attachment, owned, for building a scan by hand.
+    struct TestAttachment {
+        entry_uuid: Uuid,
+        entry_title: String,
+        name: String,
+        data: Vec<u8>,
+    }
+
+    fn attachment(name: &str, data: &str) -> TestAttachment {
+        TestAttachment {
             entry_uuid: Uuid::new_v4(),
-            entry_title: Some(name.to_string()),
-            attachment_name: format!("{name}.key"),
+            entry_title: name.to_string(),
+            name: format!("{name}.key"),
             data: data.as_bytes().to_vec(),
         }
+    }
+
+    /// `super::scan`'s classification, over hand-built attachments.
+    fn scan(attachments: &[TestAttachment]) -> ScanResult {
+        let mut result = ScanResult::default();
+        for attachment in attachments {
+            classify(
+                AttachmentView {
+                    entry_uuid: attachment.entry_uuid,
+                    entry_title: Some(&attachment.entry_title),
+                    name: &attachment.name,
+                    data: &attachment.data,
+                },
+                &mut result,
+            );
+        }
+        result
     }
 
     #[test]

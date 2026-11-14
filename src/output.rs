@@ -45,6 +45,31 @@ fn needs_terminal_escape(c: char) -> bool {
     )
 }
 
+/// `text` escaped for a one-line display of untrusted text, at most
+/// `max_len` bytes: what [`escape_for_terminal`] escapes, plus tab and
+/// newline, which it keeps for terminal output but which would break a
+/// line here. The cap falls between whole characters and whole escapes,
+/// never inside one. Used for a prompt's message and an SSH identity's
+/// comment.
+pub fn escape_one_line(text: &str, max_len: usize) -> String {
+    let mut line = String::with_capacity(text.len().min(max_len));
+    let mut piece = String::new();
+    let mut utf8 = [0u8; 4];
+    for c in text.chars() {
+        piece.clear();
+        if needs_terminal_escape(c) || matches!(c, '\t' | '\n') {
+            let _ = write!(piece, "\\u{:04x}", c as u32);
+        } else {
+            piece.push_str(c.encode_utf8(&mut utf8));
+        }
+        if line.len() + piece.len() > max_len {
+            break;
+        }
+        line.push_str(&piece);
+    }
+    line
+}
+
 /// Prints `text` to stdout with no trailing newline added, escaped.
 pub fn print_escaped(text: &str) {
     print!("{}", escape_for_terminal(text));

@@ -24,7 +24,7 @@ pub mod keys;
 pub mod policy;
 pub mod serve;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 pub mod wire;
 
 pub(crate) use agent::{Agent, SlotView, SshHost, SshSlot};

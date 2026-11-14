@@ -55,7 +55,7 @@ impl<H: SshHost> PeerOrigin for Agent<H> {
 }
 
 impl<H: SshHost> SshSign for Agent<H> {
-    fn ssh_identities(&self, class: &ConnectionClass) -> Vec<Identity> {
+    fn ssh_identities(&self, class: &ConnectionClass, _origin: Origin) -> Vec<Identity> {
         identities::identities(self.host.as_ref(), self.cache_dir.as_deref(), class)
     }
 
@@ -95,7 +95,9 @@ mod tests {
         );
 
         assert_eq!(
-            agent.ssh_identities(&ConnectionClass::LocalUnbound).len(),
+            agent
+                .ssh_identities(&ConnectionClass::LocalUnbound, Origin::Desktop)
+                .len(),
             1
         );
     }

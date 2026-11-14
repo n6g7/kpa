@@ -265,6 +265,27 @@ pub enum AgentResponse {
     ExtensionResponse(Vec<String>),
 }
 
+/// Keeps as many of `identities`, in order, as fit in one
+/// `SSH_AGENT_IDENTITIES_ANSWER` within [`MAX_FRAME_LEN`], and says how
+/// many it had to drop. Listing fewer keys is better than an answer that
+/// can't be sent at all.
+pub fn fit_identities(mut identities: Vec<Identity>) -> (Vec<Identity>, usize) {
+    // The type byte and the identity count.
+    let mut len = 1 + 4;
+    let fits = identities
+        .iter()
+        .take_while(|identity| {
+            // Each of the key blob and the comment is a `string`: a u32
+            // length, then its bytes.
+            len += 4 + identity.key_blob.len() + 4 + identity.comment.len();
+            len <= MAX_FRAME_LEN
+        })
+        .count();
+    let dropped = identities.len() - fits;
+    identities.truncate(fits);
+    (identities, dropped)
+}
+
 /// Encode `response` into the bytes to write to the socket — framed, ready
 /// to go straight to the connection.
 pub fn encode_response(response: &AgentResponse) -> Vec<u8> {
@@ -438,6 +459,27 @@ mod tests {
         assert!(!request.flags.rsa_sha2_256());
         assert!(!request.flags.rsa_sha2_512());
         assert_eq!(request.flags.raw(), 0x8000_0000);
+    }
+
+    /// An answer of every identity would be too big to frame: the ones
+    /// that fit are kept, in order, and the rest are counted.
+    #[test]
+    fn fit_identities_keeps_what_fits_in_one_frame() {
+        let identity = |n: usize| Identity {
+            key_blob: vec![0; 1000],
+            comment: format!("key {n}"),
+        };
+        let all: Vec<Identity> = (0..1000).map(identity).collect();
+        let (kept, dropped) = fit_identities(all);
+
+        assert_eq!(kept.len() + dropped, 1000);
+        assert!(dropped > 0);
+        assert_eq!(kept[0].comment, "key 0");
+        let encoded = encode_response(&AgentResponse::IdentitiesAnswer(kept));
+        assert!(encoded.len() <= 4 + MAX_FRAME_LEN);
+
+        let (few, none) = fit_identities(vec![identity(0), identity(1)]);
+        assert_eq!((few.len(), none), (2, 0));
     }
 
     #[test]

@@ -37,7 +37,7 @@ impl FakeHost {
         {
             let mut slots = host.slots.lock().expect("slots");
             let (open, ssh) = slots.get_mut(&cfg.name).expect("configured");
-            ssh.scan(&db, cfg, &crate::paths::Paths::default());
+            *ssh = SshSlot::scan(&db, cfg);
             *open = Some(db);
         }
         host

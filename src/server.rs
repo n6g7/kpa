@@ -106,14 +106,6 @@ impl Slot {
         self.lock_epoch = self.lock_epoch.wrapping_add(1);
     }
 
-    /// Scans the open database for the SSH keys `cfg` serves, which also
-    /// writes the public-key cache under `paths`.
-    fn scan_ssh_keys(&mut self, cfg: &DatabaseConfig, paths: &Paths) {
-        if let Some(db) = &self.db {
-            self.ssh.scan(db, cfg, paths);
-        }
-    }
-
     /// Installs a freshly opened database, with the fingerprint it was opened
     /// from, and starts its idle timer.
     fn install(&mut self, db: Database, stamp: Fingerprint) {
@@ -157,9 +149,9 @@ impl Default for Slot {
 /// a password; not holding it is what makes the lock epoch necessary.
 pub struct Server {
     config: Config,
-    /// The file locations `main.rs` resolved at startup: where an unlock's
-    /// scan writes the SSH public-key cache, and where the SSH agent reads
-    /// it back.
+    /// The file locations `main.rs` resolved at startup: where an unlock
+    /// writes the SSH public-key cache, and where the SSH agent reads it
+    /// back.
     paths: Paths,
     dbs: Mutex<HashMap<String, Slot>>,
     /// Told about each successful unlock, so the lock policy can take its
@@ -587,6 +579,9 @@ impl Unlock for Server {
         // flag at least bounds it to one stuck thread per database.
         let (opened, stamp) = vault::open(&cfg.path, password, cfg.keyfile.as_deref())
             .map_err(|err| unlock_error(name, err))?;
+        // The SSH key scan parses every key file, so it runs here, before
+        // the mutex, like the key derivation above.
+        let ssh = cfg.serve_ssh_keys.then(|| SshSlot::scan(&opened, cfg));
 
         let mut dbs = slots(&self.dbs);
         let Some(slot) = dbs.get_mut(name) else {
@@ -599,10 +594,16 @@ impl Unlock for Server {
             return Err(UnlockError::LockedDuringUnlock { db: db() });
         }
         slot.install(opened, stamp);
-        if cfg.serve_ssh_keys {
-            slot.scan_ssh_keys(cfg, &self.paths);
-        }
+        let cache = ssh.map(|ssh| {
+            let cache = ssh.cache(name);
+            slot.ssh = ssh;
+            cache
+        });
         drop(dbs);
+        // A file write with an fsync: after the mutex, never under it.
+        if let Some(cache) = cache {
+            cache.write(&self.paths);
+        }
         self.notify_unlocked();
         // Logged here rather than in `log_response`: only this path knows
         // the database was actually opened, as opposed to already unlocked.
@@ -1341,22 +1342,11 @@ mod tests {
         slots(&server.dbs)[name].db.is_some()
     }
 
-    /// `ssh-key`'s own test vector (`tests/examples/id_ed25519`):
-    /// unencrypted Ed25519.
-    const ED25519: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACCzPq7zfqLffKoBDe/eo04kH2XxtSmk9D7RQyf1xUqrYgAAAJgAIAxdACAM
-XQAAAAtzc2gtZWQyNTUxOQAAACCzPq7zfqLffKoBDe/eo04kH2XxtSmk9D7RQyf1xUqrYg
-AAAEC2BsIi0QwW2uFscKTUUXNHLsYX4FxlaSDSblbAj7WR7bM+rvN+ot98qgEN796jTiQf
-ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
------END OPENSSH PRIVATE KEY-----
-";
-
     /// What an unlock's scan found for a database goes with it on lock,
     /// so none of it outlives the database.
     #[test]
     fn a_lock_resets_the_ssh_agent_state() {
-        use keepass::db::{Value, fields};
+        use crate::ssh_agent::testing::{key_database, test_key};
 
         let server = Server::new(
             Config::parse(
@@ -1371,17 +1361,9 @@ ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
         {
             let mut dbs = slots(&server.dbs);
             let slot = dbs.get_mut("personal").expect("configured");
-            {
-                let db = slot.db.as_mut().expect("unlocked");
-                let mut root = db.root_mut();
-                let mut entry = root.add_entry();
-                entry.set_unprotected(fields::TITLE, "github");
-                entry.add_attachment(
-                    "id_ed25519",
-                    Value::unprotected(ED25519.as_bytes().to_vec()),
-                );
-            }
-            slot.scan_ssh_keys(&server.config.databases[0], &server.paths);
+            let db = key_database(&[("github", &test_key(1))]);
+            slot.ssh = SshSlot::scan(&db, &server.config.databases[0]);
+            slot.db = Some(db);
             assert!(!slot.ssh.is_empty(), "sanity: the scan found the key");
         }
 
