@@ -15,12 +15,12 @@ fn attachments() -> Vec<EntryAttachment> {
     vault::list_attachments(&db)
 }
 
-/// Scanning finds exactly the three OpenSSH keys (Ed25519, the
-/// passphrase-protected one, and RSA) and reports the PEM one as skipped —
+/// Scanning finds exactly the three usable OpenSSH keys (Ed25519, ECDSA
+/// and RSA) and reports the passphrase-protected and PEM ones as skipped —
 /// the key attachments on `"Historical"` and `"Recycled"` are invisible,
 /// since one lives only in history and the other only in the recycle bin.
 #[test]
-fn scan_finds_exactly_the_three_openssh_keys_and_skips_the_pem_one() {
+fn scan_finds_the_three_usable_keys_and_skips_the_encrypted_and_pem_ones() {
     let result = keys::scan(&attachments());
 
     let mut found_names: Vec<&str> = result

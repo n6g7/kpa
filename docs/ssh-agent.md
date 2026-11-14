@@ -131,7 +131,7 @@ Rejected. It stays the answer for keys that can't live in the vault (§ 2).
 | Sees each use               | No. Cannot log, approve by context, or apply per-request policy                                                                              | Yes                                                       |
 | Local vs forwarded          | Only via destination constraints, fixed when the key is added                                                                                | Decided per request                                       |
 | Idle timer                  | kpa cannot see SSH use, so the idle lock removes keys mid-session                                                                            | kpa decides what counts as activity (§ 6.9)               |
-| Crypto in kpa               | Parse the OpenSSH key file, which the agent needs in its own wire format                                                         | The same, plus calling `sign`                             |
+| Crypto in kpa               | Parse the OpenSSH key file, which the agent needs in its own wire format                                                                     | The same, plus calling `sign`                             |
 | Compatible agents           | OpenSSH's `ssh-agent`. Not `gpg-agent`, which cannot remove added keys                                                                       | Any agent-protocol client                                 |
 
 The "Write UI, not crypto" rule in [`background.md`](./background.md) still
@@ -287,16 +287,16 @@ scans it:
    `-----BEGIN OPENSSH PRIVATE KEY-----`. Other formats (PEM PKCS#1 or
    PKCS#8) are skipped. `ssh-keygen -p -f <file>` rewrites one in OpenSSH
    format.
-3. Read each key's public key from the file's header, which is stored
-   unencrypted. Passphrase-protected keys are skipped too, since kpa has
-   no passphrase to open them with. Each skipped attachment is logged at
-   unlock with its reason.
+3. Parse each key file in full, to learn its type and public key, then
+   drop the parsed key. Passphrase-protected keys are skipped too, since
+   kpa has no passphrase to open them with. Each skipped attachment is
+   logged at unlock with its reason.
 4. Drop keys that one of the database's overrides marks `serve = false`.
    A key found in two opted-in databases is served from the first one in
    config order.
 
-The private key is read at its first signature and cached in the database's
-`Slot` until lock.
+The private key is read again at its first signature and cached in the
+database's `Slot` until lock.
 
 **The key cache.** After each scan, kpa writes the database's public keys
 to `$XDG_CACHE_HOME/kpa/ssh-keys/<database>`, where `<database>` is the
@@ -360,6 +360,13 @@ can produce: `ssh` then offers only that agent key.
   there), and on `sha2` 0.11, the version kpa already uses. 0.7 is still in
   release candidates: kpa pins the current one exactly (`=0.7.0-rc.N`) and
   bumps it deliberately. The SSH release waits for 0.7.0 itself.
+- **Known limitation of 0.7.0-rc.12**: it can't read an
+  `ecdsa-sha2-nistp256` private key whose scalar OpenSSH encoded in 31
+  bytes, which about 1 generated key in 512 is
+  ([RustCrypto/SSH#620](https://github.com/RustCrypto/SSH/issues/620),
+  [#623](https://github.com/RustCrypto/SSH/issues/623); fixed upstream
+  after rc.12). The scan skips such a key and logs it with the remedy:
+  regenerate the key. The bump to 0.7.0 lifts the limitation.
 
 ### 6.6 Unlock on demand
 
@@ -837,7 +844,7 @@ programs' settings.
 | `bind.rs`     | session-bind verification and per-connection binding state                                                                                      |
 | `classify.rs` | Data to be signed → `Purpose::{Login, SshSig, Other}`. Pure, fuzzed                                                                             |
 | `policy.rs`   | (key settings, connection class, purpose, database state, approvals, prompt availability) → `Sign`, `Approve`, `Unlock`, `Refuse(reason)`. Pure, with exhaustive tests like `policy::Policy` |
-| `keys.rs`     | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                    |
+| `keys.rs`     | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                   |
 | `approve.rs`  | Approvals and pending requests: their scopes, limits and expiry                                                                                 |
 | `serve.rs`    | Listener, per-connection thread, connection cap                                                                                                 |
 

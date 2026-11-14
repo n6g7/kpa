@@ -34,9 +34,9 @@ const PEM_MARKERS: [&[u8]; 2] = [
 const MIN_RSA_BITS: u32 = 2048;
 
 /// One OpenSSH private key found among a database's current-entry
-/// attachments: its public half only, read from the attachment's
-/// unencrypted header. `parse_private_key` reads the private half later,
-/// lazily, and only once the key is actually used.
+/// attachments: its public half only. `scan` parses the whole key file to
+/// learn its type and public key, then drops the parsed private key;
+/// `parse_private_key` reads it again at the key's first signature.
 #[derive(Debug, Clone)]
 pub struct FoundKey {
     pub public_key: PublicKey,
@@ -61,6 +61,36 @@ pub enum SkipReason {
     RsaTooSmall(u32),
     /// Protected by a passphrase, which kpa has no way to ask for.
     Encrypted,
+    /// An `ecdsa-sha2-nistp256` key whose private scalar is encoded in 31
+    /// bytes, which `ssh-key` 0.7.0-rc.12 can't read
+    /// (`docs/ssh-agent.md` § 6.5). Regenerating the key fixes it.
+    ShortEcdsaScalar,
+}
+
+/// What a log line says about a skipped attachment: the reason, and what
+/// to do about it where there is something to do.
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SkipReason::Pem => write!(
+                f,
+                "PEM format; `ssh-keygen -p -f <file>` rewrites it in OpenSSH format"
+            ),
+            SkipReason::Unparseable => write!(f, "not a readable OpenSSH private key"),
+            SkipReason::UnsupportedType(algorithm) => {
+                write!(f, "unsupported key type {algorithm}")
+            }
+            SkipReason::RsaTooSmall(bits) => {
+                write!(f, "RSA key of {bits} bits, under {MIN_RSA_BITS}")
+            }
+            SkipReason::Encrypted => write!(f, "protected by a passphrase"),
+            SkipReason::ShortEcdsaScalar => write!(
+                f,
+                "a P-256 key this build can't read (its private scalar is 31 bytes); \
+                 regenerate the key"
+            ),
+        }
+    }
 }
 
 /// One attachment `scan` didn't read as a served key, and why.
@@ -103,10 +133,13 @@ fn classify(attachment: &EntryAttachment, result: &mut ScanResult) {
 
     let private_key = match PrivateKey::from_openssh(data) {
         Ok(key) => key,
-        Err(_) => {
-            result
-                .skipped
-                .push(skipped(attachment, SkipReason::Unparseable));
+        Err(err) => {
+            let reason = if is_short_p256_scalar(data, &err) {
+                SkipReason::ShortEcdsaScalar
+            } else {
+                SkipReason::Unparseable
+            };
+            result.skipped.push(skipped(attachment, reason));
             return;
         }
     };
@@ -142,6 +175,51 @@ fn skipped(attachment: &EntryAttachment, reason: SkipReason) -> SkippedAttachmen
         attachment_name: attachment.attachment_name.clone(),
         reason,
     }
+}
+
+/// Whether `err`, from parsing the OpenSSH key file `data`, is `ssh-key`
+/// 0.7.0-rc.12 refusing a P-256 private scalar encoded in 31 bytes: a
+/// length error on a file whose unencrypted header holds a P-256 public
+/// key (`docs/ssh-agent.md` § 6.5).
+fn is_short_p256_scalar(data: &[u8], err: &ssh_key::Error) -> bool {
+    matches!(
+        err,
+        ssh_key::Error::Encoding(ssh_key::encoding::Error::Length)
+    ) && matches!(
+        header_public_key(data),
+        Some(KeyData::Ecdsa(ssh_key::public::EcdsaPublicKey::NistP256(_)))
+    )
+}
+
+/// The public key in an OpenSSH private key file's header, read without
+/// touching the private section (`PROTOCOL.key`: the magic, cipher, KDF,
+/// KDF options, key count, then the first public key). The decoded file
+/// holds the private section too, so it is zeroized when dropped.
+fn header_public_key(data: &[u8]) -> Option<KeyData> {
+    use base64::Engine as _;
+    use ssh_key::encoding::Decode;
+    use zeroize::Zeroizing;
+
+    let text = std::str::from_utf8(data).ok()?;
+    let body: Zeroizing<String> = Zeroizing::new(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("-----"))
+            .collect(),
+    );
+    let decoded = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(body.as_bytes())
+            .ok()?,
+    );
+    let mut reader = decoded.strip_prefix(b"openssh-key-v1\0")?;
+    for _ in 0..3 {
+        // cipher name, KDF name, KDF options
+        Vec::<u8>::decode(&mut reader).ok()?;
+    }
+    u32::decode(&mut reader).ok()?;
+    let public_key = Vec::<u8>::decode(&mut reader).ok()?;
+    KeyData::decode(&mut public_key.as_slice()).ok()
 }
 
 /// `None` for `docs/ssh-agent.md` § 6.5's supported set — Ed25519,
@@ -469,6 +547,76 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
         let result = scan(&attachments);
         assert!(result.found.is_empty());
         assert_eq!(result.skipped[0].reason, SkipReason::Unparseable);
+    }
+
+    /// A throwaway P-256 public key, for building key files by hand.
+    const P256_PUB: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBAtn2zrH1k1g0t0P6NGtQP8xzOSu+FhsxU4sOqL6vXYEcMqCgcdlAmUZUlhF6CTkL93+eiXpYaslDIJzZPfT/Aw=";
+
+    /// An unencrypted OpenSSH key file (`PROTOCOL.key`) for `P256_PUB`
+    /// whose private scalar is `scalar`, encoded as given, the way OpenSSH
+    /// writes a scalar with a leading zero byte.
+    fn p256_key_file(scalar: &[u8]) -> String {
+        use base64::Engine as _;
+        use ssh_key::encoding::Encode;
+
+        let public = PublicKey::from_openssh(P256_PUB).expect("test key");
+        let KeyData::Ecdsa(point) = public.key_data() else {
+            panic!("not an ECDSA key");
+        };
+        let mut private = Vec::new();
+        0x0102_0304_u32.encode(&mut private).expect("encode");
+        0x0102_0304_u32.encode(&mut private).expect("encode");
+        "ecdsa-sha2-nistp256".encode(&mut private).expect("encode");
+        "nistp256".encode(&mut private).expect("encode");
+        point.as_sec1_bytes().encode(&mut private).expect("encode");
+        scalar.encode(&mut private).expect("encode");
+        "".encode(&mut private).expect("encode");
+        let mut pad = 1u8;
+        while private.len() % 8 != 0 {
+            private.push(pad);
+            pad += 1;
+        }
+
+        let mut file = b"openssh-key-v1\0".to_vec();
+        "none".encode(&mut file).expect("encode");
+        "none".encode(&mut file).expect("encode");
+        "".encode(&mut file).expect("encode");
+        1u32.encode(&mut file).expect("encode");
+        public
+            .key_data()
+            .encode_vec()
+            .expect("encode")
+            .as_slice()
+            .encode(&mut file)
+            .expect("encode");
+        private.as_slice().encode(&mut file).expect("encode");
+
+        let body = base64::engine::general_purpose::STANDARD.encode(file);
+        let lines: Vec<&str> = body
+            .as_bytes()
+            .chunks(70)
+            .map(|line| std::str::from_utf8(line).expect("base64 is ASCII"))
+            .collect();
+        format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+            lines.join("\n")
+        )
+    }
+
+    /// `ssh-key` 0.7.0-rc.12 can't read a P-256 key whose scalar OpenSSH
+    /// wrote in 31 bytes: the scan names that case, so its log line can
+    /// give the remedy, rather than calling the key unparseable.
+    #[test]
+    fn scan_names_a_p256_key_with_a_31_byte_scalar() {
+        let result = scan(&[attachment("id_ecdsa", &p256_key_file(&[0x11; 31]))]);
+        assert!(result.found.is_empty());
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].reason, SkipReason::ShortEcdsaScalar);
+        assert!(
+            SkipReason::ShortEcdsaScalar
+                .to_string()
+                .contains("regenerate the key")
+        );
     }
 
     #[test]
