@@ -12,7 +12,7 @@ pub mod origin;
 pub mod output;
 pub mod paths;
 pub mod policy;
-pub mod prompt;
+mod prompt;
 pub mod proto;
 pub mod server;
 pub mod socket;

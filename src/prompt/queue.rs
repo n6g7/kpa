@@ -23,7 +23,7 @@ struct PromptQueueState {
 
 /// Serializes every prompt across every database, so only one is ever on
 /// screen (`docs/ssh-agent.md` § 6.7's "only one prompt is on screen at a
-/// time"). `unlock`'s prompt and the SSH agent's approval prompt share one.
+/// time"). Every prompt shares one.
 pub struct PromptQueue {
     state: Mutex<PromptQueueState>,
 }

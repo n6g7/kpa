@@ -1,7 +1,5 @@
 //! The external-program backend: runs a dmenu-style prompt program and
-//! reads its answer. [`run_prompt`] returns what it printed;
-//! [`run_approval_prompt`] offers it `Allow` and `Deny` and reads which it
-//! chose.
+//! reads its answer: [`run_prompt`] returns what it printed.
 //!
 //! The prompt program's argv runs exactly as configured; what the prompt is
 //! about reaches it through the `KPA_PROMPT_MESSAGE` environment variable
@@ -14,7 +12,7 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use super::message::sanitize_message;
-use super::{Approval, CancelWatch, PromptOutcome, PromptQueue};
+use super::{CancelWatch, PromptOutcome, PromptQueue};
 use crate::proto::MAX_PASSWORD_LEN;
 
 /// The longest answer read; one more byte is an error. An answer can be a
@@ -30,9 +28,6 @@ const MAX_ANSWER_LEN: usize = MAX_PASSWORD_LEN;
 /// Either way the argv itself runs exactly as configured — kpa never
 /// rewrites it.
 const PROMPT_MESSAGE_ENV: &str = "KPA_PROMPT_MESSAGE";
-
-/// What an approval prompt is offered, one choice per line.
-const APPROVAL_CHOICES: &[u8] = b"Allow\nDeny\n";
 
 /// Runs `argv` as a prompt (`docs/design.md` decision #9), queued through
 /// `queue` so only one is ever on screen, and returns what it printed.
@@ -66,37 +61,9 @@ pub fn run_prompt(
     run(queue, argv, message, timeout, cancel, None)
 }
 
-/// Runs `argv` as an approval prompt: `Allow` and `Deny` go to its stdin
-/// one per line, and exactly `Allow` on stdout is [`Approval::Allow`];
-/// anything else it prints is [`Approval::Deny`]. Otherwise as
-/// [`run_prompt`].
-pub fn run_approval_prompt(
-    queue: &PromptQueue,
-    argv: &[String],
-    message: &str,
-    timeout: Duration,
-    cancel: &CancelWatch,
-) -> std::io::Result<PromptOutcome<Approval>> {
-    let outcome = run(
-        queue,
-        argv,
-        message,
-        timeout,
-        cancel,
-        Some(APPROVAL_CHOICES),
-    )?;
-    Ok(outcome.map(|answer| {
-        if answer.as_str() == "Allow" {
-            Approval::Allow
-        } else {
-            Approval::Deny
-        }
-    }))
-}
-
-/// Both prompts' shared body. `stdin`, when given, is written before
-/// anything is read — a prompt that picks among choices gets them this
-/// way, one per line.
+/// `run_prompt`'s body. `stdin`, when given, is written before anything
+/// is read — a prompt that picks among choices gets them this way, one per
+/// line.
 fn run(
     queue: &PromptQueue,
     argv: &[String],
@@ -309,34 +276,6 @@ mod tests {
             Duration::from_secs(60),
             &watch,
         )
-    }
-
-    fn approval(script: &str) -> std::io::Result<PromptOutcome<Approval>> {
-        let (_cancel, watch) = cancel_pair().expect("cancel pair");
-        run_approval_prompt(
-            &PromptQueue::new(),
-            &sh(script),
-            "test message",
-            Duration::from_secs(60),
-            &watch,
-        )
-    }
-
-    #[test]
-    fn an_approval_prompt_allows_only_an_exact_allow() {
-        let _spawning = spawn_lock();
-        for (script, expected) in [
-            ("sed -n 1p", Approval::Allow),
-            ("sed -n 2p", Approval::Deny),
-            ("echo allow", Approval::Deny),
-            ("echo 'Allow now'", Approval::Deny),
-        ] {
-            assert!(
-                matches!(approval(script), Ok(PromptOutcome::Answer(a)) if a == expected),
-                "{script}"
-            );
-        }
-        assert!(matches!(approval("exit 1"), Ok(PromptOutcome::Cancelled)));
     }
 
     #[test]

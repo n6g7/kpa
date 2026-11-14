@@ -18,8 +18,7 @@ pub struct PromptCancel {
     _end: UnixStream,
 }
 
-/// The prompt side's end, passed to [`run_prompt`](super::run_prompt) and
-/// [`run_approval_prompt`](super::run_approval_prompt).
+/// The prompt side's end, passed to [`run_prompt`](super::run_prompt).
 pub struct CancelWatch {
     end: UnixStream,
 }
