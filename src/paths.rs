@@ -1,8 +1,10 @@
-//! Where kpa's files live on this machine. [`Paths::from_env`] reads the
-//! environment once, at startup, and everything else is handed the
-//! `Paths` it resolved: no other module looks a location up for itself,
-//! and a test builds its own `Paths` rather than depending on this
-//! process's environment.
+//! Where kpa's sockets, caches and OpenSSH's `known_hosts` live on this
+//! machine. [`Paths::from_env`] reads them from the environment once, at
+//! startup, and the code that needs one is handed the `Paths` it resolved;
+//! a test builds its own `Paths` rather than depending on this process's
+//! environment. Two locations are looked up by their own subsystems
+//! instead: the config file (`config`) and the Wayland compositor's socket
+//! (`wayland`).
 //!
 //! These are the per-user base directories, not kpa's own files: each
 //! caller joins its own name under `kpa/` (the main socket in `main.rs`,
@@ -16,7 +18,8 @@ use std::path::PathBuf;
 
 /// The per-user locations kpa uses. Each is `None` when the environment
 /// doesn't say where it is; whoever needs one decides whether that's an
-/// error.
+/// error. A variable that is empty or holds a relative path counts as
+/// unset, as the XDG Base Directory specification says for its own.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Paths {
     /// The per-user runtime directory, for sockets: `$XDG_RUNTIME_DIR`.
@@ -37,15 +40,21 @@ impl Paths {
     /// [`Paths::from_env`] with the environment lookup passed in, so tests
     /// don't read or change the process's own.
     fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Paths {
-        let home = var("HOME").map(PathBuf::from);
+        let dir = |name| absolute(var(name));
+        let home = dir("HOME");
         Paths {
-            runtime_dir: var("XDG_RUNTIME_DIR").map(PathBuf::from),
-            cache_dir: var("XDG_CACHE_HOME")
-                .map(PathBuf::from)
+            runtime_dir: dir("XDG_RUNTIME_DIR"),
+            cache_dir: dir("XDG_CACHE_HOME")
                 .or_else(|| home.as_ref().map(|home| home.join(".cache"))),
             known_hosts: home.map(|home| home.join(".ssh/known_hosts")),
         }
     }
+}
+
+/// `value` as a path, if it is an absolute one. Empty and relative values
+/// are `None`.
+fn absolute(value: Option<OsString>) -> Option<PathBuf> {
+    value.map(PathBuf::from).filter(|path| path.is_absolute())
 }
 
 #[cfg(test)]
@@ -84,6 +93,20 @@ mod tests {
         let paths = paths(&[("HOME", "/home/me")]);
         assert_eq!(paths.cache_dir, Some(PathBuf::from("/home/me/.cache")));
         assert_eq!(paths.runtime_dir, None);
+    }
+
+    #[test]
+    fn empty_and_relative_values_count_as_unset() {
+        let resolved = paths(&[
+            ("XDG_RUNTIME_DIR", ""),
+            ("XDG_CACHE_HOME", "cache"),
+            ("HOME", "/home/me"),
+        ]);
+        assert_eq!(resolved.runtime_dir, None);
+        assert_eq!(resolved.cache_dir, Some(PathBuf::from("/home/me/.cache")));
+
+        assert_eq!(paths(&[("HOME", "home/me")]), Paths::default());
+        assert_eq!(paths(&[("HOME", "")]), Paths::default());
     }
 
     #[test]

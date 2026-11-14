@@ -97,8 +97,9 @@ fn dispatch(cli: Cli) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Every location kpa uses, read from the environment here and nowhere
-    // else.
+    // The socket, cache and `known_hosts` locations, read from the
+    // environment once. The config path and the Wayland socket are looked
+    // up by their own subsystems.
     let paths = Paths::from_env();
 
     // Reports the CLI's own version unconditionally, then best-efforts the
