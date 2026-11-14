@@ -25,7 +25,6 @@ impl ssh_key::rand_core::TryRng for TestRng {
     type Error = std::convert::Infallible;
 
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        #[allow(clippy::cast_possible_truncation)]
         Ok(self.next() as u32)
     }
 

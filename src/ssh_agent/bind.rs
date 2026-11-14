@@ -2,10 +2,10 @@
 //! (`docs/ssh-agent.md` § 6.2).
 //!
 //! [`wire::SessionBind`](super::wire::SessionBind) is the message read
-//! structurally off the wire; [`SessionBindState`] is what a connection accumulates
-//! from a sequence of them, and [`SessionBindState::class`] is the answer every
-//! later decision (which keys to list, what a signature is allowed to be)
-//! actually needs.
+//! structurally off the wire; [`SessionBindState`] is what a connection
+//! accumulates from a sequence of them, and [`SessionBindState::class`] is
+//! the answer every later decision (which keys to list, what a signature
+//! is allowed to be) actually needs.
 //!
 //! Three rules, mirroring OpenSSH's own `ssh-agent` (`process_ext_session_bind`
 //! in `ssh-agent.c`) with one deliberate addition:
@@ -239,10 +239,8 @@ fn key_data_from_bytes(bytes: &[u8]) -> ssh_key::Result<KeyData> {
 
 #[cfg(test)]
 mod tests {
-
     use super::super::testing::{signed_bind, test_key};
     use super::super::wire::AgentRequest;
-
     use super::*;
 
     fn verified_host(class: &ConnectionClass) -> &KeyData {
