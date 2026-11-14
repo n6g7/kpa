@@ -16,13 +16,15 @@ let
   # The agent's socket: `settings.ssh_agent.socket` if set, else kpa's
   # default under the runtime directory (docs/ssh-agent.md § 7). Spelled
   # once for the environment and the shells, where `$XDG_RUNTIME_DIR` and
-  # `$HOME` expand, and once for `ssh_config`, where `%i` and `~` do.
+  # `$HOME` expand, and once for `ssh_config`, where `%i` and `~` do. The
+  # variables are unbraced: environment.d, bash and zsh read `$VAR` as
+  # well as `${VAR}`, and fish reads only `$VAR`.
   agentSocket = (cfg.settings.ssh_agent or { }).socket or null;
   envAgentSocket =
     if agentSocket == null then
-      "\${XDG_RUNTIME_DIR}/kpa/ssh-agent"
+      "$XDG_RUNTIME_DIR/kpa/ssh-agent"
     else if lib.hasPrefix "~/" agentSocket then
-      "\${HOME}/" + lib.removePrefix "~/" agentSocket
+      "$HOME/" + lib.removePrefix "~/" agentSocket
     else
       agentSocket;
   sshConfigAgentSocket = if agentSocket == null then "/run/user/%i/kpa/ssh-agent" else agentSocket;
