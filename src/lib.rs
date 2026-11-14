@@ -10,6 +10,7 @@ mod io;
 pub mod log;
 pub mod origin;
 pub mod output;
+pub mod paths;
 pub mod policy;
 mod prompt;
 pub mod proto;

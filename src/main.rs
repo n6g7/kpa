@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand};
 use kpa::config::Config;
 use kpa::log::{self, Level};
 use kpa::output::report_error;
+use kpa::paths::Paths;
 use kpa::policy;
 use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op};
 use kpa::server::{self, Server};
@@ -96,18 +97,22 @@ fn dispatch(cli: Cli) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Every location kpa uses, read from the environment here and nowhere
+    // else.
+    let paths = Paths::from_env();
+
     // Reports the CLI's own version unconditionally, then best-efforts the
     // daemon's — so it still works with no `$XDG_RUNTIME_DIR` set and no
     // daemon running, handled before `socket_path` is resolved the way
     // every other subcommand needs it (which would otherwise fail loudly
     // in exactly the case this command has to tolerate quietly).
     if let Command::Version = cli.command {
-        return client::run_version(cli.socket);
+        return client::run_version(cli.socket.or_else(|| default_socket_path(&paths).ok()));
     }
 
     let socket_path = match cli.socket {
         Some(path) => path,
-        None => match default_socket_path() {
+        None => match default_socket_path(&paths) {
             Ok(path) => path,
             Err(err) => {
                 report_error(err);
@@ -129,9 +134,12 @@ fn dispatch(cli: Cli) -> ExitCode {
     }
 }
 
-fn default_socket_path() -> Result<PathBuf, String> {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(|dir| PathBuf::from(dir).join("kpa").join("sock"))
+/// The main socket's default: `kpa/sock` under the runtime directory.
+fn default_socket_path(paths: &Paths) -> Result<PathBuf, String> {
+    paths
+        .runtime_dir
+        .as_ref()
+        .map(|dir| dir.join("kpa").join("sock"))
         .ok_or_else(|| "XDG_RUNTIME_DIR is not set; pass --socket explicitly".to_string())
 }
 
