@@ -70,9 +70,11 @@ nix develop -c cargo test
 `direnv allow` drops the `nix develop -c` prefix. CI
 (`.github/workflows/ci.yml`) runs the same commands on every push and PR.
 
-Two tests in `tests/clipboard.rs` drive the live Wayland clipboard, which
+Three tests in `tests/clipboard.rs` drive the live Wayland clipboard, which
 anything else in your session can interfere with, so `cargo test` skips them.
-Run them when you change the clipboard logic:
+They need a compositor that exports `WAYLAND_DISPLAY` to the service
+manager, and a logind display session. Run them when you change the
+clipboard logic:
 
 ```sh
 nix develop -c cargo test --test clipboard -- --ignored

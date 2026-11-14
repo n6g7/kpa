@@ -18,6 +18,7 @@ pub mod socket;
 pub mod ssh_agent;
 pub mod tray;
 pub mod vault;
+mod wayland;
 
 /// The crate version alone (e.g. `0.1.0`) when built from an exact release
 /// tag, `{crate_version}+{short hash}` otherwise. Set by `build.rs`.

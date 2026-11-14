@@ -5,8 +5,9 @@
 //!
 //! - [`Backend`]/[`Offer`] are the primitive a real clipboard gives us: the
 //!   ability to start serving a secret, and to ask whether a given offer is
-//!   still the live one. [`WaylandBackend`] implements these on
-//!   `wl-clipboard-rs`. Nothing here decides *when* to stop serving.
+//!   still the live one. [`WaylandBackend`] implements these on kpa's own
+//!   Wayland client (`crate::wayland`). Nothing here decides *when* to stop
+//!   serving.
 //! - [`Clipboard`] is the part that decides: "a second `copy` replaces the
 //!   first" and "drop the offer after the timeout, but only if nothing else
 //!   already took the clipboard" are both decided against the [`Backend`]/
@@ -22,50 +23,23 @@
 //! or inject a fake clock; not needing a clock at all is simpler than
 //! either.
 //!
-//! ## The one gap `wl-clipboard-rs` 0.9.5 doesn't close
-//!
-//! `docs/design.md` claims dropping an expired offer is a no-op if
-//! something else already took the clipboard, "no content comparison
-//! needed, no risk of clobbering." That claim holds in full for the case
-//! the ownership test in `tests/clipboard.rs` exercises: once something
-//! else takes the clipboard, the compositor cancels kpa's own data source,
-//! [`WaylandOffer::is_live`] turns false on its own, and `expire` then does
-//! nothing — genuinely zero action taken, not a check-then-skip.
-//!
-//! The gap is the *other* direction. `wl-clipboard-rs`'s `copy` module
-//! keeps the live `Source`/`Device` objects behind a private `PreparedCopy`
-//! with no handle to destroy just one still-live offer from another
-//! thread — the only way to end one is `wl_clipboard_rs::copy::clear`,
-//! which unconditionally resets the seat's selection regardless of who
-//! currently holds it. `WaylandOffer::end` only calls `clear` when
-//! `Clipboard::expire` has just confirmed (via `is_live`) that kpa is still
-//! the owner, but that confirmation and the `clear` call are two separate
-//! round trips to the compositor — a vanishingly narrow window remains
-//! where something else sets the clipboard in between, and `clear` would
-//! wipe it. Closing this fully would need either a cancel hook this crate
-//! version doesn't expose, or reimplementing `ext-data-control`/
-//! `wlr-data-control` by hand instead of using `wl-clipboard-rs`. Recorded
-//! here rather than overclaimed, matching this repo's "verified vs.
-//! reasoned" discipline (see e.g. `vault.rs`'s `Fingerprint` doc).
+//! **Ending an offer never touches anyone else's clipboard.** Once
+//! something else takes the clipboard, the compositor cancels kpa's data
+//! source and [`Offer::is_live`] turns false on its own, so `expire` does
+//! nothing. And when kpa does end a live offer, it destroys only its own
+//! data source: the compositor clears the selection only if that source
+//! still holds it. So a copy landing between `is_live` and `end` survives.
 
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread;
 
-use wl_clipboard_rs::copy::{self, MimeSource, MimeType, Options, Source};
 use zeroize::Zeroizing;
 
-/// The one MIME type offered for the secret itself. `Options::sensitive`
-/// (set below) adds the second one, `x-kde-passwordManagerHint`
-/// (`docs/design.md` § Clipboard), on its own.
-const TEXT_MIME_TYPE: &str = "text/plain;charset=utf-8";
+use crate::wayland;
 
 /// What went wrong handing a secret to the clipboard backend. `Display`
-/// text only — it comes from `wl-clipboard-rs`'s own `Error`, which never
-/// carries the secret itself (the secret isn't in scope by the time a
-/// `wl_clipboard_rs::copy::Error` can occur: only connection/protocol
-/// failures are).
+/// text only, and never the secret itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardError(pub String);
 
@@ -83,20 +57,23 @@ pub trait Offer: Send + Sync {
     /// has superseded it, including another `copy` or a successful `end`.
     fn is_live(&self) -> bool;
 
-    /// Ends this offer. Only ever called by [`Clipboard::expire`] after it
-    /// has confirmed, via `is_live`, that this offer is both the most
-    /// recent one and still live — see this module's doc for the narrow
-    /// race that confirmation can't fully close.
+    /// Ends this offer. Only ever called once `is_live` said it's still
+    /// the one holding the clipboard.
     fn end(&self);
 }
 
 /// A clipboard able to start serving one offer at a time.
 pub trait Backend: Send + Sync {
-    /// Starts serving `secret` as the clipboard content, with the
-    /// password-manager hint alongside it. Blocks only long enough to know
-    /// whether the backend accepted the offer — the actual serving runs on
-    /// a thread of the backend's own.
-    fn start(&self, secret: Zeroizing<String>) -> Result<Arc<dyn Offer>, ClipboardError>;
+    /// Starts serving `secret` as the clipboard content of the display
+    /// session `session` (its logind id), with the password-manager hint
+    /// alongside it. Blocks only long enough to know whether the backend
+    /// accepted the offer — the actual serving runs on a thread of the
+    /// backend's own.
+    fn start(
+        &self,
+        secret: Zeroizing<String>,
+        session: &str,
+    ) -> Result<Arc<dyn Offer>, ClipboardError>;
 }
 
 /// Tracks the most recently started offer, so a later timeout can tell
@@ -122,8 +99,12 @@ impl Clipboard {
     /// falls out of the backend itself (a new offer supersedes the old one
     /// at the protocol level) plus this call remembering the new offer as
     /// current, so a stale timeout for the old one no longer matches it.
-    pub fn offer(&self, secret: Zeroizing<String>) -> Result<Arc<dyn Offer>, ClipboardError> {
-        let offer = self.backend.start(secret)?;
+    pub fn offer(
+        &self,
+        secret: Zeroizing<String>,
+        session: &str,
+    ) -> Result<Arc<dyn Offer>, ClipboardError> {
+        let offer = self.backend.start(secret, session)?;
         *lock(&self.current) = Some(Arc::clone(&offer));
         Ok(offer)
     }
@@ -173,89 +154,32 @@ fn lock(mutex: &Mutex<Option<Arc<dyn Offer>>>) -> MutexGuard<'_, Option<Arc<dyn 
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The real backend: `wl-clipboard-rs`, in-process, per `docs/design.md`
-/// § Clipboard — never `wl-copy` the binary. The crate speaks
+/// The real backend: kpa's own Wayland client, in-process, per
+/// `docs/design.md` § Clipboard — never `wl-copy` the binary. It speaks
 /// `ext-data-control`/`wlr-data-control`, so it can own a clipboard offer
 /// without ever holding keyboard focus, which a daemon never has.
 pub struct WaylandBackend;
 
 impl Backend for WaylandBackend {
-    fn start(&self, secret: Zeroizing<String>) -> Result<Arc<dyn Offer>, ClipboardError> {
-        // Moved into the serving thread below; `secret` itself (the
-        // `Zeroizing<String>`) is dropped at the end of this scope, which
-        // zeroizes *this* copy. The `Box<[u8]>` made from it is a second
-        // copy that `wl-clipboard-rs` holds unzeroized for as long as it
-        // serves the offer — upstream, not reachable from here, the same
-        // shape as the gaps `docs/design.md` § Security already documents
-        // for `keepass`'s own key-derivation intermediates.
-        let bytes: Box<[u8]> = secret.as_bytes().to_vec().into_boxed_slice();
-
-        let live = Arc::new(AtomicBool::new(true));
-        let live_in_thread = Arc::clone(&live);
-        let (ready_tx, ready_rx) = sync_channel(1);
-
-        let spawned = thread::Builder::new()
-            .name("kpa-clip".to_string())
-            .spawn(move || {
-                let mut options = Options::new();
-                options
-                    .foreground(true)
-                    .sensitive(true)
-                    .omit_additional_text_mime_types(true);
-                let source = MimeSource {
-                    source: Source::Bytes(bytes),
-                    mime_type: MimeType::Specific(TEXT_MIME_TYPE.to_string()),
-                };
-                match options.prepare_copy_multi(vec![source]) {
-                    Ok(prepared) => {
-                        let _ = ready_tx.send(Ok(()));
-                        // Blocks until superseded (by anything, including
-                        // `WaylandOffer::end`'s own `clear`) or an error.
-                        // Either way there is nobody left to report to;
-                        // `live` is what the rest of this module reads.
-                        let _ = prepared.serve();
-                    }
-                    Err(err) => {
-                        let _ = ready_tx.send(Err(err.to_string()));
-                    }
-                }
-                live_in_thread.store(false, Ordering::SeqCst);
-            })
-            .map_err(|err| ClipboardError(err.to_string()))?;
-
-        match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Arc::new(WaylandOffer { live }) as Arc<dyn Offer>),
-            Ok(Err(detail)) => Err(ClipboardError(detail)),
-            // The thread panicked (or was otherwise killed) before
-            // replying. `spawned` is dropped here, which just detaches it.
-            Err(_) => {
-                drop(spawned);
-                Err(ClipboardError(
-                    "the clipboard thread exited before confirming the offer".to_string(),
-                ))
-            }
-        }
+    fn start(
+        &self,
+        secret: Zeroizing<String>,
+        session: &str,
+    ) -> Result<Arc<dyn Offer>, ClipboardError> {
+        let failed = |err: wayland::Error| ClipboardError(err.0);
+        let stream = wayland::connect(session).map_err(failed)?;
+        let offer = wayland::offer(stream, secret).map_err(failed)?;
+        Ok(Arc::new(offer))
     }
 }
 
-struct WaylandOffer {
-    live: Arc<AtomicBool>,
-}
-
-impl Offer for WaylandOffer {
+impl Offer for wayland::Offer {
     fn is_live(&self) -> bool {
-        self.live.load(Ordering::SeqCst)
+        wayland::Offer::is_live(self)
     }
 
     fn end(&self) {
-        // See this module's doc comment for why this is "clear the
-        // clipboard," not "destroy only our own offer" — `wl-clipboard-rs`
-        // 0.9.5 has no handle for the latter. Best-effort: a failure here
-        // just leaves the offer being served a little past its nominal
-        // expiry, which `Clipboard::expire` already decided was safe to
-        // risk (it only reaches this call once `is_live` said we're still
-        // the one holding it).
-        let _ = copy::clear(copy::ClipboardType::Regular, copy::Seat::All);
+        wayland::Offer::end(self);
     }
 }
 
@@ -307,7 +231,11 @@ impl RecordingBackend {
 
 #[cfg(test)]
 impl Backend for RecordingBackend {
-    fn start(&self, secret: Zeroizing<String>) -> Result<Arc<dyn Offer>, ClipboardError> {
+    fn start(
+        &self,
+        secret: Zeroizing<String>,
+        _session: &str,
+    ) -> Result<Arc<dyn Offer>, ClipboardError> {
         self.offered
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -420,7 +348,11 @@ mod tests {
     }
 
     impl Backend for FakeBackend {
-        fn start(&self, _secret: Zeroizing<String>) -> Result<Arc<dyn Offer>, ClipboardError> {
+        fn start(
+            &self,
+            _secret: Zeroizing<String>,
+            _session: &str,
+        ) -> Result<Arc<dyn Offer>, ClipboardError> {
             if self.fail_next.swap(false, Ordering::SeqCst) {
                 return Err(ClipboardError("fake backend refused".to_string()));
             }
@@ -429,6 +361,8 @@ mod tests {
             Ok(offer)
         }
     }
+
+    const SESSION: &str = "2";
 
     fn secret(s: &str) -> Zeroizing<String> {
         Zeroizing::new(s.to_string())
@@ -447,7 +381,9 @@ mod tests {
     fn expire_drops_a_still_live_current_offer() {
         let (backend, offers) = FakeBackend::new();
         let clip = Clipboard::new(backend);
-        let offer = clip.offer(secret("hunter2")).expect("fake backend accepts");
+        let offer = clip
+            .offer(secret("hunter2"), SESSION)
+            .expect("fake backend accepts");
 
         clip.expire(&offer);
 
@@ -459,14 +395,14 @@ mod tests {
     /// level: something else takes the clipboard (`supersede`, standing in
     /// for the compositor cancelling kpa's data source — deliberately
     /// *not* `end`, since nothing asked this offer to end), and the later
-    /// timeout must take no action at all — not even a call to `end` that
-    /// happens to be idempotent, since the real backend's `end` is a
-    /// `clear()` that is not conditional on anything.
+    /// timeout must take no action at all, not even a call to `end`.
     #[test]
     fn expire_does_nothing_once_superseded() {
         let (backend, offers) = FakeBackend::new();
         let clip = Clipboard::new(backend);
-        let offer = clip.offer(secret("hunter2")).expect("fake backend accepts");
+        let offer = clip
+            .offer(secret("hunter2"), SESSION)
+            .expect("fake backend accepts");
 
         nth_offer(&offers, 0).supersede();
         assert!(
@@ -491,8 +427,12 @@ mod tests {
     fn a_second_copy_makes_the_first_offers_timeout_a_no_op() {
         let (backend, offers) = FakeBackend::new();
         let clip = Clipboard::new(backend);
-        let first = clip.offer(secret("first")).expect("fake backend accepts");
-        let second = clip.offer(secret("second")).expect("fake backend accepts");
+        let first = clip
+            .offer(secret("first"), SESSION)
+            .expect("fake backend accepts");
+        let second = clip
+            .offer(secret("second"), SESSION)
+            .expect("fake backend accepts");
 
         clip.expire(&first);
         assert!(
@@ -518,7 +458,7 @@ mod tests {
         backend.fail_next_start();
         let clip = Clipboard::new(backend);
 
-        assert!(clip.offer(secret("hunter2")).is_err());
+        assert!(clip.offer(secret("hunter2"), SESSION).is_err());
     }
 
     /// `end_now` is `lock`'s hook (`docs/threat-model.md` G-6): it ends
@@ -528,7 +468,9 @@ mod tests {
     fn end_now_drops_a_live_current_offer() {
         let (backend, offers) = FakeBackend::new();
         let clip = Clipboard::new(backend);
-        let offer = clip.offer(secret("hunter2")).expect("fake backend accepts");
+        let offer = clip
+            .offer(secret("hunter2"), SESSION)
+            .expect("fake backend accepts");
 
         clip.end_now();
 
@@ -551,7 +493,9 @@ mod tests {
     fn end_now_does_nothing_once_superseded() {
         let (backend, offers) = FakeBackend::new();
         let clip = Clipboard::new(backend);
-        let _offer = clip.offer(secret("hunter2")).expect("fake backend accepts");
+        let _offer = clip
+            .offer(secret("hunter2"), SESSION)
+            .expect("fake backend accepts");
 
         nth_offer(&offers, 0).supersede();
         clip.end_now();

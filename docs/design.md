@@ -53,7 +53,7 @@ graph LR
 
     serve --> keepass["keepass crate<br/>(kdbx, read-only)"]
     serve -->|ksni| tray["tray<br/>(any SNI host)"]
-    serve --> clip["wl-clipboard-rs<br/>(owns clipboard offer)"]
+    serve --> clip["src/wayland<br/>(owns clipboard offer)"]
 ```
 
 One long-lived daemon (`kpa serve`); short-lived clients (every other
@@ -365,13 +365,32 @@ Rules:
 
 ## Clipboard
 
-`wl-clipboard-rs`, in-process — **not** by spawning `wl-copy`.
+kpa's own Wayland client (`src/wayland/`), in-process — **not** by
+spawning `wl-copy`.
 
 The Wayland clipboard is pull-based: the owning client must stay alive to serve
 bytes on paste, which is why `wl-copy` forks. Since kpa is already long-lived it
-should own the offer itself. The crate speaks `ext-data-control`/`wlr-data-control`
-(advertised by compositors like niri and sway), so it can own the clipboard
-without ever holding keyboard focus — which a daemon never has.
+should own the offer itself. The client speaks `ext-data-control`, falling
+back to `wlr-data-control` (advertised by compositors like niri and sway), so
+it can own the clipboard without ever holding keyboard focus — which a daemon
+never has. Each offer has its own connection and serving thread.
+
+**Which compositor.** The daemon usually starts before the compositor, and a
+process's environment never changes after it starts, so its own
+`WAYLAND_DISPLAY` is no use. Each `copy` reads `WAYLAND_DISPLAY` from the
+service manager's environment instead (`org.freedesktop.systemd1.Manager`'s
+`Environment`, on the session bus), where the compositor exports it. The
+name is a hint, checked before any secret is sent:
+
+- it must be a bare socket name, resolved in the daemon's own
+  `$XDG_RUNTIME_DIR`; a path is refused;
+- the process listening on that socket must be the daemon's uid, and on
+  the desktop as § Protocol judges a requester: in `user@<uid>.service`
+  or the display session's scope.
+
+The copy then runs over the connection that was checked. A failure is an
+`io` error naming what failed. A compositor that doesn't export
+`WAYLAND_DISPLAY` to the service manager can't be copied to.
 
 Two MIME types are offered: `text/plain;charset=utf-8` and
 `x-kde-passwordManagerHint` with value `secret`. That's what clipboard-history
@@ -444,11 +463,9 @@ its turn to come up first.
 - **Not cleared, upstream:** unprotected field values (plain `String`s
   inside `keepass`), the decrypted and decompressed payload buffers
   `keepass` parses from, its key-derivation intermediates, its XML
-  keyfile parser's working copies, and the clipboard backend's own
-  `Box<[u8]>` copy of whatever was last offered (`wl-clipboard-rs` takes
-  ownership of it; kpa has no way to reach in and zero it, only to ask the
-  backend to stop serving it). These persist in freed heap pages until the
-  allocator reuses them.
+  keyfile parser's working copies. These persist in freed heap pages until
+  the allocator reuses them. The clipboard's copy of an offered secret is
+  kpa's own, zeroized when its serving thread ends.
 
 Lock stops serving the database and clears what kpa owns; it is not a
 guarantee that no trace of the plaintext remains in the process's memory.
@@ -540,7 +557,9 @@ overnight, secrets in shell scrollback — and that is the whole claim.
 
 `keepass` (KDBX + Argon2 + TOTP via its `totp` feature;
 `challenge_response` feature off in v1), `serde`/`serde_json`, `toml`,
-`clap`, `zbus` (logind), `ksni` (tray), `wl-clipboard-rs`, `zeroize`, `rustix`
+`clap`, `zbus` (logind, the service manager's environment), `ksni` (tray),
+`wayland-client` with `wayland-protocols`/`wayland-protocols-wlr`
+(clipboard), `zeroize`, `rustix`
 and `libc` (`SO_PEERPIDFD`, which `rustix` lacks).
 Threads over async unless `ksni`'s runtime choice makes tokio simpler.
 

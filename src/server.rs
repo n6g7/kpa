@@ -686,6 +686,7 @@ impl CopyEntry for Server {
         // which must not stall every other request behind it, the same
         // reasoning that keeps `unlock`'s prompt-and-KDF step outside the
         // mutex too.
+        let desk = self.desk();
         let value = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
@@ -696,7 +697,7 @@ impl CopyEntry for Server {
             // `unlock` reads `Desk::may_prompt`, and before the `Locked`
             // check below so an outside caller learns no more than an
             // unknown database does.
-            if !self.desk().may_copy(origin) {
+            if !desk.may_copy(origin) {
                 return Err(CopyError::NoDisplay);
             }
             let Some(database) = slot.db.as_ref() else {
@@ -713,21 +714,24 @@ impl CopyEntry for Server {
             }
         };
         let (value, entry) = value;
+        // `may_copy` only passes with a display session.
+        let session = desk.session().unwrap_or_default();
 
-        let offer = self.clip.offer(value).map_err(|err| CopyError::Clipboard {
-            db: db(),
-            detail: err.to_string(),
-        })?;
+        let offer = self
+            .clip
+            .offer(value, session)
+            .map_err(|err| CopyError::Clipboard {
+                db: db(),
+                detail: err.to_string(),
+            })?;
         // Recorded immediately after a successful handoff, so `lock`
         // (`end_clipboard_for`) knows which database's lock should end
         // this offer early. A narrow window remains between the offer
         // actually becoming current (inside `self.clip.offer`, just
         // above) and this line — a `lock` of `name` landing in between
         // would see the old `clip_db` value and miss ending this offer,
-        // which then only expires via its own `clipboard_timeout`. Same
-        // shape as the two-round-trip race `clip.rs` already documents
-        // for `WaylandOffer::end`, not closed for the same reason: doing
-        // so needs the bookkeeping and the backend handoff to be one
+        // which then only expires via its own `clipboard_timeout`. Closing
+        // it needs the bookkeeping and the backend handoff to be one
         // atomic step, which `Clipboard`'s backend-agnostic design (see
         // its doc comment) deliberately doesn't expose.
         *self.clip_db.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_string());

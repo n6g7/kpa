@@ -49,8 +49,8 @@
             # tests/logind.rs starts a private dbus-daemon for its mock logind.
             dbus
             # wl-copy/wl-paste, for driving docs/plan.md step 3's manual
-            # clipboard test by hand — not a Rust dependency (that's
-            # wl-clipboard-rs, in Cargo.toml).
+            # clipboard test by hand — kpa itself doesn't use them (its own
+            # client is src/wayland/).
             wl-clipboard
             # A StatusNotifierItem host, for driving docs/plan.md step 4's
             # tray test by hand — not a Rust dependency (that's ksni, in

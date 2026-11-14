@@ -18,10 +18,14 @@
 //! nix develop -c cargo test --test clipboard -- --ignored
 //! ```
 //!
-//! `wayland_available` checks for a compositor; where it's missing, an
-//! opted-in test prints why and skips rather than fails. The state machine those tests would exercise — supersession
-//! making a timeout a no-op, a second `copy` replacing the first — is
-//! covered without any compositor at all by `src/clip.rs`'s own unit tests.
+//! The daemon finds the compositor through the service manager's
+//! environment, not its own (`src/wayland/compositor.rs`), so
+//! `compositor` looks it up the same way, and the `wl-paste`/`wl-copy` the
+//! tests run are pointed at it. Where none is reachable, an opted-in test
+//! prints why and skips rather than fails. The state machine those tests
+//! would exercise — supersession making a timeout a no-op, a second `copy`
+//! replacing the first — is covered without any compositor at all by
+//! `src/clip.rs`'s own unit tests.
 
 mod common;
 
@@ -45,18 +49,49 @@ fn start(password: &str) -> InProcessDaemon {
     ))
 }
 
-/// Whether a Wayland compositor is actually reachable — not just whether
-/// `$WAYLAND_DISPLAY` is set, since a stale value with nothing listening
-/// behind it should skip exactly the same as it being unset.
-fn wayland_available() -> bool {
-    let Some(display) = std::env::var_os("WAYLAND_DISPLAY") else {
-        return false;
-    };
-    let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
-        return false;
-    };
-    let socket_path = PathBuf::from(runtime_dir).join(&display);
-    UnixStream::connect(&socket_path).is_ok()
+/// The compositor the daemon would copy to: `WAYLAND_DISPLAY` from the
+/// service manager's environment, if a socket by that name in
+/// `$XDG_RUNTIME_DIR` accepts a connection. A stale value with nothing
+/// listening behind it counts as none.
+fn compositor() -> Option<String> {
+    let shown = Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .output()
+        .ok()?;
+    let environment = String::from_utf8(shown.stdout).ok()?;
+    let display = environment
+        .lines()
+        .find_map(|line| line.strip_prefix("WAYLAND_DISPLAY="))?
+        .to_string();
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")?;
+    UnixStream::connect(PathBuf::from(runtime_dir).join(&display)).ok()?;
+    Some(display)
+}
+
+/// The user's logind display session, which the daemon's desk must name
+/// for the compositor to pass as being on the desktop when it runs in
+/// that session's scope.
+fn display_session() -> Option<String> {
+    let uid = rustix::process::getuid().as_raw().to_string();
+    let shown = Command::new("loginctl")
+        .args(["show-user", &uid, "--property=Display", "--value"])
+        .output()
+        .ok()?;
+    let session = String::from_utf8(shown.stdout).ok()?.trim().to_string();
+    (!session.is_empty()).then_some(session)
+}
+
+/// A daemon like `start`'s, whose desk is the real display session.
+fn start_on_the_desk(config: &str, session: String) -> InProcessDaemon {
+    let daemon = InProcessDaemon::start(config);
+    Locks::set_desk(
+        &*daemon.server,
+        Desk::Unlocked {
+            session,
+            active: true,
+        },
+    );
+    daemon
 }
 
 /// The uuid `tests/fixture.sh`'s password-only database's one entry was
@@ -78,7 +113,7 @@ fn fixture_entry_uuid(daemon: &InProcessDaemon) -> String {
 /// answered afterward.
 #[test]
 fn copy_fails_cleanly_without_a_wayland_compositor() {
-    if wayland_available() {
+    if compositor().is_some() {
         eprintln!(
             "skipping: this test is specifically about an unreachable compositor, \
              but one is reachable in this environment"
@@ -173,16 +208,22 @@ fn copy_from_the_desktop_is_refused_without_an_active_unlocked_desk() {
 #[test]
 #[ignore = "drives the live Wayland clipboard; run with --ignored when changing clipboard logic"]
 fn copy_reaches_a_reachable_compositor() {
-    if !wayland_available() {
+    let (Some(display), Some(session)) = (compositor(), display_session()) else {
         eprintln!(
-            "skipping: no reachable Wayland compositor in this environment \
-             ($WAYLAND_DISPLAY/$XDG_RUNTIME_DIR did not resolve to a live socket); \
-             docs/plan.md step 3's full clipboard test plan needs one"
+            "skipping: no reachable Wayland compositor in the service manager's \
+             environment, or no display session; docs/plan.md step 3's full \
+             clipboard test plan needs both"
         );
         return;
-    }
+    };
 
-    let daemon = start(common::PASSWORD);
+    let daemon = start_on_the_desk(
+        &common::config_toml(
+            &format!("printf %s {}", common::PASSWORD),
+            &common::password_db().display().to_string(),
+        ),
+        session,
+    );
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let uuid = fixture_entry_uuid(&daemon);
 
@@ -192,6 +233,7 @@ fn copy_reaches_a_reachable_compositor() {
 
     let pasted = Command::new("wl-paste")
         .arg("--no-newline")
+        .env("WAYLAND_DISPLAY", &display)
         .output()
         .expect("failed to spawn wl-paste");
     assert_eq!(
@@ -202,6 +244,7 @@ fn copy_reaches_a_reachable_compositor() {
 
     let types = Command::new("wl-paste")
         .arg("--list-types")
+        .env("WAYLAND_DISPLAY", &display)
         .output()
         .expect("failed to spawn wl-paste --list-types");
     let types = String::from_utf8_lossy(&types.stdout);
@@ -218,21 +261,24 @@ fn copy_reaches_a_reachable_compositor() {
 #[test]
 #[ignore = "drives the live Wayland clipboard; run with --ignored when changing clipboard logic"]
 fn surviving_a_takeover_past_the_timeout() {
-    if !wayland_available() {
+    let (Some(display), Some(session)) = (compositor(), display_session()) else {
         eprintln!(
-            "skipping: no reachable Wayland compositor in this environment; \
+            "skipping: no reachable Wayland compositor or display session; \
              this is docs/plan.md step 3's ownership test"
         );
         return;
-    }
+    };
 
-    let daemon = InProcessDaemon::start(&format!(
-        "clipboard_timeout = \"1s\"\n{}",
-        common::config_toml(
-            &format!("printf %s {}", common::PASSWORD),
-            &common::password_db().display().to_string(),
-        )
-    ));
+    let daemon = start_on_the_desk(
+        &format!(
+            "clipboard_timeout = \"1s\"\n{}",
+            common::config_toml(
+                &format!("printf %s {}", common::PASSWORD),
+                &common::password_db().display().to_string(),
+            )
+        ),
+        session,
+    );
     let run = |args: &[&str]| daemon.run(args);
 
     assert_eq!(run(&["unlock", "personal"])["ok"], true);
@@ -244,6 +290,7 @@ fn surviving_a_takeover_past_the_timeout() {
     // Immediately take the clipboard with something else.
     let status = Command::new("wl-copy")
         .arg("hello")
+        .env("WAYLAND_DISPLAY", &display)
         .status()
         .expect("spawn wl-copy");
     assert!(status.success());
@@ -253,11 +300,50 @@ fn surviving_a_takeover_past_the_timeout() {
 
     let pasted = Command::new("wl-paste")
         .arg("--no-newline")
+        .env("WAYLAND_DISPLAY", &display)
         .output()
         .expect("spawn wl-paste");
     assert_eq!(
         String::from_utf8_lossy(&pasted.stdout),
         "hello",
         "kpa's belated drop clobbered a later, unrelated clipboard write"
+    );
+}
+
+/// A lock ends the offer its database's `copy` started (G-6): the
+/// clipboard no longer serves the secret once `lock` answers.
+#[test]
+#[ignore = "drives the live Wayland clipboard; run with --ignored when changing clipboard logic"]
+fn a_lock_ends_the_offer() {
+    let (Some(display), Some(session)) = (compositor(), display_session()) else {
+        eprintln!("skipping: no reachable Wayland compositor or display session");
+        return;
+    };
+
+    let daemon = start_on_the_desk(
+        &common::config_toml(
+            &format!("printf %s {}", common::PASSWORD),
+            &common::password_db().display().to_string(),
+        ),
+        session,
+    );
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let uuid = fixture_entry_uuid(&daemon);
+    assert_eq!(
+        daemon.run(&["copy", "personal", &uuid, "password"])["ok"],
+        true
+    );
+
+    assert_eq!(daemon.run(&["lock", "personal"])["ok"], true);
+
+    let pasted = Command::new("wl-paste")
+        .arg("--no-newline")
+        .env("WAYLAND_DISPLAY", &display)
+        .output()
+        .expect("spawn wl-paste");
+    assert_ne!(
+        String::from_utf8_lossy(&pasted.stdout),
+        "entrypass1",
+        "the secret was still served after its database locked"
     );
 }
