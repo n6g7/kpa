@@ -15,7 +15,6 @@ use kpa::output::{print_escaped, report_error};
 use kpa::proto::{self, Op, Password, Request, Response, UnlockError, UnlockRequest};
 use kpa::socket;
 
-use super::default_socket_path;
 use super::tty::{self, TtyReadError};
 
 pub(super) fn run_client(socket_path: &Path, op: Op) -> ExitCode {
@@ -73,12 +72,17 @@ fn print_and_exit(line: &str) -> ExitCode {
 /// socket that answers but belongs to another uid is still refused before
 /// anything is sent to it — `kpa version`'s string isn't secret, but the
 /// path that reaches a daemon at all stays the one path.
-pub(super) fn run_version(socket: Option<PathBuf>) -> ExitCode {
+///
+/// `socket_path` is `--socket`, else the default; `None` when neither
+/// is available.
+pub(super) fn run_version(socket_path: Option<PathBuf>) -> ExitCode {
     println!("client: {}", kpa::VERSION);
 
-    let socket_path = socket.or_else(|| default_socket_path().ok());
     let Some(socket_path) = socket_path else {
-        println!("server: not running (XDG_RUNTIME_DIR is not set; pass --socket to check)");
+        println!(
+            "server: not running (XDG_RUNTIME_DIR is not set to an absolute path; \
+             pass --socket to check)"
+        );
         return ExitCode::SUCCESS;
     };
 

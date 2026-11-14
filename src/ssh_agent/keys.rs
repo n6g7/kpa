@@ -17,6 +17,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::config::SshKeyConfig;
+use crate::paths::Paths;
 use crate::vault::EntryAttachment;
 
 /// Marks the one private-key format kpa reads (`docs/ssh-agent.md` § 6.4).
@@ -264,13 +265,10 @@ pub fn decrypt(
     Ok(DecryptedKey(decrypted))
 }
 
-/// `$XDG_CACHE_HOME/kpa/ssh-keys`, or `$HOME/.cache/kpa/ssh-keys` if that's
-/// unset. `None` if neither is set.
-pub fn default_cache_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
-        return Some(PathBuf::from(dir).join("kpa/ssh-keys"));
-    }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/kpa/ssh-keys"))
+/// Where the public-key cache lives: `kpa/ssh-keys` under `paths`' cache
+/// directory. `None` without one.
+pub fn cache_dir(paths: &Paths) -> Option<PathBuf> {
+    paths.cache_dir.as_ref().map(|dir| dir.join("kpa/ssh-keys"))
 }
 
 /// Writes `database`'s served public keys to `<dir>/<database>`, creating
@@ -679,6 +677,19 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn the_cache_lives_under_the_cache_directory() {
+        let paths = Paths {
+            cache_dir: Some(PathBuf::from("/home/me/.cache")),
+            ..Paths::default()
+        };
+        assert_eq!(
+            cache_dir(&paths),
+            Some(PathBuf::from("/home/me/.cache/kpa/ssh-keys"))
+        );
+        assert_eq!(cache_dir(&Paths::default()), None);
     }
 
     #[test]
