@@ -15,3 +15,18 @@ process hardening and the service manager.
   to make it portable.
 - Don't write macOS code: no `#[cfg(target_os = "macos")]`, no macOS-only
   dependencies, no stub modules. Windows is out of scope.
+
+## Keep the module graph a DAG
+
+Modules depend on each other in one direction only, even though Rust
+compiles cycles. Read [`docs/module-structure.md`](docs/module-structure.md)
+before adding a module or a cross-module dependency.
+
+- No cycles, and no child using its parent's items: `mod.rs` declares,
+  re-exports and documents, and shared items live in a child of their own.
+- A type's `impl` blocks stay in its module. No blanket impls that give
+  another module's types new behaviour.
+- When a lower module needs something from a higher one, it defines a
+  trait and the higher module implements it.
+- One responsibility per module, and a directory once it has parts.
+- Apply this to the code your task touches, as above.
