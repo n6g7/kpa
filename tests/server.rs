@@ -19,7 +19,7 @@ mod common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,11 @@ impl Daemon {
 
     /// Starts `kpa serve` on `config`, its stderr going to `log`.
     fn spawn_config(config: &str, log: Stdio) -> Daemon {
+        Daemon::spawn_config_with_env(config, log, &[])
+    }
+
+    /// Like `spawn_config`, with `env` added to `kpa serve`'s environment.
+    fn spawn_config_with_env(config: &str, log: Stdio, env: &[(&str, &Path)]) -> Daemon {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let socket = dir.path().join("sock");
         let config_path = dir.path().join("config.toml");
@@ -58,6 +63,7 @@ impl Daemon {
             .arg(&socket)
             .arg("--config")
             .arg(&config_path)
+            .envs(env.iter().copied())
             .stdout(Stdio::null())
             .stderr(log)
             .spawn()
@@ -606,6 +612,69 @@ fn a_tilde_path_resolves_against_home() {
 
     let unlocked = daemon.run(&["unlock", "personal"]);
     assert_eq!(unlocked["ok"], true, "{unlocked}");
+}
+
+/// The SSH agent's socket at `socket`, serving `password_db()`'s keys (it
+/// has none) when `serve_ssh_keys`, or not at all.
+fn ssh_agent_config(socket: &Path, serve_ssh_keys: bool) -> String {
+    format!(
+        "[ssh_agent]\n\
+         socket = \"{socket}\"\n\
+         confirm_prompt = [\"/bin/sh\", \"-c\", \"exit 1\"]\n\n\
+         [[database]]\n\
+         name = \"personal\"\n\
+         path = \"{path}\"\n\
+         serve_ssh_keys = {serve_ssh_keys}\n",
+        socket = socket.display(),
+        path = common::password_db().display(),
+    )
+}
+
+/// `kpa serve` binds the SSH agent's socket once a database serves SSH
+/// keys, and the agent answers on it: `ssh-add -l` connects and hears
+/// there are no identities (exit 1; 2 would mean it couldn't connect).
+#[test]
+fn kpa_serve_runs_the_ssh_agent_when_a_database_serves_keys() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let agent_socket = dir.path().join("ssh-agent");
+    let cache = dir.path().join("cache");
+    let _daemon = Daemon::spawn_config_with_env(
+        &ssh_agent_config(&agent_socket, true),
+        Stdio::null(),
+        &[("XDG_CACHE_HOME", &cache)],
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !agent_socket.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "kpa serve did not create the ssh agent socket in time"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let listed = Command::new("ssh-add")
+        .arg("-l")
+        .env("SSH_AUTH_SOCK", &agent_socket)
+        .output()
+        .expect("failed to spawn ssh-add");
+    assert_eq!(listed.status.code(), Some(1), "{listed:?}");
+}
+
+/// Without a database that serves SSH keys, there is no agent socket.
+#[test]
+fn kpa_serve_has_no_ssh_agent_when_no_database_serves_keys() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let agent_socket = dir.path().join("ssh-agent");
+    let cache = dir.path().join("cache");
+    let daemon = Daemon::spawn_config_with_env(
+        &ssh_agent_config(&agent_socket, false),
+        Stdio::null(),
+        &[("XDG_CACHE_HOME", &cache)],
+    );
+
+    // The JSON socket answering means startup is over.
+    assert_eq!(daemon.run(&["status"])["ok"], true);
+    assert!(!agent_socket.exists());
 }
 
 /// A daemon whose idle timeout is `idle`, with the fixture unlockable.

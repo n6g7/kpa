@@ -12,6 +12,20 @@ self:
 let
   cfg = config.services.kpa;
   settingsFormat = pkgs.formats.toml { };
+
+  # The agent's socket: `settings.ssh_agent.socket` if set, else kpa's
+  # default under the runtime directory (docs/ssh-agent.md § 7). Spelled
+  # once for the environment and the shells, where `$XDG_RUNTIME_DIR` and
+  # `$HOME` expand, and once for `ssh_config`, where `%i` and `~` do.
+  agentSocket = (cfg.settings.ssh_agent or { }).socket or null;
+  envAgentSocket =
+    if agentSocket == null then
+      "\${XDG_RUNTIME_DIR}/kpa/ssh-agent"
+    else if lib.hasPrefix "~/" agentSocket then
+      "\${HOME}/" + lib.removePrefix "~/" agentSocket
+    else
+      agentSocket;
+  sshConfigAgentSocket = if agentSocket == null then "/run/user/%i/kpa/ssh-agent" else agentSocket;
 in
 {
   options.services.kpa = {
@@ -49,8 +63,8 @@ in
       type = lib.types.bool;
       default = false;
       description = ''
-        Wire kpa's SSH agent (`$XDG_RUNTIME_DIR/kpa/ssh-agent`) into the
-        session, as `docs/ssh-agent.md` § 8 describes: `SSH_AUTH_SOCK` for
+        Wire kpa's SSH agent (`settings.ssh_agent.socket`, by default
+        `$XDG_RUNTIME_DIR/kpa/ssh-agent`) into the session, as `docs/ssh-agent.md` § 8 describes: `SSH_AUTH_SOCK` for
         the graphical session, an `ssh_config` fallback for sessions
         outside it, and a login-shell default for tools that read neither.
 
@@ -147,7 +161,7 @@ in
       # Reaches the graphical session and everything it starts
       # (environment.d), including tools that read `SSH_AUTH_SOCK`
       # directly rather than `ssh_config`.
-      systemd.user.sessionVariables.SSH_AUTH_SOCK = lib.mkDefault "\${XDG_RUNTIME_DIR}/kpa/ssh-agent";
+      systemd.user.sessionVariables.SSH_AUTH_SOCK = lib.mkDefault envAgentSocket;
 
       # A fallback for sessions environment.d doesn't reach (an SSH
       # login, a terminal-server shell): a forwarded agent that lists
@@ -160,7 +174,7 @@ in
       # is always written last, regardless of this block's position.
       programs.ssh.settings.kpa-ssh-agent = {
         header = ''Match host * exec "test -z '$SSH_AUTH_SOCK' || ! ssh-add -l >/dev/null 2>&1"'';
-        IdentityAgent = "/run/user/%i/kpa/ssh-agent";
+        IdentityAgent = sshConfigAgentSocket;
       };
 
       # A second fallback, for tools that read neither environment.d nor
@@ -169,17 +183,17 @@ in
       # already managed by home-manager gain this; others are untouched.
       programs.bash.profileExtra = lib.mkIf config.programs.bash.enable ''
         if [ -z "$SSH_AUTH_SOCK" ]; then
-          export SSH_AUTH_SOCK="''${XDG_RUNTIME_DIR}/kpa/ssh-agent"
+          export SSH_AUTH_SOCK="${envAgentSocket}"
         fi
       '';
       programs.zsh.profileExtra = lib.mkIf config.programs.zsh.enable ''
         if [ -z "$SSH_AUTH_SOCK" ]; then
-          export SSH_AUTH_SOCK="''${XDG_RUNTIME_DIR}/kpa/ssh-agent"
+          export SSH_AUTH_SOCK="${envAgentSocket}"
         fi
       '';
       programs.fish.loginShellInit = lib.mkIf config.programs.fish.enable ''
         if not set -q SSH_AUTH_SOCK
-            set -gx SSH_AUTH_SOCK "''${XDG_RUNTIME_DIR}/kpa/ssh-agent"
+            set -gx SSH_AUTH_SOCK "${envAgentSocket}"
         end
       '';
     })

@@ -61,19 +61,40 @@ fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
+/// With nothing cached and the database locked, `ssh-add -L` reaches the
+/// agent and hears it has no identities (exit 1; 2 would mean it couldn't
+/// connect). The agent never takes a key or a secret either
+/// (`docs/ssh-agent.md` § 6.1): adding a key, removing every key and
+/// locking the agent all fail.
 #[test]
-fn ssh_add_lists_nothing_without_a_cache_and_refuses_to_add_or_remove() {
+fn ssh_add_lists_nothing_without_a_cache_and_never_takes_a_key() {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     let daemon = InProcessDaemon::start(&config(&common::ssh_db()));
     let agent = start_ssh_agent(&daemon);
 
     let listed = ssh_add(&agent, ["-L"]);
-    assert!(
-        !listed.status.success(),
+    assert_eq!(
+        listed.status.code(),
+        Some(1),
         "a fresh cache should list nothing: {}",
         stdout(&listed)
     );
 
-    // The agent never accepts a key or a secret (docs/ssh-agent.md § 6.1).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let keyfile = dir.path().join("id_ed25519");
+    let pem = raw::throwaway_key(7)
+        .to_openssh(ssh_key::LineEnding::LF)
+        .expect("key encodes");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&keyfile)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, pem.as_bytes()))
+        .expect("write key file");
+    let keyfile = keyfile.to_str().expect("utf-8 path");
+    assert!(!ssh_add(&agent, [keyfile]).status.success());
     assert!(!ssh_add(&agent, ["-D"]).status.success());
     assert!(!ssh_add(&agent, ["-x"]).status.success());
 }
@@ -124,29 +145,36 @@ fn write_pubkey(dir: &Path, name: &str, line: &str) -> PathBuf {
     path
 }
 
+/// `ssh-keygen -Y sign` of `data_path` with the public key at
+/// `pubkey_path`, through `agent`: its signature lands next to the data.
+fn sign(agent: &SshAgent, pubkey_path: &Path, data_path: &Path) -> std::process::Output {
+    Command::new("ssh-keygen")
+        .args(["-Y", "sign", "-f"])
+        .arg(pubkey_path)
+        .args(["-n", "test"])
+        .arg(data_path)
+        .env("SSH_AUTH_SOCK", &agent.socket)
+        .output()
+        .expect("failed to spawn ssh-keygen -Y sign")
+}
+
 /// Signs `data_path` with the identity named `title`, verifies it, and
-/// signs the same data again to show the second signature needs no new
-/// approval (`SSH_ASKPASS=""` makes `ssh-keygen` fail outright rather than
-/// hang if it unexpectedly tried to prompt for anything itself).
-fn sign_and_verify(agent: &SshAgent, dir: &Path, listed: &str, title: &str) {
+/// signs the same data again: the first signature raises one approval
+/// prompt (counted in `counter`), the second none.
+fn sign_and_verify(agent: &SshAgent, dir: &Path, listed: &str, title: &str, counter: &Path) {
     let pubkey_line = public_key_line(listed, title);
     let pubkey_path = write_pubkey(dir, &format!("{title}.pub"), &pubkey_line);
     let data_path = dir.join(format!("{title}-data"));
     std::fs::write(&data_path, format!("hello from {title}")).expect("write data");
+    let prompts = count_lines(counter);
 
-    let sign = Command::new("ssh-keygen")
-        .args(["-Y", "sign", "-f"])
-        .arg(&pubkey_path)
-        .args(["-n", "test"])
-        .arg(&data_path)
-        .env("SSH_AUTH_SOCK", &agent.socket)
-        .output()
-        .expect("failed to spawn ssh-keygen -Y sign");
+    let signed = sign(agent, &pubkey_path, &data_path);
     assert!(
-        sign.status.success(),
+        signed.status.success(),
         "{title}: signing should succeed after the approval prompt answers Allow: {}",
-        String::from_utf8_lossy(&sign.stderr)
+        String::from_utf8_lossy(&signed.stderr)
     );
+    assert_eq!(count_lines(counter), prompts + 1, "{title}: one prompt");
 
     let allowed_signers = dir.join(format!("{title}-allowed_signers"));
     std::fs::write(&allowed_signers, format!("tester {pubkey_line}\n")).expect("write");
@@ -167,17 +195,14 @@ fn sign_and_verify(agent: &SshAgent, dir: &Path, listed: &str, title: &str) {
         String::from_utf8_lossy(&verify.stderr)
     );
 
-    let sign_again = Command::new("ssh-keygen")
-        .args(["-Y", "sign", "-f"])
-        .arg(&pubkey_path)
-        .args(["-n", "test"])
-        .arg(&data_path)
-        .env("SSH_AUTH_SOCK", &agent.socket)
-        .env("SSH_ASKPASS", "")
-        .output()
-        .expect("failed to spawn ssh-keygen -Y sign");
+    let signed_again = sign(agent, &pubkey_path, &data_path);
     assert!(
-        sign_again.status.success(),
+        signed_again.status.success(),
+        "{title}: a second signature with the same key should succeed"
+    );
+    assert_eq!(
+        count_lines(counter),
+        prompts + 1,
         "{title}: a second signature with the same key shouldn't need another approval"
     );
 }
@@ -186,14 +211,15 @@ fn sign_and_verify(agent: &SshAgent, dir: &Path, listed: &str, title: &str) {
 /// result verifies, both through the real OpenSSH tools.
 #[test]
 fn signing_and_verifying_works_after_unlock_and_approval() {
-    let daemon = InProcessDaemon::start(&config(&common::ssh_db()));
-    let agent = start_ssh_agent(&daemon);
     let dir = tempfile::tempdir().expect("tempdir");
+    let counter = dir.path().join("prompts");
+    let daemon = InProcessDaemon::start(&config_counting_prompts(&common::ssh_db(), &counter));
+    let agent = start_ssh_agent(&daemon);
 
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let listed = stdout(&ssh_add(&agent, ["-L"]));
     for title in ["Ed25519", "Ecdsa", "Rsa"] {
-        sign_and_verify(&agent, dir.path(), &listed, title);
+        sign_and_verify(&agent, dir.path(), &listed, title, &counter);
     }
 }
 
@@ -212,16 +238,8 @@ fn locking_makes_signing_fail_again() {
 
     assert_eq!(daemon.run(&["lock", "personal"])["ok"], true);
 
-    let sign = Command::new("ssh-keygen")
-        .args(["-Y", "sign", "-f"])
-        .arg(&pubkey_path)
-        .args(["-n", "test"])
-        .arg(&data_path)
-        .env("SSH_AUTH_SOCK", &agent.socket)
-        .output()
-        .expect("failed to spawn ssh-keygen -Y sign");
     assert!(
-        !sign.status.success(),
+        !sign(&agent, &pubkey_path, &data_path).status.success(),
         "signing with a locked database must fail"
     );
 }
@@ -284,15 +302,10 @@ fn confirm_always_prompts_every_signature() {
     std::fs::write(&data_path, b"always").expect("write data");
 
     for i in 0..3 {
-        let sign = Command::new("ssh-keygen")
-            .args(["-Y", "sign", "-f"])
-            .arg(&pubkey_path)
-            .args(["-n", "test"])
-            .arg(&data_path)
-            .env("SSH_AUTH_SOCK", &agent.socket)
-            .output()
-            .expect("failed to spawn ssh-keygen -Y sign");
-        assert!(sign.status.success(), "sign {i} should succeed");
+        assert!(
+            sign(&agent, &pubkey_path, &data_path).status.success(),
+            "sign {i} should succeed"
+        );
     }
     assert_eq!(
         count_lines(&counter),
@@ -334,18 +347,11 @@ fn confirm_never_never_prompts() {
     let data_path = dir.path().join("data");
     std::fs::write(&data_path, b"never").expect("write data");
 
-    let sign = Command::new("ssh-keygen")
-        .args(["-Y", "sign", "-f"])
-        .arg(&pubkey_path)
-        .args(["-n", "test"])
-        .arg(&data_path)
-        .env("SSH_AUTH_SOCK", &agent.socket)
-        .output()
-        .expect("failed to spawn ssh-keygen -Y sign");
+    let signed = sign(&agent, &pubkey_path, &data_path);
     assert!(
-        sign.status.success(),
+        signed.status.success(),
         "confirm = never should sign without a prompt: {}",
-        String::from_utf8_lossy(&sign.stderr)
+        String::from_utf8_lossy(&signed.stderr)
     );
     assert!(
         !marker.exists(),
@@ -378,15 +384,10 @@ fn locking_clears_approvals() {
     std::fs::write(&data_path, b"before and after a lock").expect("write data");
 
     let sign_once = |label: &str| {
-        let sign = Command::new("ssh-keygen")
-            .args(["-Y", "sign", "-f"])
-            .arg(&pubkey_path)
-            .args(["-n", "test"])
-            .arg(&data_path)
-            .env("SSH_AUTH_SOCK", &agent.socket)
-            .output()
-            .expect("failed to spawn ssh-keygen -Y sign");
-        assert!(sign.status.success(), "{label} sign should succeed");
+        assert!(
+            sign(&agent, &pubkey_path, &data_path).status.success(),
+            "{label} sign should succeed"
+        );
     };
 
     sign_once("first");
@@ -404,19 +405,23 @@ fn locking_clears_approvals() {
 }
 
 /// A lock in flight kills an SSH approval prompt exactly like it kills
-/// `unlock`'s own: `ssh-keygen -Y sign` fails quickly rather than waiting
-/// out the whole (deliberately long) prompt.
+/// `unlock`'s own: once the prompt is up (it touches a marker first),
+/// `ssh-keygen -Y sign` fails quickly rather than waiting out the whole
+/// (deliberately long) prompt.
 #[test]
 fn locking_kills_an_open_approval_prompt() {
+    let marker_dir = tempfile::tempdir().expect("tempdir");
+    let marker = marker_dir.path().join("prompt-up");
     let daemon = InProcessDaemon::start(&format!(
         "prompt = [\"/bin/sh\", \"-c\", \"printf {password}\"]\n\n\
          [ssh_agent]\n\
-         confirm_prompt = [\"/bin/sh\", \"-c\", \"sleep 30; printf Allow\"]\n\n\
+         confirm_prompt = [\"/bin/sh\", \"-c\", \"touch '{marker}'; sleep 30; printf Allow\"]\n\n\
          [[database]]\n\
          name = \"personal\"\n\
          path = \"{path}\"\n\
          serve_ssh_keys = true\n",
         password = common::PASSWORD,
+        marker = marker.display(),
         path = common::ssh_db().display(),
     ));
     let agent = start_ssh_agent(&daemon);
@@ -441,7 +446,14 @@ fn locking_kills_an_open_approval_prompt() {
             .expect("failed to spawn ssh-keygen -Y sign")
     });
 
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the approval prompt never came up"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let started = std::time::Instant::now();
     assert_eq!(daemon.run(&["lock", "personal"])["ok"], true);
 
@@ -470,8 +482,9 @@ mod raw {
     use ssh_key::{Algorithm, PrivateKey};
 
     /// A deterministic, non-cryptographic stand-in for `OsRng` — these
-    /// tests only need *a* valid keypair, matching the pattern in
-    /// `src/ssh_agent/*.rs`'s own tests.
+    /// tests only need *a* valid keypair. It duplicates
+    /// `src/ssh_agent/testing.rs`'s, which is test-only code inside the
+    /// library crate and so out of reach of an integration test.
     pub struct TestRng(pub u64);
 
     impl TestRng {
@@ -488,7 +501,6 @@ mod raw {
         type Error = std::convert::Infallible;
 
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-            #[allow(clippy::cast_possible_truncation)]
             Ok(self.next() as u32)
         }
 
@@ -512,7 +524,6 @@ mod raw {
 
     fn string(bytes: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(4 + bytes.len());
-        #[allow(clippy::cast_possible_truncation)]
         out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
         out.extend_from_slice(bytes);
         out
@@ -666,10 +677,9 @@ fn a_different_destination_prompts_again_but_the_same_one_does_not() {
     );
 }
 
-/// Every `SIGN_REQUEST` over a forwarded connection is refused outright in
-/// this build (`docs/ssh-agent.md` § 6.3; forwarding itself is a later
-/// task) — even one that would otherwise be a well-formed, approvable
-/// login.
+/// Forwarded signatures are refused: every `SIGN_REQUEST` over a forwarded
+/// connection gets `FAILURE` (`docs/ssh-agent.md` § 6.3), even a
+/// well-formed, approvable login.
 #[test]
 fn forwarded_signatures_are_refused() {
     use base64::Engine as _;
