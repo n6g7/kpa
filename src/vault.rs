@@ -436,14 +436,60 @@ pub struct EntryAttachment {
 /// (`ssh_agent::keys::scan`), which only ever looks at what a database's current
 /// entries hold (`docs/ssh-agent.md` § 6.4).
 pub fn list_attachments(db: &Database) -> Vec<EntryAttachment> {
+    let mut out = Vec::new();
+    for_each_current_entry(db, |entry| out.extend(attachments_of(entry)));
+    out
+}
+
+/// The attachments of the current entry `uuid`: the same exclusions as
+/// [`list_attachments`] (no history, nothing in the recycle bin), without
+/// reading any other entry's. Empty if there is no such entry.
+pub fn entry_attachments(db: &Database, uuid: Uuid) -> Vec<EntryAttachment> {
+    let mut out = Vec::new();
+    for_each_current_entry_until(db, |entry| {
+        if entry.id().uuid() != uuid {
+            return false;
+        }
+        out = attachments_of(entry);
+        true
+    });
+    out
+}
+
+fn attachments_of(entry: &keepass::db::EntryRef<'_>) -> Vec<EntryAttachment> {
     use keepass::db::fields;
 
+    let entry_title = unprotected_field(entry, fields::TITLE)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned);
+    entry
+        .attachments_named()
+        .map(|(name, attachment)| EntryAttachment {
+            entry_uuid: entry.id().uuid(),
+            entry_title: entry_title.clone(),
+            attachment_name: name.to_string(),
+            data: attachment.get().clone(),
+        })
+        .collect()
+}
+
+fn for_each_current_entry(db: &Database, mut visit: impl FnMut(&keepass::db::EntryRef<'_>)) {
+    for_each_current_entry_until(db, |entry| {
+        visit(entry);
+        false
+    });
+}
+
+/// Visits every entry outside the recycle bin until `visit` returns `true`.
+/// Same explicit-worklist traversal as `collect_entries`, skipping the
+/// recycle bin's subtree entirely rather than filtering entries out of it
+/// after the fact — a group only ever has one parent, so this can't miss
+/// a path into it that isn't through its own id.
+fn for_each_current_entry_until(
+    db: &Database,
+    mut visit: impl FnMut(&keepass::db::EntryRef<'_>) -> bool,
+) {
     let recycle_bin = db.recycle_bin().map(|group| group.id());
-    let mut out = Vec::new();
-    // Same explicit-worklist traversal as `collect_entries`, skipping the
-    // recycle bin's subtree entirely rather than filtering entries out of it
-    // after the fact — a group only ever has one parent, so this can't miss
-    // a path into it that isn't through its own id.
     let mut stack = vec![db.root().id()];
     while let Some(id) = stack.pop() {
         if Some(id) == recycle_bin {
@@ -453,21 +499,12 @@ pub fn list_attachments(db: &Database) -> Vec<EntryAttachment> {
             continue;
         };
         for entry in group.entries() {
-            let entry_title = unprotected_field(&entry, fields::TITLE)
-                .filter(|t| !t.is_empty())
-                .map(str::to_owned);
-            for (name, attachment) in entry.attachments_named() {
-                out.push(EntryAttachment {
-                    entry_uuid: entry.id().uuid(),
-                    entry_title: entry_title.clone(),
-                    attachment_name: name.to_string(),
-                    data: attachment.get().clone(),
-                });
+            if visit(&entry) {
+                return;
             }
         }
         stack.extend(group.groups().map(|child| child.id()));
     }
-    out
 }
 
 /// A field's value, unless the user marked it protected in their KeePass
@@ -716,8 +753,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        entry_count, entry_exists, entry_field, entry_title, entry_totp, list_attachments,
-        list_entries,
+        entry_attachments, entry_count, entry_exists, entry_field, entry_title, entry_totp,
+        list_attachments, list_entries,
     };
 
     /// `entry_count` must agree with `list_entries` everywhere, including
@@ -1080,6 +1117,33 @@ mod tests {
         assert_eq!(found.entry_title.as_deref(), Some("Example"));
         assert_eq!(found.attachment_name, "key.pub");
         assert_eq!(found.data, b"ATTACHMENT");
+    }
+
+    /// Only the named entry's attachments come back, and an entry in the
+    /// recycle bin or an unknown uuid yields none.
+    #[test]
+    fn entry_attachments_reads_one_current_entry() {
+        let mut db = Database::new();
+        let (wanted, other) = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::TITLE, "wanted");
+            entry.add_attachment("a.key", Value::unprotected(b"A".to_vec()));
+            entry.add_attachment("b.key", Value::unprotected(b"B".to_vec()));
+            let wanted = entry.id().uuid();
+            let mut other = root.add_entry();
+            other.add_attachment("c.key", Value::unprotected(b"C".to_vec()));
+            (wanted, other.id().uuid())
+        };
+
+        let mut names: Vec<String> = entry_attachments(&db, wanted)
+            .into_iter()
+            .map(|a| a.attachment_name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a.key", "b.key"]);
+        assert_eq!(entry_attachments(&db, other).len(), 1);
+        assert!(entry_attachments(&db, Uuid::new_v4()).is_empty());
     }
 
     /// Nested groups, and an entry with no title (protected or absent) —

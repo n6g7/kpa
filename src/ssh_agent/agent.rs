@@ -336,13 +336,14 @@ fn load_and_sign(
         let private_key = match slot.ssh.private_keys.entry(served.fingerprint) {
             Entry::Occupied(cached) => cached.into_mut(),
             Entry::Vacant(vacant) => {
-                let attachment = vault::list_attachments(db).into_iter().find(|a| {
-                    a.entry_uuid == served.entry_uuid
-                        && keys::scan(std::slice::from_ref(a))
+                let attachment = vault::entry_attachments(db, served.entry_uuid)
+                    .into_iter()
+                    .find(|a| {
+                        keys::scan(std::slice::from_ref(a))
                             .found
                             .iter()
                             .any(|k| k.fingerprint == served.fingerprint)
-                })?;
+                    })?;
                 vacant.insert(keys::parse_private_key(&attachment.data)?)
             }
         };
