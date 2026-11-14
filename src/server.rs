@@ -38,7 +38,7 @@ use crate::io::ByteCounter;
 use crate::log;
 use crate::origin::{self, Origin};
 use crate::policy;
-use crate::prompt::{PromptOutcome, PromptQueue, prompt_message, run_choice_prompt, run_prompt};
+use crate::prompt::{PromptOutcome, PromptQueue, prompt_message, run_prompt};
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
@@ -624,6 +624,7 @@ impl Unlock for Server {
                     &message,
                     timeout,
                     &cancel_watch,
+                    None,
                 ) {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
@@ -987,15 +988,15 @@ impl Server {
             name: db_name,
         };
         matches!(
-            run_choice_prompt(
+            run_prompt(
                 &self.prompt_queue,
                 argv,
                 &message,
                 self.config.prompt_timeout,
                 &watch,
-                &["Allow", "Deny"],
+                Some(b"Allow\nDeny\n"),
             ),
-            Ok(PromptOutcome::Answer(choice)) if choice == "Allow"
+            Ok(PromptOutcome::Answer(choice)) if choice.as_str() == "Allow"
         )
     }
 

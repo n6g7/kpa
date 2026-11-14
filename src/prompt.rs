@@ -1,8 +1,7 @@
 //! Runs a dmenu-style prompt program and reads its answer: `unlock`'s
-//! password prompt today (`docs/design.md` decision #9, `Config::prompt`),
-//! and, once it exists, the SSH agent's approval prompt
-//! (`ssh_agent.confirm_prompt`, same contract — `docs/ssh-agent.md` § 6.7).
-//! Both callers go through `run_prompt`, queued through a shared
+//! prompt (`docs/design.md` decision #9, `Config::prompt`) and the SSH
+//! agent's approval prompt (`ssh_agent.confirm_prompt`, same contract —
+//! `docs/ssh-agent.md` § 6.7). Both callers go through `run_prompt`, queued through a shared
 //! `PromptQueue` so only one prompt is ever on screen at a time.
 //!
 //! The prompt program's argv runs exactly as configured; what the prompt is
@@ -20,10 +19,8 @@ use zeroize::Zeroizing;
 
 use crate::proto::MAX_PASSWORD_LEN;
 
-/// How a prompt ended. `T` is what an answered prompt yields: a
-/// [`Zeroizing`] password from [`run_prompt`], the chosen line from
-/// [`run_choice_prompt`].
-pub(crate) enum PromptOutcome<T> {
+/// How a prompt ended.
+pub(crate) enum PromptOutcome {
     /// The command exited unsuccessfully — e.g. the user dismissed a
     /// dmenu-style prompt — rather than printing an answer.
     Cancelled,
@@ -32,26 +29,19 @@ pub(crate) enum PromptOutcome<T> {
     /// A lock ended the prompt (`Slot::prompt_cancel`); it was killed, or —
     /// if it was still queued, never shown at all (`PromptQueue::enter`).
     Interrupted,
-    Answer(T),
+    /// What the program printed, line ending stripped. Zeroizing, since an
+    /// answer can be a secret.
+    Answer(Zeroizing<String>),
 }
 
-pub(crate) type PasswordOutcome = PromptOutcome<Zeroizing<String>>;
-
-impl<T> PromptOutcome<T> {
-    fn map<U>(self, f: impl FnOnce(T) -> U) -> PromptOutcome<U> {
-        match self {
-            PromptOutcome::Cancelled => PromptOutcome::Cancelled,
-            PromptOutcome::TimedOut => PromptOutcome::TimedOut,
-            PromptOutcome::Interrupted => PromptOutcome::Interrupted,
-            PromptOutcome::Answer(answer) => PromptOutcome::Answer(f(answer)),
-        }
-    }
-}
+/// The longest answer read; one more byte is an error. An answer can be a
+/// secret, so this is the secrets' length cap.
+const MAX_ANSWER_LEN: usize = MAX_PASSWORD_LEN;
 
 /// Redacts the answer, same reasoning as `UnlockRequest`'s own `Debug`
 /// (`docs/headless.md` § 9): this is cheap insurance against it ending up
 /// in a test failure message or a future `{:?}` log line.
-impl<T> std::fmt::Debug for PromptOutcome<T> {
+impl std::fmt::Debug for PromptOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PromptOutcome::Cancelled => write!(f, "Cancelled"),
@@ -110,9 +100,8 @@ struct PromptQueueState {
 
 /// Serializes every prompt across every database, so only one is ever on
 /// screen (`docs/ssh-agent.md` § 6.7's "only one prompt is on screen at a
-/// time"). `unlock`'s password prompt is the only caller today; the
-/// approval prompt `ssh_agent.confirm_prompt` raises will share this same
-/// queue once it exists.
+/// time"). `unlock`'s prompt and the approval prompt
+/// `ssh_agent.confirm_prompt` raises share it.
 pub(crate) struct PromptQueue {
     state: Mutex<PromptQueueState>,
 }
@@ -226,9 +215,8 @@ fn wait_for_wake(watch: &UnixStream, cancel_watch: &UnixStream) -> std::io::Resu
 /// stdout. The argv runs exactly as configured; `message` (already escaped
 /// and length-capped by `prompt_message`) reaches the program through the
 /// `PROMPT_MESSAGE_ENV` environment variable instead. `stdin`, when given,
-/// is written before anything is read — the approval prompt
-/// `ssh_agent.confirm_prompt` raises writes its `Allow`/`Deny` choices this
-/// way; `unlock`'s password prompt passes `None`.
+/// is written before anything is read — a prompt that picks among
+/// choices gets them this way, one per line.
 ///
 /// The prompt runs in its own process group. It is killed, with everything
 /// it started, once `timeout` passes without it finishing, or as soon as
@@ -240,7 +228,7 @@ fn wait_for_wake(watch: &UnixStream, cancel_watch: &UnixStream) -> std::io::Resu
 /// reallocates as it fills, and every reallocation frees an unwiped copy of
 /// what it held so far — for a long passphrase, most of it survived both
 /// unlock and lock (`docs/review-2026-09-secrets.md` finding 1). Output
-/// longer than `MAX_PASSWORD_LEN` is refused rather than accommodated.
+/// longer than `MAX_ANSWER_LEN` is refused rather than accommodated.
 ///
 /// Trailing `\n`/`\r` are stripped, since dmenu-style prompts
 /// newline-terminate their output. The copies kpa can't reach are the ones
@@ -251,42 +239,8 @@ pub(crate) fn run_prompt(
     message: &str,
     timeout: Duration,
     cancel_watch: &UnixStream,
-) -> std::io::Result<PasswordOutcome> {
-    run(queue, argv, message, timeout, cancel_watch, None)
-}
-
-/// Same contract as [`run_prompt`] for a prompt that picks one of
-/// `choices`: they're written to the program's stdin, one per line, and the
-/// line it prints is the answer. The answer is whatever the program printed;
-/// callers compare it against the choices they offered.
-pub(crate) fn run_choice_prompt(
-    queue: &PromptQueue,
-    argv: &[String],
-    message: &str,
-    timeout: Duration,
-    cancel_watch: &UnixStream,
-    choices: &[&str],
-) -> std::io::Result<PromptOutcome<String>> {
-    let stdin: String = choices.iter().map(|choice| format!("{choice}\n")).collect();
-    let outcome = run(
-        queue,
-        argv,
-        message,
-        timeout,
-        cancel_watch,
-        Some(stdin.as_bytes()),
-    )?;
-    Ok(outcome.map(|answer| answer.as_str().to_owned()))
-}
-
-fn run(
-    queue: &PromptQueue,
-    argv: &[String],
-    message: &str,
-    timeout: Duration,
-    cancel_watch: &UnixStream,
     stdin: Option<&[u8]>,
-) -> std::io::Result<PasswordOutcome> {
+) -> std::io::Result<PromptOutcome> {
     use std::io::{Error, ErrorKind};
 
     let Some((program, args)) = argv.split_first() else {
@@ -321,7 +275,7 @@ fn spawn_and_read(
     timeout: Duration,
     cancel_watch: &UnixStream,
     stdin: Option<&[u8]>,
-) -> std::io::Result<PasswordOutcome> {
+) -> std::io::Result<PromptOutcome> {
     use std::io::{Error, ErrorKind};
     use std::os::unix::process::CommandExt;
 
@@ -343,14 +297,14 @@ fn spawn_and_read(
         .spawn()?;
 
     if let Some(bytes) = stdin {
-        // A choice prompt's whole input is a few short lines — small enough that this never blocks waiting
-        // for the child to start reading.
+        // Choices are a few short lines — small enough that this never
+        // blocks waiting for the child to start reading.
         if let Some(mut child_stdin) = child.stdin.take() {
             let _ = child_stdin.write_all(bytes);
         }
     }
 
-    let mut buf = Zeroizing::new(vec![0u8; MAX_PASSWORD_LEN]);
+    let mut buf = Zeroizing::new(vec![0u8; MAX_ANSWER_LEN]);
     let len = match read_prompt(&mut child, &mut buf, deadline, cancel_watch) {
         Ok(Ok(len)) => len,
         Ok(Err(ended)) => {
@@ -375,9 +329,9 @@ fn spawn_and_read(
         .map_err(|_| Error::new(ErrorKind::InvalidData, "prompt output is not valid UTF-8"))?;
 
     // Sized exactly, so `push_str` doesn't reallocate either.
-    let mut password = Zeroizing::new(String::with_capacity(text.len()));
-    password.push_str(text);
-    Ok(PromptOutcome::Answer(password))
+    let mut answer = Zeroizing::new(String::with_capacity(text.len()));
+    answer.push_str(text);
+    Ok(PromptOutcome::Answer(answer))
 }
 
 /// Read the child's stdout into `buf` until EOF, returning how much was
@@ -390,7 +344,7 @@ fn read_prompt(
     buf: &mut [u8],
     deadline: Option<Instant>,
     cancel_watch: &UnixStream,
-) -> std::io::Result<Result<usize, PasswordOutcome>> {
+) -> std::io::Result<Result<usize, PromptOutcome>> {
     use rustix::event::{PollFd, PollFlags, Timespec, poll};
     use std::io::{Error, ErrorKind};
 
@@ -403,7 +357,7 @@ fn read_prompt(
         if len == buf.len() {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!("prompt output exceeds {MAX_PASSWORD_LEN} bytes"),
+                format!("prompt output exceeds {MAX_ANSWER_LEN} bytes"),
             ));
         }
         let left = match deadline {
@@ -487,7 +441,7 @@ mod tests {
     /// Runs `script` as the prompt, with a timeout long enough never to
     /// fire, nobody to cancel it, a queue of its own, and an arbitrary
     /// message — these tests don't care what it is.
-    fn prompt(script: &str) -> std::io::Result<PasswordOutcome> {
+    fn prompt(script: &str) -> std::io::Result<PromptOutcome> {
         let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
         run_prompt(
             &PromptQueue::new(),
@@ -495,31 +449,32 @@ mod tests {
             "test message",
             Duration::from_secs(60),
             &cancel_watch,
+            None,
         )
     }
 
     #[test]
-    fn a_choice_prompt_gets_the_choices_on_stdin_and_returns_the_chosen_line() {
+    fn a_prompt_gets_stdin_and_returns_the_line_it_prints() {
         let _spawning = spawn_lock();
         let (_prompt_cancel, cancel_watch) = UnixStream::pair().expect("socket pair");
-        let outcome = run_choice_prompt(
+        let outcome = run_prompt(
             &PromptQueue::new(),
             &sh("sed -n 2p"),
             "test message",
             Duration::from_secs(60),
             &cancel_watch,
-            &["Allow", "Deny"],
+            Some(b"Allow\nDeny\n"),
         );
-        assert!(matches!(outcome, Ok(PromptOutcome::Answer(choice)) if choice == "Deny"));
+        assert!(matches!(outcome, Ok(PromptOutcome::Answer(answer)) if answer.as_str() == "Deny"));
     }
 
     #[test]
     fn prompt_output_has_its_line_ending_stripped() {
         let _spawning = spawn_lock();
-        let Ok(PromptOutcome::Answer(password)) = prompt("printf 'hunter2\\r\\n'") else {
-            panic!("expected a password");
+        let Ok(PromptOutcome::Answer(answer)) = prompt("printf 'hunter2\\r\\n'") else {
+            panic!("expected an answer");
         };
-        assert_eq!(password.as_str(), "hunter2");
+        assert_eq!(answer.as_str(), "hunter2");
     }
 
     #[test]
@@ -533,7 +488,7 @@ mod tests {
     #[test]
     fn over_long_prompt_output_is_refused() {
         let _spawning = spawn_lock();
-        let script = format!("head -c {} /dev/zero | tr '\\0' a", MAX_PASSWORD_LEN + 1);
+        let script = format!("head -c {} /dev/zero | tr '\\0' a", MAX_ANSWER_LEN + 1);
         assert!(prompt(&script).is_err());
     }
 
@@ -548,6 +503,7 @@ mod tests {
             "test message",
             Duration::from_millis(200),
             &cancel_watch,
+            None,
         );
         assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -569,6 +525,7 @@ mod tests {
                 "test message",
                 Duration::from_secs(60),
                 &cancel_watch,
+                None,
             )
         });
         assert!(matches!(outcome, Ok(PromptOutcome::Interrupted)));
@@ -590,6 +547,7 @@ mod tests {
             "test message",
             Duration::from_millis(200),
             &cancel_watch,
+            None,
         );
         assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
         std::thread::sleep(Duration::from_millis(1500));
@@ -609,6 +567,7 @@ mod tests {
             "Unlock personal",
             Duration::from_secs(60),
             &cancel_watch,
+            None,
         );
         let Ok(PromptOutcome::Answer(seen)) = outcome else {
             panic!("expected the message back, got {outcome:?}");
@@ -628,9 +587,10 @@ mod tests {
             "Unlock personal",
             Duration::from_secs(60),
             &cancel_watch,
+            None,
         );
         let Ok(PromptOutcome::Answer(seen)) = outcome else {
-            panic!("expected a password, got {outcome:?}");
+            panic!("expected an answer, got {outcome:?}");
         };
         assert_eq!(seen.as_str(), "{message} literally");
     }
@@ -673,11 +633,27 @@ mod tests {
         let (_cancel_b, watch_b) = UnixStream::pair().expect("socket pair");
 
         let (first, second) = std::thread::scope(|scope| {
-            let first = scope
-                .spawn(|| run_prompt(&queue, &sh(&script), "a", Duration::from_secs(10), &watch_a));
+            let first = scope.spawn(|| {
+                run_prompt(
+                    &queue,
+                    &sh(&script),
+                    "a",
+                    Duration::from_secs(10),
+                    &watch_a,
+                    None,
+                )
+            });
             std::thread::sleep(Duration::from_millis(50));
-            let second = scope
-                .spawn(|| run_prompt(&queue, &sh(&script), "b", Duration::from_secs(10), &watch_b));
+            let second = scope.spawn(|| {
+                run_prompt(
+                    &queue,
+                    &sh(&script),
+                    "b",
+                    Duration::from_secs(10),
+                    &watch_b,
+                    None,
+                )
+            });
             (
                 first.join().expect("first prompt thread panicked"),
                 second.join().expect("second prompt thread panicked"),
@@ -712,6 +688,7 @@ mod tests {
                     "first",
                     Duration::from_secs(10),
                     &watch_first,
+                    None,
                 )
             });
             std::thread::sleep(Duration::from_millis(100));
@@ -722,6 +699,7 @@ mod tests {
                     "second",
                     Duration::from_secs(10),
                     &watch_second,
+                    None,
                 )
             });
             std::thread::sleep(Duration::from_millis(100));
