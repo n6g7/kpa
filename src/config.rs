@@ -90,13 +90,15 @@ pub struct DatabaseConfig {
     pub ssh_keys: Vec<SshKeyConfig>,
 }
 
-/// `[ssh_agent]` (`docs/ssh-agent.md` § 7).
+/// `[ssh_agent]` (`docs/ssh-agent.md` § 7). An unknown key is an error, so
+/// a typo fails the load rather than leaving a setting at its default.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshAgentConfig {
-    /// The agent socket's path. `None` means the default,
-    /// `$XDG_RUNTIME_DIR/kpa/ssh-agent` — resolved by [`SshAgentConfig::socket_path`]
-    /// rather than at parse time, since the default depends on the
-    /// environment.
+    /// The agent socket's path: absolute, or under `~/`, which `load`
+    /// expands. `None` means the default, `$XDG_RUNTIME_DIR/kpa/ssh-agent`,
+    /// resolved by [`SshAgentConfig::socket_path`] rather than at parse
+    /// time, since the default depends on the environment.
     #[serde(default)]
     pub socket: Option<PathBuf>,
 
@@ -136,11 +138,14 @@ impl SshAgentConfig {
 }
 
 /// `[[database.ssh_key]]`: an override for one key, matched by fingerprint
-/// (`docs/ssh-agent.md` § 7).
+/// (`docs/ssh-agent.md` § 7). An unknown key is an error: a typo such as
+/// `fowarded = false` must fail the load, not leave the key forwardable.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshKeyConfig {
     /// `SHA256:…`, as `ssh-add -l` and `kpa ssh keys` print it. Parsed
-    /// as the config loads, so one that doesn't parse fails the load.
+    /// as the config loads, so one that doesn't parse, or isn't SHA-256,
+    /// fails the load.
     #[serde(deserialize_with = "deserialize_fingerprint")]
     pub fingerprint: ssh_key::Fingerprint,
 
@@ -165,15 +170,24 @@ pub struct SshKeyConfig {
 }
 
 /// Reads an `SshKeyConfig::fingerprint`. An invalid one is a parse error,
-/// which TOML reports at the offending line.
+/// which TOML reports at the offending line. Only a SHA-256 fingerprint is
+/// accepted: kpa matches keys by theirs, so any other kind would never
+/// match and the override would silently do nothing.
 fn deserialize_fingerprint<'de, D>(deserializer: D) -> Result<ssh_key::Fingerprint, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let text = String::deserialize(deserializer)?;
-    text.parse().map_err(|err| {
+    let fingerprint: ssh_key::Fingerprint = text.parse().map_err(|err| {
         serde::de::Error::custom(format!("ssh_key fingerprint {text:?} is invalid: {err}"))
-    })
+    })?;
+    match fingerprint {
+        ssh_key::Fingerprint::Sha256(_) => Ok(fingerprint),
+        _ => Err(serde::de::Error::custom(format!(
+            "ssh_key fingerprint {text:?} is not a SHA-256 one: write it as `SHA256:…`, \
+             as `ssh-add -l` prints it"
+        ))),
+    }
 }
 
 /// A key's effective settings: its `[[database.ssh_key]]` override, or the
@@ -331,18 +345,35 @@ impl Config {
                 db.keyfile = Some(expand(keyfile)?);
             }
         }
+        if let Some(socket) = &self.ssh_agent.socket {
+            self.ssh_agent.socket = Some(expand(socket)?);
+        }
         Ok(self)
     }
 
-    /// Checks the cross-field rules TOML's own shape can't express
-    /// (`docs/ssh-agent.md` § 7): `ssh_agent.confirm_prompt` is required
-    /// once any database opts in, a `[[database.ssh_key]]` override needs
-    /// its database's `serve_ssh_keys = true`, and fingerprints are unique
-    /// within one database (the same fingerprint in two different databases is not a
-    /// conflict — that's config order deciding which one serves it). `load`
-    /// runs this after `expand_home`; `config` is the file's path, for
-    /// error messages.
+    /// Checks the rules TOML's own shape can't express
+    /// (`docs/ssh-agent.md` § 7):
+    ///
+    /// - `ssh_agent.confirm_prompt` is required once any database opts in;
+    /// - `ssh_agent.socket`, if set, is absolute, since a relative one
+    ///   would bind against the daemon's working directory;
+    /// - a `[[database.ssh_key]]` override needs its database's
+    ///   `serve_ssh_keys = true`;
+    /// - fingerprints are unique within one database. The same fingerprint
+    ///   in two databases is not a conflict: config order decides which
+    ///   one serves it.
+    ///
+    /// `load` runs this after `expand_home`; `config` is the file's path,
+    /// for error messages.
     pub fn validate(&self, config: &Path) -> Result<(), ConfigError> {
+        if let Some(socket) = &self.ssh_agent.socket
+            && !socket.is_absolute()
+        {
+            return Err(ConfigError::RelativeSshAgentSocket {
+                config: config.to_path_buf(),
+                socket: socket.clone(),
+            });
+        }
         if self.databases.iter().any(|db| db.serve_ssh_keys)
             && self.ssh_agent.confirm_prompt.is_empty()
         {
@@ -407,6 +438,12 @@ pub enum ConfigError {
         config.display()
     )]
     SshAgentConfirmRequired { config: PathBuf },
+    #[error(
+        "in {}: ssh_agent.socket {} is relative; give an absolute path or one under ~/",
+        config.display(),
+        socket.display()
+    )]
+    RelativeSshAgentSocket { config: PathBuf, socket: PathBuf },
     #[error(
         "in {}: database {database:?} has [[database.ssh_key]] overrides but serve_ssh_keys is not true",
         config.display()
@@ -808,6 +845,62 @@ socket = "/custom/sock"
         assert_eq!(SshKeySettings::default().confirm, SshKeyConfirm::Once);
         assert!(SshKeySettings::default().forwarded);
         assert!(SshKeySettings::default().serve);
+    }
+
+    /// An override must name its key by SHA-256 fingerprint, the only kind
+    /// kpa matches: a SHA-512 one would never match, so its settings
+    /// (`forwarded = false`, say) would silently do nothing.
+    #[test]
+    fn ssh_key_override_with_a_sha512_fingerprint_fails_to_parse() {
+        let sha512 = ssh_key::PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILM+rvN+ot98qgEN796jTiQfZfG1KaT0PtFDJ/XFSqti",
+        )
+        .expect("test key")
+        .fingerprint(ssh_key::HashAlg::Sha512);
+        let input = format!(
+            "[[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n\n\
+             [[database.ssh_key]]\nfingerprint = \"{sha512}\"\nforwarded = false\n"
+        );
+        let err = Config::parse(&input).expect_err("only SHA-256 fingerprints are accepted");
+        assert!(err.to_string().contains("SHA256:"), "{err}");
+    }
+
+    /// A typo in an override's or `[ssh_agent]`'s keys fails the load
+    /// rather than leaving the setting at its default.
+    #[test]
+    fn unknown_ssh_keys_fail_to_parse() {
+        let typo_in_override = format!(
+            "[[database]]\nname = \"personal\"\npath = \"/v.kdbx\"\nserve_ssh_keys = true\n\n\
+             [[database.ssh_key]]\nfingerprint = \"{FINGERPRINT}\"\nfowarded = false\n"
+        );
+        let err = Config::parse(&typo_in_override).expect_err("fowarded is not a key");
+        assert!(err.to_string().contains("fowarded"), "{err}");
+
+        let typo_in_agent = "[ssh_agent]\nconfirm_promt = [\"true\"]\n";
+        let err = Config::parse(typo_in_agent).expect_err("confirm_promt is not a key");
+        assert!(err.to_string().contains("confirm_promt"), "{err}");
+    }
+
+    #[test]
+    fn the_ssh_agent_socket_expands_home_and_must_be_absolute() {
+        let expanded = Config::parse("[ssh_agent]\nsocket = \"~/agent.sock\"\n")
+            .expect("valid config should parse")
+            .expand_home(Some(Path::new("/home/alice")), Path::new("config.toml"))
+            .expect("expands");
+        assert_eq!(
+            expanded.ssh_agent.socket.as_deref(),
+            Some(Path::new("/home/alice/agent.sock"))
+        );
+        expanded
+            .validate(Path::new("config.toml"))
+            .expect("an absolute socket is valid");
+
+        let relative = Config::parse("[ssh_agent]\nsocket = \"agent.sock\"\n")
+            .expect("valid config should parse");
+        let err = relative
+            .validate(Path::new("config.toml"))
+            .expect_err("a relative socket is refused");
+        assert!(matches!(err, ConfigError::RelativeSshAgentSocket { .. }));
     }
 
     #[test]
