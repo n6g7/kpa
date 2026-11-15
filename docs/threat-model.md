@@ -286,7 +286,7 @@ unlocked, takes it again on each successful unlock and after
 signal subscription drops, every database locks, and the subscription is
 re-established with backoff. A per-database idle timer, reset only by a
 successful `list` of that database or an unlock that installs it (`list`,
-`copy`, a successful `unlock`); a per-database lock epoch so a lock beats an
+`copy`, a successful `unlock`); a per-database lock signal so a lock beats an
 in-flight unlock. In scope: a missed or dropped signal subscription
 (including after a D-Bus reconnect); subscribing to a session other than
 the user's graphical one; suspending before the lock completes; an idle

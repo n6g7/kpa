@@ -8,7 +8,7 @@
 //! pre-dispatch failures, which by definition never reach an op.
 //!
 //! No tray or clipboard yet — those are later steps. Unlocking still needs a
-//! password from somewhere, so this step already calls into `prompt::run_prompt`
+//! password from somewhere, so this step already asks `prompt::PromptQueue`
 //! for one (`docs/design.md` decision #9); nothing about that requires the
 //! later pieces.
 //!
@@ -38,7 +38,7 @@ use crate::log;
 use crate::origin::{self, Origin, PeerOrigin};
 use crate::paths::Paths;
 use crate::policy;
-use crate::prompt::{PromptCancel, PromptOutcome, PromptQueue, cancel_pair, run_prompt};
+use crate::prompt::{self, CancelSource, Programs, PromptOutcome, PromptQueue};
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
@@ -74,17 +74,15 @@ struct Slot {
     /// by an `unlock`. Its idle timer runs from here, independently of every
     /// other database. Only meaningful while `db` is `Some`.
     last_activity: Instant,
-    /// Bumped by every `lock` that covers this database. An `unlock` reads
-    /// it before prompting and only stores what it opened if it is still
-    /// the same afterwards, so a lock issued mid-unlock can't be undone by
-    /// the unlock finishing.
-    lock_epoch: u64,
+    /// Replaced by every `lock` that covers this database, which cancels
+    /// every token taken from the one before. An `unlock` takes a token
+    /// before prompting: its prompt ends as soon as a lock comes in, and it
+    /// only stores what it opened if its token is still live afterwards,
+    /// so a lock issued mid-unlock can't be undone by the unlock finishing.
+    lock_signal: CancelSource,
     /// An unlock is prompting or deriving the key right now. A second one
     /// is refused rather than opening a second prompt.
     unlocking: bool,
-    /// While an unlock is prompting: the cancel end of its prompt
-    /// (`prompt::cancel_pair`). Dropping it ends the prompt.
-    prompt_cancel: Option<PromptCancel>,
     /// The SSH agent's state for this database (`docs/ssh-agent.md`
     /// § 6.4): the keys its last scan found. Empty while locked, or for a
     /// database that doesn't serve SSH keys.
@@ -92,18 +90,16 @@ struct Slot {
 }
 
 impl Slot {
-    /// Drops the database, if any, ends a prompt in flight for it, drops
-    /// the SSH agent's state for it, and bumps the epoch so an unlock that
-    /// is still prompting or deriving the key cannot install what it
+    /// Drops the database, if any, and the SSH agent's state for it, and
+    /// replaces the lock signal, even for a database that is already
+    /// locked: that ends a prompt in flight for it, and keeps an unlock
+    /// that is still prompting or deriving the key from installing what it
     /// opened.
     fn lock(&mut self) {
         self.db = None;
         self.stamp = None;
-        if let Some(cancel) = self.prompt_cancel.take() {
-            cancel.cancel();
-        }
         self.ssh = SshSlot::default();
-        self.lock_epoch = self.lock_epoch.wrapping_add(1);
+        self.lock_signal = CancelSource::new();
     }
 
     /// Installs a freshly opened database, with the fingerprint it was opened
@@ -132,9 +128,8 @@ impl Default for Slot {
             path: PathBuf::new(),
             stamp: None,
             last_activity: Instant::now(),
-            lock_epoch: 0,
+            lock_signal: CancelSource::new(),
             unlocking: false,
-            prompt_cancel: None,
             ssh: SshSlot::default(),
         }
     }
@@ -146,7 +141,7 @@ impl Default for Slot {
 /// The mutex is held only for bookkeeping, never across the slow part of
 /// `unlock` (the prompt and the key derivation, milliseconds to minutes).
 /// Holding it there would stall every other request behind someone typing
-/// a password; not holding it is what makes the lock epoch necessary.
+/// a password; not holding it is what makes the lock signal necessary.
 pub struct Server {
     config: Config,
     /// The file locations `main.rs` resolved at startup: where an unlock
@@ -182,9 +177,9 @@ pub struct Server {
     desk: Mutex<policy::Desk>,
     /// Set by `assume_origin` only.
     assumed_origin: OnceLock<Origin>,
-    /// Serializes every prompt `run_prompt` raises, across every database,
-    /// so only one is ever on screen (`docs/ssh-agent.md` § 6.7).
-    prompt_queue: PromptQueue,
+    /// Every prompt the daemon raises, across every database, one on screen
+    /// at a time (`docs/ssh-agent.md` § 6.7).
+    prompts: PromptQueue,
 }
 
 impl Server {
@@ -200,6 +195,18 @@ impl Server {
         paths: Paths,
         backend: impl clip::Backend + 'static,
     ) -> Server {
+        let prompts = Programs::new(config.prompt.clone());
+        Server::with_backends(config, paths, backend, prompts)
+    }
+
+    /// Like `with_clipboard`, but with an injected prompt backend too, for
+    /// unit tests that answer prompts without running a program.
+    fn with_backends(
+        config: Config,
+        paths: Paths,
+        clipboard: impl clip::Backend + 'static,
+        prompts: impl prompt::Backend + 'static,
+    ) -> Server {
         let dbs = config
             .databases
             .iter()
@@ -211,16 +218,17 @@ impl Server {
                 (db.name.clone(), slot)
             })
             .collect();
+        let prompts = PromptQueue::new(prompts, config.prompt_timeout);
         Server {
             config,
             paths,
             dbs: Mutex::new(dbs),
             policy_events: OnceLock::new(),
-            clip: Arc::new(Clipboard::new(backend)),
+            clip: Arc::new(Clipboard::new(clipboard)),
             clip_db: Arc::new(Mutex::new(None)),
             desk: Mutex::new(policy::Desk::NoSession),
             assumed_origin: OnceLock::new(),
-            prompt_queue: PromptQueue::new(),
+            prompts,
         }
     }
 
@@ -228,9 +236,10 @@ impl Server {
     /// unlock for `idle_timeout` as of `now`, judged per database. Returns
     /// the names it locked.
     ///
-    /// Only databases that are unlocked get their epoch bumped: an unlock
-    /// still prompting for a locked database is not idle-locked out from
-    /// under the user, and with nothing unlocked there is nothing to do.
+    /// Only databases that are unlocked get their lock signal replaced: an
+    /// unlock still prompting for a locked database is not idle-locked out
+    /// from under the user, and with nothing unlocked there is nothing to
+    /// do.
     pub fn expire_idle(&self, now: Instant) -> Vec<String> {
         let locked = {
             let mut dbs = slots(&self.dbs);
@@ -449,10 +458,9 @@ impl Status for Server {
     }
 }
 
-/// Clears a slot's `unlocking` flag and its prompt's cancel channel when
-/// dropped, so every way out of `unlock` — early returns and panics alike —
-/// releases them. A flag left set would refuse every later unlock of that
-/// database until a restart.
+/// Clears a slot's `unlocking` flag when dropped, so every way out of
+/// `unlock` — early returns and panics alike — releases it. A flag left
+/// set would refuse every later unlock of that database until a restart.
 struct UnlockingFlag<'a> {
     dbs: &'a Mutex<HashMap<String, Slot>>,
     name: &'a str,
@@ -462,9 +470,6 @@ impl Drop for UnlockingFlag<'_> {
     fn drop(&mut self) {
         if let Some(slot) = slots(self.dbs).get_mut(self.name) {
             slot.unlocking = false;
-            if let Some(cancel) = slot.prompt_cancel.take() {
-                cancel.cancel();
-            }
         }
     }
 }
@@ -484,16 +489,10 @@ impl Unlock for Server {
         // `InProgress` without installing anything.
         self.drop_stale([name]);
 
-        // How a lock ends this unlock's prompt. The slot keeps
-        // `prompt_cancel`, and `Slot::lock` drops it. The prompt watches
-        // `cancel_watch`, and is killed once its cancel end is gone.
-        let (prompt_cancel, cancel_watch) =
-            cancel_pair().map_err(|err| UnlockError::PromptFailed {
-                db: db(),
-                detail: err.to_string(),
-            })?;
-
-        let epoch = {
+        // How a lock ends this unlock: the token is cancelled by the next
+        // `Slot::lock`, which kills the prompt and keeps what this opens
+        // from being installed.
+        let lock = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
                 return Err(UnlockError::UnknownDb { db: db() });
@@ -507,7 +506,7 @@ impl Unlock for Server {
             // No prompt where nobody can answer it: from outside the
             // desktop, or behind a locker. Read under the mutex: the policy
             // marks the desk before its `lock_all` takes it, so either this
-            // sees the mark or that lock sees `prompt_cancel` below and
+            // sees the mark or that lock cancels the token taken below and
             // ends the prompt. A request that carries its password needs no
             // prompt, so it goes ahead from anywhere: that is how an
             // unlock from outside the desktop is answered.
@@ -518,8 +517,7 @@ impl Unlock for Server {
                 return Err(UnlockError::InProgress { db: db() });
             }
             slot.unlocking = true;
-            slot.prompt_cancel = Some(prompt_cancel);
-            slot.lock_epoch
+            slot.lock_signal.token()
         };
         // Declared before `dbs` below, so it drops after that guard has
         // released the mutex — `UnlockingFlag::drop` takes it again.
@@ -537,13 +535,7 @@ impl Unlock for Server {
             None => {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
-                prompted = match run_prompt(
-                    &self.prompt_queue,
-                    &self.config.prompt,
-                    &format!("Unlock {name}"),
-                    timeout,
-                    &cancel_watch,
-                ) {
+                prompted = match self.prompts.secret(&format!("Unlock {name}"), &lock) {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
                     }
@@ -587,10 +579,10 @@ impl Unlock for Server {
         let Some(slot) = dbs.get_mut(name) else {
             return Err(UnlockError::UnknownDb { db: db() });
         };
-        if slot.lock_epoch != epoch {
-            // A lock arrived while we were prompting. It already told its
-            // client the database is locked; `opened` is dropped here so
-            // that stays true.
+        if lock.is_cancelled() {
+            // A lock arrived while we were prompting or deriving the key.
+            // It already told its client the database is locked; `opened`
+            // is dropped here so that stays true.
             return Err(UnlockError::LockedDuringUnlock { db: db() });
         }
         slot.install(opened, stamp);
@@ -1144,7 +1136,7 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prompt::spawn_lock;
+    use crate::prompt::{Scripted, Step};
 
     fn empty_server() -> Server {
         Server::new(
@@ -1955,34 +1947,36 @@ mod tests {
     }
 
     /// Only unlocked databases are touched by the timer: a locked one keeps
-    /// its epoch, so an unlock still prompting for it is not cancelled.
+    /// its lock signal, so an unlock still prompting for it is not
+    /// cancelled.
     #[test]
-    fn an_idle_lock_leaves_locked_databases_and_their_epochs_alone() {
+    fn an_idle_lock_leaves_locked_databases_and_their_lock_signals_alone() {
         let server = idle_server("1s");
         unlock_directly(&server, "personal");
         age_activity(&server, "personal", Duration::from_secs(5));
-        let epoch_before = slots(&server.dbs)["work"].lock_epoch;
+        let unlocking_work = slots(&server.dbs)["work"].lock_signal.token();
 
         assert_eq!(server.expire_idle(Instant::now()), ["personal"]);
-        assert_eq!(slots(&server.dbs)["work"].lock_epoch, epoch_before);
+        assert!(!unlocking_work.is_cancelled());
     }
 
     /// Two configured, locked databases and a recording clipboard backend
-    /// that tracks per-offer liveness, with a prompt that fails instantly
-    /// rather than the default `fuzzel` (which may hang or not exist) —
-    /// for the freshness-guard tests below, which drive `unlock` far
-    /// enough to re-prompt without needing it to succeed.
+    /// that tracks per-offer liveness, with one prompt scripted to be
+    /// dismissed — for the freshness-guard tests below, which drive
+    /// `unlock` far enough to re-prompt without needing it to succeed.
     fn stale_drop_test_server() -> (Server, TrackedOffers) {
         let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
-        let server = Server::with_clipboard(
+        let prompts = Scripted::new();
+        prompts.push(Step::secret(PromptOutcome::Cancelled));
+        let server = Server::with_backends(
             Config::parse(
-                "prompt = [\"/bin/sh\", \"-c\", \"exit 1\"]\n\
-                 [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
+                "[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
                  [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n",
             )
             .expect("valid config"),
             Paths::default(),
             backend,
+            prompts,
         );
         allow_copy(&server);
         (server, offers)
@@ -2076,7 +2070,6 @@ mod tests {
     /// the database it names is already unlocked but stale.
     #[test]
     fn unlock_ends_the_clipboard_offer_for_a_stale_database() {
-        let _spawning = spawn_lock();
         let (server, _offers, offer) = stale_copy_setup();
 
         let _ = Unlock::unlock(
@@ -2227,17 +2220,22 @@ mod tests {
         );
     }
 
-    /// Two configured, locked databases whose prompt runs `script`.
-    fn prompt_server(script: &str) -> Server {
-        Server::new(
-            Config::parse(&format!(
-                "prompt = [\"/bin/sh\", \"-c\", \"{script}\"]\n\
-                 [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
-                 [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n"
-            ))
+    /// Two configured, locked databases whose prompts answer as the
+    /// returned script says. `Arc`, so a step can lock the server while its
+    /// prompt is up.
+    fn prompt_server() -> (Arc<Server>, Scripted) {
+        let prompts = Scripted::new();
+        let server = Server::with_backends(
+            Config::parse(
+                "[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
+                 [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n",
+            )
             .expect("valid config"),
             Paths::default(),
-        )
+            clip::WaylandBackend,
+            prompts.clone(),
+        );
+        (Arc::new(server), prompts)
     }
 
     fn unlock(server: &Server, name: &str) -> Result<String, UnlockError> {
@@ -2255,48 +2253,28 @@ mod tests {
         )
     }
 
-    /// Starts unlocking `name` on another thread, runs `then` once its
-    /// prompt is up, and returns what the unlock ended with and how long
-    /// it took after `then`.
-    fn unlock_then(
-        server: &Server,
-        name: &str,
-        then: impl FnOnce(),
-    ) -> (Result<String, UnlockError>, Duration) {
-        thread::scope(|scope| {
-            let unlocking = scope.spawn(|| unlock(server, name));
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while slots(&server.dbs)[name].prompt_cancel.is_none() {
-                assert!(Instant::now() < deadline, "the prompt never started");
-                thread::sleep(Duration::from_millis(10));
-            }
-            thread::sleep(Duration::from_millis(100));
-            then();
-            let started = Instant::now();
-            let result = unlocking.join().expect("unlock thread panicked");
-            (result, started.elapsed())
-        })
+    /// A prompt that types a password, unless something ends it first.
+    fn typed() -> Step {
+        Step::secret(PromptOutcome::Answer(Zeroizing::new("hunter2".to_string())))
     }
 
     #[test]
     fn no_prompt_is_raised_while_the_desk_is_locked() {
-        let _spawning = spawn_lock();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let marker = dir.path().join("prompted");
-        let server = prompt_server(&format!("touch '{}'; exit 1", marker.display()));
+        let (server, prompts) = prompt_server();
+        prompts.push(Step::secret(PromptOutcome::Cancelled));
 
         policy::Locks::set_desk(
-            &server,
+            &*server,
             policy::Desk::Locked {
                 session: "1".to_string(),
                 active: true,
             },
         );
         assert_eq!(unlock(&server, "personal"), Err(UnlockError::NoDisplay));
-        assert!(!marker.exists(), "a prompt ran behind the locker");
+        assert!(prompts.shown().is_empty(), "a prompt ran behind the locker");
 
         policy::Locks::set_desk(
-            &server,
+            &*server,
             policy::Desk::Unlocked {
                 session: "1".to_string(),
                 active: true,
@@ -2308,20 +2286,19 @@ mod tests {
                 db: "personal".to_string()
             })
         );
-        assert!(
-            marker.exists(),
+        assert_eq!(
+            prompts.shown(),
+            ["Unlock personal"],
             "the prompt runs again once the desk is unlocked"
         );
     }
 
     #[test]
     fn no_prompt_is_raised_for_a_requester_outside_the_desktop() {
-        let _spawning = spawn_lock();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let marker = dir.path().join("prompted");
-        let server = prompt_server(&format!("touch '{}'; exit 1", marker.display()));
+        let (server, prompts) = prompt_server();
+        prompts.push(Step::secret(PromptOutcome::Cancelled));
         policy::Locks::set_desk(
-            &server,
+            &*server,
             policy::Desk::Unlocked {
                 session: "1".to_string(),
                 active: true,
@@ -2332,7 +2309,10 @@ mod tests {
             unlock_from(&server, "personal", Origin::Outside),
             Err(UnlockError::NoDisplay)
         );
-        assert!(!marker.exists(), "a prompt ran for a requester outside");
+        assert!(
+            prompts.shown().is_empty(),
+            "a prompt ran for a requester outside"
+        );
 
         assert_eq!(
             unlock_from(&server, "personal", Origin::Desktop),
@@ -2340,7 +2320,11 @@ mod tests {
                 db: "personal".to_string()
             })
         );
-        assert!(marker.exists(), "the prompt runs for the desktop");
+        assert_eq!(
+            prompts.shown(),
+            ["Unlock personal"],
+            "the prompt runs for the desktop"
+        );
     }
 
     /// A request that carries its password needs no prompt, so neither
@@ -2348,10 +2332,7 @@ mod tests {
     /// locker. Here it reaches the vault, whose file doesn't exist.
     #[test]
     fn a_request_carrying_its_password_goes_ahead_from_anywhere() {
-        let _spawning = spawn_lock();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let marker = dir.path().join("prompted");
-        let server = prompt_server(&format!("touch '{}'; exit 1", marker.display()));
+        let (server, prompts) = prompt_server();
 
         for desk in [
             policy::Desk::NoSession,
@@ -2360,9 +2341,9 @@ mod tests {
                 active: true,
             },
         ] {
-            policy::Locks::set_desk(&server, desk);
+            policy::Locks::set_desk(&*server, desk);
             let result = Unlock::unlock(
-                &server,
+                &*server,
                 &UnlockRequest {
                     db: "personal".to_string(),
                     password: Some(crate::proto::Password::new(Zeroizing::new(
@@ -2378,70 +2359,65 @@ mod tests {
                 })
             );
         }
-        assert!(!marker.exists(), "a request with a password prompted");
+        assert!(
+            prompts.shown().is_empty(),
+            "a request with a password prompted"
+        );
     }
 
     #[test]
     fn lock_all_ends_a_prompt_in_flight() {
-        let _spawning = spawn_lock();
-        let server = prompt_server("sleep 30");
-
-        let (result, took) = unlock_then(&server, "personal", || {
-            policy::Locks::lock_all(&server);
-        });
+        let (server, prompts) = prompt_server();
+        let locker = Arc::clone(&server);
+        prompts.push(typed().while_up(move || policy::Locks::lock_all(&*locker)));
 
         assert_eq!(
-            result,
+            unlock(&server, "personal"),
             Err(UnlockError::LockedDuringUnlock {
                 db: "personal".to_string()
             })
         );
-        assert!(took < Duration::from_secs(5), "took {took:?}");
-        assert!(slots(&server.dbs)["personal"].prompt_cancel.is_none());
+        assert!(!slots(&server.dbs)["personal"].unlocking);
     }
 
     #[test]
     fn locking_the_database_ends_its_prompt() {
-        let _spawning = spawn_lock();
-        let server = prompt_server("sleep 30");
-
-        let (result, took) = unlock_then(&server, "personal", || {
+        let (server, prompts) = prompt_server();
+        let locker = Arc::clone(&server);
+        prompts.push(typed().while_up(move || {
             let _ = Lock::lock(
-                &server,
+                &*locker,
                 &LockRequest {
                     db: Some("personal".to_string()),
                 },
             );
-        });
+        }));
 
         assert_eq!(
-            result,
+            unlock(&server, "personal"),
             Err(UnlockError::LockedDuringUnlock {
                 db: "personal".to_string()
             })
         );
-        assert!(took < Duration::from_secs(5), "took {took:?}");
     }
 
     /// Locking another database leaves this one's prompt open; it ends
-    /// on its own, by timing out here.
+    /// on its own, dismissed here.
     #[test]
     fn locking_another_database_leaves_the_prompt_alone() {
-        let _spawning = spawn_lock();
-        let mut server = prompt_server("sleep 30");
-        server.config.prompt_timeout = Duration::from_millis(500);
-
-        let (result, _) = unlock_then(&server, "personal", || {
+        let (server, prompts) = prompt_server();
+        let locker = Arc::clone(&server);
+        prompts.push(Step::secret(PromptOutcome::Cancelled).while_up(move || {
             let _ = Lock::lock(
-                &server,
+                &*locker,
                 &LockRequest {
                     db: Some("work".to_string()),
                 },
             );
-        });
+        }));
 
         assert_eq!(
-            result,
+            unlock(&server, "personal"),
             Err(UnlockError::PromptCancelled {
                 db: "personal".to_string()
             })
