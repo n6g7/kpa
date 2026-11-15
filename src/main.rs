@@ -184,6 +184,30 @@ fn run_serve(
         }
     };
 
+    // The SSH agent's socket (`docs/ssh-agent.md` § 7), bound only once a
+    // database serves SSH keys.
+    let ssh_agent = if config.databases.iter().any(|cfg| cfg.serve_ssh_keys) {
+        let Some(path) = config.ssh_agent.socket_path(paths.runtime_dir.as_deref()) else {
+            report_error(
+                "ssh_agent.socket is unset and XDG_RUNTIME_DIR is not set to an absolute path; \
+                 a database has serve_ssh_keys = true, so the SSH agent socket needs one",
+            );
+            return ExitCode::FAILURE;
+        };
+        match socket::bind_socket(&path) {
+            Ok(listener) => Some((path, listener)),
+            Err(err) => {
+                report_error(format_args!(
+                    "binding the ssh agent socket {}: {err}",
+                    path.display()
+                ));
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
     log::set_level(log_level.unwrap_or(config.log_level));
     log::info(format_args!(
         "kpa {} listening on {}",
@@ -195,6 +219,17 @@ fn run_serve(
     let events = policy::start(server.clone(), policy::Bus::System);
     server.set_policy_events(events);
     tray::start(server.clone());
+    if let Some((path, listener)) = ssh_agent {
+        let ssh_server = server.clone();
+        let spawned = std::thread::Builder::new()
+            .name("ssh-agent".to_string())
+            .spawn(move || server::serve_ssh_agent(ssh_server, listener));
+        if let Err(err) = spawned {
+            report_error(format_args!("starting the ssh agent: {err}"));
+            return ExitCode::FAILURE;
+        }
+        log::info(format_args!("ssh agent listening on {}", path.display()));
+    }
     server::serve(server, listener);
     ExitCode::SUCCESS
 }

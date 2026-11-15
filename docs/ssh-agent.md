@@ -5,7 +5,7 @@ client's SSH agent integration. The client remains a vault editor if
 wanted, but stops handling SSH. Linux only, like the rest of kpa: a machine without kpa keeps
 its own KeePass client's agent over the same synced vault (§ 2).
 
-This is a proposal: nothing here is built. It reverses one line of
+This is a proposal. It reverses one line of
 [`design.md`](./design.md) § Scope ("Is not: … an SSH agent") and extends
 [`threat-model.md`](./threat-model.md); § 10 lists those edits. It builds
 on [`headless.md`](./headless.md) for prompt routing, prompt timeouts and
@@ -435,7 +435,15 @@ contract as `prompt`, in dmenu style:
 - kpa writes the choices, `Allow` and `Deny`, on stdin and reads the chosen
   line from stdout.
 - A non-zero exit, or any other output, means deny.
-- `fuzzel --dmenu` works as is.
+- Any dmenu-style program works. Run it through `sh -c` so the message
+  reaches its argv:
+
+  ```toml
+  confirm_prompt = ["sh", "-c", "exec fuzzel --dmenu --prompt \"$KPA_PROMPT_MESSAGE\""]
+  ```
+
+  A dialog-style program (`zenity`, `kdialog`) needs a wrapper script that
+  prints `Allow` once the user confirms.
 - It is required once any database has `serve_ssh_keys = true`. Without it,
   `kpa serve` refuses to start.
 
@@ -864,9 +872,10 @@ programs' settings.
 - `Server` implements `SshHost` as a thin adapter over its database
   slots (the configured databases, slot access under the mutex behind the
   freshness guard, `may_prompt`) and `origin::PeerOrigin`. The approval
-  prompt goes through the daemon's prompt queue, which
-  `server::serve_ssh_agent` hands the agent, so only one prompt is ever
-  on screen, unlock's included. `ssh_agent` never imports `server`.
+  prompt goes through the daemon's prompt queue, so only one prompt is
+  ever on screen, unlock's included. `server::serve_ssh_agent` runs the
+  agent with that queue, and is all the binary needs. `ssh_agent` never
+  imports `server`.
 - Unlock waiters use a condvar.
 - The prompt and approval runner gains `KPA_PROMPT_MESSAGE` and the shared
   queue. The timeout and lock-kills-prompt come from
@@ -884,20 +893,30 @@ programs' settings.
   key, an RSA key, and two keys that must be skipped: a passphrase-protected
   one and a PEM one (generated with `ssh-keygen`, imported as
   attachments).
-- **`tests/agent.rs`** spawns `kpa serve` and drives it with the real
-  OpenSSH tools:
+- **`tests/ssh_agent_serve.rs`** runs the daemon in-process
+  (`common::InProcessDaemon`), serves the agent on its own socket through
+  `server::serve_ssh_agent`, and drives it with the real OpenSSH tools and
+  raw agent-protocol frames:
   - `ssh-add -L` lists the keys from the cache while the database is
-    locked, and nothing on a first run without a cache;
-  - `ssh-keygen -Y sign` fails when the scripted prompt cancels, succeeds
-    after unlock, and `ssh-keygen -Y verify` accepts the result, for each
-    key type;
-  - a second signature doesn't prompt; `confirm = "always"` does;
-  - from outside the desktop (`Server::assume_origin`), a signature is
-    refused, `ssh_pending` lists it, and after `ssh_approve` the retry
-    signs;
-  - a lock makes signing fail again and clears approvals;
-  - `ssh-add <key>` and `ssh-add -D` fail.
-- **Forwarding**: an unprivileged `sshd` on a high port with a temporary
+    locked, by entry title once it's unlocked, and nothing on a first run
+    without a cache;
+  - `ssh-keygen -Y sign` succeeds after unlock and approval, and
+    `ssh-keygen -Y verify` accepts the result, for each key type;
+  - a second signature doesn't prompt, and neither does `confirm =
+    "never"`; `confirm = "always"` does, and so does a different
+    destination;
+  - a lock makes signing fail again, clears approvals and kills an open
+    approval prompt;
+  - forwarded signatures are refused;
+  - `ssh-add <key>`, `ssh-add -D` and `ssh-add -x` fail.
+- **`tests/server.rs`** spawns `kpa serve`: once a database serves SSH
+  keys, the agent's socket appears and `ssh-add -l` reaches it, and
+  otherwise there is no agent socket.
+- **Phase 2** (unlock on demand, requests from outside the desktop) adds:
+  `ssh-keygen -Y sign` failing when the scripted prompt cancels, and, from
+  outside the desktop (`Server::assume_origin`), a refused signature that
+  `ssh_pending` lists and whose retry signs after `ssh_approve`.
+- **Forwarding** (phase 3): an unprivileged `sshd` on a high port with a temporary
   host key, then `ssh -A` to localhost. This covers session-bind for real:
   a forwarded login approved by a scripted confirm, a second `ssh -A`
   session asking again, a `forwarded = false` key absent from the
