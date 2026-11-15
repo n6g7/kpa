@@ -1,5 +1,6 @@
 //! What a prompt comes back with: [`PromptOutcome`], generic over the
-//! answer.
+//! answer; [`Approval`], the answer an approval prompt gives; and
+//! [`Declined`], how an approval prompt ended when it didn't allow.
 
 use zeroize::Zeroizing;
 
@@ -20,6 +21,18 @@ pub enum PromptOutcome<T = Zeroizing<String>> {
     Answer(T),
 }
 
+impl<T> PromptOutcome<T> {
+    /// Interprets an answer, leaving the other outcomes as they are.
+    pub(super) fn map<U>(self, f: impl FnOnce(T) -> U) -> PromptOutcome<U> {
+        match self {
+            PromptOutcome::Cancelled => PromptOutcome::Cancelled,
+            PromptOutcome::TimedOut => PromptOutcome::TimedOut,
+            PromptOutcome::Interrupted => PromptOutcome::Interrupted,
+            PromptOutcome::Answer(answer) => PromptOutcome::Answer(f(answer)),
+        }
+    }
+}
+
 /// Redacts the answer, same reasoning as `UnlockRequest`'s own `Debug`
 /// (`docs/headless.md` § 9): this is cheap insurance against it ending up
 /// in a test failure message or a future `{:?}` log line.
@@ -34,9 +47,73 @@ impl<T> std::fmt::Debug for PromptOutcome<T> {
     }
 }
 
+/// The answer to an approval prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approval {
+    Allow,
+    Deny,
+}
+
+/// How an approval prompt ended without allowing, as a log line says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Declined {
+    #[error("denied")]
+    Denied,
+    #[error("cancelled")]
+    Cancelled,
+    #[error("timed out")]
+    TimedOut,
+    #[error("interrupted by a lock")]
+    Interrupted,
+}
+
+impl PromptOutcome<Approval> {
+    /// `Ok` for an `Allow`, and how the prompt declined otherwise.
+    pub fn allowed(self) -> Result<(), Declined> {
+        match self {
+            PromptOutcome::Answer(Approval::Allow) => Ok(()),
+            PromptOutcome::Answer(Approval::Deny) => Err(Declined::Denied),
+            PromptOutcome::Cancelled => Err(Declined::Cancelled),
+            PromptOutcome::TimedOut => Err(Declined::TimedOut),
+            PromptOutcome::Interrupted => Err(Declined::Interrupted),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_interprets_only_an_answer() {
+        let answer = PromptOutcome::Answer("Allow").map(|a| a == "Allow");
+        assert!(matches!(answer, PromptOutcome::Answer(true)));
+        assert!(matches!(
+            PromptOutcome::<&str>::TimedOut.map(|a| a == "Allow"),
+            PromptOutcome::TimedOut
+        ));
+        assert!(matches!(
+            PromptOutcome::<&str>::Interrupted.map(|a| a == "Allow"),
+            PromptOutcome::Interrupted
+        ));
+        assert!(matches!(
+            PromptOutcome::<&str>::Cancelled.map(|a| a == "Allow"),
+            PromptOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn only_an_allow_is_allowed() {
+        assert_eq!(PromptOutcome::Answer(Approval::Allow).allowed(), Ok(()));
+        for (outcome, declined) in [
+            (PromptOutcome::Answer(Approval::Deny), Declined::Denied),
+            (PromptOutcome::Cancelled, Declined::Cancelled),
+            (PromptOutcome::TimedOut, Declined::TimedOut),
+            (PromptOutcome::Interrupted, Declined::Interrupted),
+        ] {
+            assert_eq!(outcome.allowed(), Err(declined));
+        }
+    }
 
     #[test]
     fn debug_never_shows_the_answer() {

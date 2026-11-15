@@ -31,13 +31,16 @@ pub struct Ask {
     pub remember: bool,
 }
 
-/// Why a request is never signed, whatever the database's state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a request is never signed, whatever the database's state, as a log
+/// line says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
     /// A forwarded connection: none is served yet.
+    #[error("forwarding not supported yet")]
     Forwarded,
     /// The login's own session identifier doesn't match the connection's
     /// bound one (`docs/ssh-agent.md` § 6.3).
+    #[error("session mismatch")]
     SessionMismatch,
 }
 

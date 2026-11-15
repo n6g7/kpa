@@ -512,8 +512,9 @@ kpa also logs each refusal.
 ### 6.9 Lock and idle
 
 - **Lock** drops the private-key cache and every approval with the
-  database. It zeroizes the cache and follows the same epoch rules as
-  unlock.
+  database, and zeroizes the cache. As for unlock, it ends what is in
+  flight for the database: an approval prompt on screen is killed, and a
+  signature whose database locked after it was decided is not made.
 - **Freshness.** The freshness guard runs before each signature, as it does
   for `copy` (G-8).
 - **Local signatures are activity; forwarded ones never are.** A
@@ -845,15 +846,25 @@ programs' settings.
 | `wire.rs`     | Frame decode and encode into `enum AgentRequest` and `enum AgentResponse`. Pure, fuzzed                                                         |
 | `bind.rs`     | session-bind verification and per-connection binding state                                                                                      |
 | `classify.rs` | Data to be signed → `Purpose::{Login, SshSig, Other}`. Pure, fuzzed                                                                             |
-| `policy.rs`   | (key settings, connection class, purpose, database state, approvals, prompt availability) → `Sign`, `Approve`, `Unlock`, `Refuse(reason)`. Pure, with exhaustive tests like `policy::Policy` |
+| `policy.rs`   | (key settings, connection class, purpose, login session) → what the request needs (nothing, or an approval for a scope, kept until lock or not) or why it is refused. Pure and stateless: whether an approval already covers the scope, and whether a prompt may appear, are the sign flow's questions |
 | `keys.rs`     | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                   |
 | `approve.rs`  | Approvals and pending requests: their scopes, limits and expiry                                                                                 |
-| `serve.rs`    | Listener, per-connection thread, connection cap                                                                                                 |
+| `serve.rs`    | Listener, per-connection thread, connection cap, and the `SshSign` trait it answers each request through                                         |
+| `agent/`      | The agent's own logic, crate-private: per-database key state and the scan at unlock (`state.rs`), identities (`identities.rs`), the sign flow (`sign.rs`), what the approval prompt says (`message.rs`) and signing (`signer.rs`). `Agent` implements `SshSign` over `SshHost`, the database access the daemon implements |
 
 **Server changes**
 
-- `Slot` gains the key cache and its approvals, cleared in `Slot::lock()`.
-- A `SshSign` trait sits beside `CopyEntry`.
+- `Slot` gains the agent's `SshSlot`: the served keys, the private keys
+  read and the approvals, all dropped in `Slot::lock()`. Its lock signal,
+  replaced by every lock, ends an approval prompt in flight the way it
+  ends unlock's, and tells the signing hold whether a lock came in since
+  the request was decided.
+- `Server` implements `SshHost` as a thin adapter over its database
+  slots (the configured databases, slot access under the mutex behind the
+  freshness guard, `may_prompt`) and `origin::PeerOrigin`. The approval
+  prompt goes through the daemon's prompt queue, which
+  `server::serve_ssh_agent` hands the agent, so only one prompt is ever
+  on screen, unlock's included. `ssh_agent` never imports `server`.
 - Unlock waiters use a condvar.
 - The prompt and approval runner gains `KPA_PROMPT_MESSAGE` and the shared
   queue. The timeout and lock-kills-prompt come from

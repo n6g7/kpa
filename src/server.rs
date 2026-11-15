@@ -79,13 +79,17 @@ struct Slot {
     /// before prompting: its prompt ends as soon as a lock comes in, and it
     /// only stores what it opened if its token is still live afterwards,
     /// so a lock issued mid-unlock can't be undone by the unlock finishing.
+    /// The SSH agent takes one the same way for each signature
+    /// (`SlotView::lock_token`), for its approval prompt and its signing
+    /// hold.
     lock_signal: CancelSource,
     /// An unlock is prompting or deriving the key right now. A second one
     /// is refused rather than opening a second prompt.
     unlocking: bool,
     /// The SSH agent's state for this database (`docs/ssh-agent.md`
-    /// § 6.4): the keys its last scan found. Empty while locked, or for a
-    /// database that doesn't serve SSH keys.
+    /// § 6.4): the keys its last scan found, the private keys read since
+    /// and the approvals granted. Empty while locked, or for a database
+    /// that doesn't serve SSH keys.
     ssh: SshSlot,
 }
 
@@ -635,13 +639,23 @@ impl SshHost for Server {
             let mut dbs = slots(&self.dbs);
             let slot = dbs.get_mut(db)?;
             let stale = drop_if_stale(slot);
-            (f(SlotView::new(slot.db.as_ref(), &mut slot.ssh)), stale)
+            let view = SlotView::new(
+                slot.db.as_ref(),
+                &mut slot.ssh,
+                &mut slot.last_activity,
+                &slot.lock_signal,
+            );
+            (f(view), stale)
         };
         // As `drop_stale` does: the clipboard is ended after the mutex.
         if stale {
             self.end_clipboard_for(db);
         }
         Some(result)
+    }
+
+    fn may_prompt(&self, origin: Origin) -> bool {
+        self.desk().may_prompt(origin)
     }
 }
 
@@ -915,9 +929,14 @@ impl Drop for ConnectionSlot {
 
 /// Serves the SSH agent (`docs/ssh-agent.md`) for `server` on `listener`
 /// forever, each connection on its own thread, as `serve` does the JSON
-/// socket.
+/// socket. Its approval prompts go through `server.prompts`, `unlock`'s
+/// queue, so only one prompt is ever on screen.
 pub fn serve_ssh_agent(server: Arc<Server>, listener: UnixListener) {
-    let agent = Agent::new(Arc::clone(&server), &server.paths);
+    let agent = Agent::new(
+        Arc::clone(&server),
+        Arc::clone(&server.prompts),
+        &server.paths,
+    );
     ssh_agent::serve::serve(Arc::new(agent), listener);
 }
 

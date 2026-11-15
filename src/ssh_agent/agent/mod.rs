@@ -1,21 +1,27 @@
 //! The agent's own logic (`docs/ssh-agent.md` § 6): the per-database key
-//! state, the scan at unlock, and identity listing.
+//! state, the scan at unlock, identity listing, and the sign flow.
 //!
 //! - [`SshHost`]: what the agent needs from the daemon that hosts it, and
 //!   [`SlotView`], one database's slot as the agent sees it.
 //! - [`SshSlot`]: the agent's per-database state, which the host keeps in
-//!   each slot and resets on lock.
-//! - `identities`: which keys a connection sees.
+//!   each slot and locks with it.
+//! - `identities`: which keys a connection sees, and which key a request
+//!   names.
+//! - `sign`: the sign flow, with `message` for what the approval prompt
+//!   says and `signer` for the signature itself.
 //! - [`Agent`]: all of it behind [`SshSign`], the interface
 //!   [`serve`](super::serve) speaks.
 //!
-//! It reaches the daemon only through [`SshHost`]; nothing here names
-//! `server`.
+//! It reaches the daemon only through [`SshHost`] and the prompt queue the
+//! daemon hands it; nothing here names `server`.
 
 #[cfg(test)]
 mod fake;
 mod host;
 mod identities;
+mod message;
+mod sign;
+mod signer;
 mod state;
 
 use std::os::unix::net::UnixStream;
@@ -31,19 +37,28 @@ use super::serve::SshSign;
 use super::wire::{AgentResponse, Identity, SignRequest};
 use crate::origin::{Origin, PeerOrigin};
 use crate::paths::Paths;
+use crate::prompt::PromptQueue;
 
 /// The SSH agent for one host: what [`serve`](super::serve::serve) runs.
 pub struct Agent<H> {
     host: Arc<H>,
+    /// Where approval prompts are raised: the daemon's own queue, so only
+    /// one prompt is on screen at a time, unlock's included.
+    prompts: Arc<PromptQueue>,
     /// Where the public-key cache lives, `None` without a cache directory.
     cache_dir: Option<PathBuf>,
+    /// OpenSSH's known-hosts file, for naming an approval prompt's
+    /// destination.
+    known_hosts: Option<PathBuf>,
 }
 
 impl<H: SshHost> Agent<H> {
-    pub fn new(host: Arc<H>, paths: &Paths) -> Agent<H> {
+    pub fn new(host: Arc<H>, prompts: Arc<PromptQueue>, paths: &Paths) -> Agent<H> {
         Agent {
             host,
+            prompts,
             cache_dir: keys::cache_dir(paths),
+            known_hosts: paths.known_hosts.clone(),
         }
     }
 }
@@ -59,22 +74,24 @@ impl<H: SshHost> SshSign for Agent<H> {
         identities::identities(self.host.as_ref(), self.cache_dir.as_deref(), class)
     }
 
-    /// Refuses every request: this agent lists keys but doesn't sign yet.
     fn ssh_sign(
         &self,
-        _class: &ConnectionClass,
-        _request: &SignRequest,
-        _login_session_id: Option<&[u8]>,
-        _origin: Origin,
+        class: &ConnectionClass,
+        request: &SignRequest,
+        login_session_id: Option<&[u8]>,
+        origin: Origin,
     ) -> AgentResponse {
-        AgentResponse::Failure
+        self.sign(class, request, login_session_id, origin)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::fake::FakeHost;
     use super::*;
+    use crate::prompt::Scripted;
     use crate::ssh_agent::testing::{database, test_key};
 
     /// The agent lists through its host, and finds the cache where `paths`
@@ -89,10 +106,9 @@ mod tests {
         let key = test_key(1);
         let cache = keys::cache_dir(&paths).expect("cache dir");
         keys::write_cache(&cache, "personal", &[key.public_key().clone()]).expect("write cache");
-        let agent = Agent::new(
-            Arc::new(FakeHost::locked(vec![database("personal", vec![])])),
-            &paths,
-        );
+        let host = Arc::new(FakeHost::locked(vec![database("personal", vec![])]));
+        let prompts = Arc::new(PromptQueue::new(Scripted::new(), Duration::from_secs(60)));
+        let agent = Agent::new(host, prompts, &paths);
 
         assert_eq!(
             agent
