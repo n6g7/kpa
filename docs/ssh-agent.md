@@ -397,8 +397,9 @@ A wrapper puts the message right back into its own argv, so it's visible
 to other uids via `/proc/<pid>/cmdline` either way. Only a program that
 reads the variable itself avoids that.
 
-**Timeouts and cancels.** Prompts time out after `prompt_timeout`, and a
-lock kills an open prompt ([`headless.md`](./headless.md) § 6). On top of
+**Timeouts and cancels.** Prompts time out after `prompt_timeout`, the
+approval prompt after `ssh_agent.confirm_prompt_timeout` if that is set,
+and a lock kills an open prompt ([`headless.md`](./headless.md) § 6). On top of
 that, cancelling or timing out an unlock or approval prompt raised by a
 signature puts that database in backoff for `ssh_agent.backoff` (default
 2 minutes). Signatures from it then fail at once without prompting, which
@@ -549,6 +550,7 @@ password-guessing oracle.
 | `serve_ssh_keys` | `[[database]]` | `false` | Serve this database's SSH keys (§ 6.4) |
 | `socket` | `[ssh_agent]` | `$XDG_RUNTIME_DIR/kpa/ssh-agent` | The agent socket |
 | `confirm_prompt` | `[ssh_agent]` | none; required once a database opts in | The approval program, dmenu style (§ 6.7) |
+| `confirm_prompt_timeout` | `[ssh_agent]` | `prompt_timeout` | How long the approval prompt may stay open unanswered before it is killed and the signature refused |
 | `backoff` | `[ssh_agent]` | `"2m"` | How long a cancelled prompt holds back signatures from its database (§ 6.6) |
 | `fingerprint` | `[[database.ssh_key]]` | required | Which key the override is for, as `ssh-add -l` and `kpa ssh keys` print it |
 | `name` | `[[database.ssh_key]]` | the entry's title | Identity comment, shown in prompts and logs |

@@ -936,13 +936,13 @@ impl Drop for ConnectionSlot {
 /// Serves the SSH agent (`docs/ssh-agent.md`) for `server` on `listener`
 /// forever, each connection on its own thread, as `serve` does the JSON
 /// socket. Its approval prompt runs `ssh_agent.confirm_prompt`, with
-/// `prompt_timeout`, and waits its turn in `unlock`'s queue, so only one
-/// prompt is ever on screen.
+/// `Config::confirm_prompt_timeout`, and waits its turn in `unlock`'s
+/// queue, so only one prompt is ever on screen.
 pub fn serve_ssh_agent(server: Arc<Server>, listener: UnixListener) {
     let approval = Prompt::new(
         Arc::clone(&server.prompt_queue),
         ConfirmProgram::new(server.config.ssh_agent.confirm_prompt.clone()),
-        server.config.prompt_timeout,
+        server.config.confirm_prompt_timeout(),
     );
     let agent = Agent::new(Arc::clone(&server), approval, &server.paths);
     ssh_agent::serve::serve(Arc::new(agent), listener);

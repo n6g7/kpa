@@ -109,6 +109,13 @@ pub struct SshAgentConfig {
     #[serde(default)]
     pub confirm_prompt: Vec<String>,
 
+    /// How long the approval prompt may stay open unanswered before it is
+    /// killed and the signature refused. `None` (unset) means the
+    /// top-level `prompt_timeout`, as [`Config::confirm_prompt_timeout`]
+    /// resolves it.
+    #[serde(with = "humantime_serde", default)]
+    pub confirm_prompt_timeout: Option<Duration>,
+
     /// How long a cancelled unlock or approval prompt holds back
     /// signatures from its database (`docs/ssh-agent.md` § 6.6).
     #[serde(with = "humantime_serde", default = "default_ssh_agent_backoff")]
@@ -120,6 +127,7 @@ impl Default for SshAgentConfig {
         SshAgentConfig {
             socket: None,
             confirm_prompt: Vec::new(),
+            confirm_prompt_timeout: None,
             backoff: default_ssh_agent_backoff(),
         }
     }
@@ -287,6 +295,15 @@ fn default_ssh_agent_backoff() -> Duration {
 }
 
 impl Config {
+    /// How long the SSH agent's approval prompt may stay open:
+    /// `ssh_agent.confirm_prompt_timeout` if set, `prompt_timeout`
+    /// otherwise.
+    pub fn confirm_prompt_timeout(&self) -> Duration {
+        self.ssh_agent
+            .confirm_prompt_timeout
+            .unwrap_or(self.prompt_timeout)
+    }
+
     /// Find, read, parse and resolve the config: `path` if given (from
     /// `--config`), otherwise `$XDG_CONFIG_HOME/kpa/config.toml`, falling
     /// back to `~/.config/kpa/config.toml`.
@@ -550,6 +567,35 @@ mod tests {
         assert_eq!(config.prompt_timeout, Duration::from_secs(120));
         assert_eq!(config.clipboard_timeout, Duration::from_secs(5));
         assert!(config.databases.is_empty());
+    }
+
+    /// Without its own timeout, the approval prompt uses `prompt_timeout`.
+    #[test]
+    fn the_confirm_prompt_timeout_falls_back_to_prompt_timeout() {
+        let config = Config::parse("prompt_timeout = \"2m\"\n").expect("valid config");
+        assert_eq!(config.ssh_agent.confirm_prompt_timeout, None);
+        assert_eq!(config.confirm_prompt_timeout(), Duration::from_secs(120));
+
+        let default = Config::parse("").expect("valid config");
+        assert_eq!(default.confirm_prompt_timeout(), default.prompt_timeout);
+    }
+
+    /// Set, it overrides `prompt_timeout` for the approval prompt only, and
+    /// parses as `prompt_timeout` does.
+    #[test]
+    fn the_confirm_prompt_timeout_overrides_prompt_timeout() {
+        let config = Config::parse(
+            "prompt_timeout = \"2m\"\n\n\
+             [ssh_agent]\nconfirm_prompt_timeout = \"15s\"\n",
+        )
+        .expect("valid config");
+        assert_eq!(config.confirm_prompt_timeout(), Duration::from_secs(15));
+        assert_eq!(config.prompt_timeout, Duration::from_secs(120));
+
+        let config = Config::parse("[ssh_agent]\nconfirm_prompt_timeout = \"1m 30s\"\n")
+            .expect("valid config");
+        assert_eq!(config.confirm_prompt_timeout(), Duration::from_secs(90));
+        assert!(Config::parse("[ssh_agent]\nconfirm_prompt_timeout = \"soon\"\n").is_err());
     }
 
     #[test]
