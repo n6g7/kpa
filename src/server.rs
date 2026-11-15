@@ -434,9 +434,10 @@ fn slots(dbs: &Mutex<HashMap<String, Slot>>) -> MutexGuard<'_, HashMap<String, S
 
 /// Freshness guard (`docs/threat-model.md` T-12): if the file behind `slot`
 /// is no longer the one its database was opened from, drops the database
-/// and returns `true`. Only called by `drop_stale`, which also ends the
+/// and returns `true`. Called by `drop_stale`, which also ends the
 /// clipboard offer a drop implies — `status`, `unlock`, `list` and `copy`
-/// all go through that, never this directly.
+/// all go through that — and by `SshHost::with_slot`, which ends the offer
+/// the same way and runs the SSH agent's own work in the same hold.
 ///
 /// The stat runs under the slots mutex. That is one `stat` call, cheap enough
 /// to keep the check and the drop atomic with respect to other requests.
@@ -629,14 +630,18 @@ impl SshHost for Server {
         &self.config.databases
     }
 
-    fn drop_if_stale(&self, db: &str) {
-        self.drop_stale([db]);
-    }
-
     fn with_slot<R>(&self, db: &str, f: impl FnOnce(SlotView<'_>) -> R) -> Option<R> {
-        let mut dbs = slots(&self.dbs);
-        let slot = dbs.get_mut(db)?;
-        Some(f(SlotView::new(slot.db.as_ref(), &mut slot.ssh)))
+        let (result, stale) = {
+            let mut dbs = slots(&self.dbs);
+            let slot = dbs.get_mut(db)?;
+            let stale = drop_if_stale(slot);
+            (f(SlotView::new(slot.db.as_ref(), &mut slot.ssh)), stale)
+        };
+        // As `drop_stale` does: the clipboard is ended after the mutex.
+        if stale {
+            self.end_clipboard_for(db);
+        }
+        Some(result)
     }
 }
 
@@ -2092,6 +2097,21 @@ mod tests {
         assert!(
             !offer.is_live(),
             "unlock's re-prompt branch dropping a stale database must end its clipboard offer"
+        );
+    }
+
+    /// Same as above, through the SSH agent's slot access, which drops the
+    /// stale database before the agent sees it.
+    #[test]
+    fn the_ssh_agents_slot_access_ends_the_clipboard_offer_for_a_stale_database() {
+        let (server, _offers, offer) = stale_copy_setup();
+
+        assert_eq!(SshHost::with_slot(&server, "personal", |_| ()), Some(()));
+
+        assert!(!is_unlocked(&server, "personal"));
+        assert!(
+            !offer.is_live(),
+            "the agent's freshness guard dropping a stale database must end its clipboard offer"
         );
     }
 

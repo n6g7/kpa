@@ -55,8 +55,6 @@ impl SshHost for FakeHost {
         &self.databases
     }
 
-    fn drop_if_stale(&self, _: &str) {}
-
     fn with_slot<R>(&self, db: &str, f: impl FnOnce(SlotView<'_>) -> R) -> Option<R> {
         let mut slots = self.slots.lock().expect("slots");
         let (open, ssh) = slots.get_mut(db)?;

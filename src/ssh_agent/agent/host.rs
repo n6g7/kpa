@@ -14,11 +14,11 @@ pub trait SshHost: PeerOrigin {
     /// Every configured database, in config order.
     fn databases(&self) -> &[DatabaseConfig];
 
-    /// Freshness guard for `db`: locks it if its file changed on disk.
-    fn drop_if_stale(&self, db: &str);
-
     /// Runs `f` on `db`'s slot under the daemon's lock on its slots, or
-    /// returns `None` if there is no such database. `f` must not block.
+    /// returns `None` if there is no such database. The freshness guard
+    /// runs first, in the same hold (`docs/ssh-agent.md` § 6.9, G-8): a
+    /// database whose file changed on disk is locked before `f` sees it.
+    /// `f` must not block.
     fn with_slot<R>(&self, db: &str, f: impl FnOnce(SlotView<'_>) -> R) -> Option<R>;
 }
 

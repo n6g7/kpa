@@ -56,15 +56,14 @@ pub(super) fn identities(
 }
 
 /// `cfg`'s served keys right now: its last scan's if its database is
-/// unlocked, the public-key cache's under `cache_dir` if it's locked. Runs
-/// the freshness guard first, so a database whose file changed lists from
-/// the cache.
+/// unlocked, the public-key cache's under `cache_dir` if it's locked. The
+/// host runs the freshness guard first, so a database whose file changed
+/// lists from the cache.
 fn served_keys(
     host: &impl SshHost,
     cache_dir: Option<&Path>,
     cfg: &DatabaseConfig,
 ) -> Vec<keys::ServedKey> {
-    host.drop_if_stale(&cfg.name);
     let unlocked = host.with_slot(&cfg.name, |slot| {
         slot.db.is_some().then(|| slot.ssh.served.clone())
     });
