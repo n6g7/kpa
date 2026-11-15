@@ -1,11 +1,12 @@
 //! The external-program backends: [`SecretProgram`] runs a dmenu-style
-//! prompt program and reads what it prints.
+//! prompt program and reads what it prints; [`ConfirmProgram`] offers one
+//! `Allow` and `Deny` and reads which it chose.
 //!
 //! The prompt program's argv runs exactly as configured; what the prompt is
 //! about reaches it through the `KPA_PROMPT_MESSAGE` environment variable
 //! instead (`docs/ssh-agent.md` § 6.6).
 
-use std::io::{Error, ErrorKind, Read};
+use std::io::{Error, ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
@@ -13,7 +14,7 @@ use std::time::Instant;
 
 use zeroize::Zeroizing;
 
-use super::{Backend, CancelToken, PromptOutcome};
+use super::{Approval, Backend, CancelToken, PromptOutcome};
 use crate::proto::MAX_PASSWORD_LEN;
 
 /// The longest answer read; one more byte is an error. An answer can be a
@@ -29,6 +30,9 @@ const MAX_ANSWER_LEN: usize = MAX_PASSWORD_LEN;
 /// Either way the argv itself runs exactly as configured — kpa never
 /// rewrites it.
 const PROMPT_MESSAGE_ENV: &str = "KPA_PROMPT_MESSAGE";
+
+/// What an approval prompt is offered, one choice per line.
+const APPROVAL_CHOICES: &[u8] = b"Allow\nDeny\n";
 
 /// Asks for a secret by running a dmenu-style program (`docs/design.md`
 /// decision #9), such as the unlock prompt's argv (`Config::prompt`). The
@@ -62,17 +66,58 @@ impl Backend<Zeroizing<String>> for SecretProgram {
         deadline: Option<Instant>,
         cancel: &CancelToken,
     ) -> std::io::Result<PromptOutcome> {
-        run(&self.argv, message, deadline, cancel)
+        run(&self.argv, message, deadline, cancel, None)
+    }
+}
+
+/// Asks for an approval by running a dmenu-style program, such as the SSH
+/// agent's approval prompt (`ssh_agent.confirm_prompt`): `Allow` and
+/// `Deny` go to its stdin one per line, and exactly `Allow` on stdout is
+/// [`Approval::Allow`]; anything else it prints is [`Approval::Deny`].
+/// Otherwise run as [`SecretProgram`] runs its own.
+pub struct ConfirmProgram {
+    argv: Vec<String>,
+}
+
+impl ConfirmProgram {
+    pub fn new(argv: Vec<String>) -> ConfirmProgram {
+        ConfirmProgram { argv }
+    }
+}
+
+impl Backend<Approval> for ConfirmProgram {
+    fn show(
+        &self,
+        message: &str,
+        deadline: Option<Instant>,
+        cancel: &CancelToken,
+    ) -> std::io::Result<PromptOutcome<Approval>> {
+        let outcome = run(
+            &self.argv,
+            message,
+            deadline,
+            cancel,
+            Some(APPROVAL_CHOICES),
+        )?;
+        Ok(outcome.map(|answer| {
+            if answer.as_str() == "Allow" {
+                Approval::Allow
+            } else {
+                Approval::Deny
+            }
+        }))
     }
 }
 
 /// Runs `argv` with `message` in its environment, and reads what it
-/// prints.
+/// prints. `stdin`, when given, is written before anything is read — a
+/// prompt that picks among choices gets them this way, one per line.
 fn run(
     argv: &[String],
     message: &str,
     deadline: Option<Instant>,
     cancel: &CancelToken,
+    stdin: Option<&[u8]>,
 ) -> std::io::Result<PromptOutcome> {
     let Some((program, args)) = argv.split_first() else {
         return Err(Error::new(
@@ -86,13 +131,25 @@ fn run(
     let mut child = Command::new(program)
         .args(args)
         .env(PROMPT_MESSAGE_ENV, message)
-        .stdin(Stdio::null())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         // Its own process group, so `kill_prompt` can kill everything it
         // started too, such as a wrapper script's real prompt window.
         .process_group(0)
         .spawn()?;
+
+    if let Some(bytes) = stdin {
+        // Choices are a few short lines — small enough that this never
+        // blocks waiting for the child to start reading.
+        if let Some(mut child_stdin) = child.stdin.take() {
+            let _ = child_stdin.write_all(bytes);
+        }
+    }
 
     let mut buf = Zeroizing::new(vec![0u8; MAX_ANSWER_LEN]);
     let len = match read_prompt(&mut child, &mut buf, deadline, &cancel) {
@@ -253,6 +310,29 @@ mod tests {
     /// is.
     fn prompt(script: &str) -> std::io::Result<PromptOutcome> {
         shown(script, "test message", Duration::from_secs(60))
+    }
+
+    /// Runs `script` as the approval prompt.
+    fn approval(script: &str) -> std::io::Result<PromptOutcome<Approval>> {
+        let source = CancelSource::new();
+        ConfirmProgram::new(sh(script)).show("test message", None, &source.token())
+    }
+
+    #[test]
+    fn an_approval_prompt_allows_only_an_exact_allow() {
+        let _spawning = spawn_lock();
+        for (script, expected) in [
+            ("sed -n 1p", Approval::Allow),
+            ("sed -n 2p", Approval::Deny),
+            ("echo allow", Approval::Deny),
+            ("echo 'Allow now'", Approval::Deny),
+        ] {
+            assert!(
+                matches!(approval(script), Ok(PromptOutcome::Answer(a)) if a == expected),
+                "{script}"
+            );
+        }
+        assert!(matches!(approval("exit 1"), Ok(PromptOutcome::Cancelled)));
     }
 
     #[test]

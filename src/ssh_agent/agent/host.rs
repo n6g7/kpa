@@ -65,7 +65,7 @@ impl<'a> SlotView<'a> {
     /// A token the database's next lock cancels: what an approval prompt
     /// raised now ends on, and how a later hold tells that no lock came in
     /// since this one.
-    pub(super) fn lock_token(&self) -> CancelToken {
+    pub(super) fn cancel_token(&self) -> CancelToken {
         self.lock_signal.token()
     }
 }

@@ -38,7 +38,9 @@ use crate::log;
 use crate::origin::{self, Origin, PeerOrigin};
 use crate::paths::Paths;
 use crate::policy;
-use crate::prompt::{self, CancelSource, Prompt, PromptOutcome, PromptQueue, SecretProgram};
+use crate::prompt::{
+    self, CancelSource, ConfirmProgram, Prompt, PromptOutcome, PromptQueue, SecretProgram,
+};
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
@@ -80,7 +82,7 @@ struct Slot {
     /// only stores what it opened if its token is still live afterwards,
     /// so a lock issued mid-unlock can't be undone by the unlock finishing.
     /// The SSH agent takes one the same way for each signature
-    /// (`SlotView::lock_token`), for its approval prompt and its signing
+    /// (`SlotView::cancel_token`), for its approval prompt and its signing
     /// hold.
     lock_signal: CancelSource,
     /// An unlock is prompting or deriving the key right now. A second one
@@ -181,9 +183,11 @@ pub struct Server {
     desk: Mutex<policy::Desk>,
     /// Set by `assume_origin` only.
     assumed_origin: OnceLock<Origin>,
-    /// The unlock prompt (`Config::prompt`). It waits its turn in the
-    /// daemon's one prompt queue, so only one prompt is ever on screen
-    /// (`docs/ssh-agent.md` § 6.7).
+    /// The daemon's one prompt queue, so only one prompt is ever on screen
+    /// (`docs/ssh-agent.md` § 6.7): the unlock prompt's, and the SSH
+    /// agent's approval prompts, which `serve_ssh_agent` builds on it.
+    prompt_queue: Arc<PromptQueue>,
+    /// The unlock prompt (`Config::prompt`), in `prompt_queue`.
     unlock_prompt: Prompt<Zeroizing<String>>,
 }
 
@@ -223,8 +227,9 @@ impl Server {
                 (db.name.clone(), slot)
             })
             .collect();
+        let prompt_queue = Arc::new(PromptQueue::new());
         let unlock_prompt = Prompt::new(
-            Arc::new(PromptQueue::new()),
+            Arc::clone(&prompt_queue),
             unlock_prompt,
             config.prompt_timeout,
         );
@@ -237,6 +242,7 @@ impl Server {
             clip_db: Arc::new(Mutex::new(None)),
             desk: Mutex::new(policy::Desk::NoSession),
             assumed_origin: OnceLock::new(),
+            prompt_queue,
             unlock_prompt,
         }
     }
@@ -929,14 +935,16 @@ impl Drop for ConnectionSlot {
 
 /// Serves the SSH agent (`docs/ssh-agent.md`) for `server` on `listener`
 /// forever, each connection on its own thread, as `serve` does the JSON
-/// socket. Its approval prompts go through `server.prompts`, `unlock`'s
-/// queue, so only one prompt is ever on screen.
+/// socket. Its approval prompt runs `ssh_agent.confirm_prompt`, with
+/// `prompt_timeout`, and waits its turn in `unlock`'s queue, so only one
+/// prompt is ever on screen.
 pub fn serve_ssh_agent(server: Arc<Server>, listener: UnixListener) {
-    let agent = Agent::new(
-        Arc::clone(&server),
-        Arc::clone(&server.prompts),
-        &server.paths,
+    let approval = Prompt::new(
+        Arc::clone(&server.prompt_queue),
+        ConfirmProgram::new(server.config.ssh_agent.confirm_prompt.clone()),
+        server.config.prompt_timeout,
     );
+    let agent = Agent::new(Arc::clone(&server), approval, &server.paths);
     ssh_agent::serve::serve(Arc::new(agent), listener);
 }
 

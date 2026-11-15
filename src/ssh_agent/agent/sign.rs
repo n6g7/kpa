@@ -147,7 +147,7 @@ impl<H: SshHost> Agent<H> {
         }
         // 1. Under the lock: what this signature needs, and whether the
         // database already has it.
-        let (key, ask, lock) = self.hold(db, |slot| {
+        let (key, ask, cancel_token) = self.hold(db, |slot| {
             let key = slot.served(request.fingerprint)?.clone();
             let need = policy::decide(
                 &key,
@@ -163,16 +163,16 @@ impl<H: SshHost> Agent<H> {
             if ask.is_some() && !self.host.may_prompt(origin) {
                 return Err(Refused::NeedsApproval);
             }
-            Ok((key, ask, slot.lock_token()))
+            Ok((key, ask, slot.cancel_token()))
         })?;
         // 2. Outside the lock: ask.
         if ask.is_some() {
-            self.ask(&key, request, &lock)?;
+            self.ask(&key, request, &cancel_token)?;
         }
         // 3. Under the lock again: sign, unless the database locked since
         // step 1.
         self.hold(db, |mut slot| {
-            if lock.is_cancelled() {
+            if cancel_token.is_cancelled() {
                 return Err(Refused::Locked);
             }
             let signature = signer::sign(
@@ -205,12 +205,13 @@ impl<H: SshHost> Agent<H> {
     }
 
     /// Shows the approval prompt for signing `request` with `key`, and
-    /// whether the user allowed it. It ends when `lock` is cancelled.
+    /// whether the user allowed it. It ends when `cancel_token` is
+    /// cancelled.
     fn ask(
         &self,
         key: &ServedKey,
         request: &Request<'_>,
-        lock: &CancelToken,
+        cancel_token: &CancelToken,
     ) -> Result<(), Refused> {
         let destination = request.destination();
         let known_hosts_name = destination.and_then(|dest| {
@@ -223,8 +224,8 @@ impl<H: SshHost> Agent<H> {
             destination,
             known_hosts_name.as_deref(),
         );
-        self.prompts
-            .confirm(&message, lock)
+        self.approval
+            .ask(&message, cancel_token)
             .map_err(Refused::PromptFailed)?
             .allowed()
             .map_err(Refused::Declined)
@@ -273,7 +274,7 @@ mod tests {
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
     use crate::paths::Paths;
-    use crate::prompt::{Approval, PromptOutcome, PromptQueue, Scripted, Step};
+    use crate::prompt::{Approval, Prompt, PromptOutcome, PromptQueue, Scripted, Step};
     use crate::ssh_agent::approve::Scope;
     use crate::ssh_agent::keys;
     use crate::ssh_agent::serve::SshSign;
@@ -297,11 +298,18 @@ mod tests {
     }
 
     /// An agent on `host`, its prompts answered by the returned script.
-    fn agent(host: FakeHost, paths: &Paths) -> (Arc<FakeHost>, Arc<Agent<FakeHost>>, Scripted) {
+    fn agent(
+        host: FakeHost,
+        paths: &Paths,
+    ) -> (Arc<FakeHost>, Arc<Agent<FakeHost>>, Scripted<Approval>) {
         let prompts = Scripted::new();
-        let queue = Arc::new(PromptQueue::new(prompts.clone(), Duration::from_secs(60)));
+        let approval = Prompt::new(
+            Arc::new(PromptQueue::new()),
+            prompts.clone(),
+            Duration::from_secs(60),
+        );
         let host = Arc::new(host);
-        let agent = Arc::new(Agent::new(Arc::clone(&host), queue, paths));
+        let agent = Arc::new(Agent::new(Arc::clone(&host), approval, paths));
         (host, agent, prompts)
     }
 
@@ -400,7 +408,7 @@ mod tests {
             let request = std::thread::spawn(move || sign(&second_agent, &second_key));
             second_tx.send(request).expect("send");
         }));
-        prompts.push(Step::approval(PromptOutcome::Answer(Approval::Deny)));
+        prompts.push(Step::new(PromptOutcome::Answer(Approval::Deny)));
 
         assert!(signed(&sign(&agent, &key)));
         let second = second.recv().expect("second request");
@@ -420,7 +428,7 @@ mod tests {
         ];
         for (name, declined) in declines {
             let (host, agent, prompts) = agent(host(&key, SshKeyConfirm::Once), &Paths::default());
-            prompts.push(Step::approval(declined));
+            prompts.push(Step::new(declined));
             prompts.push(Step::fails());
             assert!(
                 matches!(outcome(&agent, &key), Err(Refused::Declined(_))),

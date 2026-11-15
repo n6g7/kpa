@@ -12,8 +12,8 @@
 //! - [`Agent`]: all of it behind [`SshSign`], the interface
 //!   [`serve`](super::serve) speaks.
 //!
-//! It reaches the daemon only through [`SshHost`] and the prompt queue the
-//! daemon hands it; nothing here names `server`.
+//! It reaches the daemon only through [`SshHost`] and the approval prompt
+//! the daemon hands it; nothing here names `server`.
 
 #[cfg(test)]
 mod fake;
@@ -37,14 +37,15 @@ use super::serve::SshSign;
 use super::wire::{AgentResponse, Identity, SignRequest};
 use crate::origin::{Origin, PeerOrigin};
 use crate::paths::Paths;
-use crate::prompt::PromptQueue;
+use crate::prompt::{Approval, Prompt};
 
 /// The SSH agent for one host: what [`serve`](super::serve::serve) runs.
 pub struct Agent<H> {
     host: Arc<H>,
-    /// Where approval prompts are raised: the daemon's own queue, so only
-    /// one prompt is on screen at a time, unlock's included.
-    prompts: Arc<PromptQueue>,
+    /// The approval prompt. It waits its turn in the daemon's prompt
+    /// queue, so only one prompt is on screen at a time, unlock's
+    /// included.
+    approval: Prompt<Approval>,
     /// Where the public-key cache lives, `None` without a cache directory.
     cache_dir: Option<PathBuf>,
     /// OpenSSH's known-hosts file, for naming an approval prompt's
@@ -53,10 +54,10 @@ pub struct Agent<H> {
 }
 
 impl<H: SshHost> Agent<H> {
-    pub fn new(host: Arc<H>, prompts: Arc<PromptQueue>, paths: &Paths) -> Agent<H> {
+    pub fn new(host: Arc<H>, approval: Prompt<Approval>, paths: &Paths) -> Agent<H> {
         Agent {
             host,
-            prompts,
+            approval,
             cache_dir: keys::cache_dir(paths),
             known_hosts: paths.known_hosts.clone(),
         }
@@ -91,7 +92,7 @@ mod tests {
 
     use super::fake::FakeHost;
     use super::*;
-    use crate::prompt::Scripted;
+    use crate::prompt::{PromptQueue, Scripted};
     use crate::ssh_agent::testing::{database, test_key};
 
     /// The agent lists through its host, and finds the cache where `paths`
@@ -107,8 +108,12 @@ mod tests {
         let cache = keys::cache_dir(&paths).expect("cache dir");
         keys::write_cache(&cache, "personal", &[key.public_key().clone()]).expect("write cache");
         let host = Arc::new(FakeHost::locked(vec![database("personal", vec![])]));
-        let prompts = Arc::new(PromptQueue::new(Scripted::new(), Duration::from_secs(60)));
-        let agent = Agent::new(host, prompts, &paths);
+        let approval = Prompt::new(
+            Arc::new(PromptQueue::new()),
+            Scripted::new(),
+            Duration::from_secs(60),
+        );
+        let agent = Agent::new(host, approval, &paths);
 
         assert_eq!(
             agent
