@@ -397,8 +397,9 @@ A wrapper puts the message right back into its own argv, so it's visible
 to other uids via `/proc/<pid>/cmdline` either way. Only a program that
 reads the variable itself avoids that.
 
-**Timeouts and cancels.** Prompts time out after `prompt_timeout`, and a
-lock kills an open prompt ([`headless.md`](./headless.md) § 6). On top of
+**Timeouts and cancels.** Prompts time out after `prompt_timeout`, the
+approval prompt after `ssh_agent.confirm_prompt_timeout` if that is set,
+and a lock kills an open prompt ([`headless.md`](./headless.md) § 6). On top of
 that, cancelling or timing out an unlock or approval prompt raised by a
 signature puts that database in backoff for `ssh_agent.backoff` (default
 2 minutes). Signatures from it then fail at once without prompting, which
@@ -512,8 +513,9 @@ kpa also logs each refusal.
 ### 6.9 Lock and idle
 
 - **Lock** drops the private-key cache and every approval with the
-  database. It zeroizes the cache and follows the same epoch rules as
-  unlock.
+  database, and zeroizes the cache. As for unlock, it ends what is in
+  flight for the database: an approval prompt on screen is killed, and a
+  signature whose database locked after it was decided is not made.
 - **Freshness.** The freshness guard runs before each signature, as it does
   for `copy` (G-8).
 - **Local signatures are activity; forwarded ones never are.** A
@@ -548,6 +550,7 @@ password-guessing oracle.
 | `serve_ssh_keys` | `[[database]]` | `false` | Serve this database's SSH keys (§ 6.4) |
 | `socket` | `[ssh_agent]` | `$XDG_RUNTIME_DIR/kpa/ssh-agent` | The agent socket |
 | `confirm_prompt` | `[ssh_agent]` | none; required once a database opts in | The approval program, dmenu style (§ 6.7) |
+| `confirm_prompt_timeout` | `[ssh_agent]` | `prompt_timeout` | How long the approval prompt may stay open unanswered before it is killed and the signature refused |
 | `backoff` | `[ssh_agent]` | `"2m"` | How long a cancelled prompt holds back signatures from its database (§ 6.6) |
 | `fingerprint` | `[[database.ssh_key]]` | required | Which key the override is for, as `ssh-add -l` and `kpa ssh keys` print it |
 | `name` | `[[database.ssh_key]]` | the entry's title | Identity comment, shown in prompts and logs |
@@ -845,15 +848,25 @@ programs' settings.
 | `wire.rs`     | Frame decode and encode into `enum AgentRequest` and `enum AgentResponse`. Pure, fuzzed                                                         |
 | `bind.rs`     | session-bind verification and per-connection binding state                                                                                      |
 | `classify.rs` | Data to be signed → `Purpose::{Login, SshSig, Other}`. Pure, fuzzed                                                                             |
-| `policy.rs`   | (key settings, connection class, purpose, database state, approvals, prompt availability) → `Sign`, `Approve`, `Unlock`, `Refuse(reason)`. Pure, with exhaustive tests like `policy::Policy` |
+| `policy.rs`   | (key settings, connection class, purpose, login session) → what the request needs (nothing, or an approval for a scope, kept until lock or not) or why it is refused. Pure and stateless: whether an approval already covers the scope, and whether a prompt may appear, are the sign flow's questions |
 | `keys.rs`     | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                   |
 | `approve.rs`  | Approvals and pending requests: their scopes, limits and expiry                                                                                 |
-| `serve.rs`    | Listener, per-connection thread, connection cap                                                                                                 |
+| `serve.rs`    | Listener, per-connection thread, connection cap, and the `SshSign` trait it answers each request through                                         |
+| `agent/`      | The agent's own logic, crate-private: per-database key state and the scan at unlock (`state.rs`), identities (`identities.rs`), the sign flow (`sign.rs`), what the approval prompt says (`message.rs`) and signing (`signer.rs`). `Agent` implements `SshSign` over `SshHost`, the database access the daemon implements |
 
 **Server changes**
 
-- `Slot` gains the key cache and its approvals, cleared in `Slot::lock()`.
-- A `SshSign` trait sits beside `CopyEntry`.
+- `Slot` gains the agent's `SshSlot`: the served keys, the private keys
+  read and the approvals, all dropped in `Slot::lock()`. Its lock signal,
+  replaced by every lock, ends an approval prompt in flight the way it
+  ends unlock's, and tells the signing hold whether a lock came in since
+  the request was decided.
+- `Server` implements `SshHost` as a thin adapter over its database
+  slots (the configured databases, slot access under the mutex behind the
+  freshness guard, `may_prompt`) and `origin::PeerOrigin`. The approval
+  prompt goes through the daemon's prompt queue, which
+  `server::serve_ssh_agent` hands the agent, so only one prompt is ever
+  on screen, unlock's included. `ssh_agent` never imports `server`.
 - Unlock waiters use a condvar.
 - The prompt and approval runner gains `KPA_PROMPT_MESSAGE` and the shared
   queue. The timeout and lock-kills-prompt come from

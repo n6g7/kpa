@@ -1,15 +1,15 @@
 //! [`Scripted`], a [`Backend`] for tests: each prompt it is shown takes the
 //! next [`Step`] a test queued, records its message and answers as the step
-//! says, without running a program. A step's hook runs on the prompting
-//! thread, so a test can lock while a prompt is up without threads or
-//! timing.
+//! says, without running a program. A step's hooks run on the prompting
+//! thread, so a test can lock while a prompt is up, or once its answer is
+//! in, without threads or timing.
 
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::{Backend, CancelToken, PromptOutcome};
+use super::{Approval, Backend, CancelToken, PromptOutcome};
 
 type Hook = Box<dyn FnOnce() + Send>;
 
@@ -17,6 +17,7 @@ type Hook = Box<dyn FnOnce() + Send>;
 pub(crate) struct Step<T> {
     reply: io::Result<PromptOutcome<T>>,
     while_up: Option<Hook>,
+    then: Option<Hook>,
 }
 
 impl<T> Step<T> {
@@ -26,6 +27,17 @@ impl<T> Step<T> {
         Step {
             reply: Ok(outcome),
             while_up: None,
+            then: None,
+        }
+    }
+
+    /// A prompt that fails to show, with an I/O error, as one whose program
+    /// doesn't run.
+    pub(crate) fn fails() -> Step<T> {
+        Step {
+            reply: Err(io::Error::other("the scripted prompt failed")),
+            while_up: None,
+            then: None,
         }
     }
 
@@ -34,6 +46,20 @@ impl<T> Step<T> {
     pub(crate) fn while_up(mut self, f: impl FnOnce() + Send + 'static) -> Step<T> {
         self.while_up = Some(Box::new(f));
         self
+    }
+
+    /// Runs `f` once the prompt has answered, before its caller sees the
+    /// answer.
+    pub(crate) fn then(mut self, f: impl FnOnce() + Send + 'static) -> Step<T> {
+        self.then = Some(Box::new(f));
+        self
+    }
+}
+
+impl Step<Approval> {
+    /// An approval prompt answered `Allow`.
+    pub(crate) fn allow() -> Step<Approval> {
+        Step::new(PromptOutcome::Answer(Approval::Allow))
     }
 }
 
@@ -97,6 +123,9 @@ impl<T: Send> Backend<T> for Scripted<T> {
         // A cancel ends a prompt that is up, whatever it would answer.
         if cancel.is_cancelled() {
             return Ok(PromptOutcome::Interrupted);
+        }
+        if let Some(then) = step.then {
+            then();
         }
         step.reply
     }

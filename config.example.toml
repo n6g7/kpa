@@ -49,6 +49,16 @@ prompt = ["/bin/sh", "-c", "printf %s testpass123"]
 # in flight, and no prompt is raised while the screen is known to be locked.
 prompt_timeout = "60s"
 
+# The SSH agent (docs/ssh-agent.md), off until a database sets
+# `serve_ssh_keys = true`. Its approval prompt is a dmenu-style program
+# like `prompt`, offered `Allow` and `Deny` on stdin; it is required once a
+# database serves keys. It times out after `prompt_timeout` unless
+# `confirm_prompt_timeout` gives it a timeout of its own.
+#
+# [ssh_agent]
+# confirm_prompt = ["sh", "-c", "exec fuzzel --dmenu --prompt \"$KPA_PROMPT_MESSAGE\""]
+# confirm_prompt_timeout = "30s"
+
 # Both entries deliberately point at the same fixture: two names is what
 # makes the multi-database behaviour testable — `status` listing two rows,
 # `list` tagging each entry with the database it came from, and `lock`

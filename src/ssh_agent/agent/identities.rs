@@ -1,9 +1,11 @@
 //! Which keys a connection sees (`docs/ssh-agent.md` § 6.4): each opted-in
 //! database's served keys, from its slot while unlocked and from the
 //! public-key cache while locked, deduped by config order and filtered by
-//! the connection's class.
+//! the connection's class. A signature request finds its key the same way.
 
 use std::path::Path;
+
+use ssh_key::Fingerprint;
 
 use super::SshHost;
 use crate::config::DatabaseConfig;
@@ -53,6 +55,26 @@ pub(super) fn identities(
         ));
     }
     listed
+}
+
+/// The database that serves `fingerprint`: the first opted-in database in
+/// config order that lists it (§ 6.4's dedupe rule), from its slot or its
+/// cache. The sign flow looks the key up again in that database's slot,
+/// under the hold that signs.
+pub(super) fn find_key(
+    host: &impl SshHost,
+    cache_dir: Option<&Path>,
+    fingerprint: Fingerprint,
+) -> Option<String> {
+    host.databases()
+        .iter()
+        .filter(|cfg| cfg.serve_ssh_keys)
+        .find(|cfg| {
+            served_keys(host, cache_dir, cfg)
+                .iter()
+                .any(|key| key.fingerprint == fingerprint)
+        })
+        .map(|cfg| cfg.name.clone())
 }
 
 /// `cfg`'s served keys right now: its last scan's if its database is

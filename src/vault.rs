@@ -441,10 +441,52 @@ pub struct AttachmentView<'a> {
 /// (`ssh_agent::keys::scan`), which only ever looks at what a database's
 /// current entries hold (`docs/ssh-agent.md` § 6.4).
 pub fn for_each_attachment(db: &Database, mut visit: impl FnMut(AttachmentView<'_>)) {
-    for_each_current_entry_until(db, |entry| {
-        visit_attachments(entry, &mut visit);
-        false
-    });
+    for_each_current_entry(db, |entry| visit_attachments(entry, &mut visit));
+}
+
+/// Like [`for_each_attachment`], for the one current entry `uuid` only
+/// ([`current_entry`]), without visiting any other entry. Visits nothing
+/// if there is no such entry, or if it is in the recycle bin.
+pub fn for_each_entry_attachment(
+    db: &Database,
+    uuid: Uuid,
+    mut visit: impl FnMut(AttachmentView<'_>),
+) {
+    if let Some(entry) = current_entry(db, uuid) {
+        visit_attachments(&entry, &mut visit);
+    }
+}
+
+/// The entry `uuid`, looked up directly rather than by walking the tree.
+/// The database's entries are its live ones only: never a historical
+/// revision. Entries in the recycle bin are included.
+fn entry_by_uuid(db: &Database, uuid: Uuid) -> Option<keepass::db::EntryRef<'_>> {
+    db.entry(keepass::db::EntryId::from_uuid(uuid))
+}
+
+/// [`entry_by_uuid`], unless the entry is in the recycle bin: one of its
+/// ancestors, walked up to the root, is the recycle bin group. Iterative,
+/// and stops at a group it has already seen, so a malformed parent chain
+/// can't loop.
+fn current_entry(db: &Database, uuid: Uuid) -> Option<keepass::db::EntryRef<'_>> {
+    let entry = entry_by_uuid(db, uuid)?;
+    let Some(recycle_bin) = db.recycle_bin().map(|group| group.id()) else {
+        return Some(entry);
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut group = Some(entry.parent().id());
+    while let Some(id) = group {
+        if id == recycle_bin {
+            return None;
+        }
+        if !seen.insert(id) {
+            break;
+        }
+        group = db
+            .group(id)
+            .and_then(|group| group.parent().map(|parent| parent.id()));
+    }
+    Some(entry)
 }
 
 fn visit_attachments(
@@ -464,16 +506,13 @@ fn visit_attachments(
     }
 }
 
-/// Visits every entry outside the recycle bin, in tree order, until
-/// `visit` returns `true`. An explicit worklist like `collect_entries`'s,
-/// with each group's children pushed in reverse so the first one is
-/// visited first. The recycle bin's subtree is skipped whole rather than
-/// filtered entry by entry: a group only ever has one parent, so this can't
-/// miss a path into it that isn't through its own id.
-fn for_each_current_entry_until(
-    db: &Database,
-    mut visit: impl FnMut(&keepass::db::EntryRef<'_>) -> bool,
-) {
+/// Visits every entry outside the recycle bin, in tree order. An explicit
+/// worklist like `collect_entries`'s, with each group's children pushed in
+/// reverse so the first one is visited first. The recycle bin's subtree is
+/// skipped whole rather than filtered entry by entry: a group only ever
+/// has one parent, so this can't miss a path into it that isn't through
+/// its own id.
+fn for_each_current_entry(db: &Database, mut visit: impl FnMut(&keepass::db::EntryRef<'_>)) {
     let recycle_bin = db.recycle_bin().map(|group| group.id());
     let mut stack = vec![db.root().id()];
     while let Some(id) = stack.pop() {
@@ -484,9 +523,7 @@ fn for_each_current_entry_until(
             continue;
         };
         for entry in group.entries() {
-            if visit(&entry) {
-                return;
-            }
+            visit(&entry);
         }
         let children: Vec<_> = group.groups().map(|child| child.id()).collect();
         stack.extend(children.into_iter().rev());
@@ -581,28 +618,16 @@ pub fn entry_title(db: &Database, uuid: Uuid) -> Option<String> {
     .flatten()
 }
 
-/// Find the entry with `uuid` and run `read` on it. Explicit worklist, not
-/// recursion, for the same reason as `collect_entries`: a deeply nested
-/// `.kdbx` must not overflow the stack.
+/// Find the entry with `uuid` and run `read` on it. A direct lookup
+/// ([`entry_by_uuid`]), so it neither walks the tree nor depends on its
+/// depth. An entry in the recycle bin is found like any other, for
+/// `copy` and the operation log alike.
 fn with_entry<R>(
     db: &Database,
     uuid: Uuid,
     read: impl FnOnce(&keepass::db::Entry) -> R,
 ) -> Option<R> {
-    let mut stack = vec![db.root().id()];
-    while let Some(id) = stack.pop() {
-        let Some(group) = db.group(id) else {
-            continue;
-        };
-
-        for entry in group.entries() {
-            if entry.id().uuid() == uuid {
-                return Some(read(&entry));
-            }
-        }
-        stack.extend(group.groups().map(|child| child.id()));
-    }
-    None
+    entry_by_uuid(db, uuid).map(|entry| read(&entry))
 }
 
 fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
@@ -740,7 +765,7 @@ mod tests {
 
     use super::{
         entry_count, entry_exists, entry_field, entry_title, entry_totp, for_each_attachment,
-        list_entries,
+        for_each_entry_attachment, list_entries,
     };
 
     /// `entry_count` must agree with `list_entries` everywhere, including
@@ -1126,6 +1151,63 @@ mod tests {
                 "key.pub".to_string(),
                 b"ATTACHMENT".to_vec()
             )]
+        );
+    }
+
+    /// Only the named entry's attachments, and nothing for an unknown uuid.
+    #[test]
+    fn for_each_entry_attachment_reads_one_current_entry() {
+        let mut db = Database::new();
+        let (wanted, other) = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::TITLE, "wanted");
+            entry.add_attachment("a.key", Value::unprotected(b"A".to_vec()));
+            entry.add_attachment("b.key", Value::unprotected(b"B".to_vec()));
+            let wanted = entry.id().uuid();
+            let mut other = root.add_entry();
+            other.add_attachment("c.key", Value::unprotected(b"C".to_vec()));
+            (wanted, other.id().uuid())
+        };
+
+        let entry_names = |uuid| {
+            let mut names = Vec::new();
+            for_each_entry_attachment(&db, uuid, |a| names.push(a.name.to_string()));
+            names.sort();
+            names
+        };
+
+        assert_eq!(entry_names(wanted), ["a.key", "b.key"]);
+        assert_eq!(entry_names(other), ["c.key"]);
+        assert!(entry_names(Uuid::new_v4()).is_empty());
+    }
+
+    /// An entry in the recycle bin, however deep, has no attachments to
+    /// visit, though `with_entry`'s readers still find it.
+    #[test]
+    fn for_each_entry_attachment_skips_an_entry_in_the_recycle_bin() {
+        let mut db = Database::new();
+        let (entry_id, bin_id) = {
+            let mut root = db.root_mut();
+            let mut bin = root.add_group();
+            let bin_id = bin.id();
+            let mut nested = bin.add_group();
+            let mut entry = nested.add_entry();
+            entry.set_unprotected(fields::TITLE, "recycled");
+            entry.add_attachment("bin.key", Value::unprotected(b"BIN".to_vec()));
+            (entry.id(), bin_id)
+        };
+        let mut seen = 0;
+        for_each_entry_attachment(&db, entry_id.uuid(), |_| seen += 1);
+        assert_eq!(seen, 1, "sanity: visited before it's the recycle bin");
+
+        db.meta.recyclebin_uuid = Some(bin_id.uuid());
+        let mut seen = 0;
+        for_each_entry_attachment(&db, entry_id.uuid(), |_| seen += 1);
+        assert_eq!(seen, 0);
+        assert_eq!(
+            entry_title(&db, entry_id.uuid()).as_deref(),
+            Some("recycled")
         );
     }
 

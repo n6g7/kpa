@@ -1,23 +1,35 @@
-//! [`SshSlot`]: the agent's per-database state, filled by a scan at unlock
-//! and dropped whole at lock, and [`KeyCache`], the public-key cache write
-//! that follows each scan.
+//! [`SshSlot`]: the agent's per-database state, filled by a scan at unlock,
+//! by first use and by approvals, and dropped whole at lock, and
+//! [`KeyCache`], the public-key cache write that follows each scan.
+
+use std::collections::HashMap;
 
 use keepass::Database;
-use ssh_key::PublicKey;
+use ssh_key::{Fingerprint, PrivateKey, PublicKey};
 
 use crate::config::DatabaseConfig;
 use crate::log;
 use crate::paths::Paths;
+use crate::ssh_agent::approve::Approvals;
 use crate::ssh_agent::keys::{self, SkipReason};
 
-/// The SSH-agent half of a database's slot (`docs/ssh-agent.md` § 6.4).
-/// Empty while locked, or for a database that doesn't serve SSH keys. The
-/// host replaces the whole value with a default one on lock, so a lock has
-/// one field to clear.
+/// The SSH-agent half of a database's slot (`docs/ssh-agent.md` § 6.4,
+/// § 6.7). Empty while locked, or for a database that doesn't serve SSH
+/// keys. Plain data: the host replaces the whole value with a default one
+/// on lock, the freshness guard's included, and with a scan's result on
+/// unlock, so a lock has one field to clear.
 #[derive(Default)]
 pub struct SshSlot {
     /// The keys this database serves, from its last scan.
     pub(super) served: Vec<keys::ServedKey>,
+    /// Private keys read at their first signature (`docs/ssh-agent.md`
+    /// § 6.4), kept until lock. `ssh-key`'s private key types zeroize
+    /// their secret material when they drop (Ed25519, ECDSA and RSA alike),
+    /// and an RSA signature's per-signature `rsa::PrivateKey`, built from
+    /// the key for that one signature, zeroizes on drop too.
+    pub(super) private_keys: HashMap<Fingerprint, PrivateKey>,
+    /// The approvals granted since unlock.
+    pub(super) approvals: Approvals,
 }
 
 impl SshSlot {
@@ -41,6 +53,7 @@ impl SshSlot {
         }
         SshSlot {
             served: keys::resolve(cfg, &scan.found),
+            ..SshSlot::default()
         }
     }
 
@@ -58,10 +71,11 @@ impl SshSlot {
         }
     }
 
-    /// Whether this holds nothing: what a lock leaves behind.
+    /// Whether this holds no keys, served or read: what a lock leaves
+    /// behind, along with no approvals.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.served.is_empty()
+        self.served.is_empty() && self.private_keys.is_empty()
     }
 }
 
