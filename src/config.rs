@@ -24,11 +24,12 @@ pub struct Config {
     #[serde(with = "humantime_serde", default = "default_idle_timeout")]
     pub idle_timeout: Duration,
 
-    /// argv for the passphrase prompt, e.g.
-    /// `["fuzzel", "--dmenu", "--password", "--prompt"]`. Swappable per
-    /// decision #9 in the design doc — `pinentry-qt` is the long-term
-    /// answer but fiddly, so this stays a plain argv rather than an enum.
-    /// Runs exactly as configured: `server::run_prompt` passes what the
+    /// argv for the passphrase prompt, by default
+    /// `["sh", "-c", "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""]`.
+    /// Swappable per decision #9 in the design doc — `pinentry-qt` is the
+    /// long-term answer but fiddly, so this stays a plain argv rather than
+    /// an enum.
+    /// Runs exactly as configured: `prompt::run_prompt` passes what the
     /// prompt is about through the `KPA_PROMPT_MESSAGE` environment
     /// variable instead of touching the argv.
     #[serde(default = "default_prompt")]
@@ -275,10 +276,9 @@ fn default_clipboard_timeout() -> Duration {
 
 fn default_prompt() -> Vec<String> {
     vec![
-        "fuzzel".to_string(),
-        "--dmenu".to_string(),
-        "--password".to_string(),
-        "--prompt".to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\"".to_string(),
     ]
 }
 
@@ -563,7 +563,11 @@ mod tests {
         assert_eq!(config.clipboard_timeout, Duration::from_secs(30));
         assert_eq!(
             config.prompt,
-            vec!["fuzzel", "--dmenu", "--password", "--prompt"]
+            vec![
+                "sh",
+                "-c",
+                "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""
+            ]
         );
         assert!(config.databases.is_empty());
         assert_eq!(config.ssh_agent.socket, None);
