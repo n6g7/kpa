@@ -24,12 +24,17 @@ use ssh_key::{Fingerprint, HashAlg, PublicKey};
 use super::{Agent, SlotView, SshHost, identities, message, signer};
 use crate::log;
 use crate::origin::Origin;
+use crate::output;
 use crate::prompt::{CancelToken, Declined};
 use crate::ssh_agent::bind::ConnectionClass;
 use crate::ssh_agent::classify::{self, Purpose};
 use crate::ssh_agent::keys::ServedKey;
 use crate::ssh_agent::policy::{self, Ask, Need, Refusal};
 use crate::ssh_agent::wire::{AgentResponse, SignRequest};
+
+/// The longest key name a log line carries: a `[[database.ssh_key]]`
+/// override's `name`, escaped and capped like an identity comment.
+const MAX_LOGGED_NAME_LEN: usize = 128;
 
 /// Why a request wasn't signed, as its log line says it.
 #[derive(Debug, thiserror::Error)]
@@ -126,7 +131,7 @@ impl<H: SshHost> Agent<H> {
             return AgentResponse::Failure;
         };
         let outcome = self.authorized_sign(&db, &request, origin);
-        log_sign(&db, &request, &outcome);
+        log_sign(&db, self.configured_name(&db, &request), &request, &outcome);
         match outcome {
             Ok(signature) => AgentResponse::SignResponse(signature),
             Err(_) => AgentResponse::Failure,
@@ -193,6 +198,20 @@ impl<H: SshHost> Agent<H> {
         })
     }
 
+    /// The name `db`'s config gives `request`'s key, if a
+    /// `[[database.ssh_key]]` override names it: config, so it may be
+    /// logged. Never the resolved `ServedKey::name`, which falls back to the
+    /// entry's title, vault content kpa keeps out of its own output (G-4).
+    fn configured_name(&self, db: &str, request: &Request<'_>) -> Option<String> {
+        self.host
+            .databases()
+            .iter()
+            .find(|cfg| cfg.name == db)?
+            .ssh_key_settings(request.fingerprint)
+            .name
+            .map(|name| output::escape_one_line(&name, MAX_LOGGED_NAME_LEN))
+    }
+
     /// Runs `f` on `db`'s slot under the host's lock.
     fn hold<R>(
         &self,
@@ -233,15 +252,40 @@ impl<H: SshHost> Agent<H> {
 }
 
 /// One line per `SIGN_REQUEST` for a served key (`docs/ssh-agent.md`
-/// § 11): the key by fingerprint and its database, its purpose, the
-/// connection's class, the destination's fingerprint if the connection is
-/// bound to one, and what happened. Never the key's name, which can be an
-/// entry title. A signature is `info`, everything else `warn`.
-fn log_sign(db: &str, request: &Request<'_>, outcome: &Result<Vec<u8>, Refused>) {
-    let (log, outcome): (fn(std::fmt::Arguments<'_>), &dyn std::fmt::Display) = match outcome {
-        Ok(_) => (log::info, &"signed"),
-        Err(refused) => (log::warn, refused),
+/// § 11), as [`sign_line`] words it. A signature is `info`, everything else
+/// `warn`.
+fn log_sign(
+    db: &str,
+    name: Option<String>,
+    request: &Request<'_>,
+    outcome: &Result<Vec<u8>, Refused>,
+) {
+    let log = match outcome {
+        Ok(_) => log::info,
+        Err(_) => log::warn,
     };
+    let line = sign_line(db, name.as_deref(), request, outcome);
+    log(format_args!("{line}"));
+}
+
+/// The log line for one `SIGN_REQUEST`: the key by fingerprint, and by
+/// `name` if its database's config names it (already escaped); its
+/// database; its purpose; the connection's class; the destination's
+/// fingerprint if the connection is bound to one; and what happened. Never
+/// the entry's title, which is vault content (G-4).
+fn sign_line(
+    db: &str,
+    name: Option<&str>,
+    request: &Request<'_>,
+    outcome: &Result<Vec<u8>, Refused>,
+) -> String {
+    let outcome: &dyn std::fmt::Display = match outcome {
+        Ok(_) => &"signed",
+        Err(refused) => refused,
+    };
+    let name = name
+        .map(|name| format!(" named \"{name}\""))
+        .unwrap_or_default();
     let purpose = match request.purpose {
         Purpose::Login(_) => "login",
         Purpose::SshSig { .. } => "sshsig",
@@ -256,10 +300,10 @@ fn log_sign(db: &str, request: &Request<'_>, outcome: &Result<Vec<u8>, Refused>)
         .destination()
         .map(|dest| format!(", dest {}", dest.fingerprint(HashAlg::Sha256)))
         .unwrap_or_default();
-    log(format_args!(
-        "ssh sign {outcome}: key {} in {db:?} ({purpose}, {class}{destination})",
+    format!(
+        "ssh sign {outcome}: key {}{name} in {db:?} ({purpose}, {class}{destination})",
         request.fingerprint,
-    ));
+    )
 }
 
 #[cfg(test)]
@@ -613,6 +657,45 @@ mod tests {
             None,
             Origin::Desktop
         )));
+    }
+
+    /// The log line names a key by the name its config override gives it,
+    /// escaped, and never by its entry's title.
+    #[test]
+    fn the_log_line_names_a_key_only_by_its_configured_name() {
+        let key = test_key(1);
+        let fingerprint = key.public_key().fingerprint(HashAlg::Sha256);
+        let override_named = |name: Option<&str>| SshKeyConfig {
+            fingerprint,
+            name: name.map(str::to_string),
+            confirm: SshKeyConfirm::Never,
+            forwarded: true,
+            serve: true,
+        };
+        let sign = request_with(&key, 0);
+        let request = Request::parse(&ConnectionClass::LocalUnbound, &sign, None).expect("parses");
+        let line = |agent: &Agent<FakeHost>| {
+            let name = agent.configured_name("personal", &request);
+            sign_line("personal", name.as_deref(), &request, &Ok(Vec::new()))
+        };
+
+        for (name, logged) in [
+            (Some("prod-root"), " named \"prod-root\""),
+            (Some("evil\nline"), " named \"evil\\u000aline\""),
+            (None, ""),
+        ] {
+            let host = FakeHost::unlocked(
+                vec![database("personal", vec![override_named(name)])],
+                key_database(&[("secret-entry-title", &key)]),
+            );
+            let (_host, agent, _prompts) = agent(host, &Paths::default());
+            assert_eq!(
+                line(&agent),
+                format!(
+                    "ssh sign signed: key {fingerprint}{logged} in \"personal\" (other, local)"
+                )
+            );
+        }
     }
 
     #[test]

@@ -874,9 +874,13 @@ programs' settings.
 - The JSON protocol gains three requests: `ssh_keys` (the scan behind
   `kpa ssh keys`), `ssh_pending` and `ssh_approve`. The CLI gains
   `kpa ssh keys` and `kpa ssh approve`.
-- `log_response` gains agent events: key name, purpose, connection class,
-  destination fingerprint and decision. Like `list`, `REQUEST_IDENTITIES`
-  is not logged.
+- Each signature request gets one log line: the key by fingerprint, and
+  by the `name` its `[[database.ssh_key]]` override gives it if there is
+  one; its database; purpose; connection class; destination fingerprint;
+  and outcome. Never the entry's title, which a key without an override is
+  named by elsewhere: it is vault content, and kpa keeps vault content out
+  of its own output (threat model G-4). An override's name is config. Like
+  `list`, `REQUEST_IDENTITIES` is not logged.
 
 **Tests**
 
