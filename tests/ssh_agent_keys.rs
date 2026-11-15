@@ -4,15 +4,16 @@
 
 mod common;
 
+use keepass::Database;
 use kpa::ssh_agent::keys::{self, SkipReason};
-use kpa::vault::{self, EntryAttachment};
+use kpa::vault;
 use zeroize::Zeroizing;
 
-fn attachments() -> Vec<EntryAttachment> {
+fn fixture() -> Database {
     let password = Zeroizing::new(common::PASSWORD.to_string());
     let (db, _) =
         vault::open(&common::ssh_db(), Some(&password), None).expect("fixture should open");
-    vault::list_attachments(&db)
+    db
 }
 
 /// Scanning finds exactly the three usable OpenSSH keys (Ed25519, ECDSA
@@ -21,7 +22,7 @@ fn attachments() -> Vec<EntryAttachment> {
 /// since one lives only in history and the other only in the recycle bin.
 #[test]
 fn scan_finds_the_three_usable_keys_and_skips_the_encrypted_and_pem_ones() {
-    let result = keys::scan(&attachments());
+    let result = keys::scan(&fixture());
 
     let mut found_names: Vec<&str> = result
         .found
@@ -53,19 +54,17 @@ fn scan_finds_the_three_usable_keys_and_skips_the_encrypted_and_pem_ones() {
     }
 }
 
-/// History and the recycle bin are ignored at the `vault::list_attachments`
-/// level already — `"Historical"` and `"Recycled"` contribute no
-/// attachments at all to scan.
+/// History and the recycle bin are ignored at the
+/// `vault::for_each_attachment` level already — `"Historical"` and
+/// `"Recycled"` contribute no attachments at all to scan.
 #[test]
-fn history_and_recycle_bin_attachments_are_never_listed() {
-    let names: Vec<String> = attachments()
-        .iter()
-        .filter(|a| {
-            a.entry_title.as_deref() == Some("Historical")
-                || a.entry_title.as_deref() == Some("Recycled")
-        })
-        .map(|a| a.attachment_name.clone())
-        .collect();
+fn history_and_recycle_bin_attachments_are_never_visited() {
+    let mut names = Vec::new();
+    vault::for_each_attachment(&fixture(), |a| {
+        if matches!(a.entry_title, Some("Historical" | "Recycled")) {
+            names.push(a.name.to_string());
+        }
+    });
     assert!(names.is_empty(), "unexpected attachments: {names:?}");
 }
 
@@ -73,17 +72,19 @@ fn history_and_recycle_bin_attachments_are_never_listed() {
 /// encrypted one.
 #[test]
 fn parse_private_key_reads_every_found_key_type() {
-    let attachments = attachments();
-    let data_for = |attachment_name: &str| {
-        attachments
-            .iter()
-            .find(|a| a.attachment_name == attachment_name)
-            .map(|a| a.data.as_slice())
-            .unwrap_or_else(|| panic!("no attachment named {attachment_name}"))
+    let db = fixture();
+    let parses = |attachment_name: &str| {
+        let mut parsed = None;
+        vault::for_each_attachment(&db, |a| {
+            if a.name == attachment_name {
+                parsed = Some(keys::parse_private_key(a.data).is_some());
+            }
+        });
+        parsed.unwrap_or_else(|| panic!("no attachment named {attachment_name}"))
     };
 
     for name in ["id_ed25519", "id_rsa", "id_ecdsa"] {
-        assert!(keys::parse_private_key(data_for(name)).is_some(), "{name}");
+        assert!(parses(name), "{name}");
     }
-    assert!(keys::parse_private_key(data_for("id_encrypted")).is_none());
+    assert!(!parses("id_encrypted"));
 }

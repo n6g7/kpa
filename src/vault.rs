@@ -416,34 +416,65 @@ pub fn entry_count(db: &Database) -> usize {
     count
 }
 
-/// One attachment on a current entry: outside the recycle bin, and the
-/// entry's live version, never a historical one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntryAttachment {
+/// One attachment on a current entry, borrowed from the open database:
+/// outside the recycle bin, and the entry's live version, never a
+/// historical one. Borrowed rather than copied, so a private key in it is
+/// never left behind in a buffer nobody wipes. No `Debug`, for the same
+/// reason.
+#[derive(Clone, Copy)]
+pub struct AttachmentView<'a> {
     pub entry_uuid: Uuid,
     /// The entry's title, under the same protectedness rule as `list`'s own
     /// `title` (`unprotected_field`) — `None` if it is absent, empty, or
     /// marked protected.
-    pub entry_title: Option<String>,
+    pub entry_title: Option<&'a str>,
     /// The name under which the entry stores this attachment (KeePass's
     /// "filename").
-    pub attachment_name: String,
-    pub data: Vec<u8>,
+    pub name: &'a str,
+    pub data: &'a [u8],
 }
 
-/// Every attachment on every current entry, database-wide: no history, and
-/// nothing in the recycle bin. Used by the SSH agent's key discovery
-/// (`ssh_agent::keys::scan`), which only ever looks at what a database's current
-/// entries hold (`docs/ssh-agent.md` § 6.4).
-pub fn list_attachments(db: &Database) -> Vec<EntryAttachment> {
+/// Shows `visit` every attachment on every current entry, database-wide:
+/// no history, and nothing in the recycle bin. Entries come in tree order:
+/// a group's own entries in their stored order, then each of its groups in
+/// turn, the same way. Used by the SSH agent's key discovery
+/// (`ssh_agent::keys::scan`), which only ever looks at what a database's
+/// current entries hold (`docs/ssh-agent.md` § 6.4).
+pub fn for_each_attachment(db: &Database, mut visit: impl FnMut(AttachmentView<'_>)) {
+    for_each_current_entry_until(db, |entry| {
+        visit_attachments(entry, &mut visit);
+        false
+    });
+}
+
+fn visit_attachments(
+    entry: &keepass::db::EntryRef<'_>,
+    visit: &mut impl FnMut(AttachmentView<'_>),
+) {
     use keepass::db::fields;
 
+    let entry_title = unprotected_field(entry, fields::TITLE).filter(|t| !t.is_empty());
+    for (name, attachment) in entry.attachments_named() {
+        visit(AttachmentView {
+            entry_uuid: entry.id().uuid(),
+            entry_title,
+            name,
+            data: attachment.get(),
+        });
+    }
+}
+
+/// Visits every entry outside the recycle bin, in tree order, until
+/// `visit` returns `true`. An explicit worklist like `collect_entries`'s,
+/// with each group's children pushed in reverse so the first one is
+/// visited first. The recycle bin's subtree is skipped whole rather than
+/// filtered entry by entry: a group only ever has one parent, so this can't
+/// miss a path into it that isn't through its own id.
+fn for_each_current_entry_until(
+    db: &Database,
+    mut visit: impl FnMut(&keepass::db::EntryRef<'_>) -> bool,
+) {
     let recycle_bin = db.recycle_bin().map(|group| group.id());
-    let mut out = Vec::new();
-    // Same explicit-worklist traversal as `collect_entries`, skipping the
-    // recycle bin's subtree entirely rather than filtering entries out of it
-    // after the fact — a group only ever has one parent, so this can't miss
-    // a path into it that isn't through its own id.
     let mut stack = vec![db.root().id()];
     while let Some(id) = stack.pop() {
         if Some(id) == recycle_bin {
@@ -453,21 +484,13 @@ pub fn list_attachments(db: &Database) -> Vec<EntryAttachment> {
             continue;
         };
         for entry in group.entries() {
-            let entry_title = unprotected_field(&entry, fields::TITLE)
-                .filter(|t| !t.is_empty())
-                .map(str::to_owned);
-            for (name, attachment) in entry.attachments_named() {
-                out.push(EntryAttachment {
-                    entry_uuid: entry.id().uuid(),
-                    entry_title: entry_title.clone(),
-                    attachment_name: name.to_string(),
-                    data: attachment.get().clone(),
-                });
+            if visit(&entry) {
+                return;
             }
         }
-        stack.extend(group.groups().map(|child| child.id()));
+        let children: Vec<_> = group.groups().map(|child| child.id()).collect();
+        stack.extend(children.into_iter().rev());
     }
-    out
 }
 
 /// A field's value, unless the user marked it protected in their KeePass
@@ -716,7 +739,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        entry_count, entry_exists, entry_field, entry_title, entry_totp, list_attachments,
+        entry_count, entry_exists, entry_field, entry_title, entry_totp, for_each_attachment,
         list_entries,
     };
 
@@ -1060,10 +1083,31 @@ mod tests {
         assert_eq!(entry_totp(&db, Uuid::new_v4()), None);
     }
 
+    /// What `for_each_attachment` shows, owned for comparing: entry uuid,
+    /// entry title, attachment name and data.
+    type Seen = (Uuid, Option<String>, String, Vec<u8>);
+
+    fn attachments(db: &Database) -> Vec<Seen> {
+        let mut seen = Vec::new();
+        for_each_attachment(db, |a| {
+            seen.push((
+                a.entry_uuid,
+                a.entry_title.map(str::to_owned),
+                a.name.to_string(),
+                a.data.to_vec(),
+            ));
+        });
+        seen
+    }
+
+    fn names(seen: &[Seen]) -> Vec<&str> {
+        seen.iter().map(|(_, _, name, _)| name.as_str()).collect()
+    }
+
     /// The basic case: one entry, one attachment, found with its name, its
     /// data, and its entry's title.
     #[test]
-    fn list_attachments_finds_a_current_attachment() {
+    fn for_each_attachment_finds_a_current_attachment() {
         let mut db = Database::new();
         let uuid = {
             let mut root = db.root_mut();
@@ -1073,19 +1117,22 @@ mod tests {
             entry.id().uuid()
         };
 
-        let attachments = list_attachments(&db);
-        assert_eq!(attachments.len(), 1);
-        let found = &attachments[0];
-        assert_eq!(found.entry_uuid, uuid);
-        assert_eq!(found.entry_title.as_deref(), Some("Example"));
-        assert_eq!(found.attachment_name, "key.pub");
-        assert_eq!(found.data, b"ATTACHMENT");
+        let seen = attachments(&db);
+        assert_eq!(
+            seen,
+            [(
+                uuid,
+                Some("Example".to_string()),
+                "key.pub".to_string(),
+                b"ATTACHMENT".to_vec()
+            )]
+        );
     }
 
     /// Nested groups, and an entry with no title (protected or absent) —
     /// `entry_title` comes back `None` rather than panicking.
     #[test]
-    fn list_attachments_walks_nested_groups_and_tolerates_a_titleless_entry() {
+    fn for_each_attachment_walks_nested_groups_and_tolerates_a_titleless_entry() {
         let mut db = Database::new();
         {
             let mut root = db.root_mut();
@@ -1095,17 +1142,45 @@ mod tests {
             entry.add_attachment("deep.key", Value::unprotected(b"DEEP".to_vec()));
         }
 
-        let attachments = list_attachments(&db);
-        assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0].entry_title, None);
-        assert_eq!(attachments[0].attachment_name, "deep.key");
+        let seen = attachments(&db);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].1, None);
+        assert_eq!(seen[0].2, "deep.key");
+    }
+
+    /// Entries come in tree order: a group's own entries, then each of its
+    /// groups in turn, depth first, in their stored order.
+    #[test]
+    fn for_each_attachment_visits_in_tree_order() {
+        let mut db = Database::new();
+        {
+            let mut root = db.root_mut();
+            root.add_entry()
+                .add_attachment("root", Value::unprotected(b"0".to_vec()));
+            let mut first = root.add_group();
+            first
+                .add_entry()
+                .add_attachment("first", Value::unprotected(b"1".to_vec()));
+            first
+                .add_group()
+                .add_entry()
+                .add_attachment("first/nested", Value::unprotected(b"2".to_vec()));
+            root.add_group()
+                .add_entry()
+                .add_attachment("second", Value::unprotected(b"3".to_vec()));
+        }
+
+        assert_eq!(
+            names(&attachments(&db)),
+            ["root", "first", "first/nested", "second"]
+        );
     }
 
     /// An attachment that exists only on a historical revision of an
-    /// entry — never on its current one — is invisible to
-    /// `list_attachments`, which only ever looks at current entries.
+    /// entry — never on its current one — is invisible, since only current
+    /// entries are visited.
     #[test]
-    fn list_attachments_ignores_history() {
+    fn for_each_attachment_ignores_history() {
         let mut db = Database::new();
         let id = {
             let mut root = db.root_mut();
@@ -1131,13 +1206,13 @@ mod tests {
                 .is_some_and(|h| !h.get_entries().is_empty()),
             "the attachment should have been pushed into history"
         );
-        assert_eq!(list_attachments(&db), Vec::new());
+        assert!(attachments(&db).is_empty());
     }
 
     /// An entry moved into the recycle bin is skipped, along with its
-    /// attachment — `list_attachments` only looks outside that subtree.
+    /// attachment.
     #[test]
-    fn list_attachments_ignores_the_recycle_bin() {
+    fn for_each_attachment_ignores_the_recycle_bin() {
         let mut db = Database::new();
         let (entry_id, bin_id) = {
             let mut root = db.root_mut();
@@ -1154,6 +1229,6 @@ mod tests {
             .move_to(bin_id)
             .expect("the recycle bin group exists");
 
-        assert_eq!(list_attachments(&db), Vec::new());
+        assert!(attachments(&db).is_empty());
     }
 }

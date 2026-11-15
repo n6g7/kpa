@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use kpa::config::Config;
+use kpa::paths::Paths;
 use kpa::proto::{self, Op, Password, Request, UnlockRequest};
 use kpa::server::{self, Server};
 use zeroize::Zeroizing;
@@ -119,7 +120,10 @@ fn a_password_in_a_request_leaves_no_copy_in_freed_memory() {
     let dir = tempfile::tempdir().expect("tempdir");
     let socket = dir.path().join("sock");
     let listener = UnixListener::bind(&socket).expect("bind");
-    let daemon = Arc::new(Server::new(Config::parse("").expect("empty config")));
+    let daemon = Arc::new(Server::new(
+        Config::parse("").expect("empty config"),
+        Paths::default(),
+    ));
     std::thread::spawn(move || server::serve(daemon, listener));
 
     // `serve` answers only once its own startup allocations are done.

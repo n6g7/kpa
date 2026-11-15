@@ -123,7 +123,7 @@ fn dispatch(cli: Cli) -> ExitCode {
     };
 
     match cli.command {
-        Command::Serve { log_level } => run_serve(&socket_path, cli.config, log_level),
+        Command::Serve { log_level } => run_serve(&socket_path, cli.config, log_level, paths),
         Command::Status => client::run_client(&socket_path, Op::Status),
         Command::Unlock { db, tty } => client::run_unlock(&socket_path, db, tty),
         Command::Lock { db } => client::run_client(&socket_path, Op::Lock(LockRequest { db })),
@@ -164,6 +164,7 @@ fn run_serve(
     socket_path: &Path,
     config_path: Option<PathBuf>,
     log_level: Option<Level>,
+    paths: Paths,
 ) -> ExitCode {
     // `dispatch` already marked this process non-dumpable, before it ever
     // reached this subcommand.
@@ -189,7 +190,7 @@ fn run_serve(
         kpa::VERSION,
         socket_path.display()
     ));
-    let server = Arc::new(Server::new(config));
+    let server = Arc::new(Server::new(config, paths));
     // Before serving, so no unlock can happen without the policy hearing of it.
     let events = policy::start(server.clone(), policy::Bus::System);
     server.set_policy_events(events);

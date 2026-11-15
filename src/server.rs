@@ -32,10 +32,11 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::clip::{self, Clipboard};
-use crate::config::Config;
+use crate::config::{Config, DatabaseConfig};
 use crate::io::ByteCounter;
 use crate::log;
-use crate::origin::{self, Origin};
+use crate::origin::{self, Origin, PeerOrigin};
+use crate::paths::Paths;
 use crate::policy;
 use crate::prompt::{PromptCancel, PromptOutcome, PromptQueue, cancel_pair, run_prompt};
 use crate::proto::{
@@ -44,6 +45,7 @@ use crate::proto::{
     UnlockError, UnlockRequest, WireEntry,
 };
 use crate::socket;
+use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
 use crate::vault::{self, Fingerprint, VaultError};
 
 /// Longest request line accepted, and the size of the zeroizing buffer
@@ -83,18 +85,24 @@ struct Slot {
     /// While an unlock is prompting: the cancel end of its prompt
     /// (`prompt::cancel_pair`). Dropping it ends the prompt.
     prompt_cancel: Option<PromptCancel>,
+    /// The SSH agent's state for this database (`docs/ssh-agent.md`
+    /// § 6.4): the keys its last scan found. Empty while locked, or for a
+    /// database that doesn't serve SSH keys.
+    ssh: SshSlot,
 }
 
 impl Slot {
-    /// Drops the database, if any, ends a prompt in flight for it, and
-    /// bumps the epoch so an unlock that is still prompting or deriving
-    /// the key cannot install what it opened.
+    /// Drops the database, if any, ends a prompt in flight for it, drops
+    /// the SSH agent's state for it, and bumps the epoch so an unlock that
+    /// is still prompting or deriving the key cannot install what it
+    /// opened.
     fn lock(&mut self) {
         self.db = None;
         self.stamp = None;
         if let Some(cancel) = self.prompt_cancel.take() {
             cancel.cancel();
         }
+        self.ssh = SshSlot::default();
         self.lock_epoch = self.lock_epoch.wrapping_add(1);
     }
 
@@ -127,6 +135,7 @@ impl Default for Slot {
             lock_epoch: 0,
             unlocking: false,
             prompt_cancel: None,
+            ssh: SshSlot::default(),
         }
     }
 }
@@ -140,6 +149,10 @@ impl Default for Slot {
 /// a password; not holding it is what makes the lock epoch necessary.
 pub struct Server {
     config: Config,
+    /// The file locations `main.rs` resolved at startup: where an unlock
+    /// writes the SSH public-key cache, and where the SSH agent reads it
+    /// back.
+    paths: Paths,
     dbs: Mutex<HashMap<String, Slot>>,
     /// Told about each successful unlock, so the lock policy can take its
     /// sleep inhibitor. Set once by `set_policy_events`; absent in tests.
@@ -175,14 +188,18 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(config: Config) -> Server {
-        Server::with_clipboard(config, clip::WaylandBackend)
+    pub fn new(config: Config, paths: Paths) -> Server {
+        Server::with_clipboard(config, paths, clip::WaylandBackend)
     }
 
     /// Like `new`, but with an injected clipboard backend — real tests use
     /// `new`; unit tests that need to control the clipboard without a
     /// Wayland connection use this with a fake `clip::Backend`.
-    pub fn with_clipboard(config: Config, backend: impl clip::Backend + 'static) -> Server {
+    pub fn with_clipboard(
+        config: Config,
+        paths: Paths,
+        backend: impl clip::Backend + 'static,
+    ) -> Server {
         let dbs = config
             .databases
             .iter()
@@ -196,6 +213,7 @@ impl Server {
             .collect();
         Server {
             config,
+            paths,
             dbs: Mutex::new(dbs),
             policy_events: OnceLock::new(),
             clip: Arc::new(Clipboard::new(backend)),
@@ -312,14 +330,6 @@ impl Server {
     #[doc(hidden)]
     pub fn assume_origin(&self, origin: Origin) {
         let _ = self.assumed_origin.set(origin);
-    }
-
-    /// Where the peer on `stream` runs (`docs/headless.md` § 3).
-    fn origin_of(&self, stream: &UnixStream, uid: u32) -> Origin {
-        match self.assumed_origin.get() {
-            Some(origin) => *origin,
-            None => origin::of_peer(stream, uid, self.desk().session()),
-        }
     }
 
     /// Where to report unlocks. Called once, before the server takes requests.
@@ -569,6 +579,9 @@ impl Unlock for Server {
         // flag at least bounds it to one stuck thread per database.
         let (opened, stamp) = vault::open(&cfg.path, password, cfg.keyfile.as_deref())
             .map_err(|err| unlock_error(name, err))?;
+        // The SSH key scan parses every key file, so it runs here, before
+        // the mutex, like the key derivation above.
+        let ssh = cfg.serve_ssh_keys.then(|| SshSlot::scan(&opened, cfg));
 
         let mut dbs = slots(&self.dbs);
         let Some(slot) = dbs.get_mut(name) else {
@@ -581,12 +594,49 @@ impl Unlock for Server {
             return Err(UnlockError::LockedDuringUnlock { db: db() });
         }
         slot.install(opened, stamp);
+        let cache = ssh.map(|ssh| {
+            let cache = ssh.cache(name);
+            slot.ssh = ssh;
+            cache
+        });
         drop(dbs);
+        // A file write with an fsync: after the mutex, never under it.
+        if let Some(cache) = cache {
+            cache.write(&self.paths);
+        }
         self.notify_unlocked();
         // Logged here rather than in `log_response`: only this path knows
         // the database was actually opened, as opposed to already unlocked.
         log::info(format_args!("unlocked {name:?}"));
         Ok(db())
+    }
+}
+
+impl PeerOrigin for Server {
+    /// Where the peer on `stream` runs (`docs/headless.md` § 3).
+    fn origin_of(&self, stream: &UnixStream, owner: u32) -> Origin {
+        match self.assumed_origin.get() {
+            Some(origin) => *origin,
+            None => origin::of_peer(stream, owner, self.desk().session()),
+        }
+    }
+}
+
+/// What the SSH agent needs from the daemon, as a thin adapter over the
+/// slots: the agent's own logic stays in `ssh_agent`.
+impl SshHost for Server {
+    fn databases(&self) -> &[DatabaseConfig] {
+        &self.config.databases
+    }
+
+    fn drop_if_stale(&self, db: &str) {
+        self.drop_stale([db]);
+    }
+
+    fn with_slot<R>(&self, db: &str, f: impl FnOnce(SlotView<'_>) -> R) -> Option<R> {
+        let mut dbs = slots(&self.dbs);
+        let slot = dbs.get_mut(db)?;
+        Some(f(SlotView::new(slot.db.as_ref(), &mut slot.ssh)))
     }
 }
 
@@ -858,6 +908,14 @@ impl Drop for ConnectionSlot {
     }
 }
 
+/// Serves the SSH agent (`docs/ssh-agent.md`) for `server` on `listener`
+/// forever, each connection on its own thread, as `serve` does the JSON
+/// socket.
+pub fn serve_ssh_agent(server: Arc<Server>, listener: UnixListener) {
+    let agent = Agent::new(Arc::clone(&server), &server.paths);
+    ssh_agent::serve::serve(Arc::new(agent), listener);
+}
+
 /// Accept connections forever, handling each on its own thread.
 ///
 /// Nothing here can end the loop or the process: an `accept` error (out of
@@ -1089,7 +1147,10 @@ mod tests {
     use crate::prompt::spawn_lock;
 
     fn empty_server() -> Server {
-        Server::new(Config::parse("").expect("an empty config is valid"))
+        Server::new(
+            Config::parse("").expect("an empty config is valid"),
+            Paths::default(),
+        )
     }
 
     /// Send `request` bytes to `handle_connection` over a socket pair and
@@ -1219,7 +1280,10 @@ mod tests {
              [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
              [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n"
         );
-        Server::new(Config::parse(&config).expect("valid config"))
+        Server::new(
+            Config::parse(&config).expect("valid config"),
+            Paths::default(),
+        )
     }
 
     /// Like `idle_server`, but with a recording clipboard backend instead
@@ -1231,7 +1295,11 @@ mod tests {
              [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n"
         );
         let (backend, _offered) = clip::RecordingBackend::new();
-        let server = Server::with_clipboard(Config::parse(&config).expect("valid config"), backend);
+        let server = Server::with_clipboard(
+            Config::parse(&config).expect("valid config"),
+            Paths::default(),
+            backend,
+        );
         allow_copy(&server);
         server
     }
@@ -1272,6 +1340,42 @@ mod tests {
 
     fn is_unlocked(server: &Server, name: &str) -> bool {
         slots(&server.dbs)[name].db.is_some()
+    }
+
+    /// What an unlock's scan found for a database goes with it on lock,
+    /// so none of it outlives the database.
+    #[test]
+    fn a_lock_resets_the_ssh_agent_state() {
+        use crate::ssh_agent::testing::{key_database, test_key};
+
+        let server = Server::new(
+            Config::parse(
+                "[ssh_agent]\nconfirm_prompt = [\"true\"]\n\n\
+                 [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
+                 serve_ssh_keys = true\n",
+            )
+            .expect("valid config"),
+            Paths::default(),
+        );
+        unlock_directly(&server, "personal");
+        {
+            let mut dbs = slots(&server.dbs);
+            let slot = dbs.get_mut("personal").expect("configured");
+            let db = key_database(&[("github", &test_key(1))]);
+            slot.ssh = SshSlot::scan(&db, &server.config.databases[0]);
+            slot.db = Some(db);
+            assert!(!slot.ssh.is_empty(), "sanity: the scan found the key");
+        }
+
+        Lock::lock(
+            &server,
+            &LockRequest {
+                db: Some("personal".to_string()),
+            },
+        )
+        .expect("personal is configured");
+
+        assert!(slots(&server.dbs)["personal"].ssh.is_empty());
     }
 
     /// Like `unlock_directly`, but the installed database holds one entry
@@ -1317,6 +1421,7 @@ mod tests {
         let server = Server::with_clipboard(
             Config::parse("[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n")
                 .expect("valid config"),
+            Paths::default(),
             backend,
         );
         allow_copy(&server);
@@ -1496,6 +1601,7 @@ mod tests {
                  [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n",
             )
             .expect("valid config"),
+            Paths::default(),
             backend,
         );
         allow_copy(&server);
@@ -1639,6 +1745,7 @@ mod tests {
                  [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n",
             )
             .expect("valid config"),
+            Paths::default(),
             backend,
         );
         allow_copy(&server);
@@ -1874,6 +1981,7 @@ mod tests {
                  [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n",
             )
             .expect("valid config"),
+            Paths::default(),
             backend,
         );
         allow_copy(&server);
@@ -2128,6 +2236,7 @@ mod tests {
                  [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n"
             ))
             .expect("valid config"),
+            Paths::default(),
         )
     }
 
