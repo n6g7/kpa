@@ -14,48 +14,55 @@ use super::{Backend, CancelToken, PromptOutcome};
 type Hook = Box<dyn FnOnce() + Send>;
 
 /// One prompt, as a test scripts it.
-pub(crate) struct Step {
-    outcome: PromptOutcome,
+pub(crate) struct Step<T> {
+    reply: io::Result<PromptOutcome<T>>,
     while_up: Option<Hook>,
 }
 
-impl Step {
-    /// A secret prompt that ends as `outcome`, unless its token is
-    /// cancelled while it is up.
-    pub(crate) fn secret(outcome: PromptOutcome) -> Step {
+impl<T> Step<T> {
+    /// A prompt that ends as `outcome`, unless its token is cancelled
+    /// while it is up.
+    pub(crate) fn new(outcome: PromptOutcome<T>) -> Step<T> {
         Step {
-            outcome,
+            reply: Ok(outcome),
             while_up: None,
         }
     }
 
     /// Runs `f` while the prompt is on screen, before it answers: a lock
     /// here ends it as `Interrupted`, as it ends a real one.
-    pub(crate) fn while_up(mut self, f: impl FnOnce() + Send + 'static) -> Step {
+    pub(crate) fn while_up(mut self, f: impl FnOnce() + Send + 'static) -> Step<T> {
         self.while_up = Some(Box::new(f));
         self
     }
 }
 
-/// Clones share one script: hand one to the queue and keep one to drive
-/// it.
-#[derive(Clone, Default)]
-pub(crate) struct Scripted(Arc<Script>);
+/// Clones share one script: hand one to a [`Prompt`](super::Prompt) and
+/// keep one to drive it.
+pub(crate) struct Scripted<T>(Arc<Script<T>>);
 
-#[derive(Default)]
-struct Script {
-    steps: Mutex<VecDeque<Step>>,
+struct Script<T> {
+    steps: Mutex<VecDeque<Step<T>>>,
     shown: Mutex<Vec<String>>,
 }
 
-impl Scripted {
-    pub(crate) fn new() -> Scripted {
-        Scripted::default()
+impl<T> Clone for Scripted<T> {
+    fn clone(&self) -> Scripted<T> {
+        Scripted(Arc::clone(&self.0))
+    }
+}
+
+impl<T> Scripted<T> {
+    pub(crate) fn new() -> Scripted<T> {
+        Scripted(Arc::new(Script {
+            steps: Mutex::new(VecDeque::new()),
+            shown: Mutex::new(Vec::new()),
+        }))
     }
 
     /// Queues the step the next prompt takes. A prompt with no step queued
     /// panics.
-    pub(crate) fn push(&self, step: Step) {
+    pub(crate) fn push(&self, step: Step<T>) {
         self.0.steps.lock().expect("steps").push_back(step);
     }
 
@@ -65,13 +72,13 @@ impl Scripted {
     }
 }
 
-impl Backend for Scripted {
-    fn secret(
+impl<T: Send> Backend<T> for Scripted<T> {
+    fn show(
         &self,
         message: &str,
         _deadline: Option<Instant>,
         cancel: &CancelToken,
-    ) -> io::Result<PromptOutcome> {
+    ) -> io::Result<PromptOutcome<T>> {
         let step = self
             .0
             .steps
@@ -91,6 +98,6 @@ impl Backend for Scripted {
         if cancel.is_cancelled() {
             return Ok(PromptOutcome::Interrupted);
         }
-        Ok(step.outcome)
+        step.reply
     }
 }

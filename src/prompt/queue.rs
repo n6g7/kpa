@@ -1,14 +1,12 @@
-//! [`PromptQueue`]: where every prompt is raised, one on screen at a time
-//! across every database (`docs/ssh-agent.md` § 6.7).
+//! [`PromptQueue`]: one prompt on screen at a time, across every database
+//! and every kind of prompt (`docs/ssh-agent.md` § 6.7).
 
 use std::collections::VecDeque;
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
-use super::message::sanitize_message;
-use super::{Backend, CancelToken, PromptOutcome};
+use super::CancelToken;
 
 #[derive(Default)]
 struct PromptQueueState {
@@ -24,44 +22,19 @@ struct PromptQueueState {
     waiting: VecDeque<(u64, UnixStream)>,
 }
 
-/// Every prompt the daemon raises goes through this one queue, built once
-/// at startup: it serializes them across every database, so only one is
-/// ever on screen (`docs/ssh-agent.md` § 6.7's "only one prompt is on
-/// screen at a time"), and shows each through its [`Backend`].
-///
-/// Each method sanitizes its message for display (`message`), so callers
-/// pass plain text, and gives the prompt `timeout` from the moment its turn
-/// comes. A prompt ends as [`PromptOutcome::Interrupted`] once its
-/// [`CancelToken`] is cancelled: killed if it is on screen, never shown if
-/// it is still queued.
+/// Serializes every prompt the daemon raises, across every database and
+/// every kind of [`Prompt`](super::Prompt), so only one is ever on screen
+/// (`docs/ssh-agent.md` § 6.7's "only one prompt is on screen at a time").
+/// Built once at startup and shared by every `Prompt`.
 pub struct PromptQueue {
     state: Mutex<PromptQueueState>,
-    backend: Box<dyn Backend>,
-    timeout: Duration,
 }
 
 impl PromptQueue {
-    pub fn new(backend: impl Backend + 'static, timeout: Duration) -> PromptQueue {
+    pub fn new() -> PromptQueue {
         PromptQueue {
             state: Mutex::new(PromptQueueState::default()),
-            backend: Box::new(backend),
-            timeout,
         }
-    }
-
-    /// Shows `message` and reads what the user types: a password.
-    pub fn secret(&self, message: &str, cancel: &CancelToken) -> io::Result<PromptOutcome> {
-        let message = sanitize_message(message);
-        let Some(_turn) = self.enter(cancel)? else {
-            return Ok(PromptOutcome::Interrupted);
-        };
-        self.backend.secret(&message, self.deadline(), cancel)
-    }
-
-    /// When a prompt whose turn has just come times out. `None` for a
-    /// timeout too large to add: a deadline that never arrives.
-    fn deadline(&self) -> Option<Instant> {
-        Instant::now().checked_add(self.timeout)
     }
 
     /// Blocks until either this call's turn comes up (`Ok(Some(turn))`,
@@ -76,7 +49,7 @@ impl PromptQueue {
     /// behalf, which only a `PromptTurn` does. Resolving that only under
     /// `state`'s lock — the same lock `release` pops under — is what keeps
     /// the two from disagreeing about which ticket is still queued.
-    fn enter(&self, cancel: &CancelToken) -> io::Result<Option<PromptTurn<'_>>> {
+    pub(super) fn enter(&self, cancel: &CancelToken) -> io::Result<Option<PromptTurn<'_>>> {
         // The busy check and, if it's already taken, joining the queue
         // happen under one lock hold: splitting them would let a release
         // between the two find the queue empty and clear `busy` before
@@ -130,7 +103,7 @@ impl PromptQueue {
 /// Holds `PromptQueue`'s one running slot; releases it on drop, so every
 /// way out of a prompt — an answer, a timeout, an interruption, or an I/O
 /// error — lets the next queued prompt proceed.
-struct PromptTurn<'a> {
+pub(super) struct PromptTurn<'a> {
     queue: &'a PromptQueue,
 }
 
@@ -175,22 +148,8 @@ fn wait_for_wake(watch: &UnixStream, cancel: &UnixStream) -> io::Result<Wake> {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use zeroize::Zeroizing;
-
-    use super::super::{CancelSource, Scripted, Step};
+    use super::super::CancelSource;
     use super::*;
-
-    fn queue() -> (PromptQueue, Scripted) {
-        let prompts = Scripted::new();
-        (
-            PromptQueue::new(prompts.clone(), Duration::from_secs(60)),
-            prompts,
-        )
-    }
-
-    fn answer(text: &str) -> PromptOutcome {
-        PromptOutcome::Answer(Zeroizing::new(text.to_string()))
-    }
 
     /// Waits until `n` prompts are queued behind the one on screen.
     fn wait_queued(queue: &PromptQueue, n: usize) {
@@ -203,7 +162,7 @@ mod tests {
 
     #[test]
     fn an_idle_queue_lets_the_first_prompt_straight_in() {
-        let (queue, _) = queue();
+        let queue = PromptQueue::new();
         let source = CancelSource::new();
         assert!(queue.enter(&source.token()).expect("enter").is_some());
     }
@@ -212,7 +171,7 @@ mod tests {
     /// own.
     #[test]
     fn a_second_prompt_waits_for_the_first_to_finish() {
-        let (queue, _) = queue();
+        let queue = PromptQueue::new();
         let (a, b) = (CancelSource::new(), CancelSource::new());
         let first = queue.enter(&a.token()).expect("enter").expect("a turn");
 
@@ -234,7 +193,7 @@ mod tests {
     /// turn, and without holding up the prompts behind it.
     #[test]
     fn a_queued_prompt_is_cancelled_without_a_turn() {
-        let (queue, _) = queue();
+        let queue = PromptQueue::new();
         let (a, b) = (CancelSource::new(), CancelSource::new());
         let first = queue.enter(&a.token()).expect("enter").expect("a turn");
 
@@ -249,33 +208,5 @@ mod tests {
         drop(first);
         let c = CancelSource::new();
         assert!(queue.enter(&c.token()).expect("enter").is_some());
-    }
-
-    /// The backend sees the message sanitized, and its answer is the
-    /// caller's.
-    #[test]
-    fn a_prompt_shows_its_message_sanitized() {
-        let (queue, prompts) = queue();
-        prompts.push(Step::secret(answer("hunter2")));
-        let source = CancelSource::new();
-
-        let outcome = queue.secret("Unlock personal\u{202e}evil", &source.token());
-
-        assert!(matches!(outcome, Ok(PromptOutcome::Answer(a)) if a.as_str() == "hunter2"));
-        assert_eq!(prompts.shown(), ["Unlock personal\\u202eevil"]);
-    }
-
-    /// A token cancelled before the prompt's turn comes never reaches the
-    /// backend.
-    #[test]
-    fn a_prompt_cancelled_before_its_turn_is_never_shown() {
-        let (queue, prompts) = queue();
-        let token = CancelSource::new().token();
-
-        assert!(matches!(
-            queue.secret("Unlock personal", &token),
-            Ok(PromptOutcome::Interrupted)
-        ));
-        assert!(prompts.shown().is_empty());
     }
 }

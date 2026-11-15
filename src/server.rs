@@ -8,7 +8,7 @@
 //! pre-dispatch failures, which by definition never reach an op.
 //!
 //! No tray or clipboard yet — those are later steps. Unlocking still needs a
-//! password from somewhere, so this step already asks `prompt::PromptQueue`
+//! password from somewhere, so this step already asks a `prompt::Prompt`
 //! for one (`docs/design.md` decision #9); nothing about that requires the
 //! later pieces.
 //!
@@ -38,7 +38,7 @@ use crate::log;
 use crate::origin::{self, Origin, PeerOrigin};
 use crate::paths::Paths;
 use crate::policy;
-use crate::prompt::{self, CancelSource, Programs, PromptOutcome, PromptQueue};
+use crate::prompt::{self, CancelSource, Prompt, PromptOutcome, PromptQueue, SecretProgram};
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
@@ -177,9 +177,10 @@ pub struct Server {
     desk: Mutex<policy::Desk>,
     /// Set by `assume_origin` only.
     assumed_origin: OnceLock<Origin>,
-    /// Every prompt the daemon raises, across every database, one on screen
-    /// at a time (`docs/ssh-agent.md` § 6.7).
-    prompts: PromptQueue,
+    /// The unlock prompt (`Config::prompt`). It waits its turn in the
+    /// daemon's one prompt queue, so only one prompt is ever on screen
+    /// (`docs/ssh-agent.md` § 6.7).
+    unlock_prompt: Prompt<Zeroizing<String>>,
 }
 
 impl Server {
@@ -195,17 +196,17 @@ impl Server {
         paths: Paths,
         backend: impl clip::Backend + 'static,
     ) -> Server {
-        let prompts = Programs::new(config.prompt.clone());
-        Server::with_backends(config, paths, backend, prompts)
+        let unlock_prompt = SecretProgram::new(config.prompt.clone());
+        Server::with_backends(config, paths, backend, unlock_prompt)
     }
 
-    /// Like `with_clipboard`, but with an injected prompt backend too, for
-    /// unit tests that answer prompts without running a program.
+    /// Like `with_clipboard`, but with an injected unlock prompt backend
+    /// too, for unit tests that answer prompts without running a program.
     fn with_backends(
         config: Config,
         paths: Paths,
         clipboard: impl clip::Backend + 'static,
-        prompts: impl prompt::Backend + 'static,
+        unlock_prompt: impl prompt::Backend<Zeroizing<String>> + 'static,
     ) -> Server {
         let dbs = config
             .databases
@@ -218,7 +219,11 @@ impl Server {
                 (db.name.clone(), slot)
             })
             .collect();
-        let prompts = PromptQueue::new(prompts, config.prompt_timeout);
+        let unlock_prompt = Prompt::new(
+            Arc::new(PromptQueue::new()),
+            unlock_prompt,
+            config.prompt_timeout,
+        );
         Server {
             config,
             paths,
@@ -228,7 +233,7 @@ impl Server {
             clip_db: Arc::new(Mutex::new(None)),
             desk: Mutex::new(policy::Desk::NoSession),
             assumed_origin: OnceLock::new(),
-            prompts,
+            unlock_prompt,
         }
     }
 
@@ -492,7 +497,7 @@ impl Unlock for Server {
         // How a lock ends this unlock: the token is cancelled by the next
         // `Slot::lock`, which kills the prompt and keeps what this opens
         // from being installed.
-        let lock = {
+        let cancel_token = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
                 return Err(UnlockError::UnknownDb { db: db() });
@@ -535,7 +540,10 @@ impl Unlock for Server {
             None => {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
-                prompted = match self.prompts.secret(&format!("Unlock {name}"), &lock) {
+                prompted = match self
+                    .unlock_prompt
+                    .ask(&format!("Unlock {name}"), &cancel_token)
+                {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
                     }
@@ -579,7 +587,7 @@ impl Unlock for Server {
         let Some(slot) = dbs.get_mut(name) else {
             return Err(UnlockError::UnknownDb { db: db() });
         };
-        if lock.is_cancelled() {
+        if cancel_token.is_cancelled() {
             // A lock arrived while we were prompting or deriving the key.
             // It already told its client the database is locked; `opened`
             // is dropped here so that stays true.
@@ -1967,7 +1975,7 @@ mod tests {
     fn stale_drop_test_server() -> (Server, TrackedOffers) {
         let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
         let prompts = Scripted::new();
-        prompts.push(Step::secret(PromptOutcome::Cancelled));
+        prompts.push(Step::new(PromptOutcome::Cancelled));
         let server = Server::with_backends(
             Config::parse(
                 "[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
@@ -2223,7 +2231,7 @@ mod tests {
     /// Two configured, locked databases whose prompts answer as the
     /// returned script says. `Arc`, so a step can lock the server while its
     /// prompt is up.
-    fn prompt_server() -> (Arc<Server>, Scripted) {
+    fn prompt_server() -> (Arc<Server>, Scripted<Zeroizing<String>>) {
         let prompts = Scripted::new();
         let server = Server::with_backends(
             Config::parse(
@@ -2254,14 +2262,14 @@ mod tests {
     }
 
     /// A prompt that types a password, unless something ends it first.
-    fn typed() -> Step {
-        Step::secret(PromptOutcome::Answer(Zeroizing::new("hunter2".to_string())))
+    fn typed() -> Step<Zeroizing<String>> {
+        Step::new(PromptOutcome::Answer(Zeroizing::new("hunter2".to_string())))
     }
 
     #[test]
     fn no_prompt_is_raised_while_the_desk_is_locked() {
         let (server, prompts) = prompt_server();
-        prompts.push(Step::secret(PromptOutcome::Cancelled));
+        prompts.push(Step::new(PromptOutcome::Cancelled));
 
         policy::Locks::set_desk(
             &*server,
@@ -2296,7 +2304,7 @@ mod tests {
     #[test]
     fn no_prompt_is_raised_for_a_requester_outside_the_desktop() {
         let (server, prompts) = prompt_server();
-        prompts.push(Step::secret(PromptOutcome::Cancelled));
+        prompts.push(Step::new(PromptOutcome::Cancelled));
         policy::Locks::set_desk(
             &*server,
             policy::Desk::Unlocked {
@@ -2407,7 +2415,7 @@ mod tests {
     fn locking_another_database_leaves_the_prompt_alone() {
         let (server, prompts) = prompt_server();
         let locker = Arc::clone(&server);
-        prompts.push(Step::secret(PromptOutcome::Cancelled).while_up(move || {
+        prompts.push(Step::new(PromptOutcome::Cancelled).while_up(move || {
             let _ = Lock::lock(
                 &*locker,
                 &LockRequest {

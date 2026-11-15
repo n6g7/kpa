@@ -1,5 +1,5 @@
-//! The external-program backend, [`Programs`]: runs a dmenu-style prompt
-//! program and reads its answer.
+//! The external-program backends: [`SecretProgram`] runs a dmenu-style
+//! prompt program and reads what it prints.
 //!
 //! The prompt program's argv runs exactly as configured; what the prompt is
 //! about reaches it through the `KPA_PROMPT_MESSAGE` environment variable
@@ -30,21 +30,21 @@ const MAX_ANSWER_LEN: usize = MAX_PASSWORD_LEN;
 /// rewrites it.
 const PROMPT_MESSAGE_ENV: &str = "KPA_PROMPT_MESSAGE";
 
-/// Shows prompts by running dmenu-style programs (`docs/design.md`
-/// decision #9): `secret` runs the unlock prompt's argv (`Config::prompt`).
-/// A prompt runs in its own process group. It is killed, with everything
-/// it started, at its deadline, or as soon as its token is cancelled.
-pub struct Programs {
-    secret: Vec<String>,
+/// Asks for a secret by running a dmenu-style program (`docs/design.md`
+/// decision #9), such as the unlock prompt's argv (`Config::prompt`). The
+/// program runs in its own process group. It is killed, with everything it
+/// started, at its deadline, or as soon as its token is cancelled.
+pub struct SecretProgram {
+    argv: Vec<String>,
 }
 
-impl Programs {
-    pub fn new(secret: Vec<String>) -> Programs {
-        Programs { secret }
+impl SecretProgram {
+    pub fn new(argv: Vec<String>) -> SecretProgram {
+        SecretProgram { argv }
     }
 }
 
-impl Backend for Programs {
+impl Backend<Zeroizing<String>> for SecretProgram {
     /// Returns what the program printed, with its trailing `\n`/`\r`
     /// stripped, since dmenu-style prompts newline-terminate their output.
     ///
@@ -56,13 +56,13 @@ impl Backend for Programs {
     /// finding 1). Output longer than `MAX_ANSWER_LEN` is refused rather
     /// than accommodated. The copies kpa can't reach are the ones inside the
     /// prompt program itself.
-    fn secret(
+    fn show(
         &self,
         message: &str,
         deadline: Option<Instant>,
         cancel: &CancelToken,
     ) -> std::io::Result<PromptOutcome> {
-        run(&self.secret, message, deadline, cancel)
+        run(&self.argv, message, deadline, cancel)
     }
 }
 
@@ -208,7 +208,9 @@ fn kill_prompt(child: &mut Child) {
 mod tests {
     use std::time::Duration;
 
-    use super::super::{CancelSource, PromptQueue};
+    use std::sync::Arc;
+
+    use super::super::{CancelSource, Prompt, PromptQueue};
     use super::*;
 
     /// Held by every test here: each spawns a prompt, and spawning a child
@@ -225,11 +227,25 @@ mod tests {
         vec!["/bin/sh".into(), "-c".into(), script.into()]
     }
 
+    /// `script` as a prompt with a queue of its own, timing out after
+    /// `timeout` seconds.
+    fn queued(script: &str, timeout: u64) -> Prompt<Zeroizing<String>> {
+        Prompt::new(
+            Arc::new(PromptQueue::new()),
+            SecretProgram::new(sh(script)),
+            Duration::from_secs(timeout),
+        )
+    }
+
     /// Runs `script` as the prompt with `message`, ending by `deadline`
     /// and with nobody to cancel it.
     fn shown(script: &str, message: &str, deadline: Duration) -> std::io::Result<PromptOutcome> {
         let source = CancelSource::new();
-        Programs::new(sh(script)).secret(message, Some(Instant::now() + deadline), &source.token())
+        SecretProgram::new(sh(script)).show(
+            message,
+            Some(Instant::now() + deadline),
+            &source.token(),
+        )
     }
 
     /// Runs `script` as the prompt, with a deadline far enough off never to
@@ -266,7 +282,7 @@ mod tests {
     #[test]
     fn an_empty_command_is_an_error() {
         let source = CancelSource::new();
-        let outcome = Programs::new(Vec::new()).secret("test message", None, &source.token());
+        let outcome = SecretProgram::new(Vec::new()).show("test message", None, &source.token());
         assert!(outcome.is_err());
     }
 
@@ -294,7 +310,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(200));
                 drop(source);
             });
-            Programs::new(sh("sleep 30; printf hunter2")).secret("test message", None, &token)
+            SecretProgram::new(sh("sleep 30; printf hunter2")).show("test message", None, &token)
         });
         assert!(matches!(outcome, Ok(PromptOutcome::Interrupted)));
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -346,17 +362,14 @@ mod tests {
         assert_eq!(seen.as_str(), "{message} literally");
     }
 
-    /// Callers of the queue pass plain text: the prompt program only ever
+    /// Callers of a prompt pass plain text: the prompt program only ever
     /// sees it escaped.
     #[test]
     fn the_message_is_escaped_before_the_prompt_sees_it() {
         let _spawning = spawn_lock();
-        let queue = PromptQueue::new(
-            Programs::new(sh(&format!("printf %s \"${PROMPT_MESSAGE_ENV}\""))),
-            Duration::from_secs(60),
-        );
+        let unlock = queued(&format!("printf %s \"${PROMPT_MESSAGE_ENV}\""), 60);
         let source = CancelSource::new();
-        let outcome = queue.secret("Unlock personal\u{202e}evil", &source.token());
+        let outcome = unlock.ask("Unlock personal\u{202e}evil", &source.token());
         let Ok(PromptOutcome::Answer(seen)) = outcome else {
             panic!("expected the message back, got {outcome:?}");
         };
@@ -380,13 +393,13 @@ mod tests {
             marker = marker.display(),
             overlap = overlap.display(),
         );
-        let queue = PromptQueue::new(Programs::new(sh(&script)), Duration::from_secs(10));
+        let unlock = queued(&script, 10);
         let (a, b) = (CancelSource::new(), CancelSource::new());
 
         let (first, second) = std::thread::scope(|scope| {
-            let first = scope.spawn(|| queue.secret("a", &a.token()));
+            let first = scope.spawn(|| unlock.ask("a", &a.token()));
             std::thread::sleep(Duration::from_millis(50));
-            let second = scope.spawn(|| queue.secret("b", &b.token()));
+            let second = scope.spawn(|| unlock.ask("b", &b.token()));
             (
                 first.join().expect("first prompt thread panicked"),
                 second.join().expect("second prompt thread panicked"),
@@ -413,14 +426,14 @@ mod tests {
             "if [ \"${PROMPT_MESSAGE_ENV}\" = second ]; then touch '{}'; fi; sleep 1; printf ok",
             marker.display()
         );
-        let queue = PromptQueue::new(Programs::new(sh(&script)), Duration::from_secs(10));
+        let unlock = queued(&script, 10);
         let (first_source, second_source) = (CancelSource::new(), CancelSource::new());
         let second_token = second_source.token();
 
         let (first, second) = std::thread::scope(|scope| {
-            let first = scope.spawn(|| queue.secret("first", &first_source.token()));
+            let first = scope.spawn(|| unlock.ask("first", &first_source.token()));
             std::thread::sleep(Duration::from_millis(100));
-            let second = scope.spawn(|| queue.secret("second", &second_token));
+            let second = scope.spawn(|| unlock.ask("second", &second_token));
             std::thread::sleep(Duration::from_millis(100));
             let cancelled_at = Instant::now();
             drop(second_source);
