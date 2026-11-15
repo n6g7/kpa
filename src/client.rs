@@ -94,10 +94,17 @@ fn refusal(line: &str, db: &str) -> String {
             error: ErrorCode::Stale,
             ..
         }) => format!("database {db:?} changed on disk and was locked; unlock it again"),
-        Ok(Failure { error, detail }) => match detail {
-            Some(detail) => format!("the daemon refused the request ({error:?}): {detail}"),
-            None => format!("the daemon refused the request ({error:?})"),
-        },
+        Ok(Failure { error, detail }) => {
+            // The code as the wire spells it.
+            let code = serde_json::to_value(error)
+                .ok()
+                .and_then(|code| code.as_str().map(str::to_string))
+                .unwrap_or_default();
+            match detail {
+                Some(detail) => format!("the daemon refused the request ({code}): {detail}"),
+                None => format!("the daemon refused the request ({code})"),
+            }
+        }
         Err(_) => format!("unreadable response from the daemon: {}", line.trim_end()),
     }
 }
@@ -344,7 +351,7 @@ fn unlock_from_terminal(
 mod tests {
     use std::path::Path;
 
-    use super::{ClientError, check_peer_uid, is_no_display, synthetic_no_display_line};
+    use super::{ClientError, check_peer_uid, is_no_display, refusal, synthetic_no_display_line};
 
     /// `UnixStream::pair()` gives both ends our own real uid, so the
     /// mismatch is simulated the same way `server.rs`'s
@@ -368,6 +375,26 @@ mod tests {
 
         check_peer_uid(Path::new("/dev/null"), &theirs, our_uid)
             .expect("our own uid must be accepted");
+    }
+
+    /// A refusal `kpa ssh keys` has no sentence of its own for names the
+    /// code the way the JSON spells it.
+    #[test]
+    fn a_refusal_without_its_own_sentence_names_the_wire_code() {
+        assert_eq!(
+            refusal(
+                r#"{"v":1,"ok":false,"error":"prompt_cancelled"}"#,
+                "personal"
+            ),
+            "the daemon refused the request (prompt_cancelled)"
+        );
+        assert_eq!(
+            refusal(
+                r#"{"v":1,"ok":false,"error":"version_mismatch","detail":"client sent v2"}"#,
+                "personal"
+            ),
+            "the daemon refused the request (version_mismatch): client sent v2"
+        );
     }
 
     #[test]
