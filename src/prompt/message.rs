@@ -3,8 +3,8 @@
 //! entry names, key comments, `known_hosts` names and the login user from a
 //! client's request, any of which can hold bidi overrides or control
 //! characters that spoof or break whatever displays it, a graphical prompt
-//! as much as a terminal. So every prompt backend runs every message
-//! through [`sanitize_message`] before showing it, and callers pass plain
+//! as much as a terminal. So the queue runs every message through
+//! [`sanitize_message`] before a backend shows it, and callers pass plain
 //! text.
 
 /// Longest prompt message kept: generous for "Unlock personal" and for the

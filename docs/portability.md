@@ -78,7 +78,7 @@ interface's shape against, not as a plan.
 | Lock triggers | `policy.rs` | logind over D-Bus: `Lock`, `LockedHint`, `PrepareForSleep`, a sleep inhibitor | screen-lock and sleep notifications | `policy::Event` and the `Locks` / `SleepInhibitor` traits. |
 | Clipboard | `clip.rs`, `wayland/` | kpa's own Wayland client: data-control, serving each paste | `NSPasteboard` | "serve this secret, end it after the timeout, never clear anyone else's". |
 | Tray | `tray.rs` | StatusNotifierItem over D-Bus (`ksni`) | `NSStatusItem` | database states in, menu actions out. |
-| Prompts | `prompt/` | an external program (`prompt/program.rs`), cancelled through `prompt/cancel.rs`'s socket pair | the same, or a native dialog or Touch ID | `PromptOutcome<T>`; no assumption of a child process or a string answer; `PromptCancel` and `CancelWatch` to end one. |
+| Prompts | `prompt/` | an external program per kind of prompt (`prompt/program.rs`) behind `prompt::Backend<T>`, ended through `prompt/cancel.rs`'s socket pair | another `Backend<T>` for a kind: the same program, or a native dialog, or Touch ID for an approval | `Prompt<T>`, one per kind, sharing one `PromptQueue`; `PromptOutcome<T>`; no assumption of a child process or a string answer; a `CancelToken` ends one. |
 | Process hardening | `main.rs` | `prctl(PR_SET_DUMPABLE)` | `setrlimit(RLIMIT_CORE)`, `ptrace(PT_DENY_ATTACH)` | one startup call. |
 | Service manager | `nix/hm-module.nix` | a systemd user unit | a launchd agent | `kpa serve` as a plain foreground process: no socket activation or `sd_notify`. |
 

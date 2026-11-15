@@ -29,7 +29,7 @@ pub struct Config {
     /// Swappable per decision #9 in the design doc — `pinentry-qt` is the
     /// long-term answer but fiddly, so this stays a plain argv rather than
     /// an enum.
-    /// Runs exactly as configured: `prompt::run_prompt` passes what the
+    /// Runs exactly as configured: `prompt::SecretProgram` passes what the
     /// prompt is about through the `KPA_PROMPT_MESSAGE` environment
     /// variable instead of touching the argv.
     #[serde(default = "default_prompt")]

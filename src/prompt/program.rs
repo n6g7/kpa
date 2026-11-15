@@ -1,18 +1,19 @@
-//! The external-program backend: runs a dmenu-style prompt program and
-//! reads its answer: [`run_prompt`] returns what it printed.
+//! The external-program backends: [`SecretProgram`] runs a dmenu-style
+//! prompt program and reads what it prints.
 //!
 //! The prompt program's argv runs exactly as configured; what the prompt is
 //! about reaches it through the `KPA_PROMPT_MESSAGE` environment variable
 //! instead (`docs/ssh-agent.md` § 6.6).
 
-use std::io::Read;
+use std::io::{Error, ErrorKind, Read};
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use zeroize::Zeroizing;
 
-use super::message::sanitize_message;
-use super::{CancelWatch, PromptOutcome, PromptQueue};
+use super::{Backend, CancelToken, PromptOutcome};
 use crate::proto::MAX_PASSWORD_LEN;
 
 /// The longest answer read; one more byte is an error. An answer can be a
@@ -29,79 +30,59 @@ const MAX_ANSWER_LEN: usize = MAX_PASSWORD_LEN;
 /// rewrites it.
 const PROMPT_MESSAGE_ENV: &str = "KPA_PROMPT_MESSAGE";
 
-/// Runs `argv` as a prompt (`docs/design.md` decision #9), queued through
-/// `queue` so only one is ever on screen, and returns what it printed.
-/// `message` is plain text: it is sanitized for display and length-capped
-/// here (`message::sanitize_message`), then
-/// reaches the program through the `KPA_PROMPT_MESSAGE` environment
-/// variable.
-///
-/// The prompt runs in its own process group. It is killed, with everything
-/// it started, once `timeout` passes without it finishing, or as soon as
-/// `cancel`'s `PromptCancel` is dropped. A prompt still queued when that
-/// happens is never spawned at all.
-///
-/// The output is read into a zeroizing buffer of fixed size that never
-/// grows. That's the point: `Command::output()` collects into a `Vec` that
-/// reallocates as it fills, and every reallocation frees an unwiped copy of
-/// what it held so far — for a long passphrase, most of it survived both
-/// unlock and lock (`docs/review-2026-09-secrets.md` finding 1). Output
-/// longer than `MAX_ANSWER_LEN` is refused rather than accommodated.
-///
-/// Trailing `\n`/`\r` are stripped, since dmenu-style prompts
-/// newline-terminate their output. The copies kpa can't reach are the ones
-/// inside the prompt program itself.
-pub fn run_prompt(
-    queue: &PromptQueue,
-    argv: &[String],
-    message: &str,
-    timeout: Duration,
-    cancel: &CancelWatch,
-) -> std::io::Result<PromptOutcome> {
-    run(queue, argv, message, timeout, cancel)
+/// Asks for a secret by running a dmenu-style program (`docs/design.md`
+/// decision #9), such as the unlock prompt's argv (`Config::prompt`). The
+/// program runs in its own process group. It is killed, with everything it
+/// started, at its deadline, or as soon as its token is cancelled.
+pub struct SecretProgram {
+    argv: Vec<String>,
 }
 
-/// `run_prompt`'s body.
+impl SecretProgram {
+    pub fn new(argv: Vec<String>) -> SecretProgram {
+        SecretProgram { argv }
+    }
+}
+
+impl Backend<Zeroizing<String>> for SecretProgram {
+    /// Returns what the program printed, with its trailing `\n`/`\r`
+    /// stripped, since dmenu-style prompts newline-terminate their output.
+    ///
+    /// The output is read into a zeroizing buffer of fixed size that never
+    /// grows. That's the point: `Command::output()` collects into a `Vec`
+    /// that reallocates as it fills, and every reallocation frees an unwiped
+    /// copy of what it held so far — for a long passphrase, most of it
+    /// survived both unlock and lock (`docs/review-2026-09-secrets.md`
+    /// finding 1). Output longer than `MAX_ANSWER_LEN` is refused rather
+    /// than accommodated. The copies kpa can't reach are the ones inside the
+    /// prompt program itself.
+    fn show(
+        &self,
+        message: &str,
+        deadline: Option<Instant>,
+        cancel: &CancelToken,
+    ) -> std::io::Result<PromptOutcome> {
+        run(&self.argv, message, deadline, cancel)
+    }
+}
+
+/// Runs `argv` with `message` in its environment, and reads what it
+/// prints.
 fn run(
-    queue: &PromptQueue,
     argv: &[String],
     message: &str,
-    timeout: Duration,
-    cancel: &CancelWatch,
+    deadline: Option<Instant>,
+    cancel: &CancelToken,
 ) -> std::io::Result<PromptOutcome> {
-    use std::io::{Error, ErrorKind};
-
     let Some((program, args)) = argv.split_first() else {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             "prompt command is empty",
         ));
     };
-    let message = sanitize_message(message);
-
-    let Some(turn) = queue.enter(cancel)? else {
+    let Some(cancel) = cancel.watch()? else {
         return Ok(PromptOutcome::Interrupted);
     };
-    let result = spawn_and_read(program.as_str(), args, &message, timeout, cancel);
-    drop(turn); // release the screen as soon as this prompt is done with it
-    result
-}
-
-/// The actual spawn-and-read behind `run`, split out so `run` can drop its
-/// `PromptTurn` on every path through here without repeating itself at
-/// each return.
-fn spawn_and_read(
-    program: &str,
-    args: &[String],
-    message: &str,
-    timeout: Duration,
-    cancel: &CancelWatch,
-) -> std::io::Result<PromptOutcome> {
-    use std::io::{Error, ErrorKind};
-    use std::os::unix::process::CommandExt;
-
-    // `None` for a timeout too large to add: a deadline that never arrives.
-    let deadline = Instant::now().checked_add(timeout);
     let mut child = Command::new(program)
         .args(args)
         .env(PROMPT_MESSAGE_ENV, message)
@@ -114,7 +95,7 @@ fn spawn_and_read(
         .spawn()?;
 
     let mut buf = Zeroizing::new(vec![0u8; MAX_ANSWER_LEN]);
-    let len = match read_prompt(&mut child, &mut buf, deadline, cancel) {
+    let len = match read_prompt(&mut child, &mut buf, deadline, &cancel) {
         Ok(Ok(len)) => len,
         Ok(Err(ended)) => {
             kill_prompt(&mut child);
@@ -145,17 +126,16 @@ fn spawn_and_read(
 
 /// Read the child's stdout into `buf` until EOF, returning how much was
 /// read. Errors rather than growing when `buf` fills up. Stops early with
-/// `TimedOut` at `deadline`, or `Interrupted` once `cancel` is readable or
-/// hung up: either beats the output, so a lock wins over a prompt that
-/// answers at the same moment.
+/// `TimedOut` at `deadline`, or `Interrupted` once `cancel`, the token's
+/// watch, wakes: either beats the output, so a lock wins over a prompt
+/// that answers at the same moment.
 fn read_prompt(
     child: &mut Child,
     buf: &mut [u8],
     deadline: Option<Instant>,
-    cancel: &CancelWatch,
+    cancel: &UnixStream,
 ) -> std::io::Result<Result<usize, PromptOutcome>> {
     use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    use std::io::{Error, ErrorKind};
 
     let mut stdout = child
         .stdout
@@ -185,7 +165,7 @@ fn read_prompt(
         let (output, cancelled) = {
             let mut fds = [
                 PollFd::new(&stdout, PollFlags::IN),
-                PollFd::from_borrowed_fd(cancel.fd(), PollFlags::IN),
+                PollFd::new(cancel, PollFlags::IN),
             ];
             match poll(&mut fds, left.as_ref()) {
                 Ok(_) => {}
@@ -224,42 +204,55 @@ fn kill_prompt(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Held by every test that spawns a process — here, and in `server`'s own
-/// tests that unlock through a scripted prompt — and by the one that needs
-/// a socket to be genuinely dead. Spawning a child briefly duplicates
-/// every open file descriptor into it until it execs; if a prompt test
-/// forks at the wrong moment, a "stale" socket elsewhere is still held
-/// open by that child, and `socket::bind_socket` rightly refuses to delete
-/// a socket that's still live.
-#[cfg(test)]
-static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-pub(crate) fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
-    SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::cancel_pair;
+    use std::time::Duration;
+
+    use std::sync::Arc;
+
+    use super::super::{CancelSource, Prompt, PromptQueue};
     use super::*;
+
+    /// Held by every test here: each spawns a prompt, and spawning a child
+    /// briefly duplicates every open file descriptor into it until it
+    /// execs, which would hold up the wake-ups of the queue and cancel
+    /// sockets another test is timing.
+    static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
+        SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn sh(script: &str) -> Vec<String> {
         vec!["/bin/sh".into(), "-c".into(), script.into()]
     }
 
-    /// Runs `script` as the prompt, with a timeout long enough never to
-    /// fire, nobody to cancel it, a queue of its own, and an arbitrary
-    /// message — these tests don't care what it is.
-    fn prompt(script: &str) -> std::io::Result<PromptOutcome> {
-        let (_cancel, watch) = cancel_pair().expect("cancel pair");
-        run_prompt(
-            &PromptQueue::new(),
-            &sh(script),
-            "test message",
-            Duration::from_secs(60),
-            &watch,
+    /// `script` as a prompt with a queue of its own, timing out after
+    /// `timeout` seconds.
+    fn queued(script: &str, timeout: u64) -> Prompt<Zeroizing<String>> {
+        Prompt::new(
+            Arc::new(PromptQueue::new()),
+            SecretProgram::new(sh(script)),
+            Duration::from_secs(timeout),
         )
+    }
+
+    /// Runs `script` as the prompt with `message`, ending by `deadline`
+    /// and with nobody to cancel it.
+    fn shown(script: &str, message: &str, deadline: Duration) -> std::io::Result<PromptOutcome> {
+        let source = CancelSource::new();
+        SecretProgram::new(sh(script)).show(
+            message,
+            Some(Instant::now() + deadline),
+            &source.token(),
+        )
+    }
+
+    /// Runs `script` as the prompt, with a deadline far enough off never to
+    /// arrive and an arbitrary message — these tests don't care what it
+    /// is.
+    fn prompt(script: &str) -> std::io::Result<PromptOutcome> {
+        shown(script, "test message", Duration::from_secs(60))
     }
 
     #[test]
@@ -288,50 +281,36 @@ mod tests {
 
     #[test]
     fn an_empty_command_is_an_error() {
-        let (_cancel, watch) = cancel_pair().expect("cancel pair");
-        let outcome = run_prompt(
-            &PromptQueue::new(),
-            &[],
-            "test message",
-            Duration::from_secs(60),
-            &watch,
-        );
+        let source = CancelSource::new();
+        let outcome = SecretProgram::new(Vec::new()).show("test message", None, &source.token());
         assert!(outcome.is_err());
     }
 
     #[test]
     fn an_unanswered_prompt_times_out() {
         let _spawning = spawn_lock();
-        let (_cancel, watch) = cancel_pair().expect("cancel pair");
         let started = Instant::now();
-        let outcome = run_prompt(
-            &PromptQueue::new(),
-            &sh("sleep 30; printf hunter2"),
+        let outcome = shown(
+            "sleep 30; printf hunter2",
             "test message",
             Duration::from_millis(200),
-            &watch,
         );
         assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
-    fn dropping_the_cancel_end_interrupts_the_prompt() {
+    fn cancelling_the_token_interrupts_the_prompt() {
         let _spawning = spawn_lock();
-        let (cancel, watch) = cancel_pair().expect("cancel pair");
+        let source = CancelSource::new();
+        let token = source.token();
         let started = Instant::now();
         let outcome = std::thread::scope(|scope| {
             scope.spawn(move || {
                 std::thread::sleep(Duration::from_millis(200));
-                drop(cancel);
+                drop(source);
             });
-            run_prompt(
-                &PromptQueue::new(),
-                &sh("sleep 30; printf hunter2"),
-                "test message",
-                Duration::from_secs(60),
-                &watch,
-            )
+            SecretProgram::new(sh("sleep 30; printf hunter2")).show("test message", None, &token)
         });
         assert!(matches!(outcome, Ok(PromptOutcome::Interrupted)));
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -345,14 +324,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("survived");
         let script = format!("(sleep 1; touch '{}') & sleep 30", marker.display());
-        let (_cancel, watch) = cancel_pair().expect("cancel pair");
-        let outcome = run_prompt(
-            &PromptQueue::new(),
-            &sh(&script),
-            "test message",
-            Duration::from_millis(200),
-            &watch,
-        );
+        let outcome = shown(&script, "test message", Duration::from_millis(200));
         assert!(matches!(outcome, Ok(PromptOutcome::TimedOut)));
         std::thread::sleep(Duration::from_millis(1500));
         assert!(!marker.exists(), "the prompt's child outlived it");
@@ -363,13 +335,10 @@ mod tests {
     #[test]
     fn the_message_reaches_the_prompt_as_an_environment_variable() {
         let _spawning = spawn_lock();
-        let (_cancel, watch) = cancel_pair().expect("cancel pair");
-        let outcome = run_prompt(
-            &PromptQueue::new(),
-            &sh(&format!("printf %s \"${PROMPT_MESSAGE_ENV}\"")),
+        let outcome = shown(
+            &format!("printf %s \"${PROMPT_MESSAGE_ENV}\""),
             "Unlock personal",
             Duration::from_secs(60),
-            &watch,
         );
         let Ok(PromptOutcome::Answer(seen)) = outcome else {
             panic!("expected the message back, got {outcome:?}");
@@ -377,38 +346,15 @@ mod tests {
         assert_eq!(seen.as_str(), "Unlock personal");
     }
 
-    /// Callers pass plain text: the prompt program only ever sees it
-    /// escaped.
-    #[test]
-    fn the_message_is_escaped_before_the_prompt_sees_it() {
-        let _spawning = spawn_lock();
-        let (_cancel, watch) = cancel_pair().expect("cancel pair");
-        let outcome = run_prompt(
-            &PromptQueue::new(),
-            &sh(&format!("printf %s \"${PROMPT_MESSAGE_ENV}\"")),
-            "Unlock personal\u{202e}evil",
-            Duration::from_secs(60),
-            &watch,
-        );
-        let Ok(PromptOutcome::Answer(seen)) = outcome else {
-            panic!("expected the message back, got {outcome:?}");
-        };
-        assert!(!seen.contains('\u{202e}'), "{:?}", seen.as_str());
-        assert!(seen.contains("\\u202e"), "{:?}", seen.as_str());
-    }
-
     /// The argv runs exactly as configured: nothing in it is rewritten,
     /// even text that looks like it could have been a placeholder.
     #[test]
     fn the_prompt_argv_is_never_rewritten() {
         let _spawning = spawn_lock();
-        let (_cancel, watch) = cancel_pair().expect("cancel pair");
-        let outcome = run_prompt(
-            &PromptQueue::new(),
-            &sh("printf %s '{message} literally'"),
+        let outcome = shown(
+            "printf %s '{message} literally'",
             "Unlock personal",
             Duration::from_secs(60),
-            &watch,
         );
         let Ok(PromptOutcome::Answer(seen)) = outcome else {
             panic!("expected an answer, got {outcome:?}");
@@ -416,8 +362,23 @@ mod tests {
         assert_eq!(seen.as_str(), "{message} literally");
     }
 
+    /// Callers of a prompt pass plain text: the prompt program only ever
+    /// sees it escaped.
+    #[test]
+    fn the_message_is_escaped_before_the_prompt_sees_it() {
+        let _spawning = spawn_lock();
+        let unlock = queued(&format!("printf %s \"${PROMPT_MESSAGE_ENV}\""), 60);
+        let source = CancelSource::new();
+        let outcome = unlock.ask("Unlock personal\u{202e}evil", &source.token());
+        let Ok(PromptOutcome::Answer(seen)) = outcome else {
+            panic!("expected the message back, got {outcome:?}");
+        };
+        assert!(!seen.contains('\u{202e}'), "{:?}", seen.as_str());
+        assert!(seen.contains("\\u202e"), "{:?}", seen.as_str());
+    }
+
     /// Two prompts for different databases never show at once: the
-    /// second's `run_prompt` waits for the first's to finish.
+    /// second waits for the first to finish.
     #[test]
     fn only_one_prompt_at_a_time_across_a_shared_queue() {
         let _spawning = spawn_lock();
@@ -432,16 +393,13 @@ mod tests {
             marker = marker.display(),
             overlap = overlap.display(),
         );
-        let queue = PromptQueue::new();
-        let (_cancel_a, watch_a) = cancel_pair().expect("cancel pair");
-        let (_cancel_b, watch_b) = cancel_pair().expect("cancel pair");
+        let unlock = queued(&script, 10);
+        let (a, b) = (CancelSource::new(), CancelSource::new());
 
         let (first, second) = std::thread::scope(|scope| {
-            let first = scope
-                .spawn(|| run_prompt(&queue, &sh(&script), "a", Duration::from_secs(10), &watch_a));
+            let first = scope.spawn(|| unlock.ask("a", &a.token()));
             std::thread::sleep(Duration::from_millis(50));
-            let second = scope
-                .spawn(|| run_prompt(&queue, &sh(&script), "b", Duration::from_secs(10), &watch_b));
+            let second = scope.spawn(|| unlock.ask("b", &b.token()));
             (
                 first.join().expect("first prompt thread panicked"),
                 second.join().expect("second prompt thread panicked"),
@@ -454,43 +412,31 @@ mod tests {
     }
 
     /// A prompt that never got the screen — still waiting its turn behind
-    /// another one — is cancelled the instant its own `PromptCancel` is
-    /// dropped, without waiting for its turn to come up.
+    /// another one — is cancelled the instant its token is, without
+    /// waiting for its turn to come up.
     #[test]
     fn a_queued_prompt_is_cancelled_without_ever_being_shown() {
         let _spawning = spawn_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("second-ran");
-        let second_script = sh(&format!("touch '{}'; printf ok", marker.display()));
-        let queue = PromptQueue::new();
-        let (_cancel_first, watch_first) = cancel_pair().expect("cancel pair");
-        let (cancel_second, watch_second) = cancel_pair().expect("cancel pair");
+        // The first prompt holds the screen for long enough that the
+        // second is still waiting when it gets cancelled; the second, if
+        // it ever ran, would leave `marker` behind.
+        let script = format!(
+            "if [ \"${PROMPT_MESSAGE_ENV}\" = second ]; then touch '{}'; fi; sleep 1; printf ok",
+            marker.display()
+        );
+        let unlock = queued(&script, 10);
+        let (first_source, second_source) = (CancelSource::new(), CancelSource::new());
+        let second_token = second_source.token();
 
         let (first, second) = std::thread::scope(|scope| {
-            // Holds the queue's one slot for long enough that the second
-            // call below is still waiting when it gets cancelled.
-            let first = scope.spawn(|| {
-                run_prompt(
-                    &queue,
-                    &sh("sleep 1; printf ok"),
-                    "first",
-                    Duration::from_secs(10),
-                    &watch_first,
-                )
-            });
+            let first = scope.spawn(|| unlock.ask("first", &first_source.token()));
             std::thread::sleep(Duration::from_millis(100));
-            let second = scope.spawn(|| {
-                run_prompt(
-                    &queue,
-                    &second_script,
-                    "second",
-                    Duration::from_secs(10),
-                    &watch_second,
-                )
-            });
+            let second = scope.spawn(|| unlock.ask("second", &second_token));
             std::thread::sleep(Duration::from_millis(100));
             let cancelled_at = Instant::now();
-            drop(cancel_second);
+            drop(second_source);
             let second = second.join().expect("second prompt thread panicked");
             assert!(
                 cancelled_at.elapsed() < Duration::from_millis(900),

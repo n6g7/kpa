@@ -4,8 +4,8 @@
 use zeroize::Zeroizing;
 
 /// How a prompt ended. `T` is what an answered prompt yields: by default
-/// what the program printed, as [`run_prompt`](super::run_prompt) returns
-/// it.
+/// what the user typed, as [`PromptQueue::secret`](super::PromptQueue::secret)
+/// returns it.
 pub enum PromptOutcome<T = Zeroizing<String>> {
     /// The user dismissed the prompt rather than answering it — for a
     /// prompt program, an unsuccessful exit.
@@ -13,7 +13,7 @@ pub enum PromptOutcome<T = Zeroizing<String>> {
     /// Nothing was entered within the prompt's timeout; the prompt was
     /// killed.
     TimedOut,
-    /// Its [`PromptCancel`](super::PromptCancel) was dropped — a lock
+    /// Its [`CancelToken`](super::CancelToken) was cancelled — a lock
     /// ended the prompt. It was killed, or, if it was still queued, never
     /// shown at all.
     Interrupted,
