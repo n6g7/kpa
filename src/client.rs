@@ -12,9 +12,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use kpa::output::{print_escaped, report_error};
-use kpa::proto::{self, Op, Password, Request, Response, UnlockError, UnlockRequest};
+use kpa::proto::{
+    self, ErrorCode, Op, Password, Request, Response, SshKeysReport, SshKeysRequest, UnlockError,
+    UnlockRequest,
+};
 use kpa::socket;
 
+use super::ssh_keys_report;
 use super::tty::{self, TtyReadError};
 
 pub(super) fn run_client(socket_path: &Path, op: Op) -> ExitCode {
@@ -25,18 +29,76 @@ pub(super) fn run_client(socket_path: &Path, op: Op) -> ExitCode {
 
     match send_request(socket_path, &request) {
         Ok(line) => print_and_exit(&line),
-        // Only a failed connect means the daemon may not be running. Once
-        // connected, a missing reply means it hit a problem with this
-        // request, and suggesting it's down would send someone looking in
-        // the wrong place.
-        Err(err @ ClientError::Connect(..)) => {
+        Err(err) => report_client_error(err),
+    }
+}
+
+/// Reports a failed round trip. Only a failed connect means the daemon
+/// may not be running. Once connected, a missing reply means it hit a
+/// problem with this request, and suggesting it's down would send someone
+/// looking in the wrong place.
+fn report_client_error(err: ClientError) -> ExitCode {
+    match err {
+        ClientError::Connect(..) => {
             report_error(format_args!("{err} (is `kpa serve` running?)"));
+        }
+        err => report_error(err),
+    }
+    ExitCode::FAILURE
+}
+
+/// `kpa ssh keys`: unlike the other subcommands it doesn't print the
+/// daemon's line. It reads the report out of it and prints the text
+/// [`ssh_keys_report::render`] makes of it, and a failure as a sentence.
+pub(super) fn run_ssh_keys(socket_path: &Path, request: SshKeysRequest) -> ExitCode {
+    let db = request.db.clone();
+    let request = Request {
+        v: proto::VERSION,
+        op: Op::SshKeys(request),
+    };
+    let line = match send_request(socket_path, &request) {
+        Ok(line) => line,
+        Err(err) => return report_client_error(err),
+    };
+
+    match serde_json::from_str::<SshKeysReport>(&line) {
+        Ok(report) => {
+            print!("{}", ssh_keys_report::render(&db, &report));
+            ExitCode::SUCCESS
+        }
+        Err(_) => {
+            report_error(refusal(&line, &db));
             ExitCode::FAILURE
         }
-        Err(err) => {
-            report_error(err);
-            ExitCode::FAILURE
-        }
+    }
+}
+
+/// What a failed `ssh_keys` response says, in words.
+fn refusal(line: &str, db: &str) -> String {
+    #[derive(serde::Deserialize)]
+    struct Failure {
+        error: ErrorCode,
+        detail: Option<String>,
+    }
+
+    match serde_json::from_str::<Failure>(line) {
+        Ok(Failure {
+            error: ErrorCode::UnknownDb,
+            ..
+        }) => format!("no database named {db:?} is configured"),
+        Ok(Failure {
+            error: ErrorCode::Locked,
+            ..
+        }) => format!("database {db:?} is locked; run `kpa unlock {db}` and try again"),
+        Ok(Failure {
+            error: ErrorCode::Stale,
+            ..
+        }) => format!("database {db:?} changed on disk and was locked; unlock it again"),
+        Ok(Failure { error, detail }) => match detail {
+            Some(detail) => format!("the daemon refused the request ({error:?}): {detail}"),
+            None => format!("the daemon refused the request ({error:?})"),
+        },
+        Err(_) => format!("unreadable response from the daemon: {}", line.trim_end()),
     }
 }
 

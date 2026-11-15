@@ -120,3 +120,32 @@ fn unlocking_twice_logs_one_unlocked_line() {
 
     assert_eq!(log.matches(" INFO  unlocked").count(), 1, "{log}");
 }
+
+/// `kpa ssh keys` hands entry titles and attachment names to its caller.
+/// The daemon's log, at the most verbose level, names neither.
+#[test]
+fn the_log_never_carries_what_ssh_keys_returns() {
+    let daemon = InProcessDaemon::start(&config_toml(
+        &format!("printf %s '{}'", common::PASSWORD),
+        &common::ssh_db().display().to_string(),
+    ));
+    let mut printed = String::new();
+    let log = capture_stderr(|| {
+        kpa::log::set_level(Level::Debug);
+        assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_kpa"))
+            .arg("--socket")
+            .arg(&daemon.socket)
+            .args(["ssh", "keys", "personal"])
+            .output()
+            .expect("failed to spawn kpa");
+        assert!(output.status.success());
+        printed = String::from_utf8(output.stdout).expect("UTF-8");
+        kpa::log::set_level(Level::Info);
+    });
+
+    for secret in ["Ed25519", "Ecdsa", "Rsa", "id_ed25519", "id_rsa_pem"] {
+        assert!(printed.contains(secret), "sanity: {secret:?} not printed");
+        assert!(!log.contains(secret), "{secret:?} reached the log:\n{log}");
+    }
+}

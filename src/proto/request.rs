@@ -14,6 +14,7 @@ use super::copy::CopyRequest;
 use super::error::{ErrorCode, ErrorFields};
 use super::list::ListRequest;
 use super::lock::LockRequest;
+use super::ssh_keys::SshKeysRequest;
 use super::unlock::UnlockRequest;
 use crate::io::ByteCounter;
 
@@ -42,6 +43,7 @@ pub enum Op {
     Lock(LockRequest),
     List(ListRequest),
     Copy(CopyRequest),
+    SshKeys(SshKeysRequest),
 }
 
 /// Why `decode_request` gave up. Deliberately one bucket for every JSON/shape
@@ -200,6 +202,12 @@ mod tests {
                 json!({"v": 1, "op": "list"}),
             ),
             (
+                Op::SshKeys(SshKeysRequest {
+                    db: "personal".to_string(),
+                }),
+                json!({"v": 1, "op": "ssh_keys", "db": "personal"}),
+            ),
+            (
                 Op::Copy(CopyRequest {
                     db: "personal".to_string(),
                     uuid: uuid(),
@@ -261,6 +269,12 @@ mod tests {
             ),
             (r#"{"v":1,"op":"list"}"#, Op::List(ListRequest { db: None })),
             (
+                r#"{"v":1,"op":"ssh_keys","db":"personal"}"#,
+                Op::SshKeys(SshKeysRequest {
+                    db: "personal".to_string(),
+                }),
+            ),
+            (
                 r#"{"v":1,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"password"}"#,
                 Op::Copy(CopyRequest {
                     db: "personal".to_string(),
@@ -299,6 +313,9 @@ mod tests {
                 uuid: uuid(),
                 field: Field::Notes,
             }),
+            Op::SshKeys(SshKeysRequest {
+                db: "personal".to_string(),
+            }),
         ];
 
         for op in ops {
@@ -328,6 +345,7 @@ mod tests {
             r#"{"v":"1","op":"status"}"#,             // `v` not a number
             r#"{"v":1,"op":"teleport"}"#,             // unknown op
             r#"{"v":1,"op":"unlock"}"#,               // `unlock` needs a `db`
+            r#"{"v":1,"op":"ssh_keys"}"#,             // `ssh_keys` needs a `db`
             r#"{"v":1,"op":"copy","db":"personal"}"#, // `copy` needs a `uuid` and `field`
         ] {
             assert!(

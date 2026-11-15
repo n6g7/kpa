@@ -169,6 +169,7 @@ restarting it costs one re-unlock.
 {"v":1,"op":"list"}                          // db omitted = all unlocked
 {"v":1,"op":"copy","db":"personal","uuid":"…","field":"password"}
 {"v":1,"op":"copy","db":"personal","uuid":"…","field":"custom:Password"}
+{"v":1,"op":"ssh_keys","db":"personal"}  // the SSH keys the vault holds
 ```
 
 An `unlock` that carries `password` unlocks with it and never runs the
@@ -198,6 +199,12 @@ only via the `custom:` prefix (`custom:Password`), never its bare key, so a
 bare request always means the built-in. Any other custom field is addressed
 by its bare key.
 
+`ssh_keys` scans an unlocked database's attachments for SSH keys
+([`ssh-agent.md`](./ssh-agent.md) § 6.4), the scan behind `kpa ssh keys`. It
+fails with `unknown_db`, `locked` or `stale`, and never answers a locked
+database from the key cache. Like `list`, it returns entry titles to the
+caller and keeps them out of the daemon's log.
+
 ### Responses
 
 ```json
@@ -210,6 +217,11 @@ by its bare key.
                              "fields":["username","password","totp","custom:Password"]}]}
 
 {"ok":true,"v":1,"copied":"password","expires_in":30}
+
+{"ok":true,"v":1,"keys":[{"type":"ssh-ed25519","fingerprint":"SHA256:…",
+                         "title":"Deploy","attachment":"id_ed25519"}],
+                "skipped":[{"title":"Old","attachment":"id_rsa",
+                            "reason":"PEM format; …"}]}
 
 {"ok":false,"v":1,"error":"locked","db":"personal"}
 {"ok":false,"v":1,"error":"unlock_in_progress","db":"personal"}

@@ -5,6 +5,7 @@
 //! done.
 
 mod client;
+mod ssh_keys_report;
 mod tty;
 
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use kpa::log::{self, Level};
 use kpa::output::report_error;
 use kpa::paths::Paths;
 use kpa::policy;
-use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op};
+use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op, SshKeysRequest};
 use kpa::server::{self, Server};
 use kpa::socket;
 use kpa::tray;
@@ -77,8 +78,21 @@ enum Command {
         uuid: Uuid,
         field: Field,
     },
+    /// The SSH agent's keys.
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommand,
+    },
     /// Print the version this binary was built from.
     Version,
+}
+
+#[derive(Subcommand)]
+enum SshCommand {
+    /// Show the SSH keys an unlocked database holds, the attachments
+    /// skipped and why, and a `[[database.ssh_key]]` block per key to
+    /// paste into the config (`docs/ssh-agent.md` § 6.4).
+    Keys { database: String },
 }
 
 fn main() -> ExitCode {
@@ -131,6 +145,9 @@ fn dispatch(cli: Cli) -> ExitCode {
         Command::Copy { db, uuid, field } => {
             client::run_client(&socket_path, Op::Copy(CopyRequest { db, uuid, field }))
         }
+        Command::Ssh {
+            command: SshCommand::Keys { database },
+        } => client::run_ssh_keys(&socket_path, SshKeysRequest { db: database }),
         Command::Version => unreachable!("handled above, before socket_path is resolved"),
     }
 }
