@@ -875,7 +875,7 @@ programs' settings.
   the request was decided.
 - `Server` implements `SshHost` as a thin adapter over its database
   slots (the configured databases, slot access under the mutex behind the
-  freshness guard, `may_prompt`). The approval
+  freshness guard, `may_prompt_on_screen`). The approval
   prompt goes through the daemon's prompt queue, so only one prompt is
   ever on screen, unlock's included. `server::serve_ssh_agent` runs the
   agent with that queue, and is all the binary needs. `ssh_agent` never

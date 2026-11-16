@@ -306,8 +306,8 @@ service (a cron job, a terminal server's shells), no display session at
 all, and any
 peer whose cgroup can't be read or parsed, including one that exited
 first. The origin is logged at `debug` when the connection is accepted, and
-decides whether `unlock` may prompt on screen (`DisplaySession::may_prompt`) and
-whether `copy` may reach the clipboard (`DisplaySession::may_copy`, § Clipboard). It decides where to ask, not
+decides whether `unlock` may prompt on screen (`DisplaySession::may_prompt_on_screen`) and
+which session `copy` may put on the clipboard of (`DisplaySession::clipboard_session`, § Clipboard). It decides where to ask, not
 who may ask: a same-uid process can start work in another cgroup.
 
 **`list` never returns secrets** — it is an index. That holds for any field

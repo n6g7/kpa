@@ -12,7 +12,7 @@ use crate::authn::Requester;
 use crate::config::DatabaseConfig;
 use crate::prompt::CancelSource;
 
-/// A requester. Where it runs is the host's to say (`may_prompt`), so the
+/// A requester. Where it runs is the host's to say (`may_prompt_on_screen`), so the
 /// facts are none.
 pub(super) fn requester() -> Requester {
     Requester {
@@ -44,7 +44,7 @@ impl FakeSlot {
 pub(super) struct FakeHost {
     databases: Vec<DatabaseConfig>,
     slots: Mutex<HashMap<String, FakeSlot>>,
-    may_prompt: bool,
+    may_prompt_on_screen: bool,
     /// What `unlocked` opened the first database as, for reopening it.
     opened: Option<Database>,
     /// The first database's file has changed: the next freshness guard
@@ -70,7 +70,7 @@ impl FakeHost {
         FakeHost {
             databases,
             slots: Mutex::new(slots),
-            may_prompt: true,
+            may_prompt_on_screen: true,
             opened: None,
             stale: AtomicBool::new(false),
         }
@@ -103,7 +103,7 @@ impl FakeHost {
 
     /// No prompt may appear, as outside the desktop.
     pub(super) fn without_prompts(mut self) -> FakeHost {
-        self.may_prompt = false;
+        self.may_prompt_on_screen = false;
         self
     }
 
@@ -149,7 +149,7 @@ impl SshHost for FakeHost {
         )))
     }
 
-    fn may_prompt(&self, _: &Requester) -> bool {
-        self.may_prompt
+    fn may_prompt_on_screen(&self, _: &Requester) -> bool {
+        self.may_prompt_on_screen
     }
 }

@@ -27,7 +27,7 @@ pub trait SshHost {
     /// Whether a prompt may appear on screen for a connection from
     /// `requester` (`docs/ssh-agent.md` § 6.8). Asked inside `with_slot`, so
     /// the answer holds for the hold it is asked in.
-    fn may_prompt(&self, requester: &Requester) -> bool;
+    fn may_prompt_on_screen(&self, requester: &Requester) -> bool;
 }
 
 /// One database's slot as the agent sees it, while the host holds its

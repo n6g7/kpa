@@ -179,7 +179,7 @@ pub struct Server {
     /// The display session's state, as the lock policy last published it
     /// (`policy::Event::DisplaySession`). Each connection is classified against its
     /// display session (`origin`), and `unlock` asks it whether a prompt
-    /// may be raised (`DisplaySession::may_prompt`).
+    /// may be raised (`DisplaySession::may_prompt_on_screen`).
     display_session: Mutex<policy::DisplaySession>,
     /// Set by `assume_origin` only.
     assumed_origin: OnceLock<Origin>,
@@ -502,7 +502,7 @@ impl Unlock for Server {
         request: &UnlockRequest,
         requester: &Requester,
     ) -> Result<String, UnlockError> {
-        self.unlock_db(request, || self.may_prompt(requester))
+        self.unlock_db(request, || self.may_prompt_on_screen(requester))
     }
 }
 
@@ -520,25 +520,35 @@ impl Server {
     /// Whether a prompt may appear for `requester` now (`docs/headless.md`
     /// § 2): it runs on the desktop, and the display session isn't known to
     /// be locked.
-    fn may_prompt(&self, requester: &Requester) -> bool {
+    fn may_prompt_on_screen(&self, requester: &Requester) -> bool {
         let display_session = self.display_session();
-        display_session.may_prompt(self.origin_in(requester, &display_session))
+        display_session.may_prompt_on_screen(self.origin_in(requester, &display_session))
+    }
+
+    /// The display session whose clipboard a `copy` from `requester` may
+    /// put its secret on, or `None` where the copy must be refused
+    /// (`docs/headless.md` § 5).
+    fn clipboard_session(&self, requester: &Requester) -> Option<String> {
+        let display_session = self.display_session();
+        display_session
+            .clipboard_session(self.origin_in(requester, &display_session))
+            .map(str::to_string)
     }
 
     /// The unlock the tray's menu asks for, clicked at the desk: where a
     /// prompt may appear unless the display session is known to be locked.
     pub fn unlock_at_desk(&self, request: &UnlockRequest) -> Result<String, UnlockError> {
         self.unlock_db(request, || {
-            self.display_session().may_prompt(Origin::Desktop)
+            self.display_session().may_prompt_on_screen(Origin::Desktop)
         })
     }
 
-    /// The unlock `kpa unlock` and the tray run: `may_prompt` says whether
+    /// The unlock `kpa unlock` and the tray run: `may_prompt_on_screen` says whether
     /// a prompt may appear, asked under the mutex.
     fn unlock_db(
         &self,
         request: &UnlockRequest,
-        may_prompt: impl FnOnce() -> bool,
+        may_prompt_on_screen: impl FnOnce() -> bool,
     ) -> Result<String, UnlockError> {
         let name = request.db.as_str();
         let db = || name.to_string();
@@ -574,7 +584,7 @@ impl Server {
             // ends the prompt. A request that carries its password needs no
             // prompt, so it goes ahead from anywhere: that is how an
             // unlock from outside the desktop is answered.
-            if request.password.is_none() && !may_prompt() {
+            if request.password.is_none() && !may_prompt_on_screen() {
                 return Err(UnlockError::NoDisplay);
             }
             if slot.unlocking {
@@ -698,8 +708,8 @@ impl SshHost for Server {
         Some(result)
     }
 
-    fn may_prompt(&self, requester: &Requester) -> bool {
-        Server::may_prompt(self, requester)
+    fn may_prompt_on_screen(&self, requester: &Requester) -> bool {
+        Server::may_prompt_on_screen(self, requester)
     }
 }
 
@@ -856,7 +866,7 @@ impl CopyEntry for Server {
         // which must not stall every other request behind it, the same
         // reasoning that keeps `unlock`'s prompt-and-KDF step outside the
         // mutex too.
-        let display_session = self.display_session();
+        let clipboard_session = self.clipboard_session(requester);
         let value = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
@@ -864,12 +874,12 @@ impl CopyEntry for Server {
             };
             // No secret reaches the clipboard where nobody can paste it
             // from (`docs/headless.md` § 5) — checked here, same place
-            // `unlock` reads `DisplaySession::may_prompt`, and before the `Locked`
+            // `unlock` reads `DisplaySession::may_prompt_on_screen`, and before the `Locked`
             // check below so an outside caller learns no more than an
             // unknown database does.
-            if !display_session.may_copy(self.origin_in(requester, &display_session)) {
+            let Some(session) = clipboard_session else {
                 return Err(CopyError::NoDisplay);
-            }
+            };
             let Some(database) = slot.db.as_ref() else {
                 return Err(CopyError::Locked { db: db() });
             };
@@ -880,16 +890,15 @@ impl CopyEntry for Server {
                     value,
                     vault::entry_title(database, request.uuid)
                         .unwrap_or_else(|| request.uuid.to_string()),
+                    session,
                 ),
             }
         };
-        let (value, entry) = value;
-        // `may_copy` only passes with a display session.
-        let session = display_session.id().unwrap_or_default();
+        let (value, entry, session) = value;
 
         let offer = self
             .clip
-            .offer(value, session)
+            .offer(value, &session)
             .map_err(|err| CopyError::Clipboard {
                 db: db(),
                 detail: err.to_string(),
@@ -1464,7 +1473,7 @@ mod tests {
     /// Marks the display session active and unlocked, so `CopyEntry::copy` with
     /// `Origin::Desktop` passes its gate — every copy test below that
     /// isn't itself about the gate calls this on its server, the same way
-    /// those tests always ran before `may_copy` existed.
+    /// those tests always ran before the clipboard session existed.
     fn allow_copy(server: &Server) {
         policy::Locks::set_display_session(
             server,

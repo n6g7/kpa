@@ -121,9 +121,9 @@ fn missing_approval<'n>(slot: &SlotView<'_>, need: &'n Need) -> Option<&'n Ask> 
 }
 
 /// Why a request is refused before anyone is asked, if it is: it lacks an
-/// approval, and no prompt may appear (`may_prompt`) to ask for it.
-fn refusal_before_prompting(missing: Option<&Ask>, may_prompt: bool) -> Option<Refused> {
-    (missing.is_some() && !may_prompt).then_some(Refused::NeedsApproval)
+/// approval, and no prompt may appear (`may_prompt_on_screen`) to ask for it.
+fn refusal_before_prompting(missing: Option<&Ask>, may_prompt_on_screen: bool) -> Option<Refused> {
+    (missing.is_some() && !may_prompt_on_screen).then_some(Refused::NeedsApproval)
 }
 
 impl<H: SshHost> Agent<H> {
@@ -176,8 +176,8 @@ impl<H: SshHost> Agent<H> {
             )
             .map_err(Refused::Policy)?;
             let missing = missing_approval(&slot, &need);
-            let may_prompt = self.host.may_prompt(requester);
-            if let Some(refused) = refusal_before_prompting(missing, may_prompt) {
+            let may_prompt_on_screen = self.host.may_prompt_on_screen(requester);
+            if let Some(refused) = refusal_before_prompting(missing, may_prompt_on_screen) {
                 return Err(refused);
             }
             Ok((key, missing.cloned(), slot.cancel_token()))
@@ -804,8 +804,8 @@ mod tests {
             Some(Refused::NeedsApproval)
         ));
         assert!(refusal_before_prompting(Some(&missing), true).is_none());
-        for may_prompt in [true, false] {
-            assert!(refusal_before_prompting(None, may_prompt).is_none());
+        for may_prompt_on_screen in [true, false] {
+            assert!(refusal_before_prompting(None, may_prompt_on_screen).is_none());
         }
     }
 }
