@@ -12,13 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use kpa::output::{print_escaped, report_error};
-use kpa::proto::{
-    self, ErrorCode, Op, Password, Request, Response, SshKeysReport, SshKeysRequest, UnlockError,
-    UnlockRequest,
-};
+use kpa::proto::{self, Op, Password, Request, Response, UnlockError, UnlockRequest};
 use kpa::socket;
 
-use super::ssh_keys_report;
 use super::tty::{self, TtyReadError};
 
 pub(super) fn run_client(socket_path: &Path, op: Op) -> ExitCode {
@@ -37,7 +33,7 @@ pub(super) fn run_client(socket_path: &Path, op: Op) -> ExitCode {
 /// may not be running. Once connected, a missing reply means it hit a
 /// problem with this request, and suggesting it's down would send someone
 /// looking in the wrong place.
-fn report_client_error(err: ClientError) -> ExitCode {
+pub(super) fn report_client_error(err: ClientError) -> ExitCode {
     match err {
         ClientError::Connect(..) => {
             report_error(format_args!("{err} (is `kpa serve` running?)"));
@@ -47,86 +43,10 @@ fn report_client_error(err: ClientError) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// How `kpa ssh keys` shows what the daemon answered.
-pub(super) enum SshKeysOutput {
-    /// The daemon's raw response line, as every other command prints it.
-    Json,
-    /// The text [`ssh_keys_report::render`] makes of the report, and a
-    /// failure as a sentence.
-    Text { blocks: bool },
-}
-
-/// `kpa ssh keys`: the one subcommand with a text output.
-pub(super) fn run_ssh_keys(
-    socket_path: &Path,
-    request: SshKeysRequest,
-    output: SshKeysOutput,
-) -> ExitCode {
-    let db = request.db.clone();
-    let request = Request {
-        v: proto::VERSION,
-        op: Op::SshKeys(request),
-    };
-    let line = match send_request(socket_path, &request) {
-        Ok(line) => line,
-        Err(err) => return report_client_error(err),
-    };
-    let SshKeysOutput::Text { blocks } = output else {
-        return print_and_exit(&line);
-    };
-
-    match serde_json::from_str::<SshKeysReport>(&line) {
-        Ok(report) => {
-            print!("{}", ssh_keys_report::render(&db, &report, blocks));
-            ExitCode::SUCCESS
-        }
-        Err(_) => {
-            report_error(refusal(&line, &db));
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// What a failed `ssh_keys` response says, in words.
-fn refusal(line: &str, db: &str) -> String {
-    #[derive(serde::Deserialize)]
-    struct Failure {
-        error: ErrorCode,
-        detail: Option<String>,
-    }
-
-    match serde_json::from_str::<Failure>(line) {
-        Ok(Failure {
-            error: ErrorCode::UnknownDb,
-            ..
-        }) => format!("no database named {db:?} is configured"),
-        Ok(Failure {
-            error: ErrorCode::Locked,
-            ..
-        }) => format!("database {db:?} is locked; run `kpa unlock {db}` and try again"),
-        Ok(Failure {
-            error: ErrorCode::Stale,
-            ..
-        }) => format!("database {db:?} changed on disk and was locked; unlock it again"),
-        Ok(Failure { error, detail }) => {
-            // The code as the wire spells it.
-            let code = serde_json::to_value(error)
-                .ok()
-                .and_then(|code| code.as_str().map(str::to_string))
-                .unwrap_or_default();
-            match detail {
-                Some(detail) => format!("the daemon refused the request ({code}): {detail}"),
-                None => format!("the daemon refused the request ({code})"),
-            }
-        }
-        Err(_) => format!("unreadable response from the daemon: {}", line.trim_end()),
-    }
-}
-
 /// Prints a response line and turns its `ok` field into an exit code.
 /// Shared by every client subcommand that sends exactly one request and
 /// shows the daemon's answer verbatim.
-fn print_and_exit(line: &str) -> ExitCode {
+pub(super) fn print_and_exit(line: &str) -> ExitCode {
     print_escaped(line);
     // `Response` deliberately has no generic `Deserialize` — a successful
     // `Unlock` and a successful `Lock { db: Some(_) }` serialize
@@ -201,7 +121,7 @@ pub(super) fn run_version(socket_path: Option<PathBuf>) -> ExitCode {
 /// rather than `Box<dyn Error>` so `?` stays usable while keeping the
 /// "why" in each variant.
 #[derive(Debug, thiserror::Error)]
-enum ClientError {
+pub(super) enum ClientError {
     #[error("connecting to {0}: {1}")]
     Connect(PathBuf, std::io::Error),
     #[error("encoding request: {0}")]
@@ -241,7 +161,7 @@ fn check_peer_uid(
 /// Sends one request and returns the daemon's raw response line, newline
 /// included. Deliberately not decoded into a typed `Response` — see the
 /// comment in `run_client` on why that type has no generic `Deserialize`.
-fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
+pub(super) fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|err| ClientError::Connect(socket_path.to_path_buf(), err))?;
     check_peer_uid(socket_path, &stream, rustix::process::geteuid().as_raw())?;
@@ -365,7 +285,7 @@ fn unlock_from_terminal(
 mod tests {
     use std::path::Path;
 
-    use super::{ClientError, check_peer_uid, is_no_display, refusal, synthetic_no_display_line};
+    use super::{ClientError, check_peer_uid, is_no_display, synthetic_no_display_line};
 
     /// `UnixStream::pair()` gives both ends our own real uid, so the
     /// mismatch is simulated the same way `server.rs`'s
@@ -389,26 +309,6 @@ mod tests {
 
         check_peer_uid(Path::new("/dev/null"), &theirs, our_uid)
             .expect("our own uid must be accepted");
-    }
-
-    /// A refusal `kpa ssh keys` has no sentence of its own for names the
-    /// code the way the JSON spells it.
-    #[test]
-    fn a_refusal_without_its_own_sentence_names_the_wire_code() {
-        assert_eq!(
-            refusal(
-                r#"{"v":1,"ok":false,"error":"prompt_cancelled"}"#,
-                "personal"
-            ),
-            "the daemon refused the request (prompt_cancelled)"
-        );
-        assert_eq!(
-            refusal(
-                r#"{"v":1,"ok":false,"error":"version_mismatch","detail":"client sent v2"}"#,
-                "personal"
-            ),
-            "the daemon refused the request (version_mismatch): client sent v2"
-        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! done.
 
 mod client;
+mod reply;
 mod ssh_keys_report;
 mod tty;
 
@@ -18,10 +19,11 @@ use kpa::log::{self, Level};
 use kpa::output::report_error;
 use kpa::paths::Paths;
 use kpa::policy;
-use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op, SshKeysRequest};
+use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op, SshKeysReport, SshKeysRequest};
 use kpa::server::{self, Server};
 use kpa::socket;
 use kpa::tray;
+use reply::Format;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -37,8 +39,9 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// Print the daemon's raw JSON response line. `ssh keys` prints text
-    /// without it; every other command prints the JSON line either way,
-    /// until it has a text output of its own.
+    /// without it; the other commands print the JSON line either way,
+    /// until they have a text output of their own. `version` has no JSON
+    /// form and ignores it.
     #[arg(long, global = true)]
     json: bool,
 
@@ -158,14 +161,13 @@ fn dispatch(cli: Cli) -> ExitCode {
         }
         Command::Ssh {
             command: SshCommand::Keys { database, blocks },
-        } => client::run_ssh_keys(
+        } => reply::run(
             &socket_path,
-            SshKeysRequest { db: database },
-            if cli.json {
-                client::SshKeysOutput::Json
-            } else {
-                client::SshKeysOutput::Text { blocks }
-            },
+            Op::SshKeys(SshKeysRequest {
+                db: database.clone(),
+            }),
+            if cli.json { Format::Json } else { Format::Text },
+            |report: SshKeysReport| ssh_keys_report::render(&database, &report, blocks),
         ),
         Command::Version => unreachable!("handled above, before socket_path is resolved"),
     }

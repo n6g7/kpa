@@ -11,53 +11,47 @@
 
 use std::fmt::Write as _;
 
-use kpa::output::escape_one_line;
+use kpa::output::{Table, escape_one_line};
 use kpa::proto::{SshKeysReport, WireSshKey};
 
-/// Longest escaped title, attachment name or reason shown.
-const MAX_FIELD_LEN: usize = 128;
+/// Longest escaped title, attachment name or database name in a comment.
+const MAX_TEXT_LEN: usize = 128;
 
 /// An entry without a title.
 const UNTITLED: &str = "(untitled)";
 
 /// `blocks` adds the `[[database.ssh_key]]` block per key.
 pub(super) fn render(db: &str, report: &SshKeysReport, blocks: bool) -> String {
-    let db = field(db);
+    let db = one_line(db);
     let mut out = String::new();
 
     if report.keys.is_empty() {
         let _ = writeln!(out, "No SSH keys found in {db}.");
     } else {
         let _ = writeln!(out, "SSH keys in {db}:");
-        let rows = report
-            .keys
-            .iter()
-            .map(|key| {
-                [
-                    field(&key.key_type),
-                    field(&key.fingerprint),
-                    entry(key.title.as_deref()),
-                    field(&key.attachment),
-                ]
-            })
-            .collect();
-        out.push_str(&table(["TYPE", "FINGERPRINT", "ENTRY", "ATTACHMENT"], rows));
+        let mut table = Table::new(["TYPE", "FINGERPRINT", "ENTRY", "ATTACHMENT"]);
+        for key in &report.keys {
+            table.row([
+                &key.key_type,
+                &key.fingerprint,
+                key.title.as_deref().unwrap_or(UNTITLED),
+                &key.attachment,
+            ]);
+        }
+        out.push_str(&table.render());
     }
 
     if !report.skipped.is_empty() {
         let _ = writeln!(out, "\nSkipped attachments:");
-        let rows = report
-            .skipped
-            .iter()
-            .map(|skipped| {
-                [
-                    entry(skipped.title.as_deref()),
-                    field(&skipped.attachment),
-                    field(&skipped.reason),
-                ]
-            })
-            .collect();
-        out.push_str(&table(["ENTRY", "ATTACHMENT", "REASON"], rows));
+        let mut table = Table::new(["ENTRY", "ATTACHMENT", "REASON"]);
+        for skipped in &report.skipped {
+            table.row([
+                skipped.title.as_deref().unwrap_or(UNTITLED),
+                &skipped.attachment,
+                &skipped.reason,
+            ]);
+        }
+        out.push_str(&table.render());
     }
 
     if blocks && !report.keys.is_empty() {
@@ -73,38 +67,9 @@ pub(super) fn render(db: &str, report: &SshKeysReport, blocks: bool) -> String {
     out
 }
 
-/// A header row and `rows`, each column padded to its widest cell and
-/// separated by two spaces. The last column is not padded.
-fn table<const N: usize>(header: [&str; N], rows: Vec<[String; N]>) -> String {
-    let mut widths = header.map(|cell| cell.chars().count());
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
-        }
-    }
-
-    let mut out = String::new();
-    let mut push_row = |cells: [&str; N]| {
-        let last = N - 1;
-        for (i, (cell, width)) in cells.iter().zip(widths).enumerate() {
-            if i == last {
-                out.push_str(cell);
-            } else {
-                let _ = write!(out, "{cell:<width$}  ");
-            }
-        }
-        out.push('\n');
-    };
-    push_row(header);
-    for row in &rows {
-        push_row(row.each_ref().map(String::as_str));
-    }
-    out
-}
-
 /// An entry's title as one line of text.
 fn entry(title: Option<&str>) -> String {
-    title.map_or_else(|| UNTITLED.to_string(), field)
+    title.map_or_else(|| UNTITLED.to_string(), one_line)
 }
 
 /// The `[[database.ssh_key]]` table for `key` (`docs/ssh-agent.md` § 7):
@@ -120,13 +85,13 @@ fn config_block(key: &WireSshKey) -> String {
          # forwarded = true\n\
          # serve = true\n",
         entry(key.title.as_deref()),
-        field(&key.attachment),
-        field(&key.fingerprint),
+        one_line(&key.attachment),
+        one_line(&key.fingerprint),
     )
 }
 
-fn field(text: &str) -> String {
-    escape_one_line(text, MAX_FIELD_LEN)
+fn one_line(text: &str) -> String {
+    escape_one_line(text, MAX_TEXT_LEN)
 }
 
 #[cfg(test)]
