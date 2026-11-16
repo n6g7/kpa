@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use common::InProcessDaemon;
 use kpa::origin::Origin;
-use kpa::policy::{Desk, Locks};
+use kpa::policy::{DisplaySession, Locks};
 
 /// Held by each test that drives the live clipboard, for its whole run.
 static LIVE_CLIPBOARD: Mutex<()> = Mutex::new(());
@@ -73,7 +73,7 @@ fn compositor() -> Option<String> {
     Some(display)
 }
 
-/// The user's logind display session, which the daemon's desk must name
+/// The user's logind display session, which the daemon's must name
 /// for the compositor to pass as being on the desktop when it runs in
 /// that session's scope.
 fn display_session() -> Option<String> {
@@ -86,13 +86,13 @@ fn display_session() -> Option<String> {
     (!session.is_empty()).then_some(session)
 }
 
-/// A daemon like `start`'s, whose desk is the real display session.
-fn start_on_the_desk(config: &str, session: String) -> InProcessDaemon {
+/// A daemon like `start`'s, whose state names the real display session.
+fn start_on_the_display_session(config: &str, session: String) -> InProcessDaemon {
     let daemon = InProcessDaemon::start(config);
-    Locks::set_desk(
+    Locks::set_display_session(
         &*daemon.server,
-        Desk::Unlocked {
-            session,
+        DisplaySession::Unlocked {
+            id: session,
             active: true,
         },
     );
@@ -182,28 +182,31 @@ fn copy_from_outside_the_desktop_is_refused() {
 /// unlocked session passes (`copy_fails_cleanly_without_a_wayland_compositor`
 /// above is that passing case).
 #[test]
-fn copy_from_the_desktop_is_refused_without_an_active_unlocked_desk() {
+fn copy_from_the_desktop_is_refused_without_an_active_unlocked_display_session() {
     let daemon = start(common::PASSWORD);
     let cases = [
-        Desk::Locked {
-            session: "test".to_string(),
+        DisplaySession::Locked {
+            id: "test".to_string(),
             active: true,
         },
-        Desk::Unlocked {
-            session: "test".to_string(),
+        DisplaySession::Unlocked {
+            id: "test".to_string(),
             active: false,
         },
-        Desk::NoSession,
+        DisplaySession::None,
     ];
-    for desk in cases {
-        Locks::set_desk(&*daemon.server, desk.clone());
+    for display_session in cases {
+        Locks::set_display_session(&*daemon.server, display_session.clone());
         let copied = daemon.run(&[
             "copy",
             "personal",
             &uuid::Uuid::nil().to_string(),
             "password",
         ]);
-        assert_eq!(copied["error"], "no_display", "desk {desk:?}, got {copied}");
+        assert_eq!(
+            copied["error"], "no_display",
+            "display session {display_session:?}, got {copied}"
+        );
     }
 }
 
@@ -223,7 +226,7 @@ fn copy_reaches_a_reachable_compositor() {
         return;
     };
 
-    let daemon = start_on_the_desk(
+    let daemon = start_on_the_display_session(
         &common::config_toml(
             &format!("printf %s {}", common::PASSWORD),
             &common::password_db().display().to_string(),
@@ -276,7 +279,7 @@ fn surviving_a_takeover_past_the_timeout() {
         return;
     };
 
-    let daemon = start_on_the_desk(
+    let daemon = start_on_the_display_session(
         &format!(
             "clipboard_timeout = \"1s\"\n{}",
             common::config_toml(
@@ -328,7 +331,7 @@ fn a_lock_ends_the_offer() {
         return;
     };
 
-    let daemon = start_on_the_desk(
+    let daemon = start_on_the_display_session(
         &common::config_toml(
             &format!("printf %s {}", common::PASSWORD),
             &common::password_db().display().to_string(),

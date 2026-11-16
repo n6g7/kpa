@@ -142,12 +142,12 @@ pub fn run_cli(socket: &Path, args: &[&str]) -> serde_json::Value {
 /// (`Server::assume_origin`; `with_origin` overrides it), so `unlock`
 /// raises the configured prompt wherever the tests run: a test runner is
 /// rarely in the display session. No logind watch runs, so nothing
-/// publishes the desk's state on its own — `with_config` and `with_origin`
-/// seed it as an active, unlocked session (`policy::Locks::set_desk`),
+/// publishes the display session's state on its own — `with_config` and `with_origin`
+/// seed it as an active, unlocked session (`policy::Locks::set_display_session`),
 /// standing in for logind the same way `assume_origin` stands in for the
 /// peer's cgroup, so `copy` passes its gate the way it always did before
 /// that gate existed. A test about the gate itself (an `Outside` origin, or
-/// a locked/inactive/absent desk) overrides either through `self.server`.
+/// a locked/inactive/absent display session) overrides either through `self.server`.
 /// No tray is started either. The daemon's threads run until the test
 /// binary exits.
 ///
@@ -190,10 +190,10 @@ impl InProcessDaemon {
         };
         let server = Arc::new(kpa::server::Server::new(config, paths.clone()));
         server.assume_origin(origin);
-        kpa::policy::Locks::set_desk(
+        kpa::policy::Locks::set_display_session(
             &server,
-            kpa::policy::Desk::Unlocked {
-                session: "test".to_string(),
+            kpa::policy::DisplaySession::Unlocked {
+                id: "test".to_string(),
                 active: true,
             },
         );
