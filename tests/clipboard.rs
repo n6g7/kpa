@@ -37,7 +37,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use common::InProcessDaemon;
-use kpa::origin::Origin;
+use kpa::authn::Origin;
 use kpa::policy::{DisplaySession, Locks};
 
 /// Held by each test that drives the live clipboard, for its whole run.

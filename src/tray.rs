@@ -24,8 +24,8 @@ use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{StandardItem, SubMenu};
 use ksni::{MenuItem, OfflineReason, ToolTip};
 
+use crate::authn::{Origin, Requester};
 use crate::log;
-use crate::origin::Origin;
 use crate::proto::{
     DatabaseStatus, Lock, LockRequest, Response, Unlock, UnlockError, UnlockRequest,
 };
@@ -165,7 +165,10 @@ impl TrayItem {
                     db: name.clone(),
                     password: None,
                 },
-                Origin::Desktop,
+                &Requester {
+                    origin: Origin::Desktop,
+                    command: None,
+                },
             );
             server::log_response(&Response::Unlock(result.clone()));
             let Some(handle) = handle else { return };

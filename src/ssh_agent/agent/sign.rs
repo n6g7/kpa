@@ -21,8 +21,8 @@ use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg, PublicKey};
 
 use super::{Agent, SlotView, SshHost, identities, message, signer};
+use crate::authn::Requester;
 use crate::log;
-use crate::origin::Origin;
 use crate::output;
 use crate::prompt::{CancelToken, Declined};
 use crate::ssh_agent::bind::ConnectionClass;
@@ -134,7 +134,7 @@ impl<H: SshHost> Agent<H> {
         class: &ConnectionClass,
         sign: &SignRequest,
         login_session_id: Option<&[u8]>,
-        origin: Origin,
+        requester: &Requester,
     ) -> AgentResponse {
         let Some(request) = Request::parse(class, sign, login_session_id) else {
             return AgentResponse::Failure;
@@ -144,7 +144,7 @@ impl<H: SshHost> Agent<H> {
         else {
             return AgentResponse::Failure;
         };
-        let outcome = self.authorized_sign(&db, &request, origin);
+        let outcome = self.authorized_sign(&db, &request, requester);
         log_sign(&db, self.configured_name(&db, &request), &request, &outcome);
         match outcome {
             Ok(signature) => AgentResponse::SignResponse(signature),
@@ -159,7 +159,7 @@ impl<H: SshHost> Agent<H> {
         &self,
         db: &str,
         request: &Request<'_>,
-        origin: Origin,
+        requester: &Requester,
     ) -> Result<Vec<u8>, Refused> {
         if !signer::supported(request.key.key_data(), request.sign.flags) {
             return Err(Refused::Sha1Rsa);
@@ -176,7 +176,7 @@ impl<H: SshHost> Agent<H> {
             )
             .map_err(Refused::Policy)?;
             let missing = missing_approval(&slot, &need);
-            let may_prompt = self.host.may_prompt(origin);
+            let may_prompt = self.host.may_prompt(requester);
             if let Some(refused) = refusal_before_prompting(missing, may_prompt) {
                 return Err(refused);
             }
@@ -325,7 +325,7 @@ mod tests {
     use ssh_key::{PrivateKey, Signature};
 
     use super::super::SshSlot;
-    use super::super::fake::FakeHost;
+    use super::super::fake::{FakeHost, desktop};
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
     use crate::paths::Paths;
@@ -383,7 +383,7 @@ mod tests {
         key: &PrivateKey,
         class: &ConnectionClass,
     ) -> AgentResponse {
-        agent.sign(class, &request_with(key, 0), None, Origin::Desktop)
+        agent.sign(class, &request_with(key, 0), None, &desktop())
     }
 
     fn sign(agent: &Agent<FakeHost>, key: &PrivateKey) -> AgentResponse {
@@ -394,7 +394,7 @@ mod tests {
     fn outcome(agent: &Agent<FakeHost>, key: &PrivateKey) -> Result<Vec<u8>, Refused> {
         let sign = request_with(key, 0);
         let request = Request::parse(&ConnectionClass::LocalUnbound, &sign, None).expect("parses");
-        agent.authorized_sign("personal", &request, Origin::Desktop)
+        agent.authorized_sign("personal", &request, &desktop())
     }
 
     fn signed(response: &AgentResponse) -> bool {
@@ -616,7 +616,7 @@ mod tests {
 
         assert_eq!(
             agent
-                .ssh_identities(&ConnectionClass::LocalUnbound, Origin::Desktop)
+                .ssh_identities(&ConnectionClass::LocalUnbound, &desktop())
                 .len(),
             1
         );
@@ -657,19 +657,14 @@ mod tests {
         let sha1 = request_with(&key, 0);
         let request = Request::parse(&unbound, &sha1, None).expect("parses");
         assert!(matches!(
-            agent.authorized_sign("personal", &request, Origin::Desktop),
+            agent.authorized_sign("personal", &request, &desktop()),
             Err(Refused::Sha1Rsa)
         ));
         assert!(prompts.shown().is_empty());
 
         prompts.push(Step::allow());
         let sha512 = request_with(&key, 4);
-        assert!(signed(&agent.sign(
-            &unbound,
-            &sha512,
-            None,
-            Origin::Desktop
-        )));
+        assert!(signed(&agent.sign(&unbound, &sha512, None, &desktop())));
     }
 
     /// The log line names a key by the name its config override gives it,

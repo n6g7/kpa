@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::error::{ErrorCode, ErrorFields};
-use crate::origin::Origin;
+use crate::authn::Requester;
 
 /// What `{"op":"copy", ...}` carries; `Op::Copy` wraps it. `field` accepts
 /// any name a KeePass client wrote for this entry — see [`Field`].
@@ -235,10 +235,10 @@ pub struct CopyOutcome {
 /// in scope together. `Status`/`List`/`Lock`/`Unlock` don't have this
 /// problem; this one does, so it gets a different name.
 pub trait CopyEntry {
-    /// `origin` is where the request came from, and gates the copy itself
-    /// (`docs/headless.md` § 5): only a requester on the desktop, with the
-    /// display session active and unlocked, reaches the clipboard.
-    fn copy(&self, request: &CopyRequest, origin: Origin) -> Result<CopyOutcome, CopyError>;
+    /// `requester` says where the request came from, and gates the copy
+    /// itself (`docs/headless.md` § 5): only a requester on the desktop,
+    /// with the display session active and unlocked, reaches the clipboard.
+    fn copy(&self, request: &CopyRequest, requester: &Requester) -> Result<CopyOutcome, CopyError>;
 }
 
 #[cfg(test)]

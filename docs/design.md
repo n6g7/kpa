@@ -289,7 +289,7 @@ A request line is capped at 64 KiB and must arrive within 5 seconds; a
 line over the cap is answered `malformed_request`, and a connection that
 sends nothing is dropped.
 
-**Every connection is classified by where it comes from** (`origin.rs`,
+**Every connection is classified by where it comes from** (`authn.rs`,
 [`headless.md`](./headless.md) § 3), after the uid check and before the
 request is read. The daemon takes the peer's pidfd (`SO_PEERPIDFD`, or the
 `SO_PEERCRED` pid on kernels without it) and reads its

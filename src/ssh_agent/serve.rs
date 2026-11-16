@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::authn::{PeerOrigin, Requester};
 use crate::log;
-use crate::origin::{Origin, PeerOrigin};
 use crate::socket;
 
 use super::bind::{self, BindOutcome, SessionBindState};
@@ -26,14 +26,18 @@ use super::wire::{self, AgentRequest, AgentResponse, Frame};
 /// listing and signing (`docs/ssh-agent.md` § 6). The protocol loop is
 /// generic over it, as `proto::dispatch` is over `Handler`.
 pub trait SshSign: PeerOrigin {
-    fn ssh_identities(&self, class: &bind::ConnectionClass, origin: Origin) -> Vec<wire::Identity>;
+    fn ssh_identities(
+        &self,
+        class: &bind::ConnectionClass,
+        requester: &Requester,
+    ) -> Vec<wire::Identity>;
 
     fn ssh_sign(
         &self,
         class: &bind::ConnectionClass,
         request: &wire::SignRequest,
         login_session_id: Option<&[u8]>,
-        origin: Origin,
+        requester: &Requester,
     ) -> wire::AgentResponse;
 }
 
@@ -130,7 +134,7 @@ fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32, 
         log::warn(format_args!("rejected ssh agent connection from uid {uid}"));
         return;
     }
-    let origin = server.origin_of(&stream, owner);
+    let requester = Requester::of(server, &stream, owner);
 
     let mut bindings = SessionBindState::new();
     // Held from the session-bind that makes this connection forwarded
@@ -147,7 +151,7 @@ fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32, 
                 Err(_oversize) => return,
                 Ok(Frame::Complete { message, consumed }) => {
                     let request = wire::decode_request(message);
-                    let response = dispatch(server, &mut bindings, &request, origin);
+                    let response = dispatch(server, &mut bindings, &request, &requester);
                     buf.drain(..consumed);
                     frame_deadline = None;
                     if forwarded_slot.is_none()
@@ -204,15 +208,15 @@ fn dispatch(
     server: &impl SshSign,
     bindings: &mut SessionBindState,
     request: &AgentRequest,
-    origin: Origin,
+    requester: &Requester,
 ) -> AgentResponse {
     match request {
         AgentRequest::RequestIdentities => {
-            AgentResponse::IdentitiesAnswer(server.ssh_identities(&bindings.class(), origin))
+            AgentResponse::IdentitiesAnswer(server.ssh_identities(&bindings.class(), requester))
         }
         AgentRequest::SignRequest(sign_request) => {
             let class = bindings.class();
-            server.ssh_sign(&class, sign_request, bindings.login_session_id(), origin)
+            server.ssh_sign(&class, sign_request, bindings.login_session_id(), requester)
         }
         AgentRequest::SessionBind(msg) => match bindings.apply(msg) {
             BindOutcome::Accepted => AgentResponse::Success,
@@ -233,7 +237,15 @@ mod tests {
     use super::super::testing::{signed_bind, test_key};
     use super::super::wire::{Identity, SignFlags, SignRequest};
     use super::*;
+    use crate::authn::Origin;
     use bind::ConnectionClass;
+
+    fn requester(origin: Origin) -> Requester {
+        Requester {
+            origin,
+            command: None,
+        }
+    }
 
     /// What the fake saw of one `ssh_sign` call.
     #[derive(Debug, Clone, PartialEq)]
@@ -275,8 +287,12 @@ mod tests {
     }
 
     impl SshSign for FakeSigner {
-        fn ssh_identities(&self, _: &bind::ConnectionClass, origin: Origin) -> Vec<wire::Identity> {
-            self.listed_for.lock().unwrap().push(origin);
+        fn ssh_identities(
+            &self,
+            _: &bind::ConnectionClass,
+            requester: &Requester,
+        ) -> Vec<wire::Identity> {
+            self.listed_for.lock().unwrap().push(requester.origin);
             vec![Identity {
                 key_blob: b"key".to_vec(),
                 comment: "github".to_string(),
@@ -288,12 +304,12 @@ mod tests {
             class: &bind::ConnectionClass,
             _: &wire::SignRequest,
             login_session_id: Option<&[u8]>,
-            origin: Origin,
+            requester: &Requester,
         ) -> wire::AgentResponse {
             self.calls.lock().unwrap().push(SignCall {
                 class: class.clone(),
                 login_session_id: login_session_id.map(<[u8]>::to_vec),
-                origin,
+                origin: requester.origin,
             });
             AgentResponse::SignResponse(b"signature".to_vec())
         }
@@ -315,7 +331,7 @@ mod tests {
             &signer,
             &mut state,
             &AgentRequest::RequestIdentities,
-            Origin::Outside,
+            &requester(Origin::Outside),
         );
         assert!(matches!(
             response,
@@ -331,16 +347,26 @@ mod tests {
         let signer = FakeSigner::new(Origin::Outside);
         let mut state = SessionBindState::new();
 
-        dispatch(&signer, &mut state, &sign_request(), Origin::Outside);
+        dispatch(
+            &signer,
+            &mut state,
+            &sign_request(),
+            &requester(Origin::Outside),
+        );
         let host = test_key(1);
         let bound = dispatch(
             &signer,
             &mut state,
             &AgentRequest::SessionBind(signed_bind(&host, b"sid", false)),
-            Origin::Outside,
+            &requester(Origin::Outside),
         );
         assert!(matches!(bound, AgentResponse::Success));
-        dispatch(&signer, &mut state, &sign_request(), Origin::Outside);
+        dispatch(
+            &signer,
+            &mut state,
+            &sign_request(),
+            &requester(Origin::Outside),
+        );
 
         let calls = signer.calls();
         assert_eq!(
@@ -373,7 +399,7 @@ mod tests {
             &signer,
             &mut state,
             &AgentRequest::SessionBind(forged),
-            Origin::Desktop,
+            &requester(Origin::Desktop),
         );
         assert!(matches!(response, AgentResponse::ExtensionFailure));
     }
@@ -386,7 +412,7 @@ mod tests {
             &signer,
             &mut state,
             &AgentRequest::ExtensionQuery,
-            Origin::Desktop,
+            &requester(Origin::Desktop),
         );
         assert!(matches!(
             query,
@@ -396,7 +422,7 @@ mod tests {
             &signer,
             &mut state,
             &AgentRequest::Unsupported,
-            Origin::Desktop,
+            &requester(Origin::Desktop),
         );
         assert!(matches!(unsupported, AgentResponse::Failure));
     }

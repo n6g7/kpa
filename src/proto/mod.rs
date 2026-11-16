@@ -33,7 +33,7 @@ pub use unlock::{MAX_PASSWORD_LEN, Password, PasswordError, Unlock, UnlockError,
 
 use serde::Serialize;
 
-use crate::origin::Origin;
+use crate::authn::Requester;
 
 use error::serialize_error;
 
@@ -60,7 +60,7 @@ impl<T: Status + Unlock + Lock + List + CopyEntry + SshKeys> Handler for T {}
 /// the pairing — `Op::Lock` to `Response::Lock` to `LockError` — is stated
 /// once, here, rather than being a convention each handler has to remember
 /// to follow.
-pub fn dispatch<H>(handler: &H, request: &Request, origin: Origin) -> Response
+pub fn dispatch<H>(handler: &H, request: &Request, requester: &Requester) -> Response
 where
     H: Handler + ?Sized,
 {
@@ -69,10 +69,10 @@ where
             databases: handler.status(),
             version: handler.daemon_version(),
         },
-        Op::Unlock(request) => Response::Unlock(handler.unlock(request, origin)),
+        Op::Unlock(request) => Response::Unlock(handler.unlock(request, requester)),
         Op::Lock(request) => Response::Lock(handler.lock(request)),
         Op::List(request) => Response::List(handler.list(request)),
-        Op::Copy(request) => Response::Copy(handler.copy(request, origin)),
+        Op::Copy(request) => Response::Copy(handler.copy(request, requester)),
         Op::SshKeys(request) => Response::SshKeys(handler.ssh_keys(request)),
     }
 }

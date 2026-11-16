@@ -9,9 +9,17 @@ use std::time::Instant;
 use keepass::Database;
 
 use super::{SlotView, SshHost, SshSlot};
+use crate::authn::{Origin, PeerOrigin, Requester};
 use crate::config::DatabaseConfig;
-use crate::origin::{Origin, PeerOrigin};
 use crate::prompt::CancelSource;
+
+/// A requester on the desktop.
+pub(super) fn desktop() -> Requester {
+    Requester {
+        origin: Origin::Desktop,
+        command: None,
+    }
+}
 
 /// One database's slot, as the daemon keeps it.
 struct FakeSlot {
@@ -146,7 +154,7 @@ impl SshHost for FakeHost {
         )))
     }
 
-    fn may_prompt(&self, _: Origin) -> bool {
+    fn may_prompt(&self, _: &Requester) -> bool {
         self.may_prompt
     }
 }

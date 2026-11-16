@@ -6,8 +6,8 @@ use std::time::Instant;
 use keepass::Database;
 
 use super::SshSlot;
+use crate::authn::{PeerOrigin, Requester};
 use crate::config::DatabaseConfig;
-use crate::origin::{Origin, PeerOrigin};
 use crate::prompt::{CancelSource, CancelToken};
 
 /// What the agent needs from the daemon that hosts it. The daemon
@@ -25,9 +25,9 @@ pub trait SshHost: PeerOrigin {
     fn with_slot<R>(&self, db: &str, f: impl FnOnce(SlotView<'_>) -> R) -> Option<R>;
 
     /// Whether a prompt may appear on screen for a connection from
-    /// `origin` (`docs/ssh-agent.md` § 6.8). Asked inside `with_slot`, so
+    /// `requester` (`docs/ssh-agent.md` § 6.8). Asked inside `with_slot`, so
     /// the answer holds for the hold it is asked in.
-    fn may_prompt(&self, origin: Origin) -> bool;
+    fn may_prompt(&self, requester: &Requester) -> bool;
 }
 
 /// One database's slot as the agent sees it, while the host holds its

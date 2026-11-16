@@ -16,9 +16,10 @@ use std::io::{self, ErrorKind, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 
-/// Longest `/proc/<pid>/cgroup` accepted. A unified hierarchy has one line;
-/// a hybrid one adds a line per v1 controller, still well under this.
-const MAX_CGROUP_LEN: u64 = 16 * 1024;
+/// Longest `/proc/<pid>/` file accepted. A unified hierarchy's `cgroup` has
+/// one line; a hybrid one adds a line per v1 controller, still well under
+/// this. `comm` is at most 16 bytes.
+const MAX_PROC_FILE_LEN: u64 = 16 * 1024;
 
 /// Where a connected peer runs, relative to the user's display session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +37,32 @@ pub enum Origin {
 pub trait PeerOrigin {
     /// Where the peer on `stream` runs; `owner` is the daemon's own uid.
     fn origin_of(&self, stream: &UnixStream, owner: u32) -> Origin;
+}
+
+/// Who is on the other end of a connection: where it runs, and what it is
+/// called. One value per connection, built by [`Requester::of`] where the
+/// connection is accepted, and handed to everything that answers its
+/// requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Requester {
+    pub origin: Origin,
+    /// The peer's command name, for naming it to the user who may approve
+    /// what it asked for (`docs/ssh-agent.md` § 6.8). Read for a peer
+    /// outside the desktop only, the one place that approval is offered;
+    /// `None` for any other peer, or where it can't be read.
+    pub command: Option<String>,
+}
+
+impl Requester {
+    /// The peer on `stream`, whose uid is `owner`.
+    pub fn of(daemon: &impl PeerOrigin, stream: &UnixStream, owner: u32) -> Requester {
+        let origin = daemon.origin_of(stream, owner);
+        let command = match origin {
+            Origin::Outside => peer_command(stream),
+            Origin::Desktop => None,
+        };
+        Requester { origin, command }
+    }
 }
 
 /// Classify the peer on `stream`. `uid` is the peer's (already checked to
@@ -90,32 +117,48 @@ fn unified_path(cgroup: &str) -> Option<&str> {
     Some(path)
 }
 
-/// The contents of the peer's `/proc/<pid>/cgroup`.
+/// The contents of the peer's `/proc/<pid>/cgroup`: see [`peer_proc_file`].
+pub fn peer_cgroup(stream: &UnixStream) -> io::Result<String> {
+    peer_proc_file(stream, "cgroup")
+}
+
+/// The peer's command name, as the kernel records it (`/proc/<pid>/comm`,
+/// at most 15 bytes): what to call the requester in front of the user. It
+/// is whatever the process chose to call itself, so it names a requester
+/// for display and decides nothing. `None` where it can't be read.
+pub fn peer_command(stream: &UnixStream) -> Option<String> {
+    let comm = peer_proc_file(stream, "comm").ok()?;
+    Some(comm.trim_end_matches('\n').to_string()).filter(|comm| !comm.is_empty())
+}
+
+/// The contents of `/proc/<pid>/<file>` for the peer's pid.
 ///
 /// With a pidfd, the pid is read from the pidfd's `fdinfo`, and read again
-/// after the cgroup: a pid can only be reused once its process is reaped,
+/// after the file: a pid can only be reused once its process is reaped,
 /// and a reaped process's pidfd reports pid `-1`. So an unchanged pid means
-/// the cgroup read was the peer's. Without one, the `SO_PEERCRED` pid is
-/// used as is, and a peer that exited in between can have its pid reused.
-pub fn peer_cgroup(stream: &UnixStream) -> io::Result<String> {
+/// the read was the peer's. Without one, the `SO_PEERCRED` pid is used as
+/// is, and a peer that exited in between can have its pid reused.
+fn peer_proc_file(stream: &UnixStream, file: &str) -> io::Result<String> {
     match peer_pidfd(stream) {
         Ok(pidfd) => {
             let pid = pidfd_pid(&pidfd)?;
-            let cgroup = read_cgroup(pid)?;
+            let contents = read_proc_file(pid, file)?;
             if pidfd_pid(&pidfd)? != pid {
                 return Err(io::Error::new(ErrorKind::NotFound, "the peer exited"));
             }
-            Ok(cgroup)
+            Ok(contents)
         }
-        Err(err) if err.raw_os_error() == Some(libc::ENOPROTOOPT) => peer_cgroup_by_pid(stream),
+        Err(err) if err.raw_os_error() == Some(libc::ENOPROTOOPT) => {
+            peer_proc_file_by_pid(stream, file)
+        }
         Err(err) => Err(err),
     }
 }
 
-/// `peer_cgroup` for a kernel without `SO_PEERPIDFD`.
-fn peer_cgroup_by_pid(stream: &UnixStream) -> io::Result<String> {
+/// `peer_proc_file` for a kernel without `SO_PEERPIDFD`.
+fn peer_proc_file_by_pid(stream: &UnixStream, file: &str) -> io::Result<String> {
     let cred = rustix::net::sockopt::socket_peercred(stream)?;
-    read_cgroup(cred.pid.as_raw_nonzero().get())
+    read_proc_file(cred.pid.as_raw_nonzero().get(), file)
 }
 
 /// `SO_PEERPIDFD`: a pidfd for the process that connected. Linux 6.5 and
@@ -167,20 +210,20 @@ fn pidfd_pid(pidfd: &OwnedFd) -> io::Result<i32> {
     Ok(pid)
 }
 
-fn read_cgroup(pid: i32) -> io::Result<String> {
-    read_bounded(&format!("/proc/{pid}/cgroup"))
+fn read_proc_file(pid: i32, file: &str) -> io::Result<String> {
+    read_bounded(&format!("/proc/{pid}/{file}"))
 }
 
-/// Read a small text file whole, refusing one over `MAX_CGROUP_LEN`.
+/// Read a small text file whole, refusing one over `MAX_PROC_FILE_LEN`.
 fn read_bounded(path: &str) -> io::Result<String> {
     let mut text = String::new();
     File::open(path)?
-        .take(MAX_CGROUP_LEN + 1)
+        .take(MAX_PROC_FILE_LEN + 1)
         .read_to_string(&mut text)?;
-    if text.len() as u64 > MAX_CGROUP_LEN {
+    if text.len() as u64 > MAX_PROC_FILE_LEN {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
-            format!("{path} exceeds {MAX_CGROUP_LEN} bytes"),
+            format!("{path} exceeds {MAX_PROC_FILE_LEN} bytes"),
         ));
     }
     Ok(text)
@@ -291,6 +334,16 @@ mod tests {
         let (ours, _theirs) = UnixStream::pair().expect("socket pair");
         let own = std::fs::read_to_string("/proc/self/cgroup").expect("own cgroup");
         assert_eq!(peer_cgroup(&ours).expect("peer cgroup"), own);
-        assert_eq!(peer_cgroup_by_pid(&ours).expect("peer cgroup"), own);
+        assert_eq!(
+            peer_proc_file_by_pid(&ours, "cgroup").expect("peer cgroup"),
+            own
+        );
+    }
+
+    #[test]
+    fn the_peer_of_a_socket_pair_has_this_process_command_name() {
+        let (ours, _theirs) = UnixStream::pair().expect("socket pair");
+        let own = std::fs::read_to_string("/proc/self/comm").expect("own comm");
+        assert_eq!(peer_command(&ours), Some(own.trim_end().to_string()));
     }
 }

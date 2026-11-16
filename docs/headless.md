@@ -268,7 +268,7 @@ stays refused while it is locked (§ 5).
 
 | File          | Role                                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------------------- |
-| `origin.rs`   | Peer pidfd or pid → cgroup path → `Origin::{Desktop, Outside}`. The cgroup-path classifier is pure and table-tested |
+| `authn.rs`   | Peer pidfd or pid → cgroup path → `Origin::{Desktop, Outside}`. The cgroup-path classifier is pure and table-tested |
 | `policy.rs`   | Also publishes the display session's state (no session, locked, unlocked), which `copy` and classification read      |
 | `proto/unlock.rs` | `UnlockRequest` gains `password: Option<Password>`: a zeroizing newtype, decoded from base64 by a borrowing visitor, with a redacting `Debug`. `no_display` joins the error codes |
 | `server.rs`   | Reads request lines into a fixed zeroizing buffer; prompt timeout; lock kills prompts; `copy` gated on origin and the display session's state |

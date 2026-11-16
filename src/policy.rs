@@ -36,7 +36,7 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Message;
 use zbus::zvariant::{self, OwnedObjectPath, OwnedValue};
 
-use crate::origin::Origin;
+use crate::authn::Origin;
 
 const LOGIND: &str = "org.freedesktop.login1";
 const MANAGER_PATH: &str = "/org/freedesktop/login1";

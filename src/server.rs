@@ -31,11 +31,11 @@ use keepass::Database;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::authn::{self, Origin, PeerOrigin, Requester};
 use crate::clip::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
 use crate::io::ByteCounter;
 use crate::log;
-use crate::origin::{self, Origin, PeerOrigin};
 use crate::paths::Paths;
 use crate::policy;
 use crate::prompt::{
@@ -498,7 +498,11 @@ impl Drop for UnlockingFlag<'_> {
 }
 
 impl Unlock for Server {
-    fn unlock(&self, request: &UnlockRequest, origin: Origin) -> Result<String, UnlockError> {
+    fn unlock(
+        &self,
+        request: &UnlockRequest,
+        requester: &Requester,
+    ) -> Result<String, UnlockError> {
         let name = request.db.as_str();
         let db = || name.to_string();
 
@@ -533,7 +537,7 @@ impl Unlock for Server {
             // ends the prompt. A request that carries its password needs no
             // prompt, so it goes ahead from anywhere: that is how an
             // unlock from outside the desktop is answered.
-            if request.password.is_none() && !self.display_session().may_prompt(origin) {
+            if request.password.is_none() && !self.display_session().may_prompt(requester.origin) {
                 return Err(UnlockError::NoDisplay);
             }
             if slot.unlocking {
@@ -635,7 +639,7 @@ impl PeerOrigin for Server {
     fn origin_of(&self, stream: &UnixStream, owner: u32) -> Origin {
         match self.assumed_origin.get() {
             Some(origin) => *origin,
-            None => origin::of_peer(stream, owner, self.display_session().id()),
+            None => authn::of_peer(stream, owner, self.display_session().id()),
         }
     }
 }
@@ -667,8 +671,8 @@ impl SshHost for Server {
         Some(result)
     }
 
-    fn may_prompt(&self, origin: Origin) -> bool {
-        self.display_session().may_prompt(origin)
+    fn may_prompt(&self, requester: &Requester) -> bool {
+        self.display_session().may_prompt(requester.origin)
     }
 }
 
@@ -811,7 +815,7 @@ impl SshKeys for Server {
 }
 
 impl CopyEntry for Server {
-    fn copy(&self, request: &CopyRequest, origin: Origin) -> Result<CopyOutcome, CopyError> {
+    fn copy(&self, request: &CopyRequest, requester: &Requester) -> Result<CopyOutcome, CopyError> {
         let name = request.db.as_str();
         let db = || name.to_string();
 
@@ -836,7 +840,7 @@ impl CopyEntry for Server {
             // `unlock` reads `DisplaySession::may_prompt`, and before the `Locked`
             // check below so an outside caller learns no more than an
             // unknown database does.
-            if !display_session.may_copy(origin) {
+            if !display_session.may_copy(requester.origin) {
                 return Err(CopyError::NoDisplay);
             }
             let Some(database) = slot.db.as_ref() else {
@@ -1207,8 +1211,8 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
         }
     }
 
-    let origin = server.origin_of(&stream, owner);
-    log::debug(format_args!("connection from {origin:?}"));
+    let requester = Requester::of(server, &stream, owner);
+    log::debug(format_args!("connection from {:?}", requester.origin));
 
     // The request, and the buffer it was read into, are dropped (and so
     // wiped) at the end of this block, before the response goes anywhere.
@@ -1219,7 +1223,7 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
             Ok(RequestLine::TooLong) => Response::Protocol(ProtocolError::MalformedRequest),
             Ok(RequestLine::Line(len)) => {
                 match std::str::from_utf8(&buf[..len]).map(proto::decode_request) {
-                    Ok(Ok(request)) => proto::dispatch(server, &request, origin),
+                    Ok(Ok(request)) => proto::dispatch(server, &request, &requester),
                     Ok(Err(DecodeError::VersionMismatch(client_v))) => {
                         Response::Protocol(ProtocolError::VersionMismatch { client_v })
                     }
@@ -1242,6 +1246,20 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
 mod tests {
     use super::*;
     use crate::prompt::{Scripted, Step};
+
+    fn desktop() -> Requester {
+        Requester {
+            origin: Origin::Desktop,
+            command: None,
+        }
+    }
+
+    fn outside() -> Requester {
+        Requester {
+            origin: Origin::Outside,
+            command: None,
+        }
+    }
 
     fn empty_server() -> Server {
         Server::new(
@@ -1535,7 +1553,7 @@ mod tests {
                 uuid: uuid::Uuid::nil(),
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect_err("no such database");
         assert_eq!(
@@ -1556,7 +1574,7 @@ mod tests {
                 uuid: uuid::Uuid::nil(),
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect_err("database is locked");
         assert_eq!(
@@ -1584,7 +1602,7 @@ mod tests {
         unlock_with_entry(&server, "personal");
 
         assert_eq!(
-            CopyEntry::copy(&server, &request(), Origin::Outside),
+            CopyEntry::copy(&server, &request(), &outside()),
             Err(refused.clone()),
             "a requester outside the desktop"
         );
@@ -1602,7 +1620,7 @@ mod tests {
         ] {
             policy::Locks::set_display_session(&server, display_session.clone());
             assert_eq!(
-                CopyEntry::copy(&server, &request(), Origin::Desktop),
+                CopyEntry::copy(&server, &request(), &desktop()),
                 Err(refused.clone()),
                 "display session {display_session:?}"
             );
@@ -1621,7 +1639,7 @@ mod tests {
                 uuid: uuid::Uuid::new_v4(),
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect_err("no such entry");
         assert_eq!(
@@ -1644,7 +1662,7 @@ mod tests {
                 uuid,
                 field: Field::Url,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect_err("url was never set");
         assert_eq!(
@@ -1671,7 +1689,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect("entry and field exist");
 
@@ -1721,7 +1739,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -1757,7 +1775,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -1790,7 +1808,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -1817,7 +1835,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -1854,7 +1872,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -1885,7 +1903,7 @@ mod tests {
                     uuid,
                     field: Field::Password,
                 },
-                Origin::Desktop,
+                &desktop(),
             )
             .is_ok()
         );
@@ -1908,7 +1926,7 @@ mod tests {
                 uuid: uuid::Uuid::new_v4(),
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         );
         assert!(refused.is_err());
         assert!(idle_lock_fires(&server));
@@ -2114,7 +2132,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -2183,7 +2201,7 @@ mod tests {
                 db: "personal".to_string(),
                 password: None,
             },
-            Origin::Desktop,
+            &desktop(),
         );
 
         assert!(
@@ -2219,7 +2237,7 @@ mod tests {
                 uuid: uuid::Uuid::nil(),
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         );
 
         assert!(
@@ -2247,7 +2265,7 @@ mod tests {
                 db: "personal".to_string(),
                 password: None,
             },
-            Origin::Desktop,
+            &desktop(),
         );
 
         assert_eq!(
@@ -2284,7 +2302,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -2325,7 +2343,7 @@ mod tests {
                 uuid,
                 field: Field::Password,
             },
-            Origin::Desktop,
+            &desktop(),
         )
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
@@ -2369,7 +2387,10 @@ mod tests {
                 db: name.to_string(),
                 password: None,
             },
-            origin,
+            &Requester {
+                origin,
+                command: None,
+            },
         )
     }
 
@@ -2470,7 +2491,7 @@ mod tests {
                         "hunter2".to_string(),
                     ))),
                 },
-                Origin::Outside,
+                &outside(),
             );
             assert_eq!(
                 result,

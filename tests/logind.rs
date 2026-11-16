@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 mod common;
 
+use kpa::authn::{Origin, Requester};
 use kpa::config::Config;
-use kpa::origin::Origin;
 use kpa::paths::Paths;
 use kpa::policy::{self, Bus, DisplaySession, Locks};
 use kpa::proto::{Unlock, UnlockError, UnlockRequest};
@@ -644,7 +644,10 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
                 db: "personal".to_string(),
                 password: None,
             },
-            Origin::Desktop,
+            &Requester {
+                origin: Origin::Desktop,
+                command: None,
+            },
         )
     };
     let refused = Err(UnlockError::NoDisplay);

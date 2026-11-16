@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use super::error::{ErrorCode, ErrorFields};
-use crate::origin::Origin;
+use crate::authn::Requester;
 
 /// Longest password accepted, in bytes, whether it comes from the prompt's
 /// stdout or from a request. Either way it is decoded into a buffer of
@@ -237,10 +237,11 @@ impl UnlockError {
 /// it; otherwise the implementor owns credential acquisition, and nothing
 /// about *how* it asks for one appears in this signature.
 pub trait Unlock {
-    /// `Ok` names the database that is now unlocked. `origin` is where the
-    /// request came from, which decides whether a prompt may be raised on
-    /// screen.
-    fn unlock(&self, request: &UnlockRequest, origin: Origin) -> Result<String, UnlockError>;
+    /// `Ok` names the database that is now unlocked. `requester` says where
+    /// the request came from, which decides whether a prompt may be raised
+    /// on screen.
+    fn unlock(&self, request: &UnlockRequest, requester: &Requester)
+    -> Result<String, UnlockError>;
 }
 
 #[cfg(test)]

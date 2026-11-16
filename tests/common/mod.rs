@@ -171,16 +171,13 @@ impl InProcessDaemon {
     }
 
     pub fn with_config(config: kpa::config::Config) -> InProcessDaemon {
-        InProcessDaemon::with_origin(config, kpa::origin::Origin::Desktop)
+        InProcessDaemon::with_origin(config, kpa::authn::Origin::Desktop)
     }
 
     /// Like `with_config`, but classifies every connection as `origin`
     /// instead of the default `Desktop` — for copy-gating tests that need
     /// an `Outside` requester.
-    pub fn with_origin(
-        config: kpa::config::Config,
-        origin: kpa::origin::Origin,
-    ) -> InProcessDaemon {
+    pub fn with_origin(config: kpa::config::Config, origin: kpa::authn::Origin) -> InProcessDaemon {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let socket = dir.path().join("sock");
         let paths = kpa::paths::Paths {

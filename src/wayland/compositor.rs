@@ -22,7 +22,7 @@ use zbus::blocking::Connection;
 use zbus::zvariant::OwnedValue;
 
 use super::Error;
-use crate::origin::{self, Origin};
+use crate::authn::{self, Origin};
 
 const SYSTEMD: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
@@ -105,7 +105,7 @@ fn check_listener(stream: &UnixStream, session: &str) -> Result<(), Error> {
             "the compositor's socket belongs to another user".to_string(),
         ));
     }
-    if origin::of_peer(stream, uid, Some(session)) != Origin::Desktop {
+    if authn::of_peer(stream, uid, Some(session)) != Origin::Desktop {
         return Err(Error(
             "the compositor's socket isn't served from the desktop".to_string(),
         ));
