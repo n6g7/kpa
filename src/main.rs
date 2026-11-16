@@ -1,11 +1,10 @@
 //! CLI entry point: parses arguments and dispatches. `serve` runs the
 //! daemon here directly; every other subcommand goes to [`client`] — one
-//! request, the daemon's raw JSON response line printed verbatim, except
-//! `unlock`, which can send a second once the terminal read it needs is
-//! done.
+//! request, and the daemon's raw JSON response line printed verbatim or,
+//! for a command with a text view, that view of it; `unlock` can send a
+//! second once the terminal read it needs is done.
 
 mod client;
-mod reply;
 mod ssh_keys_report;
 mod tty;
 
@@ -14,6 +13,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use client::Format;
 use kpa::config::Config;
 use kpa::log::{self, Level};
 use kpa::output::report_error;
@@ -23,7 +23,6 @@ use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op, SshKeysReport
 use kpa::server::{self, Server};
 use kpa::socket;
 use kpa::tray;
-use reply::Format;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -163,7 +162,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         }
         Command::Ssh {
             command: SshCommand::Keys { database, toml },
-        } => reply::run(
+        } => client::run(
             &socket_path,
             Op::SshKeys(SshKeysRequest { db: database }),
             if cli.json { Format::Json } else { Format::Text },
