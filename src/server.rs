@@ -177,11 +177,11 @@ pub struct Server {
     /// outlives the request, same as `clip` above) can clear it too, once
     /// its natural timeout fires with nothing newer having replaced it.
     clip_db: Arc<Mutex<Option<String>>>,
-    /// The desk's state, as the lock policy last published it
-    /// (`policy::Event::Desk`). Each connection is classified against its
+    /// The display session's state, as the lock policy last published it
+    /// (`policy::Event::DisplaySession`). Each connection is classified against its
     /// display session (`origin`), and `unlock` asks it whether a prompt
-    /// may be raised (`Desk::may_prompt`).
-    desk: Mutex<policy::Desk>,
+    /// may be raised (`DisplaySession::may_prompt`).
+    display_session: Mutex<policy::DisplaySession>,
     /// Set by `assume_origin` only.
     assumed_origin: OnceLock<Origin>,
     /// The daemon's one prompt queue, so only one prompt is ever on screen
@@ -241,7 +241,7 @@ impl Server {
             policy_events: OnceLock::new(),
             clip: Arc::new(Clipboard::new(clipboard)),
             clip_db: Arc::new(Mutex::new(None)),
-            desk: Mutex::new(policy::Desk::NoSession),
+            display_session: Mutex::new(policy::DisplaySession::None),
             assumed_origin: OnceLock::new(),
             prompt_queue,
             unlock_prompt,
@@ -341,10 +341,13 @@ impl Server {
         dropped
     }
 
-    /// The desk's state, as the lock policy last published it. No display
+    /// The display session's state, as the lock policy last published it. No display
     /// session until the logind watch says otherwise.
-    pub fn desk(&self) -> policy::Desk {
-        self.desk.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    pub fn display_session(&self) -> policy::DisplaySession {
+        self.display_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Treat every connection as coming from `origin` instead of reading
@@ -432,8 +435,11 @@ impl policy::Locks for Server {
         Server::any_unlocked(self)
     }
 
-    fn set_desk(&self, desk: policy::Desk) {
-        *self.desk.lock().unwrap_or_else(|e| e.into_inner()) = desk;
+    fn set_display_session(&self, display_session: policy::DisplaySession) {
+        *self
+            .display_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = display_session;
     }
 }
 
@@ -522,12 +528,12 @@ impl Unlock for Server {
             }
             // No prompt where nobody can answer it: from outside the
             // desktop, or behind a locker. Read under the mutex: the policy
-            // marks the desk before its `lock_all` takes it, so either this
+            // marks the display session before its `lock_all` takes it, so either this
             // sees the mark or that lock cancels the token taken below and
             // ends the prompt. A request that carries its password needs no
             // prompt, so it goes ahead from anywhere: that is how an
             // unlock from outside the desktop is answered.
-            if request.password.is_none() && !self.desk().may_prompt(origin) {
+            if request.password.is_none() && !self.display_session().may_prompt(origin) {
                 return Err(UnlockError::NoDisplay);
             }
             if slot.unlocking {
@@ -629,7 +635,7 @@ impl PeerOrigin for Server {
     fn origin_of(&self, stream: &UnixStream, owner: u32) -> Origin {
         match self.assumed_origin.get() {
             Some(origin) => *origin,
-            None => origin::of_peer(stream, owner, self.desk().session()),
+            None => origin::of_peer(stream, owner, self.display_session().id()),
         }
     }
 }
@@ -662,7 +668,7 @@ impl SshHost for Server {
     }
 
     fn may_prompt(&self, origin: Origin) -> bool {
-        self.desk().may_prompt(origin)
+        self.display_session().may_prompt(origin)
     }
 }
 
@@ -819,7 +825,7 @@ impl CopyEntry for Server {
         // which must not stall every other request behind it, the same
         // reasoning that keeps `unlock`'s prompt-and-KDF step outside the
         // mutex too.
-        let desk = self.desk();
+        let display_session = self.display_session();
         let value = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
@@ -827,10 +833,10 @@ impl CopyEntry for Server {
             };
             // No secret reaches the clipboard where nobody can paste it
             // from (`docs/headless.md` § 5) — checked here, same place
-            // `unlock` reads `Desk::may_prompt`, and before the `Locked`
+            // `unlock` reads `DisplaySession::may_prompt`, and before the `Locked`
             // check below so an outside caller learns no more than an
             // unknown database does.
-            if !desk.may_copy(origin) {
+            if !display_session.may_copy(origin) {
                 return Err(CopyError::NoDisplay);
             }
             let Some(database) = slot.db.as_ref() else {
@@ -848,7 +854,7 @@ impl CopyEntry for Server {
         };
         let (value, entry) = value;
         // `may_copy` only passes with a display session.
-        let session = desk.session().unwrap_or_default();
+        let session = display_session.id().unwrap_or_default();
 
         let offer = self
             .clip
@@ -1395,15 +1401,15 @@ mod tests {
         server
     }
 
-    /// Marks the desk active and unlocked, so `CopyEntry::copy` with
+    /// Marks the display session active and unlocked, so `CopyEntry::copy` with
     /// `Origin::Desktop` passes its gate — every copy test below that
     /// isn't itself about the gate calls this on its server, the same way
     /// those tests always ran before `may_copy` existed.
     fn allow_copy(server: &Server) {
-        policy::Locks::set_desk(
+        policy::Locks::set_display_session(
             server,
-            policy::Desk::Unlocked {
-                session: "31".to_string(),
+            policy::DisplaySession::Unlocked {
+                id: "31".to_string(),
                 active: true,
             },
         );
@@ -1562,11 +1568,11 @@ mod tests {
     }
 
     /// `docs/headless.md` § 5: `copy` is refused with `no_display` for a
-    /// requester outside the desktop, a desk that's locked, inactive, or
+    /// requester outside the desktop, a display session that's locked, inactive, or
     /// has no display session at all — and the gate fires before it even
     /// gets to `Locked`, so an outside caller learns no more than that.
     #[test]
-    fn copy_is_refused_without_a_desktop_requester_on_an_active_unlocked_desk() {
+    fn copy_is_refused_without_a_desktop_requester_on_an_active_unlocked_display_session() {
         let request = || CopyRequest {
             db: "personal".to_string(),
             uuid: uuid::Uuid::nil(),
@@ -1583,22 +1589,22 @@ mod tests {
             "a requester outside the desktop"
         );
 
-        for desk in [
-            policy::Desk::Locked {
-                session: "31".to_string(),
+        for display_session in [
+            policy::DisplaySession::Locked {
+                id: "31".to_string(),
                 active: true,
             },
-            policy::Desk::Unlocked {
-                session: "31".to_string(),
+            policy::DisplaySession::Unlocked {
+                id: "31".to_string(),
                 active: false,
             },
-            policy::Desk::NoSession,
+            policy::DisplaySession::None,
         ] {
-            policy::Locks::set_desk(&server, desk.clone());
+            policy::Locks::set_display_session(&server, display_session.clone());
             assert_eq!(
                 CopyEntry::copy(&server, &request(), Origin::Desktop),
                 Err(refused.clone()),
-                "desk {desk:?}"
+                "display session {display_session:?}"
             );
         }
     }
@@ -2373,24 +2379,24 @@ mod tests {
     }
 
     #[test]
-    fn no_prompt_is_raised_while_the_desk_is_locked() {
+    fn no_prompt_is_raised_while_the_display_session_is_locked() {
         let (server, prompts) = prompt_server();
         prompts.push(Step::new(PromptOutcome::Cancelled));
 
-        policy::Locks::set_desk(
+        policy::Locks::set_display_session(
             &*server,
-            policy::Desk::Locked {
-                session: "1".to_string(),
+            policy::DisplaySession::Locked {
+                id: "1".to_string(),
                 active: true,
             },
         );
         assert_eq!(unlock(&server, "personal"), Err(UnlockError::NoDisplay));
         assert!(prompts.shown().is_empty(), "a prompt ran behind the locker");
 
-        policy::Locks::set_desk(
+        policy::Locks::set_display_session(
             &*server,
-            policy::Desk::Unlocked {
-                session: "1".to_string(),
+            policy::DisplaySession::Unlocked {
+                id: "1".to_string(),
                 active: true,
             },
         );
@@ -2403,7 +2409,7 @@ mod tests {
         assert_eq!(
             prompts.shown(),
             ["Unlock personal"],
-            "the prompt runs again once the desk is unlocked"
+            "the prompt runs again once the display session is unlocked"
         );
     }
 
@@ -2411,10 +2417,10 @@ mod tests {
     fn no_prompt_is_raised_for_a_requester_outside_the_desktop() {
         let (server, prompts) = prompt_server();
         prompts.push(Step::new(PromptOutcome::Cancelled));
-        policy::Locks::set_desk(
+        policy::Locks::set_display_session(
             &*server,
-            policy::Desk::Unlocked {
-                session: "1".to_string(),
+            policy::DisplaySession::Unlocked {
+                id: "1".to_string(),
                 active: true,
             },
         );
@@ -2448,14 +2454,14 @@ mod tests {
     fn a_request_carrying_its_password_goes_ahead_from_anywhere() {
         let (server, prompts) = prompt_server();
 
-        for desk in [
-            policy::Desk::NoSession,
-            policy::Desk::Locked {
-                session: "1".to_string(),
+        for display_session in [
+            policy::DisplaySession::None,
+            policy::DisplaySession::Locked {
+                id: "1".to_string(),
                 active: true,
             },
         ] {
-            policy::Locks::set_desk(&*server, desk);
+            policy::Locks::set_display_session(&*server, display_session);
             let result = Unlock::unlock(
                 &*server,
                 &UnlockRequest {

@@ -303,8 +303,8 @@ service (a cron job, a terminal server's shells), no display session at
 all, and any
 peer whose cgroup can't be read or parsed, including one that exited
 first. The origin is logged at `debug`, and decides whether `unlock` may
-prompt on screen (`Desk::may_prompt`) and whether `copy` may reach the
-clipboard (`Desk::may_copy`, § Clipboard). It decides where to ask, not
+prompt on screen (`DisplaySession::may_prompt`) and whether `copy` may reach the
+clipboard (`DisplaySession::may_copy`, § Clipboard). It decides where to ask, not
 who may ask: a same-uid process can start work in another cgroup.
 
 **`list` never returns secrets** — it is an index. That holds for any field
@@ -430,7 +430,7 @@ shortcut.)
 
 **`copy` needs a desktop requester on an active, unlocked display
 session** (`docs/headless.md` § 5): the requester is classified as on the
-desktop the same way `unlock` is (§ Protocol), and the desk's state
+desktop the same way `unlock` is (§ Protocol), and the display session's state
 (§ Lock policy) must be an active display session with `LockedHint`
 false. Anything else — outside the desktop, no session, inactive, or
 locked — fails with `no_display`, and the clipboard is never touched.
@@ -462,14 +462,14 @@ Prompts are bounded too:
   reports the unlock (threat model ASM-7), so kpa doesn't know the screen
   is locked, and the timeout bounds the cost.
 
-The logind watch publishes **the desk's state** to the server: no display
+The logind watch publishes **the display session's state** to the server: no display
 session, or the display session's id with its `LockedHint` (locked or
 unlocked) and its `Active`. It is read on subscribing, whenever
 `User.Display` changes, and on each `LockedHint` or `Active` change, and
 is "no display session" while the watch is down. The classification in §
 Protocol reads the session's id, the prompt gate reads the session and
 `LockedHint`: a prompt only for a requester on the desktop, and not while
-the desk is locked. `copy`'s gate (§ Clipboard) also reads `Active`.
+the display session is locked. `copy`'s gate (§ Clipboard) also reads `Active`.
 `Active` never feeds the prompt gate and never locks anything on its
 own — only `LockedHint` does.
 
