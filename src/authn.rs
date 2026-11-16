@@ -1,11 +1,14 @@
-//! Where a request comes from: the desktop, or outside it
+//! Who a request comes from, and where: the desktop, or outside it
 //! (`docs/headless.md` § 3).
 //!
 //! The peer's pid comes from the socket, as a pidfd (`SO_PEERPIDFD`) where
 //! the kernel has it and as a bare pid (`SO_PEERCRED`) otherwise. Its
-//! cgroup, read from `/proc/<pid>/cgroup`, says whether it runs under the
-//! user's service manager or the display session's scope, which is where
-//! the compositor and everything it spawns live.
+//! cgroup, read from `/proc/<pid>/cgroup` when it connects, says whether it
+//! runs under the user's service manager or the display session's scope,
+//! which is where the compositor and everything it spawns live. Which
+//! session is the display session is not the peer's to say, so a
+//! [`Requester`] keeps the cgroup, and says where its peer runs when it is
+//! asked, against the session as it is then.
 //!
 //! This decides where to ask, not who may ask: a same-uid process can move
 //! work into another cgroup. So every failure, from a peer that already
@@ -15,6 +18,8 @@ use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+
+use crate::socket;
 
 /// Longest `/proc/<pid>/` file accepted. A unified hierarchy's `cgroup` has
 /// one line; a hybrid one adds a line per v1 controller, still well under
@@ -32,36 +37,55 @@ pub enum Origin {
     Outside,
 }
 
-/// What a daemon can tell about where a connection's peer runs: the one
-/// thing a socket's connection loop needs to ask it.
-pub trait PeerOrigin {
-    /// Where the peer on `stream` runs; `owner` is the daemon's own uid.
-    fn origin_of(&self, stream: &UnixStream, owner: u32) -> Origin;
-}
-
-/// Who is on the other end of a connection: where it runs, and what it is
-/// called. One value per connection, built by [`Requester::of`] where the
-/// connection is accepted, and handed to everything that answers its
-/// requests.
+/// Who is on the other end of a connection: plain facts about the peer,
+/// read once when the connection is accepted ([`Requester::of`]) and handed
+/// to everything that answers its requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requester {
-    pub origin: Origin,
+    /// The peer's uid.
+    pub uid: u32,
+    /// The peer's `/proc/<pid>/cgroup`, as it was when it connected. `None`
+    /// where it couldn't be read, or the peer isn't the daemon's own user.
+    pub cgroup: Option<String>,
     /// The peer's command name, for naming it to the user who may approve
-    /// what it asked for (`docs/ssh-agent.md` § 6.8). Read for a peer
-    /// outside the desktop only, the one place that approval is offered;
-    /// `None` for any other peer, or where it can't be read.
+    /// what it asked for (`docs/ssh-agent.md` § 6.8). `None` where it can't
+    /// be read, or the peer isn't the daemon's own user.
     pub command: Option<String>,
 }
 
 impl Requester {
-    /// The peer on `stream`, whose uid is `owner`.
-    pub fn of(daemon: &impl PeerOrigin, stream: &UnixStream, owner: u32) -> Requester {
-        let origin = daemon.origin_of(stream, owner);
-        let command = match origin {
-            Origin::Outside => peer_command(stream),
-            Origin::Desktop => None,
-        };
-        Requester { origin, command }
+    /// The peer on `stream`. The daemon's own user is the only one whose
+    /// process is looked at further than its uid: any other is refused by
+    /// whoever accepted it.
+    pub fn of(stream: &UnixStream) -> io::Result<Requester> {
+        let uid = socket::peer_uid(stream)?;
+        if uid != rustix::process::geteuid().as_raw() {
+            return Ok(Requester {
+                uid,
+                cgroup: None,
+                command: None,
+            });
+        }
+        let cgroup = peer_cgroup(stream)
+            .inspect_err(|err| {
+                crate::log::debug(format_args!("could not read the peer's cgroup: {err}"));
+            })
+            .ok();
+        Ok(Requester {
+            uid,
+            cgroup,
+            command: peer_command(stream),
+        })
+    }
+
+    /// Where this peer runs, against the display session `session` (`None`
+    /// when there is none). Every failure, from a cgroup that wasn't read to
+    /// one that doesn't parse, is [`Origin::Outside`].
+    pub fn origin(&self, session: Option<&str>) -> Origin {
+        match &self.cgroup {
+            Some(cgroup) => classify(cgroup, self.uid, session),
+            None => Origin::Outside,
+        }
     }
 }
 
@@ -345,5 +369,49 @@ mod tests {
         let (ours, _theirs) = UnixStream::pair().expect("socket pair");
         let own = std::fs::read_to_string("/proc/self/comm").expect("own comm");
         assert_eq!(peer_command(&ours), Some(own.trim_end().to_string()));
+    }
+
+    fn requester(cgroup: Option<&str>) -> Requester {
+        Requester {
+            uid: UID,
+            cgroup: cgroup.map(str::to_string),
+            command: None,
+        }
+    }
+
+    /// Where a requester runs is asked of it against the session as it is
+    /// then: the same cgroup is the desktop in one session and outside it in
+    /// another, or once there is none.
+    #[test]
+    fn a_requester_is_classified_against_the_session_it_is_asked_with() {
+        let in_session = requester(Some("0::/user.slice/user-1000.slice/session-3.scope\n"));
+
+        assert_eq!(in_session.origin(Some("3")), Origin::Desktop);
+        assert_eq!(in_session.origin(Some("4")), Origin::Outside);
+        assert_eq!(in_session.origin(None), Origin::Outside);
+    }
+
+    #[test]
+    fn a_requester_whose_cgroup_was_not_read_is_outside() {
+        assert_eq!(requester(None).origin(Some("3")), Origin::Outside);
+    }
+
+    #[test]
+    fn the_requester_of_a_socket_pair_is_this_process() {
+        let (ours, _theirs) = UnixStream::pair().expect("socket pair");
+
+        let requester = Requester::of(&ours).expect("peer credentials");
+
+        assert_eq!(requester.uid, rustix::process::geteuid().as_raw());
+        assert_eq!(
+            requester.cgroup.as_deref(),
+            Some(
+                std::fs::read_to_string("/proc/self/cgroup")
+                    .expect("own cgroup")
+                    .as_str()
+            )
+        );
+        let own = std::fs::read_to_string("/proc/self/comm").expect("own comm");
+        assert_eq!(requester.command.as_deref(), Some(own.trim_end()));
     }
 }

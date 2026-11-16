@@ -1,7 +1,6 @@
 //! [`FakeHost`]: an in-memory [`SshHost`] for this module's tests.
 
 use std::collections::HashMap;
-use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -9,14 +8,16 @@ use std::time::Instant;
 use keepass::Database;
 
 use super::{SlotView, SshHost, SshSlot};
-use crate::authn::{Origin, PeerOrigin, Requester};
+use crate::authn::Requester;
 use crate::config::DatabaseConfig;
 use crate::prompt::CancelSource;
 
-/// A requester on the desktop.
-pub(super) fn desktop() -> Requester {
+/// A requester. Where it runs is the host's to say (`may_prompt`), so the
+/// facts are none.
+pub(super) fn requester() -> Requester {
     Requester {
-        origin: Origin::Desktop,
+        uid: 0,
+        cgroup: None,
         command: None,
     }
 }
@@ -126,12 +127,6 @@ impl FakeHost {
     /// When `db`'s idle timer last reset.
     pub(super) fn last_activity(&self, db: &str) -> Instant {
         self.slots.lock().expect("slots")[db].last_activity
-    }
-}
-
-impl PeerOrigin for FakeHost {
-    fn origin_of(&self, _: &UnixStream, _: u32) -> Origin {
-        Origin::Desktop
     }
 }
 

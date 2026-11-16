@@ -24,11 +24,8 @@ use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{StandardItem, SubMenu};
 use ksni::{MenuItem, OfflineReason, ToolTip};
 
-use crate::authn::{Origin, Requester};
 use crate::log;
-use crate::proto::{
-    DatabaseStatus, Lock, LockRequest, Response, Unlock, UnlockError, UnlockRequest,
-};
+use crate::proto::{DatabaseStatus, Lock, LockRequest, Response, UnlockError, UnlockRequest};
 use crate::server::{self, Server};
 
 /// How often [`run`] re-checks `Server::snapshot`.
@@ -160,16 +157,10 @@ impl TrayItem {
         let name = name.to_string();
         let _ = thread::Builder::new().spawn(move || {
             // The tray's menu is clicked at the desk.
-            let result = server.unlock(
-                &UnlockRequest {
-                    db: name.clone(),
-                    password: None,
-                },
-                &Requester {
-                    origin: Origin::Desktop,
-                    command: None,
-                },
-            );
+            let result = server.unlock_at_desk(&UnlockRequest {
+                db: name.clone(),
+                password: None,
+            });
             server::log_response(&Response::Unlock(result.clone()));
             let Some(handle) = handle else { return };
             handle.update(move |item| {

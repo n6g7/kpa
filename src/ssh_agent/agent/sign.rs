@@ -325,7 +325,7 @@ mod tests {
     use ssh_key::{PrivateKey, Signature};
 
     use super::super::SshSlot;
-    use super::super::fake::{FakeHost, desktop};
+    use super::super::fake::{FakeHost, requester};
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
     use crate::paths::Paths;
@@ -383,7 +383,7 @@ mod tests {
         key: &PrivateKey,
         class: &ConnectionClass,
     ) -> AgentResponse {
-        agent.sign(class, &request_with(key, 0), None, &desktop())
+        agent.sign(class, &request_with(key, 0), None, &requester())
     }
 
     fn sign(agent: &Agent<FakeHost>, key: &PrivateKey) -> AgentResponse {
@@ -394,7 +394,7 @@ mod tests {
     fn outcome(agent: &Agent<FakeHost>, key: &PrivateKey) -> Result<Vec<u8>, Refused> {
         let sign = request_with(key, 0);
         let request = Request::parse(&ConnectionClass::LocalUnbound, &sign, None).expect("parses");
-        agent.authorized_sign("personal", &request, &desktop())
+        agent.authorized_sign("personal", &request, &requester())
     }
 
     fn signed(response: &AgentResponse) -> bool {
@@ -616,7 +616,7 @@ mod tests {
 
         assert_eq!(
             agent
-                .ssh_identities(&ConnectionClass::LocalUnbound, &desktop())
+                .ssh_identities(&ConnectionClass::LocalUnbound, &requester())
                 .len(),
             1
         );
@@ -657,14 +657,14 @@ mod tests {
         let sha1 = request_with(&key, 0);
         let request = Request::parse(&unbound, &sha1, None).expect("parses");
         assert!(matches!(
-            agent.authorized_sign("personal", &request, &desktop()),
+            agent.authorized_sign("personal", &request, &requester()),
             Err(Refused::Sha1Rsa)
         ));
         assert!(prompts.shown().is_empty());
 
         prompts.push(Step::allow());
         let sha512 = request_with(&key, 4);
-        assert!(signed(&agent.sign(&unbound, &sha512, None, &desktop())));
+        assert!(signed(&agent.sign(&unbound, &sha512, None, &requester())));
     }
 
     /// The log line names a key by the name its config override gives it,

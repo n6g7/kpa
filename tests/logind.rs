@@ -634,6 +634,8 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
     ))
     .unwrap();
     let server = Arc::new(Server::new(config, Paths::default()));
+    // The unlock below comes from a requester on the desktop.
+    server.assume_origin(Origin::Desktop);
     server.set_policy_events(policy::start(
         server.clone(),
         Bus::Address(bus.address.clone()),
@@ -645,7 +647,8 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
                 password: None,
             },
             &Requester {
-                origin: Origin::Desktop,
+                uid: rustix::process::geteuid().as_raw(),
+                cgroup: None,
                 command: None,
             },
         )

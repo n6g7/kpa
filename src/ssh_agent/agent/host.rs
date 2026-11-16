@@ -6,14 +6,14 @@ use std::time::Instant;
 use keepass::Database;
 
 use super::SshSlot;
-use crate::authn::{PeerOrigin, Requester};
+use crate::authn::Requester;
 use crate::config::DatabaseConfig;
 use crate::prompt::{CancelSource, CancelToken};
 
 /// What the agent needs from the daemon that hosts it. The daemon
 /// implements it as a thin adapter over its database slots; the agent's
 /// logic stays in this module.
-pub trait SshHost: PeerOrigin {
+pub trait SshHost {
     /// Every configured database, in config order.
     fn databases(&self) -> &[DatabaseConfig];
 

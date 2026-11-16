@@ -31,7 +31,7 @@ use keepass::Database;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::authn::{self, Origin, PeerOrigin, Requester};
+use crate::authn::{Origin, Requester};
 use crate::clip::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
 use crate::io::ByteCounter;
@@ -47,7 +47,6 @@ use crate::proto::{
     SshKeysError, SshKeysReport, SshKeysRequest, Status, Unlock, UnlockError, UnlockRequest,
     WireEntry, WireSkippedKey, WireSshKey,
 };
-use crate::socket;
 use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
 use crate::vault::{self, Fingerprint, VaultError};
 
@@ -503,6 +502,44 @@ impl Unlock for Server {
         request: &UnlockRequest,
         requester: &Requester,
     ) -> Result<String, UnlockError> {
+        self.unlock_db(request, || self.may_prompt(requester))
+    }
+}
+
+impl Server {
+    /// Where `requester` runs, against `display_session`: wherever
+    /// `assume_origin` said if it did, otherwise its cgroup against the
+    /// display session's id.
+    fn origin_in(&self, requester: &Requester, display_session: &policy::DisplaySession) -> Origin {
+        match self.assumed_origin.get() {
+            Some(origin) => *origin,
+            None => requester.origin(display_session.id()),
+        }
+    }
+
+    /// Whether a prompt may appear for `requester` now (`docs/headless.md`
+    /// § 2): it runs on the desktop, and the display session isn't known to
+    /// be locked.
+    fn may_prompt(&self, requester: &Requester) -> bool {
+        let display_session = self.display_session();
+        display_session.may_prompt(self.origin_in(requester, &display_session))
+    }
+
+    /// The unlock the tray's menu asks for, clicked at the desk: where a
+    /// prompt may appear unless the display session is known to be locked.
+    pub fn unlock_at_desk(&self, request: &UnlockRequest) -> Result<String, UnlockError> {
+        self.unlock_db(request, || {
+            self.display_session().may_prompt(Origin::Desktop)
+        })
+    }
+
+    /// The unlock `kpa unlock` and the tray run: `may_prompt` says whether
+    /// a prompt may appear, asked under the mutex.
+    fn unlock_db(
+        &self,
+        request: &UnlockRequest,
+        may_prompt: impl FnOnce() -> bool,
+    ) -> Result<String, UnlockError> {
         let name = request.db.as_str();
         let db = || name.to_string();
 
@@ -537,7 +574,7 @@ impl Unlock for Server {
             // ends the prompt. A request that carries its password needs no
             // prompt, so it goes ahead from anywhere: that is how an
             // unlock from outside the desktop is answered.
-            if request.password.is_none() && !self.display_session().may_prompt(requester.origin) {
+            if request.password.is_none() && !may_prompt() {
                 return Err(UnlockError::NoDisplay);
             }
             if slot.unlocking {
@@ -634,16 +671,6 @@ impl Unlock for Server {
     }
 }
 
-impl PeerOrigin for Server {
-    /// Where the peer on `stream` runs (`docs/headless.md` § 3).
-    fn origin_of(&self, stream: &UnixStream, owner: u32) -> Origin {
-        match self.assumed_origin.get() {
-            Some(origin) => *origin,
-            None => authn::of_peer(stream, owner, self.display_session().id()),
-        }
-    }
-}
-
 /// What the SSH agent needs from the daemon, as a thin adapter over the
 /// slots: the agent's own logic stays in `ssh_agent`.
 impl SshHost for Server {
@@ -672,7 +699,7 @@ impl SshHost for Server {
     }
 
     fn may_prompt(&self, requester: &Requester) -> bool {
-        self.display_session().may_prompt(requester.origin)
+        Server::may_prompt(self, requester)
     }
 }
 
@@ -840,7 +867,7 @@ impl CopyEntry for Server {
             // `unlock` reads `DisplaySession::may_prompt`, and before the `Locked`
             // check below so an outside caller learns no more than an
             // unknown database does.
-            if !display_session.may_copy(requester.origin) {
+            if !display_session.may_copy(self.origin_in(requester, &display_session)) {
                 return Err(CopyError::NoDisplay);
             }
             let Some(database) = slot.db.as_ref() else {
@@ -1197,10 +1224,13 @@ fn read_request(mut stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<Requ
 /// already keeps other users out; this check covers a mode that ever
 /// came out wrong.
 fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
-    match socket::peer_uid(&stream) {
-        Ok(uid) if uid == owner => {}
-        Ok(uid) => {
-            log::warn(format_args!("rejected connection from uid {uid}"));
+    let requester = match Requester::of(&stream) {
+        Ok(requester) if requester.uid == owner => requester,
+        Ok(requester) => {
+            log::warn(format_args!(
+                "rejected connection from uid {}",
+                requester.uid
+            ));
             return;
         }
         Err(err) => {
@@ -1209,10 +1239,9 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
             ));
             return;
         }
-    }
-
-    let requester = Requester::of(server, &stream, owner);
-    log::debug(format_args!("connection from {:?}", requester.origin));
+    };
+    let origin = server.origin_in(&requester, &server.display_session());
+    log::debug(format_args!("connection from {origin:?}"));
 
     // The request, and the buffer it was read into, are dropped (and so
     // wiped) at the end of this block, before the response goes anywhere.
@@ -1247,18 +1276,31 @@ mod tests {
     use super::*;
     use crate::prompt::{Scripted, Step};
 
-    fn desktop() -> Requester {
+    /// The display session the tests' display sessions name, and so the one a
+    /// requester on the desktop runs in.
+    const SESSION: &str = "1";
+
+    /// A requester that runs where `origin` says, against a display session with
+    /// `SESSION` as its display session.
+    fn requester_in(origin: Origin) -> Requester {
+        let uid = rustix::process::geteuid().as_raw();
+        let cgroup = match origin {
+            Origin::Desktop => format!("0::/user.slice/user-{uid}.slice/session-{SESSION}.scope\n"),
+            Origin::Outside => "0::/system.slice/cron.service\n".to_string(),
+        };
         Requester {
-            origin: Origin::Desktop,
+            uid,
+            cgroup: Some(cgroup),
             command: None,
         }
     }
 
+    fn desktop() -> Requester {
+        requester_in(Origin::Desktop)
+    }
+
     fn outside() -> Requester {
-        Requester {
-            origin: Origin::Outside,
-            command: None,
-        }
+        requester_in(Origin::Outside)
     }
 
     fn empty_server() -> Server {
@@ -1427,7 +1469,7 @@ mod tests {
         policy::Locks::set_display_session(
             server,
             policy::DisplaySession::Unlocked {
-                id: "31".to_string(),
+                id: SESSION.to_string(),
                 active: true,
             },
         );
@@ -1609,11 +1651,11 @@ mod tests {
 
         for display_session in [
             policy::DisplaySession::Locked {
-                id: "31".to_string(),
+                id: SESSION.to_string(),
                 active: true,
             },
             policy::DisplaySession::Unlocked {
-                id: "31".to_string(),
+                id: SESSION.to_string(),
                 active: false,
             },
             policy::DisplaySession::None,
@@ -2373,6 +2415,7 @@ mod tests {
             clip::WaylandBackend,
             prompts.clone(),
         );
+        allow_copy(&server);
         (Arc::new(server), prompts)
     }
 
@@ -2387,10 +2430,7 @@ mod tests {
                 db: name.to_string(),
                 password: None,
             },
-            &Requester {
-                origin,
-                command: None,
-            },
+            &requester_in(origin),
         )
     }
 
@@ -2407,7 +2447,7 @@ mod tests {
         policy::Locks::set_display_session(
             &*server,
             policy::DisplaySession::Locked {
-                id: "1".to_string(),
+                id: SESSION.to_string(),
                 active: true,
             },
         );
@@ -2417,7 +2457,7 @@ mod tests {
         policy::Locks::set_display_session(
             &*server,
             policy::DisplaySession::Unlocked {
-                id: "1".to_string(),
+                id: SESSION.to_string(),
                 active: true,
             },
         );
@@ -2441,7 +2481,7 @@ mod tests {
         policy::Locks::set_display_session(
             &*server,
             policy::DisplaySession::Unlocked {
-                id: "1".to_string(),
+                id: SESSION.to_string(),
                 active: true,
             },
         );
@@ -2478,7 +2518,7 @@ mod tests {
         for display_session in [
             policy::DisplaySession::None,
             policy::DisplaySession::Locked {
-                id: "1".to_string(),
+                id: SESSION.to_string(),
                 active: true,
             },
         ] {

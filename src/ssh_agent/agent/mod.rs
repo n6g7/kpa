@@ -24,7 +24,6 @@ mod sign;
 mod signer;
 mod state;
 
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,7 +34,7 @@ use super::bind::ConnectionClass;
 use super::keys;
 use super::serve::SshSign;
 use super::wire::{AgentResponse, Identity, SignRequest};
-use crate::authn::{Origin, PeerOrigin, Requester};
+use crate::authn::Requester;
 use crate::paths::Paths;
 use crate::prompt::{Approval, Prompt};
 
@@ -64,12 +63,6 @@ impl<H: SshHost> Agent<H> {
     }
 }
 
-impl<H: SshHost> PeerOrigin for Agent<H> {
-    fn origin_of(&self, stream: &UnixStream, owner: u32) -> Origin {
-        self.host.origin_of(stream, owner)
-    }
-}
-
 impl<H: SshHost> SshSign for Agent<H> {
     fn ssh_identities(&self, class: &ConnectionClass, _requester: &Requester) -> Vec<Identity> {
         identities::identities(self.host.as_ref(), self.cache_dir.as_deref(), class)
@@ -90,7 +83,7 @@ impl<H: SshHost> SshSign for Agent<H> {
 mod tests {
     use std::time::Duration;
 
-    use super::fake::{FakeHost, desktop};
+    use super::fake::{FakeHost, requester};
     use super::*;
     use crate::prompt::{PromptQueue, Scripted};
     use crate::ssh_agent::testing::{database, test_key};
@@ -117,7 +110,7 @@ mod tests {
 
         assert_eq!(
             agent
-                .ssh_identities(&ConnectionClass::LocalUnbound, &desktop())
+                .ssh_identities(&ConnectionClass::LocalUnbound, &requester())
                 .len(),
             1
         );

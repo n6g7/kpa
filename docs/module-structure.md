@@ -29,8 +29,7 @@ together freely, and the rest of the crate sees only the API it exports.
   `ssh_agent::policy::decide`, `policy::Policy` and `clip::Clipboard` do.
   When a callback can't be avoided, or a test needs a fake, the lower
   subsystem defines a trait for exactly what it needs, and the higher one
-  implements it (`policy::Locks`, `authn::PeerOrigin`,
-  `ssh_agent::agent::SshHost`). Don't add a trait with one implementation
+  implements it (`policy::Locks`, `ssh_agent::agent::SshHost`). Don't add a trait with one implementation
   and no test using a second.
 
 ## Within a subsystem
