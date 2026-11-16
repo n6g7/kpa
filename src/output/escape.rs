@@ -1,8 +1,5 @@
-//! What the CLI writes to a terminal. Everything printed on stdout or stderr
-//! goes through `escape_for_terminal`, because the text it carries (entry
-//! titles, usernames, group names, and any input echoed back in an error)
-//! comes from the database or the user and must not be able to drive the
-//! terminal.
+//! Escaping text from the vault or the user for a terminal
+//! (`docs/threat-model.md` T-13).
 
 use std::fmt::Write as _;
 
@@ -68,16 +65,6 @@ pub fn escape_one_line(text: &str, max_len: usize) -> String {
         line.push_str(&piece);
     }
     line
-}
-
-/// Prints `text` to stdout with no trailing newline added, escaped.
-pub fn print_escaped(text: &str) {
-    print!("{}", escape_for_terminal(text));
-}
-
-/// Prints `error: <message>` to stderr, with the message escaped.
-pub fn report_error(message: impl std::fmt::Display) {
-    eprintln!("error: {}", escape_for_terminal(&message.to_string()));
 }
 
 #[cfg(test)]
