@@ -1,10 +1,11 @@
 //! CLI entry point: parses arguments and dispatches. `serve` runs the
 //! daemon here directly; every other subcommand goes to [`client`] — one
-//! request, the daemon's raw JSON response line printed verbatim, except
-//! `unlock`, which can send a second once the terminal read it needs is
-//! done.
+//! request, and the daemon's raw JSON response line printed verbatim or,
+//! for a command with a text view, that view of it; `unlock` can send a
+//! second once the terminal read it needs is done.
 
 mod client;
+mod ssh_keys_report;
 mod tty;
 
 use std::path::{Path, PathBuf};
@@ -12,12 +13,13 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use client::Format;
 use kpa::config::Config;
 use kpa::log::{self, Level};
 use kpa::output::report_error;
 use kpa::paths::Paths;
 use kpa::policy;
-use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op};
+use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op, SshKeysReport, SshKeysRequest};
 use kpa::server::{self, Server};
 use kpa::socket;
 use kpa::tray;
@@ -34,6 +36,13 @@ struct Cli {
     /// `$XDG_CONFIG_HOME/kpa/config.toml`.
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
+
+    /// Print the daemon's raw JSON response line. `ssh keys` prints text
+    /// without it; the other commands print the JSON line either way,
+    /// until they have a text output of their own. `version` has no JSON
+    /// form and ignores it.
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -77,8 +86,28 @@ enum Command {
         uuid: Uuid,
         field: Field,
     },
+    /// The SSH agent's keys.
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommand,
+    },
     /// Print the version this binary was built from.
     Version,
+}
+
+#[derive(Subcommand)]
+enum SshCommand {
+    /// Show the SSH keys the unlocked databases hold, and the attachments
+    /// skipped and why (`docs/ssh-agent.md` § 6.4).
+    Keys {
+        /// Only this database's keys.
+        #[arg(long)]
+        database: Option<String>,
+        /// Print a `[[database.ssh_key]]` block per key instead, to paste
+        /// into the config.
+        #[arg(long, conflicts_with = "json")]
+        toml: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -131,6 +160,14 @@ fn dispatch(cli: Cli) -> ExitCode {
         Command::Copy { db, uuid, field } => {
             client::run_client(&socket_path, Op::Copy(CopyRequest { db, uuid, field }))
         }
+        Command::Ssh {
+            command: SshCommand::Keys { database, toml },
+        } => client::run(
+            &socket_path,
+            Op::SshKeys(SshKeysRequest { db: database }),
+            if cli.json { Format::Json } else { Format::Text },
+            |report: SshKeysReport| ssh_keys_report::render(&report, toml),
+        ),
         Command::Version => unreachable!("handled above, before socket_path is resolved"),
     }
 }
@@ -278,6 +315,7 @@ mod tests {
         dispatch(Cli {
             socket: Some(PathBuf::from("/nonexistent-kpa-f01-test/sock")),
             config: None,
+            json: false,
             command: Command::Unlock {
                 db: "test".to_string(),
                 tty: false,

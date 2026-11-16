@@ -169,6 +169,8 @@ restarting it costs one re-unlock.
 {"v":1,"op":"list"}                          // db omitted = all unlocked
 {"v":1,"op":"copy","db":"personal","uuid":"…","field":"password"}
 {"v":1,"op":"copy","db":"personal","uuid":"…","field":"custom:Password"}
+{"v":1,"op":"ssh_keys"}                     // db omitted = all unlocked
+{"v":1,"op":"ssh_keys","db":"personal"}     // the SSH keys the vault holds
 ```
 
 An `unlock` that carries `password` unlocks with it and never runs the
@@ -198,6 +200,24 @@ only via the `custom:` prefix (`custom:Password`), never its bare key, so a
 bare request always means the built-in. Any other custom field is addressed
 by its bare key.
 
+`ssh_keys` scans the unlocked databases' attachments for SSH keys
+([`ssh-agent.md`](./ssh-agent.md) § 6.4), the scan behind `kpa ssh keys`.
+Like `list`, a request with no `db` covers every unlocked database, and each
+key and skipped attachment says which database it is in: a key two databases
+hold is reported once for each. `locked` names the databases such a request
+could not scan, and is left out when there are none. A request that names a
+locked database fails with `locked` instead, as it does with `unknown_db` or
+`stale`; it never answers from the key cache. Like `list`, it returns entry
+titles to the caller and keeps them out of the daemon's log.
+
+**CLI output.** The protocol is what the CLI speaks; what it prints is a
+separate choice. A subcommand with a text output (`kpa ssh keys` so far)
+renders the response for a person, with every string the vault supplied
+escaped (T-13). `--json`, a flag every client subcommand takes, prints the
+daemon's response line instead, so a script keeps a stable shape whatever
+text a command grows. The subcommands without a text output yet print the
+response line with or without it.
+
 ### Responses
 
 ```json
@@ -210,6 +230,13 @@ by its bare key.
                              "fields":["username","password","totp","custom:Password"]}]}
 
 {"ok":true,"v":1,"copied":"password","expires_in":30}
+
+{"ok":true,"v":1,"keys":[{"db":"personal","type":"ssh-ed25519",
+                          "fingerprint":"SHA256:…","title":"Deploy",
+                          "attachment":"id_ed25519"}],
+                "skipped":[{"db":"personal","title":"Old","attachment":"id_rsa",
+                            "reason":"PEM format; …"}],
+                "locked":["work"]}
 
 {"ok":false,"v":1,"error":"locked","db":"personal"}
 {"ok":false,"v":1,"error":"unlock_in_progress","db":"personal"}

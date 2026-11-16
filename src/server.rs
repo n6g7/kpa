@@ -43,8 +43,9 @@ use crate::prompt::{
 };
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
-    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, Status, Unlock,
-    UnlockError, UnlockRequest, WireEntry,
+    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshKeys,
+    SshKeysError, SshKeysReport, SshKeysRequest, Status, Unlock, UnlockError, UnlockRequest,
+    WireEntry, WireSkippedKey, WireSshKey,
 };
 use crate::socket;
 use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
@@ -746,6 +747,63 @@ impl List for Server {
     }
 }
 
+impl SshKeys for Server {
+    /// Scans the unlocked databases again, under the mutex: a database
+    /// can't leave it, and the scan parses only the few key attachments a
+    /// vault holds. Like `list`, a request for every database reports a
+    /// stale one by name and fails, and one that names a database fails
+    /// on it if it is locked.
+    fn ssh_keys(&self, request: &SshKeysRequest) -> Result<SshKeysReport, SshKeysError> {
+        let names: Vec<&str> = match &request.db {
+            Some(name) => vec![name.as_str()],
+            None => self
+                .config
+                .databases
+                .iter()
+                .map(|cfg| cfg.name.as_str())
+                .collect(),
+        };
+        if let Some(db) = self.drop_stale(names.iter().copied()).into_iter().next() {
+            return Err(SshKeysError::Stale { db });
+        }
+        let mut dbs = slots(&self.dbs);
+        let mut report = SshKeysReport::default();
+        for name in names {
+            let db = || name.to_string();
+            let slot = dbs
+                .get_mut(name)
+                .ok_or_else(|| SshKeysError::UnknownDb { db: db() })?;
+            let Some(database) = slot.db.as_ref() else {
+                if request.db.is_some() {
+                    return Err(SshKeysError::Locked { db: db() });
+                }
+                report.locked.push(db());
+                continue;
+            };
+            let scan = ssh_agent::keys::scan(database);
+            slot.touch();
+            report
+                .keys
+                .extend(scan.found.into_iter().map(|key| WireSshKey {
+                    db: db(),
+                    key_type: key.public_key.algorithm().to_string(),
+                    fingerprint: key.fingerprint.to_string(),
+                    title: key.entry_title,
+                    attachment: key.attachment_name,
+                }));
+            report
+                .skipped
+                .extend(scan.skipped.into_iter().map(|skipped| WireSkippedKey {
+                    db: db(),
+                    title: skipped.entry_title,
+                    attachment: skipped.attachment_name,
+                    reason: skipped.reason.to_string(),
+                }));
+        }
+        Ok(report)
+    }
+}
+
 impl CopyEntry for Server {
     fn copy(&self, request: &CopyRequest, origin: Origin) -> Result<CopyOutcome, CopyError> {
         let name = request.db.as_str();
@@ -1047,8 +1105,9 @@ pub(crate) fn log_response(response: &Response) {
 
         // Listed above rather than caught by a `_` arm on purpose: adding
         // an op should be a decision about whether it belongs in the log,
-        // not something a wildcard answers silently.
-        Response::Status { .. } | Response::List(_) => {}
+        // not something a wildcard answers silently. `ssh_keys` carries
+        // entry titles, which stay out of the log like `list`'s.
+        Response::Status { .. } | Response::List(_) | Response::SshKeys(_) => {}
     }
 }
 

@@ -138,13 +138,21 @@ cargo run -- list              # every entry in every unlocked database (alias: 
 cargo run -- list personal     # just the one
 cargo run -- lock personal     # lock one
 cargo run -- lock              # lock all of them
+cargo run -- ssh keys          # the SSH keys every unlocked database holds, and
+                                # the attachments skipped (--database <name>
+                                # for one; --toml prints a config block per
+                                # key instead)
 cargo run -- version           # the CLI's build version, and the running daemon's
 ```
 
 Each client subcommand prints the daemon's raw JSON response and exits
-non-zero when `ok` is `false`. The socket defaults to
-`$XDG_RUNTIME_DIR/kpa/sock`; pass `--socket <path>` to both sides to use a
-different one.
+non-zero when `ok` is `false`. `ssh keys` is the exception: it prints text,
+and a refusal as an error on stderr. `--json`, which every client command
+takes, before or after the subcommand, prints the raw JSON response line
+for it too; the commands without a text output yet print it either way,
+and `version`, which has no JSON form, ignores it. The
+socket defaults to `$XDG_RUNTIME_DIR/kpa/sock`; pass `--socket <path>` to
+both sides to use a different one.
 
 `version` is the exception: it prints plain text, not JSON, and always
 exits `0`. It always prints the CLI's own build version as `client: …`,

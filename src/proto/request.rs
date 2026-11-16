@@ -14,6 +14,7 @@ use super::copy::CopyRequest;
 use super::error::{ErrorCode, ErrorFields};
 use super::list::ListRequest;
 use super::lock::LockRequest;
+use super::ssh_keys::SshKeysRequest;
 use super::unlock::UnlockRequest;
 use crate::io::ByteCounter;
 
@@ -42,6 +43,7 @@ pub enum Op {
     Lock(LockRequest),
     List(ListRequest),
     Copy(CopyRequest),
+    SshKeys(SshKeysRequest),
 }
 
 /// Why `decode_request` gave up. Deliberately one bucket for every JSON/shape
@@ -200,6 +202,16 @@ mod tests {
                 json!({"v": 1, "op": "list"}),
             ),
             (
+                Op::SshKeys(SshKeysRequest {
+                    db: Some("personal".to_string()),
+                }),
+                json!({"v": 1, "op": "ssh_keys", "db": "personal"}),
+            ),
+            (
+                Op::SshKeys(SshKeysRequest { db: None }),
+                json!({"v": 1, "op": "ssh_keys"}),
+            ),
+            (
                 Op::Copy(CopyRequest {
                     db: "personal".to_string(),
                     uuid: uuid(),
@@ -261,6 +273,16 @@ mod tests {
             ),
             (r#"{"v":1,"op":"list"}"#, Op::List(ListRequest { db: None })),
             (
+                r#"{"v":1,"op":"ssh_keys","db":"personal"}"#,
+                Op::SshKeys(SshKeysRequest {
+                    db: Some("personal".to_string()),
+                }),
+            ),
+            (
+                r#"{"v":1,"op":"ssh_keys"}"#,
+                Op::SshKeys(SshKeysRequest { db: None }),
+            ),
+            (
                 r#"{"v":1,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"password"}"#,
                 Op::Copy(CopyRequest {
                     db: "personal".to_string(),
@@ -298,6 +320,10 @@ mod tests {
                 db: "personal".to_string(),
                 uuid: uuid(),
                 field: Field::Notes,
+            }),
+            Op::SshKeys(SshKeysRequest { db: None }),
+            Op::SshKeys(SshKeysRequest {
+                db: Some("personal".to_string()),
             }),
         ];
 

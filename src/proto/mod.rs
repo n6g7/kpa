@@ -3,7 +3,7 @@
 //!
 //! One module per op, since an op's payload type and its error type belong
 //! together and nothing outside that op needs either: [`status`],
-//! [`unlock`], [`lock`], [`list`], [`copy`]. [`request`] holds the request
+//! [`unlock`], [`lock`], [`list`], [`copy`], [`ssh_keys`]. [`request`] holds the request
 //! half plus the failures that precede dispatch, and [`error`] the wire
 //! vocabulary all of them share.
 //!
@@ -16,6 +16,7 @@ mod error;
 mod list;
 mod lock;
 mod request;
+mod ssh_keys;
 mod status;
 mod unlock;
 
@@ -24,6 +25,9 @@ pub use error::ErrorCode;
 pub use list::{List, ListError, ListRequest, WireEntry};
 pub use lock::{Lock, LockError, LockRequest};
 pub use request::{DecodeError, Op, ProtocolError, Request, decode_request, encode_request};
+pub use ssh_keys::{
+    SshKeys, SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey,
+};
 pub use status::{DatabaseStatus, Status};
 pub use unlock::{MAX_PASSWORD_LEN, Password, PasswordError, Unlock, UnlockError, UnlockRequest};
 
@@ -41,14 +45,14 @@ pub const VERSION: u32 = 1;
 
 /// Everything a kpa daemon has to be able to do, as one bound. Each op's
 /// trait is defined next to that op's types; this just gathers them, so
-/// `dispatch` takes one bound instead of four and `server::Server` has one
+/// `dispatch` takes one bound instead of one per op and `server::Server` has one
 /// thing to satisfy.
 ///
-/// The blanket impl means implementing the five op traits is all it takes —
+/// The blanket impl means implementing the op traits is all it takes —
 /// there is nothing extra to write.
-pub trait Handler: Status + Unlock + Lock + List + CopyEntry {}
+pub trait Handler: Status + Unlock + Lock + List + CopyEntry + SshKeys {}
 
-impl<T: Status + Unlock + Lock + List + CopyEntry> Handler for T {}
+impl<T: Status + Unlock + Lock + List + CopyEntry + SshKeys> Handler for T {}
 
 /// Turn one decoded request into the response for it.
 ///
@@ -69,6 +73,7 @@ where
         Op::Lock(request) => Response::Lock(handler.lock(request)),
         Op::List(request) => Response::List(handler.list(request)),
         Op::Copy(request) => Response::Copy(handler.copy(request, origin)),
+        Op::SshKeys(request) => Response::SshKeys(handler.ssh_keys(request)),
     }
 }
 
@@ -112,6 +117,8 @@ pub enum Response {
     /// `Ok` names which field was copied and for how long it will stay on
     /// the clipboard — never the value itself (see `copy`'s module doc).
     Copy(Result<CopyOutcome, CopyError>),
+    /// `Ok` carries what the scan of the database found.
+    SshKeys(Result<SshKeysReport, SshKeysError>),
     /// Rejected before the daemon knew which op was even being asked for,
     /// so it belongs to no op's `Result`.
     Protocol(ProtocolError),
@@ -155,6 +162,15 @@ impl Serialize for Response {
                 map.serialize_entry("expires_in", &outcome.expires_in)?;
             }
             Response::Copy(Err(err)) => serialize_error(&mut map, &err.fields())?,
+            Response::SshKeys(Ok(report)) => {
+                map.serialize_entry("ok", &true)?;
+                map.serialize_entry("keys", &report.keys)?;
+                map.serialize_entry("skipped", &report.skipped)?;
+                if !report.locked.is_empty() {
+                    map.serialize_entry("locked", &report.locked)?;
+                }
+            }
+            Response::SshKeys(Err(err)) => serialize_error(&mut map, &err.fields())?,
             Response::Protocol(err) => serialize_error(&mut map, &err.fields())?,
         }
         map.end()
@@ -243,6 +259,62 @@ mod tests {
             serde_json::to_value(&copy).expect("copy should serialize"),
             json!({"v": 1, "ok": true, "copied": "password", "expires_in": 30})
         );
+
+        // A key without a title leaves the field out, like `list`'s.
+        let ssh_keys = Response::SshKeys(Ok(SshKeysReport {
+            keys: vec![
+                WireSshKey {
+                    db: "personal".to_string(),
+                    key_type: "ssh-ed25519".to_string(),
+                    fingerprint: "SHA256:abc".to_string(),
+                    title: Some("Deploy".to_string()),
+                    attachment: "id_ed25519".to_string(),
+                },
+                WireSshKey {
+                    db: "work".to_string(),
+                    key_type: "ssh-rsa".to_string(),
+                    fingerprint: "SHA256:def".to_string(),
+                    title: None,
+                    attachment: "id_rsa".to_string(),
+                },
+            ],
+            skipped: vec![WireSkippedKey {
+                db: "personal".to_string(),
+                title: Some("Old".to_string()),
+                attachment: "id_old".to_string(),
+                reason: "protected by a passphrase".to_string(),
+            }],
+            locked: vec!["archive".to_string()],
+        }));
+        assert_eq!(
+            serde_json::to_value(&ssh_keys).expect("ssh_keys should serialize"),
+            json!({
+                "v": 1,
+                "ok": true,
+                "keys": [
+                    {
+                        "db": "personal",
+                        "type": "ssh-ed25519",
+                        "fingerprint": "SHA256:abc",
+                        "title": "Deploy",
+                        "attachment": "id_ed25519",
+                    },
+                    {
+                        "db": "work",
+                        "type": "ssh-rsa",
+                        "fingerprint": "SHA256:def",
+                        "attachment": "id_rsa",
+                    },
+                ],
+                "skipped": [{
+                    "db": "personal",
+                    "title": "Old",
+                    "attachment": "id_old",
+                    "reason": "protected by a passphrase",
+                }],
+                "locked": ["archive"],
+            })
+        );
     }
 
     /// The reason `Response` is `Serialize`-only: these two are different
@@ -320,7 +392,7 @@ mod tests {
         let owned = || db.to_string();
 
         // (response, expected code, expected `db`, expected `detail`)
-        let cases: [(Response, &str, Option<&str>, Option<&str>); 23] = [
+        let cases: [(Response, &str, Option<&str>, Option<&str>); 26] = [
             (
                 Response::Unlock(Err(UnlockError::InProgress { db: owned() })),
                 "unlock_in_progress",
@@ -421,6 +493,24 @@ mod tests {
                 "malformed_request",
                 None,
                 None,
+            ),
+            (
+                Response::SshKeys(Err(SshKeysError::UnknownDb { db: owned() })),
+                "unknown_db",
+                Some(db),
+                None,
+            ),
+            (
+                Response::SshKeys(Err(SshKeysError::Locked { db: owned() })),
+                "locked",
+                Some(db),
+                None,
+            ),
+            (
+                Response::SshKeys(Err(SshKeysError::Stale { db: owned() })),
+                "stale",
+                Some(db),
+                Some("database changed on disk"),
             ),
             (
                 Response::Copy(Err(CopyError::UnknownDb { db: owned() })),

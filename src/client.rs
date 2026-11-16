@@ -1,19 +1,24 @@
 //! Talking to the daemon as a client: one request per call, over the
-//! socket, with the daemon's raw JSON response line printed verbatim
-//! (`docs/design.md`'s "hand-debuggable with socat" argument, applied to
-//! the CLI itself rather than just `socat`). `unlock` is the one exception
-//! that can send two: a plain request first, then — on the daemon's
-//! `no_display` — the master password read from this process's own
-//! controlling terminal (`docs/headless.md` § 4).
+//! socket, and showing the answer. A command prints the daemon's raw JSON
+//! response line verbatim (`docs/design.md`'s "hand-debuggable with socat"
+//! argument, applied to the CLI itself rather than just `socat`), or, once
+//! it has a text view, that view of it unless `--json` asks for the line
+//! ([`run`]). `unlock` is the one command that can send two requests: a
+//! plain one first, then — on the daemon's `no_display` — the master
+//! password read from this process's own controlling terminal
+//! (`docs/headless.md` § 4).
 
+use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use kpa::output::{print_escaped, report_error};
-use kpa::proto::{self, Op, Password, Request, Response, UnlockError, UnlockRequest};
+use kpa::proto::{self, ErrorCode, Op, Password, Request, Response, UnlockError, UnlockRequest};
 use kpa::socket;
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use super::tty::{self, TtyReadError};
 
@@ -25,17 +30,124 @@ pub(super) fn run_client(socket_path: &Path, op: Op) -> ExitCode {
 
     match send_request(socket_path, &request) {
         Ok(line) => print_and_exit(&line),
-        // Only a failed connect means the daemon may not be running. Once
-        // connected, a missing reply means it hit a problem with this
-        // request, and suggesting it's down would send someone looking in
-        // the wrong place.
-        Err(err @ ClientError::Connect(..)) => {
+        Err(err) => report_client_error(err),
+    }
+}
+
+/// Reports a failed round trip. Only a failed connect means the daemon
+/// may not be running. Once connected, a missing response means it hit a
+/// problem with this request, and suggesting it's down would send someone
+/// looking in the wrong place.
+fn report_client_error(err: ClientError) -> ExitCode {
+    match err {
+        ClientError::Connect(..) => {
             report_error(format_args!("{err} (is `kpa serve` running?)"));
+        }
+        err => report_error(err),
+    }
+    ExitCode::FAILURE
+}
+
+/// How a command's answer is shown, from `--json`.
+#[derive(Clone, Copy)]
+pub(super) enum Format {
+    /// The daemon's response line, as it came.
+    Json,
+    /// The command's own view, and a failure as a sentence.
+    Text,
+}
+
+/// Sends `op` and shows the answer, for a command with a text view
+/// (`run_client` is for one without). In text mode `show` turns the typed
+/// answer into the text to print, which goes to the terminal escaped
+/// (`output::print_escaped`) whatever it holds. Either way the exit status
+/// follows the answer's `ok`.
+pub(super) fn run<T: DeserializeOwned>(
+    socket_path: &Path,
+    op: Op,
+    format: Format,
+    show: impl FnOnce(T) -> String,
+) -> ExitCode {
+    let request = Request {
+        v: proto::VERSION,
+        op,
+    };
+    let line = match send_request(socket_path, &request) {
+        Ok(line) => line,
+        Err(err) => return report_client_error(err),
+    };
+    if let Format::Json = format {
+        return print_and_exit(&line);
+    }
+    match parse_response(&line) {
+        Ok(typed) => {
+            print_escaped(&show(typed));
+            ExitCode::SUCCESS
+        }
+        Err(sentence) => {
+            report_error(sentence);
             ExitCode::FAILURE
         }
-        Err(err) => {
-            report_error(err);
-            ExitCode::FAILURE
+    }
+}
+
+/// What a response line is: the daemon refusing the request, or the answer
+/// a command asked for. `untagged` means no field names the variant: serde
+/// tries them in order and takes the first the line fits, so the variants
+/// are tried in the order written here. `Failure` goes first because it
+/// requires `error`, which a failure line carries and an answer never does,
+/// so a failure can't be taken for an answer whose fields are all optional.
+/// A line that fits neither is not a response this build understands.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ResponseLine<T> {
+    Failure(Failure),
+    Success(T),
+}
+
+/// The fields of a failure response (`docs/design.md` § Protocol).
+#[derive(Deserialize)]
+struct Failure {
+    error: ErrorCode,
+    db: Option<String>,
+    detail: Option<String>,
+}
+
+/// The typed answer in `line`, or the sentence for why there is none.
+fn parse_response<T: DeserializeOwned>(line: &str) -> Result<T, String> {
+    match serde_json::from_str::<ResponseLine<T>>(line) {
+        Ok(ResponseLine::Success(answer)) => Ok(answer),
+        Ok(ResponseLine::Failure(failure)) => Err(failure.to_string()),
+        Err(_) => Err("the daemon's answer was not one this kpa understands".to_string()),
+    }
+}
+
+/// A failure as a sentence, with what to do about it where there is
+/// something to do. The code's wire spelling stands in for one without a
+/// sentence of its own.
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let db = self.db.as_deref().unwrap_or("?");
+        match self.error {
+            ErrorCode::UnknownDb => write!(f, "no database named {db:?} is configured"),
+            ErrorCode::Locked => {
+                write!(
+                    f,
+                    "database {db:?} is locked; run `kpa unlock {db}` and try again"
+                )
+            }
+            ErrorCode::Stale => write!(
+                f,
+                "database {db:?} changed on disk and was locked; unlock it again"
+            ),
+            code => {
+                let code = serde_json::to_value(code).ok();
+                let code = code.as_ref().and_then(|code| code.as_str()).unwrap_or("?");
+                match &self.detail {
+                    Some(detail) => write!(f, "the daemon refused the request ({code}): {detail}"),
+                    None => write!(f, "the daemon refused the request ({code})"),
+                }
+            }
         }
     }
 }
@@ -118,7 +230,7 @@ pub(super) fn run_version(socket_path: Option<PathBuf>) -> ExitCode {
 /// rather than `Box<dyn Error>` so `?` stays usable while keeping the
 /// "why" in each variant.
 #[derive(Debug, thiserror::Error)]
-enum ClientError {
+pub(super) enum ClientError {
     #[error("connecting to {0}: {1}")]
     Connect(PathBuf, std::io::Error),
     #[error("encoding request: {0}")]
@@ -158,7 +270,7 @@ fn check_peer_uid(
 /// Sends one request and returns the daemon's raw response line, newline
 /// included. Deliberately not decoded into a typed `Response` — see the
 /// comment in `run_client` on why that type has no generic `Deserialize`.
-fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
+pub(super) fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|err| ClientError::Connect(socket_path.to_path_buf(), err))?;
     check_peer_uid(socket_path, &stream, rustix::process::geteuid().as_raw())?;
@@ -282,7 +394,11 @@ fn unlock_from_terminal(
 mod tests {
     use std::path::Path;
 
-    use super::{ClientError, check_peer_uid, is_no_display, synthetic_no_display_line};
+    use serde::Deserialize;
+
+    use super::{
+        ClientError, check_peer_uid, is_no_display, parse_response, synthetic_no_display_line,
+    };
 
     /// `UnixStream::pair()` gives both ends our own real uid, so the
     /// mismatch is simulated the same way `server.rs`'s
@@ -331,6 +447,73 @@ mod tests {
         assert_eq!(
             line,
             "{\"v\":1,\"ok\":false,\"error\":\"no_display\",\"detail\":\"no display to prompt on\"}\n"
+        );
+    }
+
+    /// An answer whose every field is optional, which any JSON object fits.
+    #[derive(Deserialize, Debug)]
+    struct Anything {
+        #[serde(default)]
+        #[allow(dead_code)]
+        db: Option<String>,
+    }
+
+    fn failed(line: &str) -> String {
+        parse_response::<Anything>(line).expect_err("a failure")
+    }
+
+    #[test]
+    fn a_failure_is_never_taken_for_an_answer() {
+        assert_eq!(
+            failed(r#"{"v":1,"ok":false,"error":"locked","db":"personal"}"#),
+            "database \"personal\" is locked; run `kpa unlock personal` and try again"
+        );
+        assert!(parse_response::<Anything>(r#"{"v":1,"ok":true}"#).is_ok());
+    }
+
+    #[test]
+    fn each_failure_is_a_sentence() {
+        assert_eq!(
+            failed(r#"{"v":1,"ok":false,"error":"unknown_db","db":"x"}"#),
+            "no database named \"x\" is configured"
+        );
+        assert_eq!(
+            failed(
+                r#"{"v":1,"ok":false,"error":"stale","db":"x","detail":"database changed on disk"}"#
+            ),
+            "database \"x\" changed on disk and was locked; unlock it again"
+        );
+        assert_eq!(
+            failed(r#"{"v":1,"ok":false,"error":"prompt_cancelled"}"#),
+            "the daemon refused the request (prompt_cancelled)"
+        );
+        assert_eq!(
+            failed(r#"{"v":1,"ok":false,"error":"version_mismatch","detail":"client sent v2"}"#),
+            "the daemon refused the request (version_mismatch): client sent v2"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_line_is_not_an_answer() {
+        assert_eq!(
+            failed("not json"),
+            "the daemon's answer was not one this kpa understands"
+        );
+    }
+
+    /// A success whose fields aren't the ones the command asked for fits
+    /// neither variant.
+    #[test]
+    fn a_line_of_the_wrong_shape_is_not_an_answer() {
+        #[derive(Deserialize, Debug)]
+        struct Databases {
+            #[allow(dead_code)]
+            databases: Vec<String>,
+        }
+
+        assert_eq!(
+            parse_response::<Databases>(r#"{"v":1,"ok":true,"entries":[]}"#).expect_err("shape"),
+            "the daemon's answer was not one this kpa understands"
         );
     }
 }
