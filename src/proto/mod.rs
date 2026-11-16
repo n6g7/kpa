@@ -166,6 +166,9 @@ impl Serialize for Response {
                 map.serialize_entry("ok", &true)?;
                 map.serialize_entry("keys", &report.keys)?;
                 map.serialize_entry("skipped", &report.skipped)?;
+                if !report.locked.is_empty() {
+                    map.serialize_entry("locked", &report.locked)?;
+                }
             }
             Response::SshKeys(Err(err)) => serialize_error(&mut map, &err.fields())?,
             Response::Protocol(err) => serialize_error(&mut map, &err.fields())?,
@@ -261,12 +264,14 @@ mod tests {
         let ssh_keys = Response::SshKeys(Ok(SshKeysReport {
             keys: vec![
                 WireSshKey {
+                    db: "personal".to_string(),
                     key_type: "ssh-ed25519".to_string(),
                     fingerprint: "SHA256:abc".to_string(),
                     title: Some("Deploy".to_string()),
                     attachment: "id_ed25519".to_string(),
                 },
                 WireSshKey {
+                    db: "work".to_string(),
                     key_type: "ssh-rsa".to_string(),
                     fingerprint: "SHA256:def".to_string(),
                     title: None,
@@ -274,10 +279,12 @@ mod tests {
                 },
             ],
             skipped: vec![WireSkippedKey {
+                db: "personal".to_string(),
                 title: Some("Old".to_string()),
                 attachment: "id_old".to_string(),
                 reason: "protected by a passphrase".to_string(),
             }],
+            locked: vec!["archive".to_string()],
         }));
         assert_eq!(
             serde_json::to_value(&ssh_keys).expect("ssh_keys should serialize"),
@@ -286,18 +293,26 @@ mod tests {
                 "ok": true,
                 "keys": [
                     {
+                        "db": "personal",
                         "type": "ssh-ed25519",
                         "fingerprint": "SHA256:abc",
                         "title": "Deploy",
                         "attachment": "id_ed25519",
                     },
-                    {"type": "ssh-rsa", "fingerprint": "SHA256:def", "attachment": "id_rsa"},
+                    {
+                        "db": "work",
+                        "type": "ssh-rsa",
+                        "fingerprint": "SHA256:def",
+                        "attachment": "id_rsa",
+                    },
                 ],
                 "skipped": [{
+                    "db": "personal",
                     "title": "Old",
                     "attachment": "id_old",
                     "reason": "protected by a passphrase",
                 }],
+                "locked": ["archive"],
             })
         );
     }

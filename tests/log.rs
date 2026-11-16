@@ -136,7 +136,7 @@ fn the_log_never_carries_what_ssh_keys_returns() {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_kpa"))
             .arg("--socket")
             .arg(&daemon.socket)
-            .args(["ssh", "keys", "personal"])
+            .args(["ssh", "keys"])
             .output()
             .expect("failed to spawn kpa");
         assert!(output.status.success());

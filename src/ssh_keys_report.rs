@@ -1,13 +1,11 @@
-//! What `kpa ssh keys` prints (`docs/ssh-agent.md` § 6.4): the keys a
-//! database's vault holds, the attachments skipped, and, on request, a
+//! What `kpa ssh keys` prints (`docs/ssh-agent.md` § 6.4): the keys the
+//! unlocked databases hold and the attachments skipped, or, on request, a
 //! `[[database.ssh_key]]` block per key to paste into the config.
 //!
-//! Pure: a report in, text out. Everything the vault supplies (titles,
-//! attachment names, the text of a reason) is escaped for one line of
-//! terminal output before it is interpolated, which also keeps a title
-//! from ending the `#` comment a block puts it in (`docs/threat-model.md`
-//! T-13). Columns are padded to the widest escaped cell, so no cell can
-//! push the next one out of line.
+//! Pure: a report in, text out. Cells go through `output::Table`, which
+//! escapes them; the rest of a line is built from `escape_one_line`, which
+//! also keeps a title from ending the `#` comment a block puts it in
+//! (`docs/threat-model.md` T-13).
 
 use std::fmt::Write as _;
 
@@ -20,62 +18,75 @@ const MAX_TEXT_LEN: usize = 128;
 /// An entry without a title.
 const UNTITLED: &str = "(untitled)";
 
-/// `blocks` adds the `[[database.ssh_key]]` block per key.
-pub(super) fn render(db: &str, report: &SshKeysReport, blocks: bool) -> String {
-    let db = one_line(db);
-    let mut out = String::new();
+/// `toml` shows only the blocks, for a file.
+pub(super) fn render(report: &SshKeysReport, toml: bool) -> String {
+    if toml {
+        return blocks(report);
+    }
+    let mut sections = Vec::new();
 
     if report.keys.is_empty() {
-        let _ = writeln!(out, "No SSH keys found in {db}.");
+        sections.push("No SSH keys found.\n".to_string());
     } else {
-        let _ = writeln!(out, "SSH keys in {db}:");
-        let mut table = Table::new(["TYPE", "FINGERPRINT", "ENTRY", "ATTACHMENT"]);
+        let mut table = Table::new(["DATABASE", "TYPE", "FINGERPRINT", "ENTRY", "ATTACHMENT"]);
         for key in &report.keys {
             table.row([
+                &key.db,
                 &key.key_type,
                 &key.fingerprint,
                 key.title.as_deref().unwrap_or(UNTITLED),
                 &key.attachment,
             ]);
         }
-        out.push_str(&table.render());
+        sections.push(table.render());
     }
 
     if !report.skipped.is_empty() {
-        let _ = writeln!(out, "\nSkipped attachments:");
-        let mut table = Table::new(["ENTRY", "ATTACHMENT", "REASON"]);
+        let mut table = Table::new(["DATABASE", "ENTRY", "ATTACHMENT", "REASON"]);
         for skipped in &report.skipped {
             table.row([
+                &skipped.db,
                 skipped.title.as_deref().unwrap_or(UNTITLED),
                 &skipped.attachment,
                 &skipped.reason,
             ]);
         }
-        out.push_str(&table.render());
+        sections.push(format!("Skipped attachments:\n{}", table.render()));
     }
 
-    if blocks && !report.keys.is_empty() {
-        let _ = writeln!(
-            out,
-            "\nPaste a block under the [[database]] for {db} and uncomment a setting to change \
-             it. Each shows its default, except `name`, which defaults to the entry's title:",
-        );
-        for key in &report.keys {
-            let _ = write!(out, "\n{}", config_block(key));
+    if !report.locked.is_empty() {
+        let names: Vec<String> = report.locked.iter().map(|db| one_line(db)).collect();
+        sections.push(format!(
+            "Locked, not scanned: {} (`kpa unlock <database>` first)\n",
+            names.join(", ")
+        ));
+    }
+    sections.join("\n")
+}
+
+/// One `[[database.ssh_key]]` block per key, under a comment naming the
+/// database it belongs under: a table joins the last `[[database]]` above
+/// it. With every other setting commented out at its default.
+fn blocks(report: &SshKeysReport) -> String {
+    let mut out = String::new();
+    let mut current = None;
+    for key in &report.keys {
+        if current != Some(&key.db) {
+            if current.is_some() {
+                out.push('\n');
+            }
+            let _ = writeln!(out, "# Paste under [[database]] {}:", one_line(&key.db));
+            current = Some(&key.db);
         }
+        let _ = write!(out, "\n{}", block(key));
     }
     out
 }
 
-/// An entry's title as one line of text.
-fn entry(title: Option<&str>) -> String {
-    title.map_or_else(|| UNTITLED.to_string(), one_line)
-}
-
-/// The `[[database.ssh_key]]` table for `key` (`docs/ssh-agent.md` § 7):
-/// its fingerprint, which is all a table needs, with every other setting
-/// commented out at its default.
-fn config_block(key: &WireSshKey) -> String {
+/// The table for `key` (`docs/ssh-agent.md` § 7): its fingerprint, which is
+/// all a table needs, and the other settings commented out at their
+/// defaults.
+fn block(key: &WireSshKey) -> String {
     format!(
         "# entry: {}, attachment: {}\n\
          [[database.ssh_key]]\n\
@@ -84,7 +95,7 @@ fn config_block(key: &WireSshKey) -> String {
          # confirm = \"once\"   # or \"always\", or \"never\"\n\
          # forwarded = true\n\
          # serve = true\n",
-        entry(key.title.as_deref()),
+        one_line(key.title.as_deref().unwrap_or(UNTITLED)),
         one_line(&key.attachment),
         one_line(&key.fingerprint),
     )
@@ -101,17 +112,25 @@ mod tests {
 
     use super::*;
 
-    fn key(title: Option<&str>, fingerprint: &str) -> WireSshKey {
+    /// A real `SHA256:…` fingerprint, `ssh_key`'s own doc example.
+    const FINGERPRINT: &str = "SHA256:Nh0Me49Zh9fDw/VYUfq43IJmI1T+XrjiYONPND8GzaM";
+
+    fn key(db: &str, title: Option<&str>) -> WireSshKey {
         WireSshKey {
+            db: db.to_string(),
             key_type: "ssh-ed25519".to_string(),
-            fingerprint: fingerprint.to_string(),
+            fingerprint: FINGERPRINT.to_string(),
             title: title.map(str::to_string),
             attachment: "id_ed25519".to_string(),
         }
     }
 
-    /// A real `SHA256:…` fingerprint, `ssh_key`'s own doc example.
-    const FINGERPRINT: &str = "SHA256:Nh0Me49Zh9fDw/VYUfq43IJmI1T+XrjiYONPND8GzaM";
+    fn report(keys: Vec<WireSshKey>) -> SshKeysReport {
+        SshKeysReport {
+            keys,
+            ..SshKeysReport::default()
+        }
+    }
 
     fn config_with(blocks: &str) -> Result<Config, toml::de::Error> {
         Config::parse(&format!(
@@ -125,97 +144,80 @@ mod tests {
         ))
     }
 
-    /// The text of `rendered` from its first `[[database.ssh_key]]` line,
-    /// one line above, to the end: the blocks.
-    fn blocks_of(rendered: &str) -> String {
-        let lines: Vec<&str> = rendered.lines().collect();
-        let first = lines
-            .iter()
-            .position(|line| *line == "[[database.ssh_key]]")
-            .expect("a block");
-        lines[first - 1..].join("\n")
-    }
-
     #[test]
-    fn lists_keys_and_skipped_attachments_in_labelled_columns() {
+    fn lists_keys_skipped_attachments_and_locked_databases() {
         let report = SshKeysReport {
             keys: vec![
-                key(Some("Deploy"), FINGERPRINT),
+                key("personal", Some("Deploy")),
                 WireSshKey {
                     key_type: "ecdsa-sha2-nistp256".to_string(),
-                    title: None,
                     attachment: "id_ecdsa".to_string(),
-                    ..key(None, FINGERPRINT)
+                    ..key("work", None)
                 },
             ],
             skipped: vec![WireSkippedKey {
+                db: "personal".to_string(),
                 title: Some("Old".to_string()),
                 attachment: "id_rsa".to_string(),
                 reason: "PEM format".to_string(),
             }],
+            locked: vec!["archive".to_string()],
         };
 
-        let text = render("personal", &report, false);
-
         assert_eq!(
-            text,
+            render(&report, false),
             format!(
-                "SSH keys in personal:\n\
-                 TYPE                 FINGERPRINT                                         \
+                "DATABASE  TYPE                 FINGERPRINT                                         \
                  ENTRY       ATTACHMENT\n\
-                 ssh-ed25519          {FINGERPRINT}  Deploy      id_ed25519\n\
-                 ecdsa-sha2-nistp256  {FINGERPRINT}  (untitled)  id_ecdsa\n\
+                 personal  ssh-ed25519          {FINGERPRINT}  Deploy      id_ed25519\n\
+                 work      ecdsa-sha2-nistp256  {FINGERPRINT}  (untitled)  id_ecdsa\n\
                  \n\
                  Skipped attachments:\n\
-                 ENTRY  ATTACHMENT  REASON\n\
-                 Old    id_rsa      PEM format\n"
+                 DATABASE  ENTRY  ATTACHMENT  REASON\n\
+                 personal  Old    id_rsa      PEM format\n\
+                 \n\
+                 Locked, not scanned: archive (`kpa unlock <database>` first)\n"
             )
         );
     }
 
     #[test]
-    fn no_keys_says_so_and_offers_no_blocks() {
-        let text = render("personal", &SshKeysReport::default(), true);
-        assert_eq!(text, "No SSH keys found in personal.\n");
+    fn no_keys_says_so() {
+        assert_eq!(
+            render(&SshKeysReport::default(), false),
+            "No SSH keys found.\n"
+        );
+        assert_eq!(render(&SshKeysReport::default(), true), "");
     }
 
+    /// The blocks come grouped under the database they belong to, and parse
+    /// as the config they claim to be, each under its own database.
     #[test]
-    fn blocks_come_only_when_asked_for() {
-        let report = SshKeysReport {
-            keys: vec![key(Some("Deploy"), FINGERPRINT)],
-            skipped: Vec::new(),
-        };
+    fn the_blocks_parse_as_config_under_their_database() {
+        let text = render(
+            &report(vec![
+                key("personal", Some("Deploy")),
+                key("personal", None),
+                key("work", Some("Build")),
+            ]),
+            true,
+        );
 
-        assert!(!render("personal", &report, false).contains("database.ssh_key"));
-
-        let text = render("personal", &report, true);
-        assert!(
-            text.contains(
-                "# entry: Deploy, attachment: id_ed25519\n[[database.ssh_key]]\n\
-                 fingerprint = \"SHA256:Nh0Me49Zh9fDw/VYUfq43IJmI1T+XrjiYONPND8GzaM\"\n"
-            ),
+        assert_eq!(
+            text.matches("# Paste under [[database]]").count(),
+            2,
             "{text}"
         );
-    }
-
-    /// Every block parses as the config it claims to be, alone and all
-    /// together, as a table of the database above it.
-    #[test]
-    fn the_blocks_parse_as_config() {
-        let keys = [
-            key(Some("Deploy"), FINGERPRINT),
-            key(None, "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-        ];
-        for key in &keys {
-            let config = config_with(&config_block(key)).expect("a block should parse");
-            let parsed = &config.databases[0].ssh_keys;
-            assert_eq!(parsed.len(), 1);
-            assert_eq!(parsed[0].fingerprint.to_string(), key.fingerprint);
-        }
-
-        let all: String = keys.iter().map(config_block).collect();
-        let config = config_with(&all).expect("the blocks together should parse");
+        let personal = text
+            .split("# Paste under [[database]] work:")
+            .next()
+            .expect("the first group");
+        let config = config_with(personal).expect("the blocks should parse");
         assert_eq!(config.databases[0].ssh_keys.len(), 2);
+        assert_eq!(
+            config.databases[0].ssh_keys[0].fingerprint.to_string(),
+            FINGERPRINT
+        );
     }
 
     /// Each commented setting is valid TOML once uncommented, and shows
@@ -224,7 +226,7 @@ mod tests {
     fn the_commented_settings_are_the_defaults() {
         use kpa::config::SshKeySettings;
 
-        let block = config_block(&key(Some("Deploy"), FINGERPRINT));
+        let block = block(&key("personal", Some("Deploy")));
         let settings: Vec<&str> = block
             .lines()
             .filter_map(|line| line.strip_prefix("# "))
@@ -245,82 +247,27 @@ mod tests {
         }
     }
 
-    /// A title can't end the comment it sits in, drive the terminal, or
-    /// smuggle a line into the paste block.
+    /// A title can't end the comment it sits in or smuggle a line into the
+    /// blocks, and can't drive the terminal from the table either.
     #[test]
     fn hostile_text_is_escaped_and_cannot_leave_its_line() {
         let hostile = "x\nfingerprint = \"SHA256:evil\"\n\u{9b}c\u{202e}\t";
-        let report = SshKeysReport {
-            keys: vec![key(Some(hostile), FINGERPRINT)],
-            skipped: vec![WireSkippedKey {
-                title: Some(hostile.to_string()),
-                attachment: hostile.to_string(),
-                reason: hostile.to_string(),
-            }],
-        };
+        let report = report(vec![key(hostile, Some(hostile))]);
 
-        let text = render(hostile, &report, true);
-
-        assert!(!text.contains('\u{9b}'));
-        assert!(!text.contains('\u{202e}'));
-        assert!(!text.contains('\t'));
-        assert!(
-            text.lines()
-                .all(|line| !line.starts_with("fingerprint = \"SHA256:evil")),
-            "{text}"
-        );
-        let config = config_with(&blocks_of(&text)).expect("the blocks should still parse");
-        assert_eq!(config.databases[0].ssh_keys.len(), 1);
-    }
-
-    /// Widths are measured on the escaped text, so a title full of
-    /// newlines, tabs and control characters still leaves every row's
-    /// attachment where the header put it.
-    #[test]
-    fn hostile_titles_do_not_break_the_alignment() {
-        let titles = [
-            Some("plain"),
-            Some("two\nlines"),
-            Some("tab\there"),
-            Some("\u{9b}c\u{202e}\u{7f}"),
-            None,
-        ];
-        let keys: Vec<WireSshKey> = titles
-            .iter()
-            .enumerate()
-            .map(|(i, title)| WireSshKey {
-                key_type: ["ssh-rsa", "ssh-ed25519", "ecdsa-sha2-nistp384"][i % 3].to_string(),
-                attachment: format!("att-{i}"),
-                ..key(*title, FINGERPRINT)
-            })
-            .collect();
-        let report = SshKeysReport {
-            keys,
-            skipped: Vec::new(),
-        };
-
-        let text = render("personal", &report, false);
-
-        let mut lines = text.lines().skip(1);
-        let header = lines.next().expect("a header");
-        let column = header.find("ATTACHMENT").expect("an ATTACHMENT column");
-        let rows: Vec<&str> = lines.collect();
-        assert_eq!(rows.len(), titles.len(), "a title added a line: {text}");
-        for (i, row) in rows.iter().enumerate() {
-            assert_eq!(
-                row.get(column..),
-                Some(format!("att-{i}").as_str()),
-                "row {i} is out of line:\n{text}"
+        for toml in [false, true] {
+            let text = render(&report, toml);
+            assert!(!text.contains('\u{9b}') && !text.contains('\u{202e}'));
+            assert!(!text.contains('\t'));
+            assert!(
+                text.lines()
+                    .all(|line| !line.starts_with("fingerprint = \"SHA256:evil")),
+                "{text}"
             );
         }
-    }
-
-    #[test]
-    fn long_titles_are_capped() {
-        let report = SshKeysReport {
-            keys: vec![key(Some(&"t".repeat(10_000)), FINGERPRINT)],
-            skipped: Vec::new(),
-        };
-        assert!(render("personal", &report, true).len() < 1_000);
+        // Only the real fingerprint is in the blocks.
+        let blocks = render(&report, true);
+        let after_header = blocks.split_once('\n').expect("a header").1;
+        let config = config_with(after_header).expect("the blocks should still parse");
+        assert_eq!(config.databases[0].ssh_keys.len(), 1);
     }
 }

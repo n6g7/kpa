@@ -1,6 +1,6 @@
-//! `ssh_keys`: what a database's vault holds in the way of SSH keys
-//! (`docs/ssh-agent.md` § 6.4), for `kpa ssh keys`. A scan of an unlocked
-//! database, so like `list` it can only fail on *which* database was asked
+//! `ssh_keys`: what the unlocked databases hold in the way of SSH keys
+//! (`docs/ssh-agent.md` § 6.4), for `kpa ssh keys`. A scan of unlocked
+//! databases, so like `list` it can only fail on *which* database was asked
 //! for.
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,11 @@ use super::error::{ErrorCode, ErrorFields};
 /// What `{"op":"ssh_keys", ...}` carries; `Op::SshKeys` wraps it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SshKeysRequest {
-    pub db: String,
+    /// `None` covers every unlocked database, listing the locked ones in
+    /// the report rather than failing on them, as `list` skips them.
+    /// Omitted from the wire rather than sent as `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
 }
 
 /// What the scan found: the keys the agent can serve and the attachments
@@ -19,13 +23,21 @@ pub struct SshKeysRequest {
 /// (`output::escape_one_line`), and never the daemon's log.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SshKeysReport {
+    /// In config order of the databases, then entry order.
     pub keys: Vec<WireSshKey>,
     pub skipped: Vec<WireSkippedKey>,
+    /// Configured databases a request for all of them could not scan.
+    /// Omitted when empty, and always for a request that named one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locked: Vec<String>,
 }
 
 /// One key found in an attachment.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WireSshKey {
+    /// The database it was found in. A key held by two databases is
+    /// reported once for each.
+    pub db: String,
     /// The key type as `ssh-add -l` shows it, such as `ssh-ed25519`.
     #[serde(rename = "type")]
     pub key_type: String,
@@ -40,6 +52,7 @@ pub struct WireSshKey {
 /// One attachment that looked like a private key and was not read as one.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WireSkippedKey {
+    pub db: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub attachment: String,
@@ -54,7 +67,8 @@ pub enum SshKeysError {
         db: String,
     },
     /// A locked database has nothing to scan. The request never falls back
-    /// to the key cache: it exists to show what the vault holds now.
+    /// to the key cache: it exists to show what the vault holds now. Only
+    /// a request that named the database fails on it.
     Locked {
         db: String,
     },

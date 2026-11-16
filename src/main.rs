@@ -98,14 +98,16 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SshCommand {
-    /// Show the SSH keys an unlocked database holds, and the attachments
+    /// Show the SSH keys the unlocked databases hold, and the attachments
     /// skipped and why (`docs/ssh-agent.md` § 6.4).
     Keys {
-        database: String,
-        /// Also print a `[[database.ssh_key]]` block per key, to paste into
-        /// the config.
+        /// Only this database's keys.
+        #[arg(long)]
+        database: Option<String>,
+        /// Print a `[[database.ssh_key]]` block per key instead, to paste
+        /// into the config.
         #[arg(long, conflicts_with = "json")]
-        blocks: bool,
+        toml: bool,
     },
 }
 
@@ -160,14 +162,12 @@ fn dispatch(cli: Cli) -> ExitCode {
             client::run_client(&socket_path, Op::Copy(CopyRequest { db, uuid, field }))
         }
         Command::Ssh {
-            command: SshCommand::Keys { database, blocks },
+            command: SshCommand::Keys { database, toml },
         } => reply::run(
             &socket_path,
-            Op::SshKeys(SshKeysRequest {
-                db: database.clone(),
-            }),
+            Op::SshKeys(SshKeysRequest { db: database }),
             if cli.json { Format::Json } else { Format::Text },
-            |report: SshKeysReport| ssh_keys_report::render(&database, &report, blocks),
+            |report: SshKeysReport| ssh_keys_report::render(&report, toml),
         ),
         Command::Version => unreachable!("handled above, before socket_path is resolved"),
     }

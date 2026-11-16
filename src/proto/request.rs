@@ -203,9 +203,13 @@ mod tests {
             ),
             (
                 Op::SshKeys(SshKeysRequest {
-                    db: "personal".to_string(),
+                    db: Some("personal".to_string()),
                 }),
                 json!({"v": 1, "op": "ssh_keys", "db": "personal"}),
+            ),
+            (
+                Op::SshKeys(SshKeysRequest { db: None }),
+                json!({"v": 1, "op": "ssh_keys"}),
             ),
             (
                 Op::Copy(CopyRequest {
@@ -271,8 +275,12 @@ mod tests {
             (
                 r#"{"v":1,"op":"ssh_keys","db":"personal"}"#,
                 Op::SshKeys(SshKeysRequest {
-                    db: "personal".to_string(),
+                    db: Some("personal".to_string()),
                 }),
+            ),
+            (
+                r#"{"v":1,"op":"ssh_keys"}"#,
+                Op::SshKeys(SshKeysRequest { db: None }),
             ),
             (
                 r#"{"v":1,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"password"}"#,
@@ -313,8 +321,9 @@ mod tests {
                 uuid: uuid(),
                 field: Field::Notes,
             }),
+            Op::SshKeys(SshKeysRequest { db: None }),
             Op::SshKeys(SshKeysRequest {
-                db: "personal".to_string(),
+                db: Some("personal".to_string()),
             }),
         ];
 
@@ -345,7 +354,6 @@ mod tests {
             r#"{"v":"1","op":"status"}"#,             // `v` not a number
             r#"{"v":1,"op":"teleport"}"#,             // unknown op
             r#"{"v":1,"op":"unlock"}"#,               // `unlock` needs a `db`
-            r#"{"v":1,"op":"ssh_keys"}"#,             // `ssh_keys` needs a `db`
             r#"{"v":1,"op":"copy","db":"personal"}"#, // `copy` needs a `uuid` and `field`
         ] {
             assert!(

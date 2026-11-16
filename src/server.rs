@@ -748,46 +748,59 @@ impl List for Server {
 }
 
 impl SshKeys for Server {
-    /// Scans the unlocked database again, under the mutex: the database
+    /// Scans the unlocked databases again, under the mutex: a database
     /// can't leave it, and the scan parses only the few key attachments a
-    /// vault holds.
+    /// vault holds. Like `list`, a request for every database reports a
+    /// stale one by name and fails, and one that names a database fails
+    /// on it if it is locked.
     fn ssh_keys(&self, request: &SshKeysRequest) -> Result<SshKeysReport, SshKeysError> {
-        let name = request.db.as_str();
-        let db = || name.to_string();
-        if !self.drop_stale([name]).is_empty() {
-            return Err(SshKeysError::Stale { db: db() });
+        let names: Vec<&str> = match &request.db {
+            Some(name) => vec![name.as_str()],
+            None => self
+                .config
+                .databases
+                .iter()
+                .map(|cfg| cfg.name.as_str())
+                .collect(),
+        };
+        if let Some(db) = self.drop_stale(names.iter().copied()).into_iter().next() {
+            return Err(SshKeysError::Stale { db });
         }
         let mut dbs = slots(&self.dbs);
-        let slot = dbs
-            .get_mut(name)
-            .ok_or_else(|| SshKeysError::UnknownDb { db: db() })?;
-        let database = slot
-            .db
-            .as_ref()
-            .ok_or_else(|| SshKeysError::Locked { db: db() })?;
-        let scan = ssh_agent::keys::scan(database);
-        slot.touch();
-        Ok(SshKeysReport {
-            keys: scan
-                .found
-                .into_iter()
-                .map(|key| WireSshKey {
+        let mut report = SshKeysReport::default();
+        for name in names {
+            let db = || name.to_string();
+            let slot = dbs
+                .get_mut(name)
+                .ok_or_else(|| SshKeysError::UnknownDb { db: db() })?;
+            let Some(database) = slot.db.as_ref() else {
+                if request.db.is_some() {
+                    return Err(SshKeysError::Locked { db: db() });
+                }
+                report.locked.push(db());
+                continue;
+            };
+            let scan = ssh_agent::keys::scan(database);
+            slot.touch();
+            report
+                .keys
+                .extend(scan.found.into_iter().map(|key| WireSshKey {
+                    db: db(),
                     key_type: key.public_key.algorithm().to_string(),
                     fingerprint: key.fingerprint.to_string(),
                     title: key.entry_title,
                     attachment: key.attachment_name,
-                })
-                .collect(),
-            skipped: scan
+                }));
+            report
                 .skipped
-                .into_iter()
-                .map(|skipped| WireSkippedKey {
+                .extend(scan.skipped.into_iter().map(|skipped| WireSkippedKey {
+                    db: db(),
                     title: skipped.entry_title,
                     attachment: skipped.attachment_name,
                     reason: skipped.reason.to_string(),
-                })
-                .collect(),
-        })
+                }));
+        }
+        Ok(report)
     }
 }
 

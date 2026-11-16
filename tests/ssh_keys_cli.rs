@@ -5,7 +5,8 @@
 //! entry (titled `Ed25519`, `Ecdsa` and `Rsa`); a passphrase-protected key
 //! (`Encrypted`) and a PEM-format RSA key (`Pem`) that must be skipped; and
 //! two keys that are invisible, one only in an entry's history and one only
-//! in the recycle bin.
+//! in the recycle bin. The daemon here configures it twice, as `personal`
+//! and `work`, and a third database, `archive`, that stays locked.
 
 mod common;
 
@@ -15,17 +16,24 @@ use common::InProcessDaemon;
 use kpa::config::Config;
 
 fn daemon() -> InProcessDaemon {
-    InProcessDaemon::start(&common::config_toml(
-        &format!("printf {}", common::PASSWORD),
-        &common::ssh_db().display().to_string(),
+    let ssh = common::ssh_db().display().to_string();
+    let other = common::password_db().display().to_string();
+    InProcessDaemon::start(&format!(
+        "prompt = [\"/bin/sh\", \"-c\", \"printf {password}\"]\n\n\
+         [[database]]\nname = \"personal\"\npath = \"{ssh}\"\n\n\
+         [[database]]\nname = \"work\"\npath = \"{ssh}\"\n\n\
+         [[database]]\nname = \"archive\"\npath = \"{other}\"\n",
+        password = common::PASSWORD,
     ))
 }
 
-fn ssh_keys(daemon: &InProcessDaemon, database: &str) -> Output {
-    ssh_keys_with(daemon, &["ssh", "keys", database])
+fn unlock(daemon: &InProcessDaemon, names: &[&str]) {
+    for name in names {
+        assert_eq!(daemon.run(&["unlock", name])["ok"], true);
+    }
 }
 
-fn ssh_keys_with(daemon: &InProcessDaemon, args: &[&str]) -> Output {
+fn kpa(daemon: &InProcessDaemon, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_kpa"))
         .arg("--socket")
         .arg(&daemon.socket)
@@ -38,100 +46,126 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).expect("output is UTF-8")
 }
 
-#[test]
-fn prints_the_three_keys_and_the_skipped_attachments() {
-    let daemon = daemon();
-    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+/// The rows of the table whose header starts with `first`, split into
+/// cells. Cells hold no spaces in this fixture.
+fn rows<'a>(stdout: &'a str, first: &str) -> Vec<Vec<&'a str>> {
+    stdout
+        .lines()
+        .skip_while(|line| !line.starts_with(first))
+        .take_while(|line| !line.is_empty())
+        .map(|line| line.split_whitespace().collect())
+        .collect()
+}
 
-    let output = ssh_keys(&daemon, "personal");
+#[test]
+fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
+    let daemon = daemon();
+    unlock(&daemon, &["personal", "work"]);
+
+    let output = kpa(&daemon, &["ssh", "keys"]);
     let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", text(&output.stderr));
 
-    // Labelled columns, each padded to its widest cell.
-    let rows: Vec<Vec<&str>> = stdout
-        .lines()
-        .skip_while(|line| !line.starts_with("TYPE"))
-        .take_while(|line| !line.is_empty())
-        .map(|line| line.split_whitespace().collect())
+    // A key two databases hold shows once for each, in config order.
+    let keys = rows(&stdout, "DATABASE  TYPE");
+    assert_eq!(
+        keys[0],
+        ["DATABASE", "TYPE", "FINGERPRINT", "ENTRY", "ATTACHMENT"]
+    );
+    let expected: Vec<Vec<String>> = ["personal", "work"]
+        .into_iter()
+        .flat_map(|db| {
+            [
+                ("ssh-ed25519", "Ed25519", "id_ed25519"),
+                ("ecdsa-sha2-nistp256", "Ecdsa", "id_ecdsa"),
+                ("ssh-rsa", "Rsa", "id_rsa"),
+            ]
+            .map(|(key_type, title, attachment)| {
+                vec![
+                    db.to_string(),
+                    key_type.to_string(),
+                    common::ssh_fixture_fingerprint(title),
+                    title.to_string(),
+                    attachment.to_string(),
+                ]
+            })
+        })
         .collect();
-    assert_eq!(rows[0], ["TYPE", "FINGERPRINT", "ENTRY", "ATTACHMENT"]);
-    for (key_type, title, attachment) in [
-        ("ssh-ed25519", "Ed25519", "id_ed25519"),
-        ("ecdsa-sha2-nistp256", "Ecdsa", "id_ecdsa"),
-        ("ssh-rsa", "Rsa", "id_rsa"),
-    ] {
-        let fingerprint = common::ssh_fixture_fingerprint(title);
-        let row = [key_type, fingerprint.as_str(), title, attachment];
-        assert!(
-            rows.iter().any(|r| *r == row),
-            "no row {row:?} in:\n{stdout}"
-        );
-    }
-    let header = stdout
-        .lines()
-        .find(|line| line.starts_with("TYPE"))
-        .expect("a header");
+    let mut shown: Vec<Vec<String>> = keys[1..]
+        .iter()
+        .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+        .collect();
+    let mut expected_sorted = expected.clone();
+    shown.sort();
+    expected_sorted.sort();
+    assert_eq!(shown, expected_sorted, "{stdout}");
+    assert_eq!(keys[1][0], "personal", "config order: {stdout}");
+    assert_eq!(keys[4][0], "work", "config order: {stdout}");
+
+    // Fingerprints line up under their header.
+    let header = stdout.lines().next().expect("a header");
     let column = header.find("FINGERPRINT").expect("a FINGERPRINT column");
     for line in stdout.lines().filter(|line| line.contains("SHA256:")) {
-        assert_eq!(
-            line.find("SHA256:"),
-            Some(column),
-            "fingerprints are not aligned:\n{stdout}"
-        );
+        assert_eq!(line.find("SHA256:"), Some(column), "{stdout}");
     }
 
-    let skipped = stdout
-        .split_once("Skipped attachments:\n")
-        .expect("a skipped section")
-        .1;
-    let skipped: Vec<&str> = skipped
-        .lines()
-        .take_while(|line| !line.is_empty())
-        .collect();
-    assert_eq!(skipped.len(), 3, "{skipped:?}");
-    assert!(skipped[0].starts_with("ENTRY") && skipped[0].contains("ATTACHMENT"));
-    assert!(
-        skipped[1..].iter().any(|line| line.starts_with("Encrypted")
-            && line.contains("id_encrypted")
-            && line.contains("protected by a passphrase")),
-        "{skipped:?}"
-    );
-    assert!(
-        skipped[1..].iter().any(|line| line.starts_with("Pem")
-            && line.contains("id_rsa_pem")
-            && line.contains("PEM format")),
-        "{skipped:?}"
-    );
-    // Config blocks only on request.
-    assert!(!stdout.contains("database.ssh_key"));
+    let skipped = rows(&stdout, "DATABASE  ENTRY");
+    assert_eq!(skipped[0], ["DATABASE", "ENTRY", "ATTACHMENT", "REASON"]);
+    assert_eq!(skipped.len(), 5, "two skipped attachments in each of two");
+    for db in ["personal", "work"] {
+        for (title, attachment, reason) in [
+            ("Encrypted", "id_encrypted", "protected"),
+            ("Pem", "id_rsa_pem", "PEM"),
+        ] {
+            assert!(
+                skipped[1..]
+                    .iter()
+                    .any(|row| row[..3] == [db, title, attachment]
+                        && row[3..].join(" ").contains(reason)),
+                "{db} {title}: {stdout}"
+            );
+        }
+    }
 
+    assert!(
+        stdout.ends_with("Locked, not scanned: archive (`kpa unlock <database>` first)\n"),
+        "{stdout}"
+    );
     // History and the recycle bin are not looked at.
     assert!(!stdout.contains("Historical") && !stdout.contains("Recycled"));
 }
 
-/// The blocks `--blocks` prints are config: pasted under a database that
-/// serves SSH keys, they parse and name exactly the printed fingerprints.
 #[test]
-fn the_pasted_blocks_parse_as_config_for_each_key() {
+fn database_limits_it_to_one() {
     let daemon = daemon();
-    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
-    let stdout = text(&ssh_keys_with(&daemon, &["ssh", "keys", "personal", "--blocks"]).stdout);
+    unlock(&daemon, &["personal", "work"]);
 
-    let lines: Vec<&str> = stdout.lines().collect();
-    let first = lines
-        .iter()
-        .position(|line| *line == "[[database.ssh_key]]")
-        .expect("a block");
-    // Each block starts one line above its table, with a `#` comment.
-    let blocks = lines[first - 1..].join("\n");
+    let stdout = text(&kpa(&daemon, &["ssh", "keys", "--database", "work"]).stdout);
 
+    assert!(stdout.contains("work "), "{stdout}");
+    assert!(!stdout.contains("personal"), "{stdout}");
+    assert!(!stdout.contains("Locked"), "{stdout}");
+}
+
+/// What `--toml` prints is config: pasted under the database it names, the
+/// blocks parse and name exactly the keys the table shows.
+#[test]
+fn toml_prints_blocks_that_parse_as_config() {
+    let daemon = daemon();
+    unlock(&daemon, &["personal"]);
+
+    let output = kpa(&daemon, &["ssh", "keys", "--toml"]);
+    let stdout = text(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.starts_with("# Paste under [[database]] personal:\n"));
+    assert!(!stdout.contains("DATABASE"), "{stdout}");
     let config = Config::parse(&format!(
         "[ssh_agent]\nconfirm_prompt = [\"true\"]\n\n\
          [[database]]\nname = \"personal\"\npath = \"/vaults/personal.kdbx\"\n\
-         serve_ssh_keys = true\n\n{blocks}\n"
+         serve_ssh_keys = true\n\n{stdout}"
     ))
     .expect("the pasted blocks should parse as config");
-
     let mut parsed: Vec<String> = config.databases[0]
         .ssh_keys
         .iter()
@@ -146,25 +180,33 @@ fn the_pasted_blocks_parse_as_config_for_each_key() {
     assert_eq!(parsed, expected);
 }
 
-/// A locked database is an error the user can act on, not an empty list.
+/// Naming a locked database is an error the user can act on; asking for
+/// every database just says which were not scanned.
 #[test]
-fn a_locked_database_is_an_error_not_an_empty_list() {
+fn a_locked_database_is_an_error_when_named_and_a_note_otherwise() {
     let daemon = daemon();
 
-    let output = ssh_keys(&daemon, "personal");
-
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty(), "{}", text(&output.stdout));
-    let stderr = text(&output.stderr);
+    let named = kpa(&daemon, &["ssh", "keys", "--database", "personal"]);
+    assert!(!named.status.success());
+    assert!(named.stdout.is_empty());
+    let stderr = text(&named.stderr);
     assert!(stderr.contains("is locked"), "{stderr}");
     assert!(stderr.contains("kpa unlock personal"), "{stderr}");
+
+    let all = kpa(&daemon, &["ssh", "keys"]);
+    assert!(all.status.success());
+    assert_eq!(
+        text(&all.stdout),
+        "No SSH keys found.\n\nLocked, not scanned: personal, work, archive \
+         (`kpa unlock <database>` first)\n"
+    );
 }
 
 #[test]
 fn an_unknown_database_is_named_in_the_error() {
     let daemon = daemon();
 
-    let output = ssh_keys(&daemon, "nonesuch");
+    let output = kpa(&daemon, &["ssh", "keys", "--database", "nonesuch"]);
 
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
@@ -175,50 +217,42 @@ fn an_unknown_database_is_named_in_the_error() {
     );
 }
 
-/// A database whose attachments hold no keys says so.
-#[test]
-fn a_vault_without_keys_says_so() {
-    let daemon = InProcessDaemon::start(&common::config_toml(
-        &format!("printf {}", common::PASSWORD),
-        &common::password_db().display().to_string(),
-    ));
-    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
-
-    let output = ssh_keys(&daemon, "personal");
-
-    assert!(output.status.success());
-    assert_eq!(text(&output.stdout), "No SSH keys found in personal.\n");
-}
-
-/// `--json` prints the daemon's response line, wherever the flag stands,
-/// and says nothing else.
+/// `--json` prints the daemon's response line, wherever the flag stands.
 #[test]
 fn json_prints_the_daemons_response_line() {
     let daemon = daemon();
-    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    unlock(&daemon, &["personal"]);
 
     for args in [
-        ["--json", "ssh", "keys", "personal"],
-        ["ssh", "keys", "personal", "--json"],
+        ["--json", "ssh", "keys", "--database", "personal"],
+        ["ssh", "keys", "--database", "personal", "--json"],
     ] {
-        let output = ssh_keys_with(&daemon, &args);
+        let output = kpa(&daemon, &args);
         assert!(output.status.success());
         let line: serde_json::Value =
             serde_json::from_str(text(&output.stdout).trim()).expect("a JSON line");
-        assert_eq!(line["ok"], true);
         assert_eq!(line["keys"].as_array().expect("keys").len(), 3);
+        assert_eq!(line["keys"][0]["db"], "personal");
         assert_eq!(line["skipped"].as_array().expect("skipped").len(), 2);
-        assert_eq!(line["keys"][0]["type"], "ssh-ed25519");
+        assert!(line.get("locked").is_none());
     }
+
+    let all = kpa(&daemon, &["ssh", "keys", "--json"]);
+    let line: serde_json::Value =
+        serde_json::from_str(text(&all.stdout).trim()).expect("a JSON line");
+    assert_eq!(line["locked"], serde_json::json!(["work", "archive"]));
 }
 
-/// A refusal under `--json` is the daemon's error line, with the failing
-/// exit status, not a sentence.
+/// A refusal under `--json` is the daemon's error line, with the same exit
+/// status as the sentence it would have been.
 #[test]
 fn json_prints_a_refusal_as_the_daemons_error_line() {
     let daemon = daemon();
 
-    let output = ssh_keys_with(&daemon, &["ssh", "keys", "personal", "--json"]);
+    let output = kpa(
+        &daemon,
+        &["ssh", "keys", "--database", "personal", "--json"],
+    );
 
     assert!(!output.status.success());
     let line: serde_json::Value =
@@ -227,13 +261,23 @@ fn json_prints_a_refusal_as_the_daemons_error_line() {
     assert!(output.stderr.is_empty());
 }
 
+#[test]
+fn toml_and_json_are_refused_together() {
+    let daemon = daemon();
+    assert!(
+        !kpa(&daemon, &["ssh", "keys", "--toml", "--json"])
+            .status
+            .success()
+    );
+}
+
 /// `--json` is accepted by every client command, before or after it.
 #[test]
 fn json_is_accepted_by_other_commands_too() {
     let daemon = daemon();
 
     for args in [["--json", "status"], ["status", "--json"]] {
-        let output = ssh_keys_with(&daemon, &args);
+        let output = kpa(&daemon, &args);
         assert!(output.status.success());
         let line: serde_json::Value =
             serde_json::from_str(text(&output.stdout).trim()).expect("a JSON line");
