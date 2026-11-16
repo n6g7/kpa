@@ -92,9 +92,12 @@ pub(super) fn run<T: DeserializeOwned>(
 }
 
 /// What a response line is: the daemon refusing the request, or the answer
-/// a command asked for. A failure line always carries `error` and a success
-/// line never does, so trying `Failure` first can't mistake one for the
-/// other, even for an answer whose fields are all optional.
+/// a command asked for. `untagged` means no field names the variant: serde
+/// tries them in order and takes the first the line fits, so the variants
+/// are tried in the order written here. `Failure` goes first because it
+/// requires `error`, which a failure line carries and an answer never does,
+/// so a failure can't be taken for an answer whose fields are all optional.
+/// A line that fits neither is not a response this build understands.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ResponseLine<T> {
@@ -494,6 +497,22 @@ mod tests {
     fn an_unreadable_line_is_not_an_answer() {
         assert_eq!(
             failed("not json"),
+            "the daemon's answer was not one this kpa understands"
+        );
+    }
+
+    /// A success whose fields aren't the ones the command asked for fits
+    /// neither variant.
+    #[test]
+    fn a_line_of_the_wrong_shape_is_not_an_answer() {
+        #[derive(Deserialize, Debug)]
+        struct Databases {
+            #[allow(dead_code)]
+            databases: Vec<String>,
+        }
+
+        assert_eq!(
+            parse_response::<Databases>(r#"{"v":1,"ok":true,"entries":[]}"#).expect_err("shape"),
             "the daemon's answer was not one this kpa understands"
         );
     }
