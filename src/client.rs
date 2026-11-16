@@ -35,7 +35,7 @@ pub(super) fn run_client(socket_path: &Path, op: Op) -> ExitCode {
 }
 
 /// Reports a failed round trip. Only a failed connect means the daemon
-/// may not be running. Once connected, a missing reply means it hit a
+/// may not be running. Once connected, a missing response means it hit a
 /// problem with this request, and suggesting it's down would send someone
 /// looking in the wrong place.
 fn report_client_error(err: ClientError) -> ExitCode {
@@ -79,7 +79,7 @@ pub(super) fn run<T: DeserializeOwned>(
     if let Format::Json = format {
         return print_and_exit(&line);
     }
-    match parse_reply(&line) {
+    match parse_response(&line) {
         Ok(typed) => {
             print_escaped(&show(typed));
             ExitCode::SUCCESS
@@ -97,7 +97,7 @@ pub(super) fn run<T: DeserializeOwned>(
 /// other, even for an answer whose fields are all optional.
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum Reply<T> {
+enum ResponseLine<T> {
     Failure(Failure),
     Success(T),
 }
@@ -111,10 +111,10 @@ struct Failure {
 }
 
 /// The typed answer in `line`, or the sentence for why there is none.
-fn parse_reply<T: DeserializeOwned>(line: &str) -> Result<T, String> {
-    match serde_json::from_str::<Reply<T>>(line) {
-        Ok(Reply::Success(answer)) => Ok(answer),
-        Ok(Reply::Failure(failure)) => Err(failure.to_string()),
+fn parse_response<T: DeserializeOwned>(line: &str) -> Result<T, String> {
+    match serde_json::from_str::<ResponseLine<T>>(line) {
+        Ok(ResponseLine::Success(answer)) => Ok(answer),
+        Ok(ResponseLine::Failure(failure)) => Err(failure.to_string()),
         Err(_) => Err("the daemon's answer was not one this kpa understands".to_string()),
     }
 }
@@ -394,7 +394,7 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        ClientError, check_peer_uid, is_no_display, parse_reply, synthetic_no_display_line,
+        ClientError, check_peer_uid, is_no_display, parse_response, synthetic_no_display_line,
     };
 
     /// `UnixStream::pair()` gives both ends our own real uid, so the
@@ -456,7 +456,7 @@ mod tests {
     }
 
     fn failed(line: &str) -> String {
-        parse_reply::<Anything>(line).expect_err("a failure")
+        parse_response::<Anything>(line).expect_err("a failure")
     }
 
     #[test]
@@ -465,7 +465,7 @@ mod tests {
             failed(r#"{"v":1,"ok":false,"error":"locked","db":"personal"}"#),
             "database \"personal\" is locked; run `kpa unlock personal` and try again"
         );
-        assert!(parse_reply::<Anything>(r#"{"v":1,"ok":true}"#).is_ok());
+        assert!(parse_response::<Anything>(r#"{"v":1,"ok":true}"#).is_ok());
     }
 
     #[test]
