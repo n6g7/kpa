@@ -205,6 +205,14 @@ fails with `unknown_db`, `locked` or `stale`, and never answers a locked
 database from the key cache. Like `list`, it returns entry titles to the
 caller and keeps them out of the daemon's log.
 
+**CLI output.** The protocol is what the CLI speaks; what it prints is a
+separate choice. A subcommand with a text output (`kpa ssh keys` so far)
+renders the response for a person, with every string the vault supplied
+escaped (T-13). `--json`, a flag every client subcommand takes, prints the
+daemon's response line instead, so a script keeps a stable shape whatever
+text a command grows. The subcommands without a text output yet print the
+response line with or without it.
+
 ### Responses
 
 ```json

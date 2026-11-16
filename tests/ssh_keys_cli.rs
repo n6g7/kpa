@@ -22,10 +22,14 @@ fn daemon() -> InProcessDaemon {
 }
 
 fn ssh_keys(daemon: &InProcessDaemon, database: &str) -> Output {
+    ssh_keys_with(daemon, &["ssh", "keys", database])
+}
+
+fn ssh_keys_with(daemon: &InProcessDaemon, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_kpa"))
         .arg("--socket")
         .arg(&daemon.socket)
-        .args(["ssh", "keys", database])
+        .args(args)
         .output()
         .expect("failed to spawn kpa")
 }
@@ -43,14 +47,37 @@ fn prints_the_three_keys_and_the_skipped_attachments() {
     let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", text(&output.stderr));
 
+    // Labelled columns, each padded to its widest cell.
+    let rows: Vec<Vec<&str>> = stdout
+        .lines()
+        .skip_while(|line| !line.starts_with("TYPE"))
+        .take_while(|line| !line.is_empty())
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    assert_eq!(rows[0], ["TYPE", "FINGERPRINT", "ENTRY", "ATTACHMENT"]);
     for (key_type, title, attachment) in [
         ("ssh-ed25519", "Ed25519", "id_ed25519"),
         ("ecdsa-sha2-nistp256", "Ecdsa", "id_ecdsa"),
         ("ssh-rsa", "Rsa", "id_rsa"),
     ] {
         let fingerprint = common::ssh_fixture_fingerprint(title);
-        let line = format!("  {key_type}  {fingerprint}  {title} ({attachment})\n");
-        assert!(stdout.contains(&line), "no line {line:?} in:\n{stdout}");
+        let row = [key_type, fingerprint.as_str(), title, attachment];
+        assert!(
+            rows.iter().any(|r| *r == row),
+            "no row {row:?} in:\n{stdout}"
+        );
+    }
+    let header = stdout
+        .lines()
+        .find(|line| line.starts_with("TYPE"))
+        .expect("a header");
+    let column = header.find("FINGERPRINT").expect("a FINGERPRINT column");
+    for line in stdout.lines().filter(|line| line.contains("SHA256:")) {
+        assert_eq!(
+            line.find("SHA256:"),
+            Some(column),
+            "fingerprints are not aligned:\n{stdout}"
+        );
     }
 
     let skipped = stdout
@@ -59,34 +86,36 @@ fn prints_the_three_keys_and_the_skipped_attachments() {
         .1;
     let skipped: Vec<&str> = skipped
         .lines()
-        .take_while(|line| line.starts_with("  "))
+        .take_while(|line| !line.is_empty())
         .collect();
-    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert_eq!(skipped.len(), 3, "{skipped:?}");
+    assert!(skipped[0].starts_with("ENTRY") && skipped[0].contains("ATTACHMENT"));
     assert!(
-        skipped
-            .iter()
-            .any(|line| line.contains("Encrypted (id_encrypted)")
-                && line.contains("protected by a passphrase")),
+        skipped[1..].iter().any(|line| line.starts_with("Encrypted")
+            && line.contains("id_encrypted")
+            && line.contains("protected by a passphrase")),
         "{skipped:?}"
     );
     assert!(
-        skipped
-            .iter()
-            .any(|line| line.contains("Pem (id_rsa_pem)") && line.contains("PEM format")),
+        skipped[1..].iter().any(|line| line.starts_with("Pem")
+            && line.contains("id_rsa_pem")
+            && line.contains("PEM format")),
         "{skipped:?}"
     );
+    // Config blocks only on request.
+    assert!(!stdout.contains("database.ssh_key"));
 
     // History and the recycle bin are not looked at.
     assert!(!stdout.contains("Historical") && !stdout.contains("Recycled"));
 }
 
-/// The blocks in the output are config: pasted under a database that
+/// The blocks `--blocks` prints are config: pasted under a database that
 /// serves SSH keys, they parse and name exactly the printed fingerprints.
 #[test]
 fn the_pasted_blocks_parse_as_config_for_each_key() {
     let daemon = daemon();
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
-    let stdout = text(&ssh_keys(&daemon, "personal").stdout);
+    let stdout = text(&ssh_keys_with(&daemon, &["ssh", "keys", "personal", "--blocks"]).stdout);
 
     let lines: Vec<&str> = stdout.lines().collect();
     let first = lines
@@ -159,4 +188,55 @@ fn a_vault_without_keys_says_so() {
 
     assert!(output.status.success());
     assert_eq!(text(&output.stdout), "No SSH keys found in personal.\n");
+}
+
+/// `--json` prints the daemon's response line, wherever the flag stands,
+/// and says nothing else.
+#[test]
+fn json_prints_the_daemons_response_line() {
+    let daemon = daemon();
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+
+    for args in [
+        ["--json", "ssh", "keys", "personal"],
+        ["ssh", "keys", "personal", "--json"],
+    ] {
+        let output = ssh_keys_with(&daemon, &args);
+        assert!(output.status.success());
+        let line: serde_json::Value =
+            serde_json::from_str(text(&output.stdout).trim()).expect("a JSON line");
+        assert_eq!(line["ok"], true);
+        assert_eq!(line["keys"].as_array().expect("keys").len(), 3);
+        assert_eq!(line["skipped"].as_array().expect("skipped").len(), 2);
+        assert_eq!(line["keys"][0]["type"], "ssh-ed25519");
+    }
+}
+
+/// A refusal under `--json` is the daemon's error line, with the failing
+/// exit status, not a sentence.
+#[test]
+fn json_prints_a_refusal_as_the_daemons_error_line() {
+    let daemon = daemon();
+
+    let output = ssh_keys_with(&daemon, &["ssh", "keys", "personal", "--json"]);
+
+    assert!(!output.status.success());
+    let line: serde_json::Value =
+        serde_json::from_str(text(&output.stdout).trim()).expect("a JSON line");
+    assert_eq!(line["error"], "locked");
+    assert!(output.stderr.is_empty());
+}
+
+/// `--json` is accepted by every client command, before or after it.
+#[test]
+fn json_is_accepted_by_other_commands_too() {
+    let daemon = daemon();
+
+    for args in [["--json", "status"], ["status", "--json"]] {
+        let output = ssh_keys_with(&daemon, &args);
+        assert!(output.status.success());
+        let line: serde_json::Value =
+            serde_json::from_str(text(&output.stdout).trim()).expect("a JSON line");
+        assert_eq!(line["ok"], true);
+    }
 }

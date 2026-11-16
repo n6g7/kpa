@@ -47,10 +47,21 @@ fn report_client_error(err: ClientError) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// `kpa ssh keys`: unlike the other subcommands it doesn't print the
-/// daemon's line. It reads the report out of it and prints the text
-/// [`ssh_keys_report::render`] makes of it, and a failure as a sentence.
-pub(super) fn run_ssh_keys(socket_path: &Path, request: SshKeysRequest) -> ExitCode {
+/// How `kpa ssh keys` shows what the daemon answered.
+pub(super) enum SshKeysOutput {
+    /// The daemon's raw response line, as every other command prints it.
+    Json,
+    /// The text [`ssh_keys_report::render`] makes of the report, and a
+    /// failure as a sentence.
+    Text { blocks: bool },
+}
+
+/// `kpa ssh keys`: the one subcommand with a text output.
+pub(super) fn run_ssh_keys(
+    socket_path: &Path,
+    request: SshKeysRequest,
+    output: SshKeysOutput,
+) -> ExitCode {
     let db = request.db.clone();
     let request = Request {
         v: proto::VERSION,
@@ -60,10 +71,13 @@ pub(super) fn run_ssh_keys(socket_path: &Path, request: SshKeysRequest) -> ExitC
         Ok(line) => line,
         Err(err) => return report_client_error(err),
     };
+    let SshKeysOutput::Text { blocks } = output else {
+        return print_and_exit(&line);
+    };
 
     match serde_json::from_str::<SshKeysReport>(&line) {
         Ok(report) => {
-            print!("{}", ssh_keys_report::render(&db, &report));
+            print!("{}", ssh_keys_report::render(&db, &report, blocks));
             ExitCode::SUCCESS
         }
         Err(_) => {

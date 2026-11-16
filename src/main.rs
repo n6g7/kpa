@@ -36,6 +36,12 @@ struct Cli {
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
 
+    /// Print the daemon's raw JSON response line. `ssh keys` prints text
+    /// without it; every other command prints the JSON line either way,
+    /// until it has a text output of its own.
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -89,10 +95,15 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SshCommand {
-    /// Show the SSH keys an unlocked database holds, the attachments
-    /// skipped and why, and a `[[database.ssh_key]]` block per key to
-    /// paste into the config (`docs/ssh-agent.md` § 6.4).
-    Keys { database: String },
+    /// Show the SSH keys an unlocked database holds, and the attachments
+    /// skipped and why (`docs/ssh-agent.md` § 6.4).
+    Keys {
+        database: String,
+        /// Also print a `[[database.ssh_key]]` block per key, to paste into
+        /// the config.
+        #[arg(long, conflicts_with = "json")]
+        blocks: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -146,8 +157,16 @@ fn dispatch(cli: Cli) -> ExitCode {
             client::run_client(&socket_path, Op::Copy(CopyRequest { db, uuid, field }))
         }
         Command::Ssh {
-            command: SshCommand::Keys { database },
-        } => client::run_ssh_keys(&socket_path, SshKeysRequest { db: database }),
+            command: SshCommand::Keys { database, blocks },
+        } => client::run_ssh_keys(
+            &socket_path,
+            SshKeysRequest { db: database },
+            if cli.json {
+                client::SshKeysOutput::Json
+            } else {
+                client::SshKeysOutput::Text { blocks }
+            },
+        ),
         Command::Version => unreachable!("handled above, before socket_path is resolved"),
     }
 }
@@ -295,6 +314,7 @@ mod tests {
         dispatch(Cli {
             socket: Some(PathBuf::from("/nonexistent-kpa-f01-test/sock")),
             config: None,
+            json: false,
             command: Command::Unlock {
                 db: "test".to_string(),
                 tty: false,

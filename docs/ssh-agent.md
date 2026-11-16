@@ -339,8 +339,8 @@ the keys the desk keeps off forwarding (S8).
   override says `serve = false`.
 
 `kpa ssh keys <database>` prints each key found in an unlocked database
-(type, fingerprint, entry title) with a ready-to-paste override block, and
-lists the attachments it skipped and why.
+(type, fingerprint, entry title, attachment name) and lists the attachments
+it skipped and why. `--blocks` adds a ready-to-paste override block per key.
 
 kpa lists keys in config order, then entry order. With many keys, a server
 can hit `MaxAuthTries`. The usual answer is `IdentitiesOnly yes` plus a
@@ -669,7 +669,7 @@ The setup kpa replaces, on a typical NixOS desktop with a KeePass client:
 1. **Run kpa and opt the databases in** with `serve_ssh_keys = true`. Add a
    `[[database.ssh_key]]` override for a key that must stay off forwarding
    (`forwarded = false`) or that needs a different approval policy.
-   `kpa ssh keys <database>` prints the blocks to paste.
+   `kpa ssh keys <database> --blocks` prints the blocks to paste.
 2. **Turn off what kpa replaces.**
    - Set `services.gnome.gcr-ssh-agent.enable = false`. gnome-keyring keeps
      its Secret Service role.
