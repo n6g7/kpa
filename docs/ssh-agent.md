@@ -339,7 +339,7 @@ the keys the desk keeps off forwarding (S8).
   override says `serve = false`.
 
 `kpa ssh keys` prints each key found in the unlocked databases (database,
-type, fingerprint, entry title, attachment name), the attachments it skipped
+entry title, attachment name, type, fingerprint), the attachments it skipped
 and why, and the databases it could not scan because they are locked.
 `--database <name>` limits it to one database. It reads databases that have
 not opted in too, which shows what opting in would serve. `--toml` prints

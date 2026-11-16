@@ -28,14 +28,14 @@ pub(super) fn render(report: &SshKeysReport, toml: bool) -> String {
     if report.keys.is_empty() {
         sections.push("No SSH keys found.\n".to_string());
     } else {
-        let mut table = Table::new(["DATABASE", "TYPE", "FINGERPRINT", "ENTRY", "ATTACHMENT"]);
+        let mut table = Table::new(["DATABASE", "ENTRY", "ATTACHMENT", "TYPE", "FINGERPRINT"]);
         for key in &report.keys {
             table.row([
                 &key.db,
-                &key.key_type,
-                &key.fingerprint,
                 key.title.as_deref().unwrap_or(UNTITLED),
                 &key.attachment,
+                &key.key_type,
+                &key.fingerprint,
             ]);
         }
         sections.push(table.render());
@@ -167,10 +167,9 @@ mod tests {
         assert_eq!(
             render(&report, false),
             format!(
-                "DATABASE  TYPE                 FINGERPRINT                                         \
-                 ENTRY       ATTACHMENT\n\
-                 personal  ssh-ed25519          {FINGERPRINT}  Deploy      id_ed25519\n\
-                 work      ecdsa-sha2-nistp256  {FINGERPRINT}  (untitled)  id_ecdsa\n\
+                "DATABASE  ENTRY       ATTACHMENT  TYPE                 FINGERPRINT\n\
+                 personal  Deploy      id_ed25519  ssh-ed25519          {FINGERPRINT}\n\
+                 work      (untitled)  id_ecdsa    ecdsa-sha2-nistp256  {FINGERPRINT}\n\
                  \n\
                  Skipped attachments:\n\
                  DATABASE  ENTRY  ATTACHMENT  REASON\n\

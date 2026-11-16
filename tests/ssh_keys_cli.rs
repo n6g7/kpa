@@ -46,12 +46,12 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).expect("output is UTF-8")
 }
 
-/// The rows of the table whose header starts with `first`, split into
-/// cells. Cells hold no spaces in this fixture.
-fn rows<'a>(stdout: &'a str, first: &str) -> Vec<Vec<&'a str>> {
+/// The rows of the table whose header has the cells `header`, split into
+/// cells, header first. Cells hold no spaces in this fixture.
+fn rows<'a>(stdout: &'a str, header: &[&str]) -> Vec<Vec<&'a str>> {
     stdout
         .lines()
-        .skip_while(|line| !line.starts_with(first))
+        .skip_while(|line| !line.split_whitespace().eq(header.iter().copied()))
         .take_while(|line| !line.is_empty())
         .map(|line| line.split_whitespace().collect())
         .collect()
@@ -67,11 +67,11 @@ fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
     assert!(output.status.success(), "{stdout}{}", text(&output.stderr));
 
     // A key two databases hold shows once for each, in config order.
-    let keys = rows(&stdout, "DATABASE  TYPE");
-    assert_eq!(
-        keys[0],
-        ["DATABASE", "TYPE", "FINGERPRINT", "ENTRY", "ATTACHMENT"]
+    let keys = rows(
+        &stdout,
+        &["DATABASE", "ENTRY", "ATTACHMENT", "TYPE", "FINGERPRINT"],
     );
+    assert!(!keys.is_empty(), "no keys table in:\n{stdout}");
     let expected: Vec<Vec<String>> = ["personal", "work"]
         .into_iter()
         .flat_map(|db| {
@@ -83,10 +83,10 @@ fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
             .map(|(key_type, title, attachment)| {
                 vec![
                     db.to_string(),
-                    key_type.to_string(),
-                    common::ssh_fixture_fingerprint(title),
                     title.to_string(),
                     attachment.to_string(),
+                    key_type.to_string(),
+                    common::ssh_fixture_fingerprint(title),
                 ]
             })
         })
@@ -109,8 +109,8 @@ fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
         assert_eq!(line.find("SHA256:"), Some(column), "{stdout}");
     }
 
-    let skipped = rows(&stdout, "DATABASE  ENTRY");
-    assert_eq!(skipped[0], ["DATABASE", "ENTRY", "ATTACHMENT", "REASON"]);
+    let skipped = rows(&stdout, &["DATABASE", "ENTRY", "ATTACHMENT", "REASON"]);
+    assert!(!skipped.is_empty(), "no skipped table in:\n{stdout}");
     assert_eq!(skipped.len(), 5, "two skipped attachments in each of two");
     for db in ["personal", "work"] {
         for (title, attachment, reason) in [
