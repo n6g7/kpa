@@ -33,6 +33,14 @@ pub(super) fn requester() -> Requester {
     }
 }
 
+/// A requester running `command`.
+pub(super) fn requester_running(command: &str) -> Requester {
+    Requester {
+        command: Some(command.to_string()),
+        ..requester()
+    }
+}
+
 /// One database's slot, as the daemon keeps it.
 struct FakeSlot {
     db: Option<Database>,

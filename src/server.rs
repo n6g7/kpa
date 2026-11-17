@@ -44,9 +44,10 @@ use crate::prompt::{
 };
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
-    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshKeys,
-    SshKeysError, SshKeysReport, SshKeysRequest, Status, Unlock, UnlockError, UnlockRequest,
-    WireEntry, WireSkippedKey, WireSshKey,
+    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshApprove,
+    SshApproveError, SshApproveRequest, SshKeys, SshKeysError, SshKeysReport, SshKeysRequest,
+    SshPending, Status, Unlock, UnlockError, UnlockRequest, WireEntry, WirePending, WireSkippedKey,
+    WireSshKey,
 };
 use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
 use crate::socket::{self, Received};
@@ -764,6 +765,39 @@ impl List for Server {
     }
 }
 
+impl SshPending for Server {
+    fn ssh_pending(&self) -> Vec<WirePending> {
+        ssh_agent::pending_requests(self)
+            .into_iter()
+            .map(|pending| WirePending {
+                id: pending.id,
+                db: pending.db,
+                key: pending.key,
+                name: pending.requested.key_name,
+                purpose: pending.requested.purpose.to_string(),
+                user: pending.requested.user,
+                namespace: pending.requested.namespace,
+                class: pending.requested.class.to_string(),
+                destination: pending.destination,
+                command: pending.requested.command,
+                age: pending.age.as_secs(),
+            })
+            .collect()
+    }
+}
+
+impl SshApprove for Server {
+    fn ssh_approve(&self, request: &SshApproveRequest) -> Result<(), SshApproveError> {
+        let approved =
+            ssh_agent::approve_pending(self, request.id, self.config.ssh_agent.retry_window);
+        if approved {
+            Ok(())
+        } else {
+            Err(SshApproveError::NotPending)
+        }
+    }
+}
+
 impl SshKeys for Server {
     /// Scans the unlocked databases again, under the mutex: a database
     /// can't leave it, and the scan parses only the few key attachments a
@@ -1123,11 +1157,18 @@ pub(crate) fn log_response(response: &Response) {
         )),
         Response::Copy(Err(err)) => log::warn(format_args!("copy failed: {err:?}")),
 
+        // Success is logged by `ssh_agent::approve_pending`.
+        Response::SshApprove(Ok(())) => {}
+        Response::SshApprove(Err(err)) => log::warn(format_args!("ssh approve failed: {err:?}")),
+
         // Listed above rather than caught by a `_` arm on purpose: adding
         // an op should be a decision about whether it belongs in the log,
         // not something a wildcard answers silently. `ssh_keys` carries
         // entry titles, which stay out of the log like `list`'s.
-        Response::Status { .. } | Response::List(_) | Response::SshKeys(_) => {}
+        Response::Status { .. }
+        | Response::List(_)
+        | Response::SshKeys(_)
+        | Response::SshPending(_) => {}
     }
 }
 

@@ -44,6 +44,8 @@ pub enum ErrorCode {
     /// An `unlock` has nowhere to ask for the password: no screen it may
     /// prompt on, and no terminal passed with the request.
     NoPrompt,
+    /// `ssh_approve` names a scope with no request pending.
+    NotPending,
 }
 
 /// What an error response puts on the wire, however it arose. Each op

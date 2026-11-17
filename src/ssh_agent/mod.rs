@@ -27,4 +27,4 @@ pub mod serve;
 pub(crate) mod testing;
 pub mod wire;
 
-pub(crate) use agent::{Agent, SlotView, SshHost, SshSlot};
+pub(crate) use agent::{Agent, SlotView, SshHost, SshSlot, approve_pending, pending_requests};

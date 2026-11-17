@@ -8,11 +8,14 @@
 //!    all, and which approval it needs.
 //! 2. Sign if the request is ready ([`Agent::sign_if_ready`]): the database
 //!    is open and holds the approval, checked and signed in one hold of the
-//!    database. Most requests end here, waiting for nobody.
+//!    database. Most requests end here, waiting for nobody. A request that
+//!    rode on an approval for one signature uses it up.
 //! 3. Otherwise the refusal says what is lacking, and the user is asked for
 //!    it ([`prompts`](super::prompts)): the unlock of a locked database, then the
 //!    approval of the key. A requester who may not be asked is refused
-//!    before it waits for its turn, and a prompt the user cancels, or
+//!    before it waits for its turn, and recorded as pending when it lacks
+//!    an approval, for the approval to be granted later (`docs/ssh-agent.md`
+//!    § 6.8). A prompt the user cancels, or
 //!    leaves unanswered, holds the database's prompts back for a while
 //!    (backoff).
 //! 4. Sign what the user allowed ([`Agent::sign_allowed`]), unless a lock
@@ -111,7 +114,7 @@ pub(super) fn lacking(slot: &SlotView<'_>, needed: Option<&SignatureApproval>) -
         return Some(Lacking::Unlock);
     }
     needed
-        .filter(|approval| !slot.ssh.approvals.covers(&approval.scope))
+        .filter(|approval| !slot.ssh.approvals.covers(&approval.scope, slot.now()))
         .map(|approval| Lacking::Approval(approval.clone()))
 }
 
@@ -174,7 +177,7 @@ impl<H: SshHost> Agent<H> {
         }
 
         // 3. Something to ask. Refused here if the user can't be asked.
-        self.check_may_prompt(db, requester, approval.as_ref())?;
+        self.check_may_prompt(found, request, requester, approval.as_ref())?;
 
         // 4. Ask. One signature at a time asks for a database, and keeps its
         // turn until it has signed, so the next one finds what this one got.
@@ -210,7 +213,16 @@ impl<H: SshHost> Agent<H> {
             if let Some(lacking) = lacking(&slot, needed) {
                 return Err(lacking.refusal());
             }
-            sign_and_touch(&mut slot, request)
+            let signature = sign_and_touch(&mut slot, request)?;
+            // The approval for one signature this request rode on is used
+            // up, now that the signature is made: a failed one leaves it
+            // for the retry.
+            if let Some(approval) = needed
+                && !approval.remember
+            {
+                slot.ssh.approvals.spend(&approval.scope);
+            }
+            Ok(signature)
         })
     }
 
@@ -285,8 +297,9 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::super::SshSlot;
-    use super::super::fake::{FakeHost, requester};
+    use super::super::fake::{FakeHost, requester, requester_running};
     use super::super::request::sign_line;
+    use super::super::{approve_pending, pending_requests};
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
     use crate::paths::Paths;
@@ -395,7 +408,10 @@ mod tests {
     /// Whether `key` is approved for unbound use in `personal`.
     fn approved(host: &FakeHost, key: &PrivateKey) -> bool {
         let scope = Scope::new(key.public_key().fingerprint(HashAlg::Sha256), None);
-        host.peek("personal", |_, ssh| ssh.approvals.covers(&scope))
+        host.with_slot("personal", |slot| {
+            slot.ssh.approvals.covers(&scope, slot.now())
+        })
+        .expect("a slot")
     }
 
     /// A step that locks `personal` on `host`.
@@ -881,6 +897,154 @@ mod tests {
         assert!(prompts.shown().is_empty());
     }
 
+    const WINDOW: Duration = Duration::from_secs(60);
+
+    /// An agent whose requests come from outside the desktop, where no
+    /// prompt may appear.
+    fn outside_agent(
+        key: &PrivateKey,
+        confirm: SshKeyConfirm,
+    ) -> (Arc<FakeHost>, Arc<Agent<FakeHost>>) {
+        let (host, agent, _prompts) =
+            agent(host(key, confirm).without_prompts(), &Paths::default());
+        (host, agent)
+    }
+
+    /// `key`, unbound, as a requester outside the desktop running `ssh`
+    /// asks for it.
+    fn sign_from_outside(agent: &Agent<FakeHost>, key: &PrivateKey) -> AgentResponse {
+        agent.sign(
+            &ConnectionClass::LocalUnbound,
+            &request_with(key, 0),
+            None,
+            &requester_running("ssh"),
+        )
+    }
+
+    /// Approves the first request pending for `key` by its id. `false` if
+    /// none is.
+    fn approve_from_terminal(host: &FakeHost, key: &PrivateKey) -> bool {
+        let fingerprint = key.public_key().fingerprint(HashAlg::Sha256);
+        pending_requests(host)
+            .iter()
+            .find(|pending| pending.key == fingerprint)
+            .is_some_and(|pending| approve_pending(host, pending.id, WINDOW))
+    }
+
+    /// Approving a refused request, for a `once` key: refused and recorded,
+    /// listed, approved, and the retry signs, and so does every one after
+    /// it, as after an approval on screen.
+    #[test]
+    fn a_refused_request_is_pending_and_signs_once_approved() {
+        let key = test_key(1);
+        let (host, agent) = outside_agent(&key, SshKeyConfirm::Once);
+
+        assert!(!signed(&sign_from_outside(&agent, &key)));
+        let pending = pending_requests(host.as_ref());
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].requested.key_name, "github");
+        assert_eq!(pending[0].requested.purpose, "other");
+        assert_eq!(pending[0].requested.class, "local");
+        assert_eq!(pending[0].requested.command.as_deref(), Some("ssh"));
+
+        assert!(approve_from_terminal(&host, &key));
+        assert!(pending_requests(host.as_ref()).is_empty());
+        assert!(signed(&sign_from_outside(&agent, &key)));
+        assert!(signed(&sign_from_outside(&agent, &key)));
+        assert!(approved(&host, &key));
+    }
+
+    /// An `always` key's approval covers the retry, and only that one: the
+    /// next request is refused and pending again.
+    #[test]
+    fn an_always_keys_approval_covers_one_retry() {
+        let key = test_key(1);
+        let (host, agent) = outside_agent(&key, SshKeyConfirm::Always);
+
+        assert!(!signed(&sign_from_outside(&agent, &key)));
+        assert!(approve_from_terminal(&host, &key));
+        assert!(signed(&sign_from_outside(&agent, &key)));
+
+        assert!(!signed(&sign_from_outside(&agent, &key)));
+        assert_eq!(pending_requests(host.as_ref()).len(), 1);
+    }
+
+    /// The retry has the window to come in, and no longer.
+    #[test]
+    fn a_one_shot_approval_expires() {
+        let key = test_key(1);
+        let (host, agent) = outside_agent(&key, SshKeyConfirm::Always);
+        assert!(!signed(&sign_from_outside(&agent, &key)));
+        assert!(approve_from_terminal(&host, &key));
+
+        host.advance(WINDOW);
+        assert!(!signed(&sign_from_outside(&agent, &key)));
+        assert_eq!(pending_requests(host.as_ref()).len(), 1);
+
+        assert!(approve_from_terminal(&host, &key));
+        host.advance(WINDOW - Duration::from_secs(1));
+        assert!(signed(&sign_from_outside(&agent, &key)));
+    }
+
+    /// A lock drops what is pending and every approval, a one-shot's
+    /// included, and an approval doesn't come back with the next unlock.
+    #[test]
+    fn a_lock_clears_pending_requests_and_one_shot_approvals() {
+        let key = test_key(1);
+        let (host, agent) = outside_agent(&key, SshKeyConfirm::Always);
+        assert!(!signed(&sign_from_outside(&agent, &key)));
+        assert!(approve_from_terminal(&host, &key));
+        host.lock("personal");
+        host.reopen();
+
+        assert!(pending_requests(host.as_ref()).is_empty());
+        assert!(!approve_from_terminal(&host, &key));
+        assert!(!signed(&sign_from_outside(&agent, &key)));
+    }
+
+    /// Identical requests are one pending request, and a request for
+    /// another destination is another.
+    #[test]
+    fn identical_requests_merge_and_other_destinations_do_not() {
+        let key = test_key(1);
+        let (host, agent) = outside_agent(&key, SshKeyConfirm::Once);
+        let bound = |seed: u64| ConnectionClass::LocalBound {
+            dest: test_key(seed).public_key().key_data().clone(),
+        };
+
+        for _ in 0..3 {
+            sign_as_outside(&agent, &key, &bound(2));
+        }
+        sign_as_outside(&agent, &key, &bound(3));
+        sign_from_outside(&agent, &key);
+
+        assert_eq!(pending_requests(host.as_ref()).len(), 3);
+    }
+
+    fn sign_as_outside(agent: &Agent<FakeHost>, key: &PrivateKey, class: &ConnectionClass) {
+        assert!(!signed(&agent.sign(
+            class,
+            &request_with(key, 0),
+            None,
+            &requester_running("ssh")
+        )));
+    }
+
+    /// A request that may be asked on screen is asked, never recorded as
+    /// pending, and neither is one the policy refuses outright.
+    #[test]
+    fn only_a_request_that_could_not_be_asked_is_pending() {
+        let key = test_key(1);
+        let (host, agent, prompts) = agent(host(&key, SshKeyConfirm::Once), &Paths::default());
+        prompts.push(Step::allow());
+        assert!(signed(&sign(&agent, &key)));
+        assert!(pending_requests(host.as_ref()).is_empty());
+
+        let (host, agent) = outside_agent(&key, SshKeyConfirm::Never);
+        assert!(signed(&sign_from_outside(&agent, &key)));
+        assert!(pending_requests(host.as_ref()).is_empty());
+    }
+
     /// A lock while the prompt is up ends it, signs nothing and leaves no
     /// approval behind for the next unlock.
     #[test]
@@ -1125,7 +1289,8 @@ mod tests {
     ) -> R {
         let mut ssh = SshSlot::default();
         if let Some(approved) = approved {
-            ssh.approvals.grant(approved.scope);
+            ssh.approvals
+                .approve(approved, Instant::now(), Duration::from_secs(60));
         }
         let db = Database::new();
         let (mut last_activity, lock_signal) = (Instant::now(), CancelSource::new());
@@ -1168,15 +1333,20 @@ mod tests {
         }
     }
 
+    /// An approval kept until lock and one for a single signature both
+    /// cover their request: nothing is lacking. The one for a single
+    /// signature is spent when its signature is made, and not before.
     #[test]
     fn an_approval_the_database_holds_is_not_lacking() {
-        let needed = approval(true);
-        assert!(
-            on_slot(true, Some(approval(true)), |slot| lacking(
-                slot,
-                Some(&needed)
-            ))
-            .is_none()
-        );
+        for remember in [true, false] {
+            let needed = approval(remember);
+            assert!(
+                on_slot(true, Some(approval(remember)), |slot| lacking(
+                    slot,
+                    Some(&needed)
+                ))
+                .is_none()
+            );
+        }
     }
 }

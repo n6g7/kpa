@@ -1938,6 +1938,7 @@ dependencies = [
  "rand_core",
  "rsa",
  "sec1",
+ "serde",
  "sha2 0.11.0",
  "signature",
  "ssh-cipher",

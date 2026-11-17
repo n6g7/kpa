@@ -517,29 +517,49 @@ Two points are specific to the agent:
 - **User services such as timers and Syncthing count as desktop.** That is
   S6.
 
-**Approving from a terminal.** A request from outside the desktop that
+**Approving a refused request.** A request from outside the desktop that
 needs an approval is refused, and kpa remembers it as pending:
 
-- the key, the purpose, the connection class, the forwarding host and
-  destination, the remote user, the requester's command name, and the
-  time;
-- at most 16 pending requests, identical ones merged, each kept for
-  5 minutes, all dropped on lock.
+- a random id, the key, the purpose, the connection class, the forwarding
+  host and destination, the remote user, the requester's command name, and
+  the time;
+- at most 16 pending requests, identical ones merged (a repeat keeps its id
+  and is kept another 5 minutes), each kept for 5 minutes, all dropped on
+  lock.
 
-`kpa ssh approve` lists the pending requests on its terminal and asks
-about each one: allow or deny. It reads the answers from its own controlling
-terminal, so it needs one. An approval it grants
-is the same as one granted on screen, with the same scope. For a key with
-`confirm = "always"`, it covers one signature: the retry. The user then
-retries the command, and it signs. A forwarded request's approval is
-scoped to its forwarding session, so the retry has to run in the same
-`ssh -A` session. `kpa ssh approve` doesn't unlock: a refusal caused by a
-locked database is answered with `kpa unlock`.
+`ssh_pending` lists them, and `ssh_approve` approves one by its id. A
+request nobody approves just expires after 5 minutes; nothing is blocked
+meanwhile.
 
-`kpa ssh approve` talks to the JSON socket, which forwarding never reaches,
-so a forwarded host cannot approve its own requests. Any same-uid process
-can run it, which is the same as approving on screen within the uid
-boundary (NG-1, T-18).
+A request is named by its id, which is random: it never comes back after a
+lock, so an id from before one can't approve some other request, and it
+says nothing of the scope the approval covers, so a forwarded request's
+larger scope needs no change to `ssh_approve`. Approving an id grants the
+approval its request asked for, and answers every request pending for the
+same scope.
+
+An approval it grants is the same as one granted on screen, with the same
+scope. For a key with `confirm = "once"` it holds until lock. For a key
+with `confirm = "always"`, it covers one signature: the retry. The retry is
+a separate request that comes later, so the approval waits for it for
+`ssh_agent.retry_window` (default 1 minute), and is gone once the
+signature is made, or the window has passed, or the database locks. A
+signature that fails leaves it for the next try. The user then retries the
+command, and it signs. A forwarded request's approval is scoped to its
+forwarding session, so the retry has to run in the same `ssh -A` session.
+Approving doesn't unlock: a refusal caused by a locked database is
+answered with `kpa unlock`.
+
+A one-signature approval is not tied to the process that was refused: it is
+spent by whichever request for the same key and destination arrives first
+within the window. Any same-uid process could ask for it, and could as
+well have approved on screen, so this is the uid boundary again (NG-1,
+T-18), and the window keeps it short.
+
+`ssh_pending` and `ssh_approve` are on the JSON socket, which forwarding
+never reaches, so a forwarded host cannot approve its own requests. Any
+same-uid process can send them, which is the same as approving on screen
+within the uid boundary (NG-1, T-18).
 
 **The hint.** The agent protocol's `FAILURE` carries no text, but `ssh`
 prints the key's comment when the agent refuses: `signing failed for
@@ -600,6 +620,7 @@ password-guessing oracle.
 | `confirm_prompt` | `[ssh_agent]` | none; required once a database opts in | The approval program, dmenu style (§ 6.7) |
 | `confirm_prompt_timeout` | `[ssh_agent]` | `prompt_timeout` | How long the confirm prompt may stay open unanswered before it is killed and the signature refused |
 | `backoff` | `[ssh_agent]` | `"2m"` | How long a cancelled prompt holds back prompts for its database (§ 6.6) |
+| `retry_window` | `[ssh_agent]` | `"1m"` | How long an approval of a `confirm = "always"` key from `ssh_approve` stays usable for the retry (§ 6.8) |
 | `fingerprint` | `[[database.ssh_key]]` | required | Which key the override is for, as `ssh-add -l` and `kpa ssh keys` print it |
 | `name` | `[[database.ssh_key]]` | the entry's title | Identity comment, shown in prompts and logs |
 | `confirm` | `[[database.ssh_key]]` | `"once"` | Local approval: `"once"`, `"always"` or `"never"` (§ 6.7) |

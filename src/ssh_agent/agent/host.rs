@@ -77,6 +77,11 @@ impl<'a> SlotView<'a> {
         self.db.is_some()
     }
 
+    /// The time of this hold.
+    pub(super) fn now(&self) -> Instant {
+        self.now
+    }
+
     /// Whether prompts are held back.
     pub(super) fn backing_off(&self) -> bool {
         self.backoff.is_some_and(|until| self.now < until)

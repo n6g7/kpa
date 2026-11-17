@@ -61,6 +61,12 @@ prompt_timeout = "60s"
 # confirm_prompt = ["sh", "-c", "exec fuzzel --dmenu --prompt \"$KPA_PROMPT_MESSAGE\""]
 # confirm_prompt_timeout = "30s"
 # backoff = "2m"
+#
+# A request from outside the desktop that needs an approval is refused and
+# remembered, and can be approved afterwards. For a key with
+# `confirm = "always"` the approval covers one signature, the retry, and
+# lapses after `retry_window` if the retry doesn't come.
+# retry_window = "1m"
 
 # Both entries deliberately point at the same fixture: two names is what
 # makes the multi-database behaviour testable — `status` listing two rows,
