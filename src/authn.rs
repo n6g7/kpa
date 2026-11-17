@@ -10,15 +10,50 @@
 //! Which session is the display session is not the peer's to say, so a
 //! [`Requester`] only keeps the cgroup.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 /// Longest `/proc/<pid>/` file accepted. A unified hierarchy's `cgroup` has
 /// one line; a hybrid one adds a line per v1 controller, still well under
 /// this. `comm` is at most 16 bytes.
 const MAX_PROC_FILE_LEN: u64 = 16 * 1024;
+
+/// The cgroup that every connection to a listening socket is taken to
+/// have, in place of its peer's own, keyed by the socket's path. Empty
+/// outside tests: [`Requester::of`] makes one lookup per connection.
+static ASSUMED_CGROUPS: LazyLock<Mutex<HashMap<PathBuf, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Takes every connection to the listening socket at `socket_path` to come
+/// from a peer in `cgroup`, for tests that run the daemon in-process and
+/// drive it with the real CLI. Test-only: nothing in the daemon calls it, and
+/// no CLI flag, environment variable, config key or request field reaches
+/// it. Keyed by socket, so tests running in parallel, each with a socket of
+/// its own, don't affect one another.
+#[doc(hidden)]
+pub fn assume_cgroup(socket_path: &Path, cgroup: &str) {
+    ASSUMED_CGROUPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(socket_path.to_path_buf(), cgroup.to_string());
+}
+
+/// The cgroup `assume_cgroup` set for the socket `stream` was accepted on,
+/// if it did.
+fn assumed_cgroup(stream: &UnixStream) -> Option<String> {
+    let address = stream.local_addr().ok()?;
+    let path = address.as_pathname()?;
+    ASSUMED_CGROUPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .cloned()
+}
 
 /// The uid this process acts as (its effective uid): the one every
 /// same-user check compares against and the one kpa looks the user up by.
@@ -56,11 +91,13 @@ impl Requester {
     /// command name where they can be read.
     pub fn of(stream: &UnixStream) -> io::Result<Requester> {
         let uid = peer_uid(stream)?;
-        let cgroup = peer_cgroup(stream)
-            .inspect_err(|err| {
-                crate::log::debug(format_args!("could not read the peer's cgroup: {err}"));
-            })
-            .ok();
+        let cgroup = assumed_cgroup(stream).or_else(|| {
+            peer_cgroup(stream)
+                .inspect_err(|err| {
+                    crate::log::debug(format_args!("could not read the peer's cgroup: {err}"));
+                })
+                .ok()
+        });
         Ok(Requester {
             uid,
             cgroup,
@@ -248,5 +285,35 @@ mod tests {
             Some(std::fs::read_to_string("/proc/self/cgroup").expect("own cgroup"))
         );
         assert_eq!(requester.command.as_deref(), Some("kpa"));
+    }
+
+    #[test]
+    fn a_connection_to_a_socket_with_an_assumed_cgroup_has_that_cgroup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (assumed, untouched) = (dir.path().join("assumed"), dir.path().join("untouched"));
+        let accepted = |path: &Path| {
+            let listener = std::os::unix::net::UnixListener::bind(path).expect("bind");
+            let _client = UnixStream::connect(path).expect("connect");
+            listener.accept().expect("accept").0
+        };
+        assume_cgroup(&assumed, "0::/system.slice/cron.service\n");
+
+        let forced = Requester::of(&accepted(&assumed)).expect("peer credentials");
+        let own = Requester::of(&accepted(&untouched)).expect("peer credentials");
+
+        assert_eq!(
+            forced.cgroup.as_deref(),
+            Some("0::/system.slice/cron.service\n")
+        );
+        assert_eq!(forced.uid, own.uid);
+        assert_eq!(forced.command, own.command);
+        assert_eq!(
+            own.cgroup.as_deref(),
+            Some(
+                std::fs::read_to_string("/proc/self/cgroup")
+                    .expect("own cgroup")
+                    .as_str()
+            )
+        );
     }
 }

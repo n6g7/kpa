@@ -8,7 +8,7 @@
 //! forwarded `SIGN_REQUEST` reaches `ssh_sign` with its connection's class
 //! like any other.
 
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -97,16 +97,7 @@ impl Drop for CapSlot {
 /// Accept connections on the SSH agent socket forever, handling each on
 /// its own thread. Mirrors `server::serve`'s shape: a stuck `accept`
 /// pauses rather than spins, and a connection over the cap is dropped.
-///
-/// `identify` says who is on a connection: the daemon's own
-/// `Server::requester_of`, so the JSON socket and this one build a requester
-/// in the one place.
-pub fn serve<S: SshSign + Send + Sync + 'static>(
-    server: Arc<S>,
-    listener: UnixListener,
-    identify: impl Fn(&UnixStream) -> io::Result<Requester> + Send + Sync + 'static,
-) {
-    let identify = Arc::new(identify);
+pub fn serve<S: SshSign + Send + Sync + 'static>(server: Arc<S>, listener: UnixListener) {
     let limits = Arc::new(Limits::new());
     let owner = crate::authn::process_uid();
     for conn in listener.incoming() {
@@ -125,10 +116,9 @@ pub fn serve<S: SshSign + Send + Sync + 'static>(
         };
         let server = Arc::clone(&server);
         let limits = Arc::clone(&limits);
-        let identify = Arc::clone(&identify);
         let _ = thread::Builder::new().spawn(move || {
             let _slot = slot;
-            handle_connection(server.as_ref(), stream, owner, &limits, identify.as_ref());
+            handle_connection(server.as_ref(), stream, owner, &limits);
         });
     }
 }
@@ -136,14 +126,8 @@ pub fn serve<S: SshSign + Send + Sync + 'static>(
 /// Serves one connection until it closes, errors, sends an oversize frame,
 /// lets a frame take longer than `limits.frame_timeout`, or becomes
 /// forwarded while the forwarded cap is full.
-fn handle_connection(
-    server: &impl SshSign,
-    mut stream: UnixStream,
-    owner: u32,
-    limits: &Limits,
-    identify: &impl Fn(&UnixStream) -> io::Result<Requester>,
-) {
-    let requester = match identify(&stream) {
+fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32, limits: &Limits) {
+    let requester = match Requester::of(&stream) {
         Ok(requester) if authz::may_connect(&requester, owner) => requester,
         Ok(requester) => {
             log::warn(format_args!(
@@ -443,9 +427,7 @@ mod tests {
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
 
         std::thread::scope(|scope| {
-            scope.spawn(|| {
-                handle_connection(&signer, theirs, owner, &Limits::new(), &Requester::of)
-            });
+            scope.spawn(|| handle_connection(&signer, theirs, owner, &Limits::new()));
             let mut sign = vec![13u8];
             for field in [b"key".as_slice(), b"data".as_slice()] {
                 sign.extend_from_slice(&u32::try_from(field.len()).unwrap().to_be_bytes());
@@ -473,9 +455,7 @@ mod tests {
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
 
         std::thread::scope(|scope| {
-            scope.spawn(|| {
-                handle_connection(&signer, theirs, owner, &Limits::new(), &Requester::of)
-            });
+            scope.spawn(|| handle_connection(&signer, theirs, owner, &Limits::new()));
             let len = u32::try_from(wire::MAX_FRAME_LEN + 1).unwrap();
             ours.write_all(&len.to_be_bytes()).expect("write");
             let mut rest = Vec::new();
@@ -515,9 +495,7 @@ mod tests {
         send(&mut ours, &[11]); // REQUEST_IDENTITIES
 
         std::thread::scope(|scope| {
-            scope.spawn(|| {
-                handle_connection(&signer, theirs, other, &Limits::new(), &Requester::of)
-            });
+            scope.spawn(|| handle_connection(&signer, theirs, other, &Limits::new()));
             // The connection closes with the request unread, so the
             // kernel may reset it rather than end it: either way, no reply.
             let mut reply = Vec::new();
@@ -542,7 +520,7 @@ mod tests {
 
         let started = Instant::now();
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, owner, &limits, &Requester::of));
+            scope.spawn(|| handle_connection(&signer, theirs, owner, &limits));
             let mut writer = ours.try_clone().expect("clone");
             scope.spawn(move || {
                 let _ = writer.write_all(&100u32.to_be_bytes());
@@ -590,7 +568,7 @@ mod tests {
             .store(MAX_FORWARDED_CONNECTIONS, Ordering::SeqCst);
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, owner, &full, &Requester::of));
+            scope.spawn(|| handle_connection(&signer, theirs, owner, &full));
             send(&mut ours, &forwarding_bind());
             assert!(closed_unanswered(&mut ours));
         });
@@ -604,7 +582,7 @@ mod tests {
             .store(MAX_FORWARDED_CONNECTIONS - 1, Ordering::SeqCst);
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, owner, &room, &Requester::of));
+            scope.spawn(|| handle_connection(&signer, theirs, owner, &room));
             send(&mut ours, &forwarding_bind());
             assert_eq!(read_response(&mut ours), [6]); // SUCCESS
             assert_eq!(

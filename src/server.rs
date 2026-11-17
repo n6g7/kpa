@@ -181,9 +181,6 @@ pub struct Server {
     /// (`policy::Event::DisplaySession`). `authz` decides against it each
     /// time a request is answered.
     display_session: Mutex<policy::DisplaySession>,
-    /// The cgroup every connection is taken to have, in place of its
-    /// peer's own. Set by `assume_cgroup` only.
-    assumed_cgroup: OnceLock<String>,
     /// The daemon's one prompt queue, so only one prompt is ever on screen
     /// (`docs/ssh-agent.md` § 6.7): the unlock prompt's, and the SSH
     /// agent's approval prompts, which `serve_ssh_agent` builds on it.
@@ -242,7 +239,6 @@ impl Server {
             clip: Arc::new(Clipboard::new(clipboard)),
             clip_db: Arc::new(Mutex::new(None)),
             display_session: Mutex::new(policy::DisplaySession::None),
-            assumed_cgroup: OnceLock::new(),
             prompt_queue,
             unlock_prompt,
         }
@@ -348,28 +344,6 @@ impl Server {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-    }
-
-    /// Take every connection's cgroup to be `cgroup`, instead of reading the
-    /// peer's, for tests that run the daemon in-process and drive it with
-    /// the real CLI. Only code that builds its own `Server` can call this:
-    /// `main.rs` never does, and no CLI flag, environment variable, config
-    /// key or request field reaches it.
-    #[doc(hidden)]
-    pub fn assume_cgroup(&self, cgroup: &str) {
-        let _ = self.assumed_cgroup.set(cgroup.to_string());
-    }
-
-    /// The caller on `stream`, as both sockets' accept loops build it: its
-    /// own facts, except the cgroup `assume_cgroup` set, if it did. The one
-    /// place a connection's requester is made, so every decision after it
-    /// sees a plain [`Requester`].
-    pub fn requester_of(&self, stream: &UnixStream) -> std::io::Result<Requester> {
-        let mut requester = Requester::of(stream)?;
-        if let Some(cgroup) = self.assumed_cgroup.get() {
-            requester.cgroup = Some(cgroup.clone());
-        }
-        Ok(requester)
     }
 
     /// Where to report unlocks. Called once, before the server takes requests.
@@ -1024,10 +998,7 @@ pub fn serve_ssh_agent(server: Arc<Server>, listener: UnixListener) {
         server.config.confirm_prompt_timeout(),
     );
     let agent = Agent::new(Arc::clone(&server), approval, &server.paths);
-    let identify = Arc::clone(&server);
-    ssh_agent::serve::serve(Arc::new(agent), listener, move |stream| {
-        identify.requester_of(stream)
-    });
+    ssh_agent::serve::serve(Arc::new(agent), listener);
 }
 
 /// Accept connections forever, handling each on its own thread.
@@ -1211,7 +1182,7 @@ fn read_request(mut stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<Requ
 /// already keeps other users out; this check covers a mode that ever
 /// came out wrong.
 fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
-    let requester = match server.requester_of(&stream) {
+    let requester = match Requester::of(&stream) {
         Ok(requester) if authz::may_connect(&requester, owner) => requester,
         Ok(requester) => {
             log::warn(format_args!(
@@ -1302,24 +1273,6 @@ mod tests {
             Config::parse("").expect("an empty config is valid"),
             Paths::default(),
         )
-    }
-
-    #[test]
-    fn a_connections_requester_has_the_assumed_cgroup_if_one_was_set() {
-        let (ours, _theirs) = UnixStream::pair().expect("socket pair");
-        let server = empty_server();
-        let own = server.requester_of(&ours).expect("peer credentials");
-        assert_eq!(own, Requester::of(&ours).expect("peer credentials"));
-
-        server.assume_cgroup("0::/system.slice/cron.service\n");
-        let assumed = server.requester_of(&ours).expect("peer credentials");
-
-        assert_eq!(
-            assumed.cgroup.as_deref(),
-            Some("0::/system.slice/cron.service\n")
-        );
-        assert_eq!(assumed.uid, own.uid);
-        assert_eq!(assumed.command, own.command);
     }
 
     /// Send `request` bytes to `handle_connection` over a socket pair and

@@ -150,12 +150,12 @@ pub fn cgroup_on(on_desktop: bool, session: &str) -> String {
 /// spawned `kpa serve`, and driven with the real `kpa` CLI over its socket.
 ///
 /// Every connection counts as coming from the desktop by default
-/// (`Server::assume_cgroup`; `with_requester_on` overrides it), so `unlock`
+/// (`authn::assume_cgroup`; `with_requester_on` overrides it), so `unlock`
 /// raises the configured prompt wherever the tests run: a test runner is
 /// rarely in the display session. No logind watch runs, so nothing
 /// publishes the display session's state on its own: `with_config` and `with_requester_on`
 /// seed it as an active, unlocked session (`policy::Locks::set_display_session`),
-/// standing in for logind the same way `assume_cgroup` stands in for the
+/// standing in for logind the same way `authn::assume_cgroup` stands in for the
 /// peer's cgroup, so `copy` passes its gate the way it always did before
 /// that gate existed. A test about the gate itself (a requester outside the desktop, or
 /// a locked/inactive/absent display session) overrides either through `self.server`.
@@ -168,6 +168,9 @@ pub fn cgroup_on(on_desktop: bool, session: &str) -> String {
 /// stderr of its own.
 pub struct InProcessDaemon {
     pub socket: PathBuf,
+    /// The cgroup its connections are taken to have, on this socket and on
+    /// an agent socket a test starts (`kpa::authn::assume_cgroup`).
+    pub cgroup: String,
     pub server: Arc<kpa::server::Server>,
     /// The daemon's file locations: its SSH key cache and `known_hosts`
     /// live under its own tempdir, so a test never touches the real ones.
@@ -196,7 +199,8 @@ impl InProcessDaemon {
             ..kpa::paths::Paths::default()
         };
         let server = Arc::new(kpa::server::Server::new(config, paths.clone()));
-        server.assume_cgroup(&cgroup_on(on_desktop, "test"));
+        let cgroup = cgroup_on(on_desktop, "test");
+        kpa::authn::assume_cgroup(&socket, &cgroup);
         kpa::policy::Locks::set_display_session(
             &server,
             kpa::policy::DisplaySession::Unlocked {
@@ -213,6 +217,7 @@ impl InProcessDaemon {
         std::thread::spawn(move || kpa::server::serve(serving, listener));
         InProcessDaemon {
             socket,
+            cgroup,
             server,
             paths,
             _dir: dir,
