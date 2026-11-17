@@ -88,8 +88,13 @@ impl<H: SshHost> Agent<H> {
 }
 
 impl<H: SshHost> SshSign for Agent<H> {
-    fn ssh_identities(&self, class: &ConnectionClass, _requester: &Requester) -> Vec<Identity> {
-        identities::identities(self.host.as_ref(), self.cache_dir.as_deref(), class)
+    fn ssh_identities(&self, class: &ConnectionClass, requester: &Requester) -> Vec<Identity> {
+        identities::identities(
+            self.host.as_ref(),
+            self.cache_dir.as_deref(),
+            class,
+            requester,
+        )
     }
 
     fn ssh_sign(

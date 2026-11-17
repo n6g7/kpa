@@ -2,17 +2,24 @@
 //! database's served keys, from its slot while unlocked and from the
 //! public-key cache while locked, deduped by config order and filtered by
 //! the connection's class. A signature request finds its key the same way.
+//! For a requester outside the desktop, a key's comment also says what to
+//! run to use it (`docs/ssh-agent.md` § 6.8, "The hint"), as the sign flow
+//! would refuse it.
 
 use std::path::Path;
 
 use ssh_key::Fingerprint;
 
 use super::SshHost;
+use super::sign::{Lacking, lacking};
+use crate::authn::Requester;
+use crate::authz::may_prompt_on_screen;
 use crate::config::DatabaseConfig;
 use crate::log;
 use crate::output;
-use crate::ssh_agent::authz::may_list;
+use crate::ssh_agent::authz::{authorize_sign, may_list};
 use crate::ssh_agent::bind::ConnectionClass;
+use crate::ssh_agent::classify::Purpose;
 use crate::ssh_agent::keys;
 use crate::ssh_agent::wire::{self, Identity};
 
@@ -24,12 +31,15 @@ const MAX_COMMENT_LEN: usize = 128;
 
 /// Every key a connection of `class` may list right now: a forwarded
 /// connection never sees a `forwarded = false` key. Each comment is the
-/// key's name, escaped and capped. If the answer would be too big to send,
-/// the keys that fit are listed and the rest dropped, with a warning.
+/// key's name, escaped and capped, and for a requester who may not be
+/// prompted (outside the desktop, or the screen locked) followed by the hint
+/// [`remedy`] gives. If the answer would be too big to send, the keys that
+/// fit are listed and the rest dropped, with a warning.
 pub(super) fn identities(
     host: &impl SshHost,
     cache_dir: Option<&Path>,
     class: &ConnectionClass,
+    requester: &Requester,
 ) -> Vec<Identity> {
     let per_database: Vec<Vec<keys::ServedKey>> = host
         .databases()
@@ -42,10 +52,12 @@ pub(super) fn identities(
         .filter(|key| may_list(class, key.forwarded))
         .filter_map(|key| {
             let key_blob = key.public_key.to_bytes().ok()?;
-            Some(Identity {
-                key_blob,
-                comment: output::escape_one_line(&key.name, MAX_COMMENT_LEN),
-            })
+            let name = output::escape_one_line(&key.name, MAX_COMMENT_LEN);
+            let comment = match remedy(host, &key, class, requester) {
+                Some(remedy) => format!("{name} ({remedy})"),
+                None => name,
+            };
+            Some(Identity { key_blob, comment })
         })
         .collect();
     let (listed, dropped) = wire::fit_identities(listed);
@@ -56,6 +68,37 @@ pub(super) fn identities(
         ));
     }
     listed
+}
+
+/// What a requester who may not be prompted has to run before `key` signs
+/// for it, as the sign flow would refuse it: unlock its database, or
+/// approve the request it will be pending as. `ssh` prints the comment when
+/// the agent refuses, which is the one place such a requester is told. A
+/// requester who may be prompted, and a key that is refused for no remedy (a
+/// forwarded connection's included), has none to give.
+fn remedy(
+    host: &impl SshHost,
+    key: &keys::ServedKey,
+    class: &ConnectionClass,
+    requester: &Requester,
+) -> Option<String> {
+    // The purpose only matters to a login's session check, which doesn't
+    // change what the key needs.
+    let approval = authorize_sign(key, class, &Purpose::Other, None).ok()?;
+    host.with_slot(&key.database, |slot| {
+        let lacking = lacking(&slot, approval.as_ref())?;
+        if may_prompt_on_screen(requester, &host.display_session()) {
+            return None;
+        }
+        Some(match lacking {
+            Lacking::Unlock => {
+                let database = output::escape_one_line(&key.database, MAX_COMMENT_LEN);
+                format!("locked: kpa unlock {database}")
+            }
+            Lacking::Approval(_) => "needs approval: kpa ssh pending".to_string(),
+        })
+    })
+    .flatten()
 }
 
 /// The key `fingerprint` names, as the first opted-in database in config
@@ -103,9 +146,13 @@ fn served_keys(
 mod tests {
     use ssh_key::{HashAlg, PublicKey};
 
-    use super::super::fake::FakeHost;
+    use super::super::fake::{FakeHost, requester};
+    use std::time::Duration;
+
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
+    use crate::ssh_agent::approve::Scope;
+    use crate::ssh_agent::authz::SignatureApproval;
     use crate::ssh_agent::testing::{database, key_database, test_key};
 
     fn cached(seed: u64) -> PublicKey {
@@ -128,7 +175,12 @@ mod tests {
         keys::write_cache(dir.path(), "personal", &[cached(1)]).expect("write cache");
         let host = FakeHost::locked(vec![database("personal", vec![])]);
 
-        let listed = identities(&host, Some(dir.path()), &ConnectionClass::LocalUnbound);
+        let listed = identities(
+            &host,
+            Some(dir.path()),
+            &ConnectionClass::LocalUnbound,
+            &requester(),
+        );
         assert_eq!(listed.len(), 1);
         assert!(
             listed[0].comment.starts_with("personal SHA256:"),
@@ -144,14 +196,19 @@ mod tests {
         keys::write_cache(dir.path(), "personal", std::slice::from_ref(&key)).expect("write cache");
         let host = FakeHost::locked(vec![database("personal", vec![hidden(&key)])]);
 
-        let listed = identities(&host, Some(dir.path()), &ConnectionClass::LocalUnbound);
+        let listed = identities(
+            &host,
+            Some(dir.path()),
+            &ConnectionClass::LocalUnbound,
+            &requester(),
+        );
         assert!(listed.is_empty());
     }
 
     #[test]
     fn a_locked_database_without_a_cache_directory_lists_nothing() {
         let host = FakeHost::locked(vec![database("personal", vec![])]);
-        assert!(identities(&host, None, &ConnectionClass::LocalUnbound).is_empty());
+        assert!(identities(&host, None, &ConnectionClass::LocalUnbound, &requester()).is_empty());
     }
 
     #[test]
@@ -162,7 +219,7 @@ mod tests {
             key_database(&[("github", &key)]),
         );
 
-        let listed = identities(&host, None, &ConnectionClass::LocalUnbound);
+        let listed = identities(&host, None, &ConnectionClass::LocalUnbound, &requester());
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].comment, "github");
         assert_eq!(
@@ -179,7 +236,12 @@ mod tests {
         keys::write_cache(dir.path(), "work", &[key, cached(2)]).expect("write cache");
         let host = FakeHost::locked(vec![database("personal", vec![]), database("work", vec![])]);
 
-        let listed = identities(&host, Some(dir.path()), &ConnectionClass::LocalUnbound);
+        let listed = identities(
+            &host,
+            Some(dir.path()),
+            &ConnectionClass::LocalUnbound,
+            &requester(),
+        );
         let names: Vec<&str> = listed
             .iter()
             .map(|id| id.comment.split(' ').next().unwrap_or(""))
@@ -195,7 +257,15 @@ mod tests {
         cfg.serve_ssh_keys = false;
         let host = FakeHost::locked(vec![cfg]);
 
-        assert!(identities(&host, Some(dir.path()), &ConnectionClass::LocalUnbound).is_empty());
+        assert!(
+            identities(
+                &host,
+                Some(dir.path()),
+                &ConnectionClass::LocalUnbound,
+                &requester()
+            )
+            .is_empty()
+        );
     }
 
     /// A hostile entry title is escaped and capped before it becomes a
@@ -209,7 +279,7 @@ mod tests {
             key_database(&[(title.as_str(), &key)]),
         );
 
-        let listed = identities(&host, None, &ConnectionClass::LocalUnbound);
+        let listed = identities(&host, None, &ConnectionClass::LocalUnbound, &requester());
         assert_eq!(listed.len(), 1);
         let comment = &listed[0].comment;
         assert!(comment.len() <= MAX_COMMENT_LEN, "{}", comment.len());
@@ -237,7 +307,12 @@ mod tests {
         keys::write_cache(dir.path(), "personal", &many).expect("write cache");
         let host = FakeHost::locked(vec![database("personal", vec![])]);
 
-        let listed = identities(&host, Some(dir.path()), &ConnectionClass::LocalUnbound);
+        let listed = identities(
+            &host,
+            Some(dir.path()),
+            &ConnectionClass::LocalUnbound,
+            &requester(),
+        );
         assert!(!listed.is_empty());
         assert!(listed.len() < 6000);
         wire::encode_response(&wire::AgentResponse::IdentitiesAnswer(listed));
@@ -261,10 +336,119 @@ mod tests {
             dest: None,
         };
 
-        assert!(identities(&host, Some(dir.path()), &forwarded).is_empty());
+        assert!(identities(&host, Some(dir.path()), &forwarded, &requester()).is_empty());
         assert_eq!(
-            identities(&host, Some(dir.path()), &ConnectionClass::LocalUnbound).len(),
+            identities(
+                &host,
+                Some(dir.path()),
+                &ConnectionClass::LocalUnbound,
+                &requester()
+            )
+            .len(),
             1
         );
+    }
+
+    /// `key` as an unlocked `personal` serves it, named `github`.
+    fn serving(key: &ssh_key::PrivateKey, confirm: SshKeyConfirm) -> FakeHost {
+        let settings = SshKeyConfig {
+            fingerprint: key.public_key().fingerprint(HashAlg::Sha256),
+            name: None,
+            confirm,
+            forwarded: true,
+            serve: true,
+        };
+        FakeHost::unlocked(
+            vec![database("personal", vec![settings])],
+            key_database(&[("github", key)]),
+        )
+    }
+
+    fn comment(host: &FakeHost) -> String {
+        let listed = identities(host, None, &ConnectionClass::LocalUnbound, &requester());
+        assert_eq!(listed.len(), 1);
+        listed[0].comment.clone()
+    }
+
+    /// A requester who may not be prompted is told what to run, and only
+    /// while the key needs it. One who may be prompted is told nothing.
+    #[test]
+    fn a_key_that_needs_approval_says_so_to_a_requester_who_may_not_be_prompted() {
+        let key = test_key(1);
+        let host = serving(&key, SshKeyConfirm::Once).without_prompts();
+
+        assert_eq!(comment(&host), "github (needs approval: kpa ssh pending)");
+        assert_eq!(comment(&serving(&key, SshKeyConfirm::Once)), "github");
+
+        let scope = Scope::new(key.public_key().fingerprint(HashAlg::Sha256), None);
+        host.with_slot("personal", |slot| slot.ssh.approvals.grant(scope));
+        assert_eq!(comment(&host), "github");
+    }
+
+    /// An approval for one signature silences the hint while it lasts.
+    #[test]
+    fn a_one_signature_approval_silences_the_hint_until_it_expires() {
+        let key = test_key(1);
+        let host = serving(&key, SshKeyConfirm::Always).without_prompts();
+        let approval = SignatureApproval {
+            scope: Scope::new(key.public_key().fingerprint(HashAlg::Sha256), None),
+            remember: false,
+        };
+        let window = Duration::from_secs(60);
+        host.with_slot("personal", |slot| {
+            slot.ssh.approvals.approve(approval, slot.now(), window)
+        });
+
+        assert_eq!(comment(&host), "github");
+        host.advance(window);
+        assert_eq!(comment(&host), "github (needs approval: kpa ssh pending)");
+    }
+
+    #[test]
+    fn a_key_that_needs_nothing_has_no_hint() {
+        let key = test_key(1);
+        let host = serving(&key, SshKeyConfirm::Never).without_prompts();
+        assert_eq!(comment(&host), "github");
+    }
+
+    #[test]
+    fn a_locked_databases_key_says_to_unlock_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        keys::write_cache(dir.path(), "personal", &[cached(1)]).expect("write cache");
+        let listed = |host: &FakeHost| {
+            identities(
+                host,
+                Some(dir.path()),
+                &ConnectionClass::LocalUnbound,
+                &requester(),
+            )
+        };
+        let locked = || FakeHost::locked(vec![database("personal", vec![])]);
+
+        let may_not_prompt = listed(&locked().without_prompts());
+        assert!(
+            may_not_prompt[0]
+                .comment
+                .ends_with(" (locked: kpa unlock personal)"),
+            "{}",
+            may_not_prompt[0].comment
+        );
+        assert!(!listed(&locked())[0].comment.contains("kpa unlock"));
+    }
+
+    /// A forwarded connection's requester is told nothing: neither remedy
+    /// is one it can act on.
+    #[test]
+    fn a_forwarded_connection_gets_no_hint() {
+        let key = test_key(1);
+        let host = serving(&key, SshKeyConfirm::Once).without_prompts();
+        let forwarded = ConnectionClass::Forwarded {
+            host: cached(9).key_data().clone(),
+            session: vec![1],
+            dest: None,
+        };
+
+        let listed = identities(&host, None, &forwarded, &requester());
+        assert_eq!(listed[0].comment, "github");
     }
 }
