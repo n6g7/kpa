@@ -8,7 +8,7 @@
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
 
-use kpa::authn::{self, Requester};
+use kpa::authn::Requester;
 use kpa::authz;
 use kpa::policy::DisplaySession;
 
@@ -31,11 +31,12 @@ fn a_local_client_is_classified_by_its_own_cgroup() {
     let (stream, _) = listener.accept().unwrap();
 
     let own = std::fs::read_to_string(format!("/proc/{}/cgroup", client.id())).unwrap();
-    let peer = authn::peer_cgroup(&stream).expect("the peer's cgroup");
-    assert_eq!(peer, own, "the peer is the client process");
-
     let requester = Requester::of(&stream).expect("the peer's identity");
-    assert_eq!(requester.cgroup.as_deref(), Some(own.as_str()));
+    assert_eq!(
+        requester.cgroup.as_deref(),
+        Some(own.as_str()),
+        "the peer is the client process"
+    );
     let display_session = DisplaySession::Unlocked {
         id: "1".to_string(),
         active: true,

@@ -1,8 +1,14 @@
-//! The checks about a [`Requester`] that both sockets share, made when a
-//! request is answered, against the display session as it is then
-//! (`docs/headless.md` §§ 2 and 3). What each socket's requests may do with
-//! them is that socket's own policy: `request_policy` for kpa's socket,
-//! `ssh_agent::policy` for the agent's.
+//! Who may do what, about a [`Requester`], decided when a request is
+//! answered against the display session as it is then
+//! (`docs/headless.md` §§ 2, 3 and 5).
+//!
+//! There are two layers here, and a third policy elsewhere. The checks
+//! (`may_connect`, `on_desktop`, `may_prompt_on_screen`) are shared by both
+//! sockets. The `authorize_*` functions are kpa's own socket's policy, one
+//! per request type, built on the checks and returning what the request may
+//! use or the refusal it gets. The SSH agent's policy is
+//! `ssh_agent::policy`. `policy` is unrelated: it holds the auto-lock rules
+//! and the [`DisplaySession`] type.
 //!
 //! A requester holds facts read from its socket. Whether it runs on the
 //! desktop is not one of them: it depends on which session is the display
@@ -16,6 +22,7 @@
 
 use crate::authn::Requester;
 use crate::policy::DisplaySession;
+use crate::proto::{CopyError, UnlockError, UnlockRequest};
 
 /// Whether `requester` may talk to the daemon at all: only `owner`, the
 /// daemon's own user, may.
@@ -37,6 +44,40 @@ pub fn on_desktop(requester: &Requester, display_session: &DisplaySession) -> bo
 /// `active`: an inactive display session (a VT switch) still shows a prompt.
 pub fn may_prompt_on_screen(requester: &Requester, display_session: &DisplaySession) -> bool {
     on_desktop(requester, display_session) && !display_session.is_locked()
+}
+
+/// The display session whose clipboard a `copy` from `requester` may put
+/// its secret on: the requester is on the desktop, and the display session
+/// is active and not locked (`docs/headless.md` § 5). Anything else is
+/// `no_display`, and the clipboard is never touched. It is the display
+/// session itself that comes back, not just its id: the clipboard backend
+/// judges the compositor against it.
+pub fn authorize_copy<'s>(
+    requester: &Requester,
+    display_session: &'s DisplaySession,
+) -> Result<&'s DisplaySession, CopyError> {
+    match display_session {
+        DisplaySession::Unlocked { active: true, .. } if on_desktop(requester, display_session) => {
+            Ok(display_session)
+        }
+        _ => Err(CopyError::NoDisplay),
+    }
+}
+
+/// Whether `request` may go on to unlock: a request that carries its
+/// password needs no prompt, so it goes ahead from anywhere (that is how an
+/// unlock from outside the desktop is answered). One that needs a prompt
+/// may be answered only where a prompt may appear
+/// ([`may_prompt_on_screen`]), else it is `no_display`.
+pub fn authorize_unlock(
+    request: &UnlockRequest,
+    requester: &Requester,
+    display_session: &DisplaySession,
+) -> Result<(), UnlockError> {
+    if request.password.is_none() && !may_prompt_on_screen(requester, display_session) {
+        return Err(UnlockError::NoDisplay);
+    }
+    Ok(())
 }
 
 /// Whether the requester's cgroup is the desktop of the logind session
@@ -69,6 +110,8 @@ fn in_desktop_cgroup(requester: &Requester, session: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::Password;
+    use zeroize::Zeroizing;
 
     const UID: u32 = 1000;
     const SESSION: &str = "3";
@@ -242,5 +285,70 @@ mod tests {
         let requester = without_cgroup();
         assert!(may_connect(&requester, UID));
         assert!(!may_connect(&requester, UID + 1));
+    }
+
+    fn unlock_request(password: Option<&str>) -> UnlockRequest {
+        UnlockRequest {
+            db: "personal".to_string(),
+            password: password.map(|password| Password::new(Zeroizing::new(password.to_string()))),
+        }
+    }
+
+    /// `docs/headless.md` § 5: `copy` needs a requester on the desktop, an
+    /// active display session, and `LockedHint` false; every other
+    /// combination gets `no_display`.
+    #[test]
+    fn only_a_desktop_requester_on_an_active_unlocked_display_session_may_copy() {
+        let (desktop, outside) = (requester(DESKTOP), requester(CRON));
+        let active = unlocked("3", true);
+        assert_eq!(authorize_copy(&desktop, &active), Ok(&active));
+        for (requester, display_session) in [
+            (&outside, unlocked("3", true)),
+            (&desktop, locked("3")),
+            (&outside, locked("3")),
+            (&desktop, unlocked("3", false)),
+            (&outside, unlocked("3", false)),
+            (&desktop, DisplaySession::None),
+            (&outside, DisplaySession::None),
+        ] {
+            assert_eq!(
+                authorize_copy(requester, &display_session),
+                Err(CopyError::NoDisplay),
+                "{requester:?} on {display_session:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unlock_that_needs_a_prompt_needs_a_requester_on_the_desktop_and_no_locker() {
+        let (desktop, outside) = (requester(DESKTOP), requester(CRON));
+        let asking = unlock_request(None);
+        assert_eq!(
+            authorize_unlock(&asking, &desktop, &unlocked("3", true)),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_unlock(&asking, &desktop, &locked("3")),
+            Err(UnlockError::NoDisplay)
+        );
+        assert_eq!(
+            authorize_unlock(&asking, &outside, &unlocked("3", true)),
+            Err(UnlockError::NoDisplay)
+        );
+        assert_eq!(
+            authorize_unlock(&asking, &desktop, &DisplaySession::None),
+            Err(UnlockError::NoDisplay)
+        );
+    }
+
+    #[test]
+    fn an_unlock_that_carries_its_password_goes_ahead_from_anywhere() {
+        let carrying = unlock_request(Some("hunter2"));
+        let outside = requester(CRON);
+        assert_eq!(
+            authorize_unlock(&carrying, &outside, &DisplaySession::None),
+            Ok(())
+        );
+        assert_eq!(authorize_unlock(&carrying, &outside, &locked("3")), Ok(()));
     }
 }

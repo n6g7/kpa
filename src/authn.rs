@@ -86,7 +86,7 @@ impl Requester {
 }
 
 /// The contents of the peer's `/proc/<pid>/cgroup`: see [`peer_proc_file`].
-pub fn peer_cgroup(stream: &UnixStream) -> io::Result<String> {
+fn peer_cgroup(stream: &UnixStream) -> io::Result<String> {
     peer_proc_file(stream, "cgroup")
 }
 
@@ -94,7 +94,7 @@ pub fn peer_cgroup(stream: &UnixStream) -> io::Result<String> {
 /// at most 15 bytes): what to call the requester in front of the user. It
 /// is whatever the process chose to call itself, so it names a requester
 /// for display and decides nothing. `None` where it can't be read.
-pub fn peer_command(stream: &UnixStream) -> Option<String> {
+fn peer_command(stream: &UnixStream) -> Option<String> {
     let comm = peer_proc_file(stream, "comm").ok()?;
     Some(comm.trim_end_matches('\n').to_string()).filter(|comm| !comm.is_empty())
 }

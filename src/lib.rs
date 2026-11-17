@@ -15,7 +15,6 @@ pub mod paths;
 pub mod policy;
 mod prompt;
 pub mod proto;
-pub mod request_policy;
 pub mod server;
 pub mod socket;
 pub mod ssh_agent;

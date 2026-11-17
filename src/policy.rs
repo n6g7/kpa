@@ -83,7 +83,7 @@ pub enum Event {
 /// Only `LockedHint` makes the display session locked. A locker that only sends the
 /// `Lock` signal never reports the unlock (ASM-7), so its display session stays
 /// [`DisplaySession::Unlocked`]. `active` is a separate fact, carried alongside
-/// `LockedHint` for `request_policy::copy` alone: counting an
+/// `LockedHint` for `authz::authorize_copy` alone: counting an
 /// inactive session (one a VT switch moved away from) as locked would make
 /// kpa lock the vault just for that, so `active` never touches
 /// [`is_locked`](DisplaySession::is_locked) or `authz::may_prompt_on_screen`.

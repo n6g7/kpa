@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use zeroize::Zeroizing;
 
+use crate::policy::DisplaySession;
 use crate::wayland;
 pub use crate::wayland::Offer;
 
@@ -52,12 +53,15 @@ impl std::error::Error for ClipboardError {}
 /// A clipboard able to start serving one offer at a time.
 pub trait Backend: Send + Sync {
     /// Starts serving `secret` as the clipboard content of the display
-    /// session `session` (its logind id), with the password-manager hint
+    /// session `display_session`, with the password-manager hint
     /// alongside it. Blocks only long enough to know whether the backend
     /// accepted the offer — the actual serving runs on a thread of the
     /// backend's own.
-    fn start(&self, secret: Zeroizing<String>, session: &str)
-    -> Result<Arc<Offer>, ClipboardError>;
+    fn start(
+        &self,
+        secret: Zeroizing<String>,
+        display_session: &DisplaySession,
+    ) -> Result<Arc<Offer>, ClipboardError>;
 }
 
 /// Tracks the most recently started offer, so a later timeout can tell
@@ -86,9 +90,9 @@ impl Clipboard {
     pub fn offer(
         &self,
         secret: Zeroizing<String>,
-        session: &str,
+        display_session: &DisplaySession,
     ) -> Result<Arc<Offer>, ClipboardError> {
-        let offer = self.backend.start(secret, session)?;
+        let offer = self.backend.start(secret, display_session)?;
         *lock(&self.current) = Some(Arc::clone(&offer));
         Ok(offer)
     }
@@ -148,10 +152,10 @@ impl Backend for WaylandBackend {
     fn start(
         &self,
         secret: Zeroizing<String>,
-        session: &str,
+        display_session: &DisplaySession,
     ) -> Result<Arc<Offer>, ClipboardError> {
         let failed = |err: wayland::Error| ClipboardError(err.0);
-        let stream = wayland::connect(session).map_err(failed)?;
+        let stream = wayland::connect(display_session).map_err(failed)?;
         let offer = wayland::offer(stream, secret).map_err(failed)?;
         Ok(Arc::new(offer))
     }
@@ -208,7 +212,7 @@ impl Backend for RecordingBackend {
     fn start(
         &self,
         secret: Zeroizing<String>,
-        _session: &str,
+        _display_session: &DisplaySession,
     ) -> Result<Arc<Offer>, ClipboardError> {
         self.offered
             .lock()
@@ -231,6 +235,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{Backend, Clipboard, ClipboardError, Offer};
+    use crate::policy::DisplaySession;
 
     /// A backend whose offers have no Wayland connection at all.
     struct FakeBackend {
@@ -253,7 +258,7 @@ mod tests {
         fn start(
             &self,
             _secret: Zeroizing<String>,
-            _session: &str,
+            _display_session: &DisplaySession,
         ) -> Result<Arc<Offer>, ClipboardError> {
             if self.fail_next.swap(false, Ordering::SeqCst) {
                 return Err(ClipboardError("fake backend refused".to_string()));
@@ -262,7 +267,12 @@ mod tests {
         }
     }
 
-    const SESSION: &str = "2";
+    fn session() -> DisplaySession {
+        DisplaySession::Unlocked {
+            id: "2".to_string(),
+            active: true,
+        }
+    }
 
     fn secret(s: &str) -> Zeroizing<String> {
         Zeroizing::new(s.to_string())
@@ -275,7 +285,7 @@ mod tests {
         let backend = FakeBackend::new();
         let clip = Clipboard::new(backend);
         let offer = clip
-            .offer(secret("hunter2"), SESSION)
+            .offer(secret("hunter2"), &session())
             .expect("fake backend accepts");
 
         clip.expire(&offer);
@@ -292,10 +302,10 @@ mod tests {
         let backend = FakeBackend::new();
         let clip = Clipboard::new(backend);
         let first = clip
-            .offer(secret("first"), SESSION)
+            .offer(secret("first"), &session())
             .expect("fake backend accepts");
         let second = clip
-            .offer(secret("second"), SESSION)
+            .offer(secret("second"), &session())
             .expect("fake backend accepts");
 
         clip.expire(&first);
@@ -320,7 +330,7 @@ mod tests {
         backend.fail_next_start();
         let clip = Clipboard::new(backend);
 
-        assert!(clip.offer(secret("hunter2"), SESSION).is_err());
+        assert!(clip.offer(secret("hunter2"), &session()).is_err());
     }
 
     /// `end_now` is `lock`'s hook (`docs/threat-model.md` G-6): it ends
@@ -331,7 +341,7 @@ mod tests {
         let backend = FakeBackend::new();
         let clip = Clipboard::new(backend);
         let offer = clip
-            .offer(secret("hunter2"), SESSION)
+            .offer(secret("hunter2"), &session())
             .expect("fake backend accepts");
 
         clip.end_now();

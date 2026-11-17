@@ -294,7 +294,7 @@ sends nothing is dropped.
 `Requester`: its uid, the peer's pidfd (`SO_PEERPIDFD`, or the
 `SO_PEERCRED` pid on kernels without it) read for its
 `/proc/<pid>/cgroup` once when the connection is accepted, and its command
-name. `authz.rs` holds the checks both sockets share, pure functions of a
+name. `authz.rs` holds the decisions, pure functions of a
 `Requester` and the display session: only the daemon's own uid may connect
 (`authz::may_connect`), and the cgroup is classified against the display
 session each time a decision asks, not once at connect, so a connection
@@ -309,8 +309,8 @@ service (a cron job, a terminal server's shells), no display session at
 all, and any
 peer whose cgroup can't be read or parsed, including one that exited
 first. Whether the peer is on the desktop is logged at `debug` when the connection is accepted, and
-decides whether `unlock` may prompt on screen (`request_policy::unlock`) and
-which session `copy` may put on the clipboard of (`request_policy::copy`, § Clipboard). It decides where to ask, not
+decides whether `unlock` may prompt on screen (`authz::authorize_unlock`) and
+which session `copy` may put on the clipboard of (`authz::authorize_copy`, § Clipboard). It decides where to ask, not
 who may ask: a same-uid process can start work in another cgroup.
 
 **`list` never returns secrets** — it is an index. That holds for any field

@@ -48,7 +48,6 @@ use crate::proto::{
     SshKeysError, SshKeysReport, SshKeysRequest, Status, Unlock, UnlockError, UnlockRequest,
     WireEntry, WireSkippedKey, WireSshKey,
 };
-use crate::request_policy;
 use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
 use crate::vault::{self, Fingerprint, VaultError};
 
@@ -523,7 +522,7 @@ impl Unlock for Server {
 impl Server {
     /// The unlock `kpa unlock` and the tray's menu run, for `requester`.
     /// Whether a prompt may appear for it is decided under the mutex
-    /// (`request_policy::unlock`).
+    /// (`authz::authorize_unlock`).
     fn unlock_db(
         &self,
         request: &UnlockRequest,
@@ -563,7 +562,7 @@ impl Server {
             // ends the prompt. A request that carries its password needs no
             // prompt, so it goes ahead from anywhere: that is how an
             // unlock from outside the desktop is answered.
-            request_policy::unlock(request, requester, &self.display_session())?;
+            authz::authorize_unlock(request, requester, &self.display_session())?;
             if slot.unlocking {
                 return Err(UnlockError::InProgress { db: db() });
             }
@@ -843,8 +842,8 @@ impl CopyEntry for Server {
         // which must not stall every other request behind it, the same
         // reasoning that keeps `unlock`'s prompt-and-KDF step outside the
         // mutex too.
-        let clipboard_session =
-            request_policy::copy(requester, &self.display_session()).map(str::to_string);
+        let display_session = self.display_session();
+        let clipboard_session = authz::authorize_copy(requester, &display_session);
         let value = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
@@ -852,7 +851,7 @@ impl CopyEntry for Server {
             };
             // No secret reaches the clipboard where nobody can paste it
             // from (`docs/headless.md` § 5) — checked here, same place
-            // `unlock` asks `request_policy::unlock`, and before the `Locked`
+            // `unlock` asks `authz::authorize_unlock`, and before the `Locked`
             // check below so an outside caller learns no more than an
             // unknown database does.
             let session = clipboard_session?;
@@ -874,7 +873,7 @@ impl CopyEntry for Server {
 
         let offer = self
             .clip
-            .offer(value, &session)
+            .offer(value, session)
             .map_err(|err| CopyError::Clipboard {
                 db: db(),
                 detail: err.to_string(),

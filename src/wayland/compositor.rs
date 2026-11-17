@@ -33,9 +33,9 @@ const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 
 const DISPLAY_VAR: &str = "WAYLAND_DISPLAY=";
 
-/// Connects to the compositor of the display session `session` (its logind
-/// id), checked as this module's doc describes.
-pub fn connect(session: &str) -> Result<UnixStream, Error> {
+/// Connects to the compositor of `display_session`, checked as this
+/// module's doc describes.
+pub fn connect(display_session: &DisplaySession) -> Result<UnixStream, Error> {
     let environment = manager_environment()?;
     let name = socket_name(&environment)?;
     let path = runtime_dir()?.join(name);
@@ -44,7 +44,7 @@ pub fn connect(session: &str) -> Result<UnixStream, Error> {
             "couldn't connect to the compositor at {name}: {err}"
         ))
     })?;
-    check_listener(&stream, session)?;
+    check_listener(&stream, display_session)?;
     Ok(stream)
 }
 
@@ -99,7 +99,7 @@ fn runtime_dir() -> Result<PathBuf, Error> {
 /// desktop. Like `authz`'s other decisions, this tells the desktop from
 /// outside it, not an honest process from a hostile one of the same uid
 /// (NG-1).
-fn check_listener(stream: &UnixStream, session: &str) -> Result<(), Error> {
+fn check_listener(stream: &UnixStream, display_session: &DisplaySession) -> Result<(), Error> {
     let listener = Requester::of(stream)
         .map_err(|err| Error(format!("couldn't identify the compositor: {err}")))?;
     if !authz::may_connect(&listener, crate::authn::process_uid()) {
@@ -107,11 +107,7 @@ fn check_listener(stream: &UnixStream, session: &str) -> Result<(), Error> {
             "the compositor's socket belongs to another user".to_string(),
         ));
     }
-    let display_session = DisplaySession::Unlocked {
-        id: session.to_string(),
-        active: true,
-    };
-    if !authz::on_desktop(&listener, &display_session) {
+    if !authz::on_desktop(&listener, display_session) {
         return Err(Error(
             "the compositor's socket isn't served from the desktop".to_string(),
         ));

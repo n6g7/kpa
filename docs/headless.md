@@ -269,8 +269,7 @@ stays refused while it is locked (§ 5).
 | File          | Role                                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------------------- |
 | `authn.rs`   | Peer pidfd or pid → uid, cgroup path and command name, kept in a `Requester`. Plain facts, no rules |
-| `authz.rs`   | The checks both sockets share, pure functions of a `Requester` and the display session as it is when asked: `may_connect`, `on_desktop`, `may_prompt_on_screen`. The cgroup-path classifier is table-tested |
-| `request_policy.rs` | What kpa's own socket's requests may do, one pure function per request type: `copy` (the session whose clipboard may be used, or `no_display`) and `unlock` (a prompt may appear, or `no_display`). The SSH agent's counterpart is `ssh_agent::policy`; `policy.rs` is the auto-lock rules |
+| `authz.rs`   | Who may do what, as pure functions of a `Requester` and the display session as it is when asked. The checks both sockets share (`may_connect`, `on_desktop`, `may_prompt_on_screen`; the cgroup-path classifier is table-tested), and kpa's own socket's policy, one function per request type (`authorize_copy`: the session whose clipboard may be used, or `no_display`; `authorize_unlock`: a prompt may appear, or `no_display`). The SSH agent's policy is `ssh_agent::policy`; `policy.rs` is the auto-lock rules |
 | `policy.rs`   | Also publishes the display session's state (no session, locked, unlocked), which `copy` and classification read      |
 | `proto/unlock.rs` | `UnlockRequest` gains `password: Option<Password>`: a zeroizing newtype, decoded from base64 by a borrowing visitor, with a redacting `Debug`. `no_display` joins the error codes |
 | `server.rs`   | Reads request lines into a fixed zeroizing buffer; prompt timeout; lock kills prompts; `copy` gated on origin and the display session's state |
