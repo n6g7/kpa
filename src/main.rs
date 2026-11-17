@@ -6,6 +6,7 @@
 
 mod client;
 mod ssh_keys_report;
+mod ssh_requests_report;
 mod tty;
 
 use std::path::{Path, PathBuf};
@@ -18,7 +19,10 @@ use kpa::config::Config;
 use kpa::log::{self, Level};
 use kpa::output::report_error;
 use kpa::paths::Paths;
-use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op, SshKeysReport, SshKeysRequest};
+use kpa::proto::{
+    CopyRequest, Field, ListRequest, LockRequest, Op, SshApproveRequest, SshKeysReport,
+    SshKeysRequest,
+};
 use kpa::server::{self, Server};
 use kpa::session_watch::{self, Bus};
 use kpa::socket;
@@ -86,7 +90,8 @@ enum Command {
         uuid: Uuid,
         field: Field,
     },
-    /// The SSH agent's keys.
+    /// The SSH agent: its keys, and the requests refused for want of an
+    /// approval.
     Ssh {
         #[command(subcommand)]
         command: SshCommand,
@@ -108,6 +113,14 @@ enum SshCommand {
         #[arg(long, conflicts_with = "json")]
         toml: bool,
     },
+    /// List the SSH requests that came from outside the desktop and were
+    /// refused for want of an approval, each with the id `kpa ssh approve`
+    /// takes (`docs/ssh-agent.md` § 6.8). A request nobody approves expires
+    /// after 5 minutes.
+    Pending,
+    /// Approve one pending SSH request, by the id `kpa ssh pending` shows;
+    /// the command that was refused then works on its next try.
+    Approve { id: Uuid },
 }
 
 fn main() -> ExitCode {
@@ -166,6 +179,22 @@ fn dispatch(cli: Cli) -> ExitCode {
             Op::SshKeys(SshKeysRequest { db: database }),
             if cli.json { Format::Json } else { Format::Text },
             |report: SshKeysReport| ssh_keys_report::render(&report, toml),
+        ),
+        Command::Ssh {
+            command: SshCommand::Pending,
+        } => client::run(
+            &socket_path,
+            Op::SshPending,
+            if cli.json { Format::Json } else { Format::Text },
+            |pending: ssh_requests_report::Pending| ssh_requests_report::render(&pending),
+        ),
+        Command::Ssh {
+            command: SshCommand::Approve { id },
+        } => client::run(
+            &socket_path,
+            Op::SshApprove(SshApproveRequest { id }),
+            if cli.json { Format::Json } else { Format::Text },
+            |approved: ssh_requests_report::Approved| ssh_requests_report::approved(id, &approved),
         ),
         Command::Version => unreachable!("handled above, before socket_path is resolved"),
     }

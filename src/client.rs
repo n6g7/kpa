@@ -135,6 +135,11 @@ impl fmt::Display for Failure {
                 f,
                 "database {db:?} changed on disk and was locked; unlock it again"
             ),
+            ErrorCode::NotPending => write!(
+                f,
+                "no such request is pending: it expired, or the database locked since. Retry \
+                 the command, and `kpa ssh pending` lists it again"
+            ),
             code => {
                 let code = serde_json::to_value(code).ok();
                 let code = code.as_ref().and_then(|code| code.as_str()).unwrap_or("?");
@@ -391,6 +396,11 @@ mod tests {
                 r#"{"v":1,"ok":false,"error":"stale","db":"x","detail":"database changed on disk"}"#
             ),
             "database \"x\" changed on disk and was locked; unlock it again"
+        );
+        assert_eq!(
+            failed(r#"{"v":1,"ok":false,"error":"not_pending","detail":"no such request"}"#),
+            "no such request is pending: it expired, or the database locked since. Retry the \
+             command, and `kpa ssh pending` lists it again"
         );
         assert_eq!(
             failed(r#"{"v":1,"ok":false,"error":"prompt_cancelled"}"#),

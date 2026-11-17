@@ -803,10 +803,11 @@ fn forwarded_signatures_are_refused() {
 
 /// Pending requests and their approval (`docs/ssh-agent.md` § 6.8): a
 /// request from outside the desktop is refused and pending, `ssh_approve`
-/// approves it by its id, and the retry signs.
+/// (`kpa ssh approve <id>`) approves it by its id, and the retry signs.
 mod pending {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
+    use std::process::{Command, Output};
 
     use kpa::authn::Requester;
     use kpa::proto::{Unlock, UnlockRequest};
@@ -861,6 +862,26 @@ mod pending {
             .collect::<Vec<_>>()
             .join(" ");
         write_pubkey(dir, "key.pub", &key_only)
+    }
+
+    /// `kpa <args>` against `daemon`, its text output as it is.
+    fn kpa(daemon: &InProcessDaemon, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_kpa"))
+            .arg("--socket")
+            .arg(&daemon.socket)
+            .args(args)
+            .output()
+            .expect("failed to run kpa")
+    }
+
+    /// The id in the first row of `kpa ssh pending`'s table.
+    fn first_id(pending: &str) -> String {
+        pending
+            .lines()
+            .nth(1)
+            .and_then(|row| row.split_whitespace().next())
+            .unwrap_or_else(|| panic!("no request listed in {pending:?}"))
+            .to_string()
     }
 
     fn pending(daemon: &InProcessDaemon) -> Vec<Value> {
@@ -945,5 +966,88 @@ mod pending {
             &json!({"v": 2, "op": "ssh_approve", "id": "not an id"}),
         );
         assert_eq!(malformed["error"], "malformed_request");
+    }
+
+    /// The commands do what the requests do: `kpa ssh pending` lists the
+    /// refused request with its id, `kpa ssh approve <id>` approves it, and
+    /// the retry signs.
+    #[test]
+    fn kpa_lists_a_refused_request_and_approves_it_by_its_id() {
+        let daemon = outside_daemon();
+        let agent = start_ssh_agent(&daemon);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pubkey = ed25519_pubkey(&agent, dir.path());
+        let data = dir.path().join("data");
+        std::fs::write(&data, b"approve me").expect("write data");
+        assert!(!sign(&agent, &pubkey, &data).status.success());
+
+        let listed = kpa(&daemon, &["ssh", "pending"]);
+        assert!(listed.status.success());
+        let listed = stdout(&listed);
+        let row = listed.lines().nth(1).expect("one request listed");
+        for cell in ["Ed25519", "personal", "sign (test)"] {
+            assert!(row.contains(cell), "{listed}");
+        }
+        assert!(listed.contains("kpa ssh approve <id>"), "{listed}");
+
+        let id = first_id(&listed);
+        let approved = kpa(&daemon, &["ssh", "approve", &id]);
+        assert!(approved.status.success());
+        assert_eq!(
+            stdout(&approved),
+            format!("Approved {id}. Retry the command that was refused.\n")
+        );
+        assert!(sign(&agent, &pubkey, &data).status.success());
+        assert_eq!(
+            stdout(&kpa(&daemon, &["ssh", "pending"])),
+            "No SSH request is pending.\n"
+        );
+    }
+
+    /// `--json` is the daemon's line for both commands, and the exit status
+    /// follows its `ok`.
+    #[test]
+    fn json_is_the_daemons_response_line() {
+        let daemon = outside_daemon();
+        let agent = start_ssh_agent(&daemon);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pubkey = ed25519_pubkey(&agent, dir.path());
+        let data = dir.path().join("data");
+        std::fs::write(&data, b"json").expect("write data");
+        assert!(!sign(&agent, &pubkey, &data).status.success());
+
+        let listed = kpa(&daemon, &["--json", "ssh", "pending"]);
+        let line: Value = serde_json::from_str(&stdout(&listed)).expect("a JSON line");
+        assert_eq!(line["ok"], true, "{line}");
+        let id = line["pending"][0]["id"]
+            .as_str()
+            .expect("an id")
+            .to_string();
+
+        let approved = kpa(&daemon, &["--json", "ssh", "approve", &id]);
+        assert!(approved.status.success());
+        let line: Value = serde_json::from_str(&stdout(&approved)).expect("a JSON line");
+        assert_eq!(line["ok"], true, "{line}");
+
+        let again = kpa(&daemon, &["--json", "ssh", "approve", &id]);
+        assert!(!again.status.success());
+        let line: Value = serde_json::from_str(&stdout(&again)).expect("a JSON line");
+        assert_eq!(line["error"], "not_pending");
+    }
+
+    #[test]
+    fn approving_what_is_not_pending_is_a_sentence() {
+        let daemon = outside_daemon();
+        let id = "00000000-0000-4000-8000-000000000000";
+
+        let approve = kpa(&daemon, &["ssh", "approve", id]);
+        assert!(!approve.status.success());
+        let stderr = String::from_utf8_lossy(&approve.stderr);
+        assert!(stderr.contains("no such request is pending"), "{stderr}");
+        assert!(
+            !kpa(&daemon, &["ssh", "approve", "not an id"])
+                .status
+                .success()
+        );
     }
 }
