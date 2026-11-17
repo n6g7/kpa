@@ -13,7 +13,7 @@ use ssh_key::Fingerprint;
 use super::SshHost;
 use super::sign::{Lacking, lacking};
 use crate::authn::Requester;
-use crate::authz::may_prompt_on_screen;
+use crate::authz::on_desktop;
 use crate::config::DatabaseConfig;
 use crate::log;
 use crate::output;
@@ -31,10 +31,9 @@ const MAX_COMMENT_LEN: usize = 128;
 
 /// Every key a connection of `class` may list right now: a forwarded
 /// connection never sees a `forwarded = false` key. Each comment is the
-/// key's name, escaped and capped, and for a requester who may not be
-/// prompted (outside the desktop, or the screen locked) followed by the hint
-/// [`remedy`] gives. If the answer would be too big to send, the keys that
-/// fit are listed and the rest dropped, with a warning.
+/// key's name, escaped and capped, and for a requester outside the desktop
+/// followed by the hint [`remedy`] gives. If the answer would be too big to
+/// send, the keys that fit are listed and the rest dropped, with a warning.
 pub(super) fn identities(
     host: &impl SshHost,
     cache_dir: Option<&Path>,
@@ -47,13 +46,15 @@ pub(super) fn identities(
         .filter(|cfg| cfg.serve_ssh_keys)
         .map(|cfg| served_keys(host, cache_dir, cfg))
         .collect();
+    let outside = !on_desktop(requester, &host.display_session());
     let listed = keys::dedupe_by_config_order(per_database)
         .into_iter()
         .filter(|key| may_list(class, key.forwarded))
         .filter_map(|key| {
             let key_blob = key.public_key.to_bytes().ok()?;
             let name = output::escape_one_line(&key.name, MAX_COMMENT_LEN);
-            let comment = match remedy(host, &key, class, requester) {
+            let remedy = outside.then(|| remedy(host, &key, class)).flatten();
+            let comment = match remedy {
                 Some(remedy) => format!("{name} ({remedy})"),
                 None => name,
             };
@@ -70,27 +71,18 @@ pub(super) fn identities(
     listed
 }
 
-/// What a requester who may not be prompted has to run before `key` signs
-/// for it, as the sign flow would refuse it: unlock its database, or
-/// approve the request it will be pending as. `ssh` prints the comment when
-/// the agent refuses, which is the one place such a requester is told. A
-/// requester who may be prompted, and a key that is refused for no remedy (a
-/// forwarded connection's included), has none to give.
-fn remedy(
-    host: &impl SshHost,
-    key: &keys::ServedKey,
-    class: &ConnectionClass,
-    requester: &Requester,
-) -> Option<String> {
+/// What a requester outside the desktop has to run before `key` signs for
+/// it, as the sign flow would refuse it where no prompt may appear: unlock
+/// its database, or approve the request it will be pending as. `ssh` prints
+/// the comment when the agent refuses, which is the one place such a
+/// requester is told. A key that is refused for no remedy, a forwarded
+/// connection's included, has none to give.
+fn remedy(host: &impl SshHost, key: &keys::ServedKey, class: &ConnectionClass) -> Option<String> {
     // The purpose only matters to a login's session check, which doesn't
     // change what the key needs.
     let approval = authorize_sign(key, class, &Purpose::Other, None).ok()?;
     host.with_slot(&key.database, |slot| {
-        let lacking = lacking(&slot, approval.as_ref())?;
-        if may_prompt_on_screen(requester, &host.display_session()) {
-            return None;
-        }
-        Some(match lacking {
+        Some(match lacking(&slot, approval.as_ref())? {
             Lacking::Unlock => {
                 let database = output::escape_one_line(&key.database, MAX_COMMENT_LEN);
                 format!("locked: kpa unlock {database}")
@@ -370,10 +362,10 @@ mod tests {
         listed[0].comment.clone()
     }
 
-    /// A requester who may not be prompted is told what to run, and only
-    /// while the key needs it. One who may be prompted is told nothing.
+    /// A requester outside the desktop is told what to run, and only while
+    /// the key needs it. One on the desktop is told nothing.
     #[test]
-    fn a_key_that_needs_approval_says_so_to_a_requester_who_may_not_be_prompted() {
+    fn a_key_that_needs_approval_says_so_to_a_requester_outside_the_desktop() {
         let key = test_key(1);
         let host = serving(&key, SshKeyConfirm::Once).without_prompts();
 

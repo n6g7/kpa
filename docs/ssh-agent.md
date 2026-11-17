@@ -594,9 +594,9 @@ person types at a terminal is not what the approval rests on.
 
 **The hint.** The agent protocol's `FAILURE` carries no text, but `ssh`
 prints the key's comment when the agent refuses: `signing failed for
-ED25519 "github" from agent: agent refused operation`. So when no
-prompt may appear for the requester (it runs outside the desktop, or the
-screen is locked), kpa puts the remedy in the comment it lists:
+ED25519 "github" from agent: agent refused operation`. So when the
+requester runs outside the desktop, kpa puts the remedy in the comment it
+lists:
 
 - an unapproved key: `github (needs approval: kpa ssh pending)`;
 - a key from a locked database: `personal SHA256:3fQ… (locked: kpa unlock
