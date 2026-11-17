@@ -702,6 +702,7 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
                 // On the desktop of the mock's display session.
                 cgroup: Some(common::cgroup_on(true, "31")),
                 command: None,
+                terminal: None,
             },
             None,
         )

@@ -2,6 +2,8 @@
 //! answer; [`ConfirmAnswer`], the answer a confirm prompt gives; and
 //! [`Declined`], how a confirm prompt ended when it didn't allow.
 
+use std::io;
+
 use zeroize::Zeroizing;
 
 /// How a prompt ended. `T` is what an answered prompt yields: by default
@@ -9,7 +11,8 @@ use zeroize::Zeroizing;
 /// returns it.
 pub enum PromptOutcome<T = Zeroizing<String>> {
     /// The user dismissed the prompt rather than answering it — for a
-    /// prompt program, an unsuccessful exit.
+    /// prompt program, an unsuccessful exit; for a terminal, its hang-up or
+    /// the requester that passed it leaving.
     Cancelled,
     /// Nothing was entered within the prompt's timeout; the prompt was
     /// killed.
@@ -19,6 +22,28 @@ pub enum PromptOutcome<T = Zeroizing<String>> {
     /// shown at all.
     Interrupted,
     Answer(T),
+}
+
+impl PromptOutcome {
+    /// The answer a prompt's raw output makes: its trailing line ending
+    /// stripped, and what is left read as UTF-8. It is copied into a buffer
+    /// of exactly its size, so nothing reallocates and the wipe on drop
+    /// covers all of it.
+    pub(super) fn from_output(output: &[u8]) -> io::Result<PromptOutcome> {
+        let mut end = output.len();
+        while end > 0 && matches!(output[end - 1], b'\n' | b'\r') {
+            end -= 1;
+        }
+        let text = std::str::from_utf8(&output[..end]).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "prompt output is not valid UTF-8",
+            )
+        })?;
+        let mut answer = Zeroizing::new(String::with_capacity(text.len()));
+        answer.push_str(text);
+        Ok(PromptOutcome::Answer(answer))
+    }
 }
 
 impl<T> PromptOutcome<T> {

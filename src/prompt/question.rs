@@ -9,9 +9,10 @@ use super::message::sanitize_message;
 use super::{Backend, CancelToken, PromptOutcome, PromptQueue};
 
 /// One kind of question whose answer is a `T`: `unlock`'s password, say.
-/// Each kind has its own [`Backend`] and timeout, and every kind waits its
-/// turn in the same [`PromptQueue`], so only one prompt is on screen at a
-/// time.
+/// Each kind has its own [`Backend`] and timeout, and every kind that takes
+/// the screen waits its turn in the same [`PromptQueue`], so only one prompt
+/// is on screen at a time. A kind whose backend asks elsewhere
+/// ([`Backend::is_queued`]) doesn't wait.
 pub struct Prompt<T> {
     queue: Arc<PromptQueue>,
     backend: Box<dyn Backend<T>>,
@@ -38,8 +39,13 @@ impl<T> Prompt<T> {
     /// it is on screen, never shown if it is still queued.
     pub fn ask(&self, message: &str, cancel: &CancelToken) -> io::Result<PromptOutcome<T>> {
         let message = sanitize_message(message);
-        let Some(_turn) = self.queue.enter(cancel)? else {
-            return Ok(PromptOutcome::Interrupted);
+        let _turn = if self.backend.is_queued() {
+            let Some(turn) = self.queue.enter(cancel)? else {
+                return Ok(PromptOutcome::Interrupted);
+            };
+            Some(turn)
+        } else {
+            None
         };
         // `None` for a timeout too large to add: a deadline that never
         // arrives.

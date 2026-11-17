@@ -1129,6 +1129,103 @@ fn copy_of_totp_without_a_valid_otp_field_is_field_empty() {
     }
 }
 
+/// A client that passes a terminal with its `unlock` (`docs/headless.md`
+/// § 4): the daemon asks on it where it can't ask on screen. The test is the
+/// client, over the socket directly, and the user at the pty.
+mod terminal_passed_with_the_request {
+    use std::io::{BufRead, BufReader};
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixStream;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use kpa::config::Config;
+    use serde_json::Value;
+
+    use super::{InProcessDaemon, common};
+    use crate::common::{Pty, config_toml};
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Sends an `unlock` of `personal` with `pty`'s terminal attached, and
+    /// reads the reply on another thread while `during` plays the user.
+    fn unlock_passing(socket: &Path, pty: &Pty, during: impl FnOnce()) -> Value {
+        let mut stream = UnixStream::connect(socket).expect("connect");
+        kpa::socket::send_with_fd(
+            &stream,
+            b"{\"v\":1,\"op\":\"unlock\",\"db\":\"personal\"}\n",
+            Some(pty.open_slave().as_fd()),
+        )
+        .expect("send the request");
+        std::thread::scope(|scope| {
+            let reply = scope.spawn(|| {
+                let mut line = String::new();
+                BufReader::new(&mut stream)
+                    .read_line(&mut line)
+                    .expect("read the reply");
+                serde_json::from_str(line.trim()).expect("a JSON reply")
+            });
+            during();
+            reply.join().expect("reply thread")
+        })
+    }
+
+    fn daemon(on_desktop: bool, prompt_script: &str) -> InProcessDaemon {
+        let config = config_toml(prompt_script, &common::password_db().display().to_string());
+        InProcessDaemon::with_requester_on(
+            Config::parse(&config).expect("valid config"),
+            on_desktop,
+        )
+    }
+
+    #[test]
+    fn an_unlock_from_outside_the_desktop_is_asked_on_the_terminal_and_the_password_unlocks() {
+        // The configured prompt would fail: it must never run.
+        let daemon = daemon(false, "exit 1");
+        let pty = Pty::open();
+
+        let reply = unlock_passing(&daemon.socket, &pty, || {
+            let screen = pty.read_until("Unlock personal: ", TIMEOUT);
+            assert!(!pty.echoing(), "echo is off while the daemon reads");
+            pty.type_text(&format!("{}\n", common::PASSWORD));
+            assert!(!screen.contains(common::PASSWORD));
+        });
+
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["db"], "personal");
+        assert!(pty.echoing(), "echo is back");
+        assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], false);
+    }
+
+    #[test]
+    fn a_wrong_password_typed_there_is_wrong_credentials() {
+        let daemon = daemon(false, "exit 1");
+        let pty = Pty::open();
+
+        let reply = unlock_passing(&daemon.socket, &pty, || {
+            pty.read_until("Unlock personal: ", TIMEOUT);
+            pty.type_text("not-the-real-password\n");
+        });
+
+        assert_eq!(reply["error"], "wrong_credentials", "{reply}");
+        assert!(pty.echoing());
+    }
+
+    /// Where the daemon can ask on screen it does, and never touches the
+    /// terminal.
+    #[test]
+    fn the_terminal_is_ignored_on_the_desktop() {
+        let daemon = daemon(true, &format!("printf %s {}", common::PASSWORD));
+        let pty = Pty::open();
+
+        let reply = unlock_passing(&daemon.socket, &pty, || {});
+
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert!(pty.echoing());
+        assert!(!pty.shows_anything(), "the daemon wrote to the terminal");
+    }
+}
+
 /// `kpa unlock`'s terminal read (`docs/headless.md` § 4): `--tty` and the
 /// two-step flow it falls back to from a plain `no_display`, both driven
 /// through a real pty so the password really does go in with echo off.
