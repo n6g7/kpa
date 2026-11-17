@@ -19,8 +19,6 @@ use std::io::{self, ErrorKind, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 
-use crate::socket;
-
 /// Longest `/proc/<pid>/` file accepted. A unified hierarchy's `cgroup` has
 /// one line; a hybrid one adds a line per v1 controller, still well under
 /// this. `comm` is at most 16 bytes.
@@ -30,6 +28,15 @@ const MAX_PROC_FILE_LEN: u64 = 16 * 1024;
 /// same-user check compares against and the one kpa looks the user up by.
 pub fn process_uid() -> u32 {
     rustix::process::geteuid().as_raw()
+}
+
+/// The uid of the process on the other end of `stream`, from `SO_PEERCRED`.
+/// Fails if the kernel can't say, and the caller must treat that as a
+/// refusal, not as a match.
+pub fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    rustix::net::sockopt::socket_peercred(stream)
+        .map(|cred| cred.uid.as_raw())
+        .map_err(std::io::Error::from)
 }
 
 /// Where a connected peer runs, relative to the user's display session.
@@ -64,7 +71,7 @@ impl Requester {
     /// process is looked at further than its uid: any other is refused by
     /// whoever accepted it.
     pub fn of(stream: &UnixStream) -> io::Result<Requester> {
-        let uid = socket::peer_uid(stream)?;
+        let uid = peer_uid(stream)?;
         if uid != process_uid() {
             return Ok(Requester {
                 uid,

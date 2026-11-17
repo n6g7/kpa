@@ -14,9 +14,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use kpa::authn;
 use kpa::output::{print_escaped, report_error};
 use kpa::proto::{self, ErrorCode, Op, Password, Request, Response, UnlockError, UnlockRequest};
-use kpa::socket;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -260,7 +260,7 @@ fn check_peer_uid(
     stream: &UnixStream,
     expected: u32,
 ) -> Result<(), ClientError> {
-    match socket::peer_uid(stream) {
+    match authn::peer_uid(stream) {
         Ok(uid) if uid == expected => Ok(()),
         Ok(uid) => Err(ClientError::WrongPeer(socket_path.to_path_buf(), uid)),
         Err(err) => Err(ClientError::Connect(socket_path.to_path_buf(), err)),
@@ -273,7 +273,7 @@ fn check_peer_uid(
 pub(super) fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|err| ClientError::Connect(socket_path.to_path_buf(), err))?;
-    check_peer_uid(socket_path, &stream, kpa::authn::process_uid())?;
+    check_peer_uid(socket_path, &stream, authn::process_uid())?;
 
     let line = proto::encode_request(request).map_err(ClientError::Encode)?;
     stream.write_all(&line).map_err(ClientError::Send)?;

@@ -72,7 +72,7 @@ interface's shape against, not as a plan.
 
 | Seam | Code | Linux | macOS counterpart | Keep the interface to |
 |---|---|---|---|---|
-| Socket peer identity | `socket.rs`, `authn.rs` | `SO_PEERCRED`, `SO_PEERPIDFD` | `getpeereid`, `LOCAL_PEERCRED`, `LOCAL_PEERPID` | a uid, and at most a pid. No pidfd. |
+| Socket peer identity | `authn.rs` | `SO_PEERCRED`, `SO_PEERPIDFD` | `getpeereid`, `LOCAL_PEERCRED`, `LOCAL_PEERPID` | a uid, and at most a pid. No pidfd. |
 | Request origin | `authn.rs` | the peer's cgroup and command name (`comm`), from `/proc` | no cgroups or `/proc`; `proc_name` for the command name | `Requester`: the peer's uid, its cgroup text and its command name, read once at connect, and `Requester::origin(session)`, where every failure is `Outside`. The command name is `None` on failure and only ever shown to the user. |
 | File locations | `paths.rs` (sockets, caches, `known_hosts`), `config.rs` (the config file) | `$XDG_RUNTIME_DIR`, `$XDG_CONFIG_HOME`, `$XDG_CACHE_HOME`, `$HOME` | `~/Library/…`, the per-user `$TMPDIR` | paths resolved in one helper per location, handed to callers as `Path`s. Socket paths stay under 104 bytes, macOS's `sun_path` limit. |
 | Lock triggers | `policy.rs` | logind over D-Bus: `Lock`, `LockedHint`, `PrepareForSleep`, a sleep inhibitor | screen-lock and sleep notifications | `policy::Event` and the `Locks` / `SleepInhibitor` traits. |
