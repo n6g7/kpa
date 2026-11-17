@@ -922,7 +922,7 @@ programs' settings.
   otherwise there is no agent socket.
 - **Phase 2** (unlock on demand, requests from outside the desktop) adds:
   `ssh-keygen -Y sign` failing when the scripted prompt cancels, and, from
-  outside the desktop (`Server::assume_origin`), a refused signature that
+  outside the desktop (`Server::assume_cgroup`), a refused signature that
   `ssh_pending` lists and whose retry signs after `ssh_approve`.
 - **Forwarding** (phase 3): an unprivileged `sshd` on a high port with a temporary
   host key, then `ssh -A` to localhost. This covers session-bind for real:

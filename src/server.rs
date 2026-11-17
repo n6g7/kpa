@@ -31,7 +31,8 @@ use keepass::Database;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::authn::{Origin, Requester};
+use crate::authn::Requester;
+use crate::authz;
 use crate::clip::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
 use crate::io::ByteCounter;
@@ -47,6 +48,7 @@ use crate::proto::{
     SshKeysError, SshKeysReport, SshKeysRequest, Status, Unlock, UnlockError, UnlockRequest,
     WireEntry, WireSkippedKey, WireSshKey,
 };
+use crate::request_policy;
 use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
 use crate::vault::{self, Fingerprint, VaultError};
 
@@ -177,12 +179,12 @@ pub struct Server {
     /// its natural timeout fires with nothing newer having replaced it.
     clip_db: Arc<Mutex<Option<String>>>,
     /// The display session's state, as the lock policy last published it
-    /// (`policy::Event::DisplaySession`). Each connection is classified against its
-    /// display session (`origin`), and `unlock` asks it whether a prompt
-    /// may be raised (`DisplaySession::may_prompt_on_screen`).
+    /// (`policy::Event::DisplaySession`). `authz` decides against it each
+    /// time a request is answered.
     display_session: Mutex<policy::DisplaySession>,
-    /// Set by `assume_origin` only.
-    assumed_origin: OnceLock<Origin>,
+    /// The cgroup every connection is taken to have, in place of its
+    /// peer's own. Set by `assume_cgroup` only.
+    assumed_cgroup: OnceLock<String>,
     /// The daemon's one prompt queue, so only one prompt is ever on screen
     /// (`docs/ssh-agent.md` § 6.7): the unlock prompt's, and the SSH
     /// agent's approval prompts, which `serve_ssh_agent` builds on it.
@@ -241,7 +243,7 @@ impl Server {
             clip: Arc::new(Clipboard::new(clipboard)),
             clip_db: Arc::new(Mutex::new(None)),
             display_session: Mutex::new(policy::DisplaySession::None),
-            assumed_origin: OnceLock::new(),
+            assumed_cgroup: OnceLock::new(),
             prompt_queue,
             unlock_prompt,
         }
@@ -349,14 +351,26 @@ impl Server {
             .clone()
     }
 
-    /// Treat every connection as coming from `origin` instead of reading
-    /// the peer's cgroup, for tests that run the daemon in-process and
-    /// drive it with the real CLI. Only code that builds its own `Server`
-    /// can call this: `main.rs` never does, and no CLI flag, environment
-    /// variable, config key or request field reaches it.
+    /// Take every connection's cgroup to be `cgroup`, instead of reading the
+    /// peer's, for tests that run the daemon in-process and drive it with
+    /// the real CLI. Only code that builds its own `Server` can call this:
+    /// `main.rs` never does, and no CLI flag, environment variable, config
+    /// key or request field reaches it.
     #[doc(hidden)]
-    pub fn assume_origin(&self, origin: Origin) {
-        let _ = self.assumed_origin.set(origin);
+    pub fn assume_cgroup(&self, cgroup: &str) {
+        let _ = self.assumed_cgroup.set(cgroup.to_string());
+    }
+
+    /// The caller on `stream`, as both sockets' accept loops build it: its
+    /// own facts, except the cgroup `assume_cgroup` set, if it did. The one
+    /// place a connection's requester is made, so every decision after it
+    /// sees a plain [`Requester`].
+    pub fn requester_of(&self, stream: &UnixStream) -> std::io::Result<Requester> {
+        let mut requester = Requester::of(stream)?;
+        if let Some(cgroup) = self.assumed_cgroup.get() {
+            requester.cgroup = Some(cgroup.clone());
+        }
+        Ok(requester)
     }
 
     /// Where to report unlocks. Called once, before the server takes requests.
@@ -502,53 +516,18 @@ impl Unlock for Server {
         request: &UnlockRequest,
         requester: &Requester,
     ) -> Result<String, UnlockError> {
-        self.unlock_db(request, || self.may_prompt_on_screen(requester))
+        self.unlock_db(request, requester)
     }
 }
 
 impl Server {
-    /// Where `requester` runs, against `display_session`: wherever
-    /// `assume_origin` said if it did, otherwise its cgroup against the
-    /// display session's id.
-    fn origin_in(&self, requester: &Requester, display_session: &policy::DisplaySession) -> Origin {
-        match self.assumed_origin.get() {
-            Some(origin) => *origin,
-            None => requester.origin(display_session.id()),
-        }
-    }
-
-    /// Whether a prompt may appear for `requester` now (`docs/headless.md`
-    /// § 2): it runs on the desktop, and the display session isn't known to
-    /// be locked.
-    fn may_prompt_on_screen(&self, requester: &Requester) -> bool {
-        let display_session = self.display_session();
-        display_session.may_prompt_on_screen(self.origin_in(requester, &display_session))
-    }
-
-    /// The display session whose clipboard a `copy` from `requester` may
-    /// put its secret on, or `None` where the copy must be refused
-    /// (`docs/headless.md` § 5).
-    fn clipboard_session(&self, requester: &Requester) -> Option<String> {
-        let display_session = self.display_session();
-        display_session
-            .clipboard_session(self.origin_in(requester, &display_session))
-            .map(str::to_string)
-    }
-
-    /// The unlock the tray's menu asks for, clicked at the desk: where a
-    /// prompt may appear unless the display session is known to be locked.
-    pub fn unlock_at_desk(&self, request: &UnlockRequest) -> Result<String, UnlockError> {
-        self.unlock_db(request, || {
-            self.display_session().may_prompt_on_screen(Origin::Desktop)
-        })
-    }
-
-    /// The unlock `kpa unlock` and the tray run: `may_prompt_on_screen` says whether
-    /// a prompt may appear, asked under the mutex.
+    /// The unlock `kpa unlock` and the tray's menu run, for `requester`.
+    /// Whether a prompt may appear for it is decided under the mutex
+    /// (`request_policy::unlock`).
     fn unlock_db(
         &self,
         request: &UnlockRequest,
-        may_prompt_on_screen: impl FnOnce() -> bool,
+        requester: &Requester,
     ) -> Result<String, UnlockError> {
         let name = request.db.as_str();
         let db = || name.to_string();
@@ -584,9 +563,7 @@ impl Server {
             // ends the prompt. A request that carries its password needs no
             // prompt, so it goes ahead from anywhere: that is how an
             // unlock from outside the desktop is answered.
-            if request.password.is_none() && !may_prompt_on_screen() {
-                return Err(UnlockError::NoDisplay);
-            }
+            request_policy::unlock(request, requester, &self.display_session())?;
             if slot.unlocking {
                 return Err(UnlockError::InProgress { db: db() });
             }
@@ -709,7 +686,7 @@ impl SshHost for Server {
     }
 
     fn may_prompt_on_screen(&self, requester: &Requester) -> bool {
-        Server::may_prompt_on_screen(self, requester)
+        authz::may_prompt_on_screen(requester, &self.display_session())
     }
 }
 
@@ -866,7 +843,8 @@ impl CopyEntry for Server {
         // which must not stall every other request behind it, the same
         // reasoning that keeps `unlock`'s prompt-and-KDF step outside the
         // mutex too.
-        let clipboard_session = self.clipboard_session(requester);
+        let clipboard_session =
+            request_policy::copy(requester, &self.display_session()).map(str::to_string);
         let value = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
@@ -874,12 +852,10 @@ impl CopyEntry for Server {
             };
             // No secret reaches the clipboard where nobody can paste it
             // from (`docs/headless.md` § 5) — checked here, same place
-            // `unlock` reads `DisplaySession::may_prompt_on_screen`, and before the `Locked`
+            // `unlock` asks `request_policy::unlock`, and before the `Locked`
             // check below so an outside caller learns no more than an
             // unknown database does.
-            let Some(session) = clipboard_session else {
-                return Err(CopyError::NoDisplay);
-            };
+            let session = clipboard_session?;
             let Some(database) = slot.db.as_ref() else {
                 return Err(CopyError::Locked { db: db() });
             };
@@ -1049,7 +1025,10 @@ pub fn serve_ssh_agent(server: Arc<Server>, listener: UnixListener) {
         server.config.confirm_prompt_timeout(),
     );
     let agent = Agent::new(Arc::clone(&server), approval, &server.paths);
-    ssh_agent::serve::serve(Arc::new(agent), listener);
+    let identify = Arc::clone(&server);
+    ssh_agent::serve::serve(Arc::new(agent), listener, move |stream| {
+        identify.requester_of(stream)
+    });
 }
 
 /// Accept connections forever, handling each on its own thread.
@@ -1233,8 +1212,8 @@ fn read_request(mut stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<Requ
 /// already keeps other users out; this check covers a mode that ever
 /// came out wrong.
 fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
-    let requester = match Requester::of(&stream) {
-        Ok(requester) if requester.uid == owner => requester,
+    let requester = match server.requester_of(&stream) {
+        Ok(requester) if authz::may_connect(&requester, owner) => requester,
         Ok(requester) => {
             log::warn(format_args!(
                 "rejected connection from uid {}",
@@ -1249,8 +1228,14 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
             return;
         }
     };
-    let origin = server.origin_in(&requester, &server.display_session());
-    log::debug(format_args!("connection from {origin:?}"));
+    log::debug(format_args!(
+        "connection from {}",
+        if authz::on_desktop(&requester, &server.display_session()) {
+            "the desktop"
+        } else {
+            "outside the desktop"
+        }
+    ));
 
     // The request, and the buffer it was read into, are dropped (and so
     // wiped) at the end of this block, before the response goes anywhere.
@@ -1289,13 +1274,14 @@ mod tests {
     /// requester on the desktop runs in.
     const SESSION: &str = "1";
 
-    /// A requester that runs where `origin` says, against a display session with
-    /// `SESSION` as its display session.
-    fn requester_in(origin: Origin) -> Requester {
+    /// A requester on the desktop of the display session `SESSION`, or, if
+    /// not `on_desktop`, in a system service.
+    fn requester_in(on_desktop: bool) -> Requester {
         let uid = crate::authn::process_uid();
-        let cgroup = match origin {
-            Origin::Desktop => format!("0::/user.slice/user-{uid}.slice/session-{SESSION}.scope\n"),
-            Origin::Outside => "0::/system.slice/cron.service\n".to_string(),
+        let cgroup = if on_desktop {
+            format!("0::/user.slice/user-{uid}.slice/session-{SESSION}.scope\n")
+        } else {
+            "0::/system.slice/cron.service\n".to_string()
         };
         Requester {
             uid,
@@ -1305,11 +1291,11 @@ mod tests {
     }
 
     fn desktop() -> Requester {
-        requester_in(Origin::Desktop)
+        requester_in(true)
     }
 
     fn outside() -> Requester {
-        requester_in(Origin::Outside)
+        requester_in(false)
     }
 
     fn empty_server() -> Server {
@@ -1317,6 +1303,24 @@ mod tests {
             Config::parse("").expect("an empty config is valid"),
             Paths::default(),
         )
+    }
+
+    #[test]
+    fn a_connections_requester_has_the_assumed_cgroup_if_one_was_set() {
+        let (ours, _theirs) = UnixStream::pair().expect("socket pair");
+        let server = empty_server();
+        let own = server.requester_of(&ours).expect("peer credentials");
+        assert_eq!(own, Requester::of(&ours).expect("peer credentials"));
+
+        server.assume_cgroup("0::/system.slice/cron.service\n");
+        let assumed = server.requester_of(&ours).expect("peer credentials");
+
+        assert_eq!(
+            assumed.cgroup.as_deref(),
+            Some("0::/system.slice/cron.service\n")
+        );
+        assert_eq!(assumed.uid, own.uid);
+        assert_eq!(assumed.command, own.command);
     }
 
     /// Send `request` bytes to `handle_connection` over a socket pair and
@@ -1471,7 +1475,7 @@ mod tests {
     }
 
     /// Marks the display session active and unlocked, so `CopyEntry::copy` with
-    /// `Origin::Desktop` passes its gate — every copy test below that
+    /// a requester on the desktop passes its gate — every copy test below that
     /// isn't itself about the gate calls this on its server, the same way
     /// those tests always ran before the clipboard session existed.
     fn allow_copy(server: &Server) {
@@ -2429,17 +2433,21 @@ mod tests {
     }
 
     fn unlock(server: &Server, name: &str) -> Result<String, UnlockError> {
-        unlock_from(server, name, Origin::Desktop)
+        unlock_from(server, name, &desktop())
     }
 
-    fn unlock_from(server: &Server, name: &str, origin: Origin) -> Result<String, UnlockError> {
+    fn unlock_from(
+        server: &Server,
+        name: &str,
+        requester: &Requester,
+    ) -> Result<String, UnlockError> {
         Unlock::unlock(
             server,
             &UnlockRequest {
                 db: name.to_string(),
                 password: None,
             },
-            &requester_in(origin),
+            requester,
         )
     }
 
@@ -2496,7 +2504,7 @@ mod tests {
         );
 
         assert_eq!(
-            unlock_from(&server, "personal", Origin::Outside),
+            unlock_from(&server, "personal", &outside()),
             Err(UnlockError::NoDisplay)
         );
         assert!(
@@ -2505,7 +2513,7 @@ mod tests {
         );
 
         assert_eq!(
-            unlock_from(&server, "personal", Origin::Desktop),
+            unlock_from(&server, "personal", &desktop()),
             Err(UnlockError::PromptCancelled {
                 db: "personal".to_string()
             })

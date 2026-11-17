@@ -5,6 +5,7 @@
 //! against. `main.rs` uses these same modules for the actual CLI.
 
 pub mod authn;
+pub mod authz;
 pub mod clip;
 pub mod config;
 mod io;
@@ -14,6 +15,7 @@ pub mod paths;
 pub mod policy;
 mod prompt;
 pub mod proto;
+pub mod request_policy;
 pub mod server;
 pub mod socket;
 pub mod ssh_agent;

@@ -36,8 +36,6 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Message;
 use zbus::zvariant::{self, OwnedObjectPath, OwnedValue};
 
-use crate::authn::Origin;
-
 const LOGIND: &str = "org.freedesktop.login1";
 const MANAGER_PATH: &str = "/org/freedesktop/login1";
 const MANAGER_IFACE: &str = "org.freedesktop.login1.Manager";
@@ -85,10 +83,10 @@ pub enum Event {
 /// Only `LockedHint` makes the display session locked. A locker that only sends the
 /// `Lock` signal never reports the unlock (ASM-7), so its display session stays
 /// [`DisplaySession::Unlocked`]. `active` is a separate fact, carried alongside
-/// `LockedHint` for [`clipboard_session`](DisplaySession::clipboard_session) alone: counting an
+/// `LockedHint` for `request_policy::copy` alone: counting an
 /// inactive session (one a VT switch moved away from) as locked would make
 /// kpa lock the vault just for that, so `active` never touches
-/// [`is_locked`](DisplaySession::is_locked) or [`may_prompt_on_screen`](DisplaySession::may_prompt_on_screen).
+/// [`is_locked`](DisplaySession::is_locked) or `authz::may_prompt_on_screen`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DisplaySession {
     /// No display session (`User.Display` is `/`), or no working logind
@@ -151,27 +149,6 @@ impl DisplaySession {
         match self {
             DisplaySession::None => None,
             DisplaySession::Locked { id, .. } | DisplaySession::Unlocked { id, .. } => Some(id),
-        }
-    }
-
-    /// Whether an unlock from `origin` may raise the graphical prompt: only
-    /// for a requester on the desktop, and not while the display session is known to
-    /// be locked (`docs/headless.md` § 2). Anything else gets `no_display`.
-    /// Never reads `active` — see this type's own doc comment.
-    pub fn may_prompt_on_screen(&self, origin: Origin) -> bool {
-        origin == Origin::Desktop && !self.is_locked()
-    }
-
-    /// The display session a `copy` from `origin` puts its secret on the
-    /// clipboard of: only for a requester on the desktop, with the display
-    /// session active and `LockedHint` false (`docs/headless.md` § 5).
-    /// `None` for anything else — outside the desktop, no session,
-    /// inactive, or locked — which gets `no_display`, and the clipboard is
-    /// never touched.
-    pub fn clipboard_session(&self, origin: Origin) -> Option<&str> {
-        match self {
-            DisplaySession::Unlocked { id, active: true } if origin == Origin::Desktop => Some(id),
-            _ => None,
         }
     }
 }
@@ -826,51 +803,6 @@ mod tests {
             .handle(Event::DisplaySession(locked_display_session()));
         h.policy.handle(Event::WatchLost);
         assert_eq!(h.locks.display_session(), DisplaySession::None);
-    }
-
-    #[test]
-    fn only_a_requester_on_the_desktop_may_prompt_and_not_while_locked() {
-        assert!(unlocked_display_session().may_prompt_on_screen(Origin::Desktop));
-        assert!(!locked_display_session().may_prompt_on_screen(Origin::Desktop));
-        assert!(!unlocked_display_session().may_prompt_on_screen(Origin::Outside));
-        assert!(!locked_display_session().may_prompt_on_screen(Origin::Outside));
-        assert!(!DisplaySession::None.may_prompt_on_screen(Origin::Outside));
-    }
-
-    /// `may_prompt_on_screen` never reads `active` — an inactive display session (a VT switch)
-    /// is treated exactly like an active one for prompting.
-    #[test]
-    fn may_prompt_ignores_whether_the_display_session_is_active() {
-        assert!(inactive_unlocked_display_session().may_prompt_on_screen(Origin::Desktop));
-    }
-
-    /// `docs/headless.md` § 5: `copy` needs a desktop requester, an active
-    /// display session, and `LockedHint` false — every other combination
-    /// gets `no_display`.
-    #[test]
-    fn only_a_desktop_requester_on_an_active_unlocked_display_session_has_a_clipboard_session() {
-        let unlocked = unlocked_display_session();
-        assert_eq!(unlocked.clipboard_session(Origin::Desktop), Some("31"));
-        assert_eq!(unlocked.clipboard_session(Origin::Outside), None);
-        assert_eq!(
-            locked_display_session().clipboard_session(Origin::Desktop),
-            None
-        );
-        assert_eq!(
-            locked_display_session().clipboard_session(Origin::Outside),
-            None
-        );
-        let inactive = inactive_unlocked_display_session();
-        assert_eq!(inactive.clipboard_session(Origin::Desktop), None);
-        assert_eq!(inactive.clipboard_session(Origin::Outside), None);
-        assert_eq!(
-            DisplaySession::None.clipboard_session(Origin::Desktop),
-            None
-        );
-        assert_eq!(
-            DisplaySession::None.clipboard_session(Origin::Outside),
-            None
-        );
     }
 
     #[test]

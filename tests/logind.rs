@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 mod common;
 
-use kpa::authn::{Origin, Requester};
+use kpa::authn::Requester;
 use kpa::config::Config;
 use kpa::paths::Paths;
 use kpa::policy::{self, Bus, DisplaySession, Locks};
@@ -634,8 +634,6 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
     ))
     .unwrap();
     let server = Arc::new(Server::new(config, Paths::default()));
-    // The unlock below comes from a requester on the desktop.
-    server.assume_origin(Origin::Desktop);
     server.set_policy_events(policy::start(
         server.clone(),
         Bus::Address(bus.address.clone()),
@@ -648,7 +646,8 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
             },
             &Requester {
                 uid: kpa::authn::process_uid(),
-                cgroup: None,
+                // On the desktop of the mock's display session.
+                cgroup: Some(common::cgroup_on(true, "31")),
                 command: None,
             },
         )

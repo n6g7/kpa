@@ -37,7 +37,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use common::InProcessDaemon;
-use kpa::authn::Origin;
 use kpa::policy::{DisplaySession, Locks};
 
 /// Held by each test that drives the live clipboard, for its whole run.
@@ -156,9 +155,9 @@ fn copy_from_outside_the_desktop_is_refused() {
         "printf %s unused",
         &common::password_db().display().to_string(),
     );
-    let daemon = InProcessDaemon::with_origin(
+    let daemon = InProcessDaemon::with_requester_on(
         kpa::config::Config::parse(&config).expect("valid config"),
-        Origin::Outside,
+        false,
     );
 
     let copied = daemon.run(&[

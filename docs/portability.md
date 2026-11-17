@@ -59,8 +59,7 @@ covers:
 These traits often sit on an OS boundary already. Keep their method
 signatures OS-neutral, like any other interface.
 
-**Answers and events are kpa's own types.** `authn::Origin`
-(desktop or outside), `policy::Event` (screen locked, sleeping, the display
+**Answers and events are kpa's own types.** `policy::Event` (screen locked, sleeping, the display
 session's state) and `prompt::PromptOutcome<T>` (generic over the answer, so a prompt
 needn't return a string) are the pattern to follow.
 
@@ -73,7 +72,7 @@ interface's shape against, not as a plan.
 | Seam | Code | Linux | macOS counterpart | Keep the interface to |
 |---|---|---|---|---|
 | Socket peer identity | `authn.rs` | `SO_PEERCRED`, `SO_PEERPIDFD` | `getpeereid`, `LOCAL_PEERCRED`, `LOCAL_PEERPID` | a uid, and at most a pid. No pidfd. |
-| Request origin | `authn.rs` | the peer's cgroup and command name (`comm`), from `/proc` | no cgroups or `/proc`; `proc_name` for the command name | `Requester`: the peer's uid, its cgroup text and its command name, read once at connect, and `Requester::origin(session)`, where every failure is `Outside`. The command name is `None` on failure and only ever shown to the user. |
+| Request origin | `authn.rs`, `authz.rs` | the peer's cgroup and command name (`comm`), from `/proc` | no cgroups or `/proc`; `proc_name` for the command name | `Requester`: the peer's uid, its cgroup text and its command name, read once at connect. `authz::on_desktop(&Requester, &DisplaySession)` is the one place the cgroup is judged, where every failure is outside the desktop. The command name is `None` on failure and only ever shown to the user. |
 | File locations | `paths.rs` (sockets, caches, `known_hosts`), `config.rs` (the config file) | `$XDG_RUNTIME_DIR`, `$XDG_CONFIG_HOME`, `$XDG_CACHE_HOME`, `$HOME` | `~/Library/…`, the per-user `$TMPDIR` | paths resolved in one helper per location, handed to callers as `Path`s. Socket paths stay under 104 bytes, macOS's `sun_path` limit. |
 | Lock triggers | `policy.rs` | logind over D-Bus: `Lock`, `LockedHint`, `PrepareForSleep`, a sleep inhibitor | screen-lock and sleep notifications | `policy::Event` and the `Locks` / `SleepInhibitor` traits. |
 | Clipboard | `clip.rs`, `wayland/` | kpa's own Wayland client: data-control, serving each paste | `NSPasteboard` | "serve this secret, end it after the timeout, never clear anyone else's". |

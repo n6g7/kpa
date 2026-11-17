@@ -55,7 +55,7 @@ fn the_log_never_carries_vault_contents_or_the_password() {
 
     assert!(log.contains(" INFO  unlocked \"personal\""), "{log}");
     assert!(log.contains(" DEBUG prompting for \"personal\""), "{log}");
-    assert!(log.contains(" DEBUG connection from Desktop"), "{log}");
+    assert!(log.contains(" DEBUG connection from the desktop"), "{log}");
     assert!(log.contains(" WARN  unlock failed"), "{log}");
     assert!(log.contains(" INFO  locked every database"), "{log}");
 

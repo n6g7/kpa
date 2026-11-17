@@ -1,18 +1,14 @@
-//! Who a request comes from, and where: the desktop, or outside it
-//! (`docs/headless.md` § 3).
+//! Who is on the other end of a connection: plain facts about the caller,
+//! read from its socket and `/proc` (`docs/headless.md` § 3). What those
+//! facts allow is not decided here: that is [`authz`](crate::authz), asked
+//! when a request is answered.
 //!
 //! The peer's pid comes from the socket, as a pidfd (`SO_PEERPIDFD`) where
 //! the kernel has it and as a bare pid (`SO_PEERCRED`) otherwise. Its
 //! cgroup, read from `/proc/<pid>/cgroup` when it connects, says whether it
-//! runs under the user's service manager or the display session's scope,
-//! which is where the compositor and everything it spawns live. Which
-//! session is the display session is not the peer's to say, so a
-//! [`Requester`] keeps the cgroup, and says where its peer runs when it is
-//! asked, against the session as it is then.
-//!
-//! This decides where to ask, not who may ask: a same-uid process can move
-//! work into another cgroup. So every failure, from a peer that already
-//! exited to a cgroup file that doesn't parse, counts as [`Origin::Outside`].
+//! runs under the user's service manager or the display session's scope.
+//! Which session is the display session is not the peer's to say, so a
+//! [`Requester`] only keeps the cgroup.
 
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
@@ -39,46 +35,27 @@ pub fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
         .map_err(std::io::Error::from)
 }
 
-/// Where a connected peer runs, relative to the user's display session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
-    /// Under `user@<uid>.service` or in the display session's scope, while
-    /// a display session exists.
-    Desktop,
-    /// Anywhere else: an SSH login's scope, a system service, no display
-    /// session at all, or a peer kpa couldn't classify.
-    Outside,
-}
-
-/// Who is on the other end of a connection: plain facts about the peer,
+/// Who is on the other end of a connection: plain facts about the caller,
 /// read once when the connection is accepted ([`Requester::of`]) and handed
 /// to everything that answers its requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requester {
-    /// The peer's uid.
+    /// The caller's uid.
     pub uid: u32,
-    /// The peer's `/proc/<pid>/cgroup`, as it was when it connected. `None`
-    /// where it couldn't be read, or the peer isn't the daemon's own user.
+    /// The caller's `/proc/<pid>/cgroup`, as it was when it connected.
+    /// `None` where it couldn't be read.
     pub cgroup: Option<String>,
-    /// The peer's command name, for naming it to the user who may approve
+    /// The caller's command name, for naming it to the user who may approve
     /// what it asked for (`docs/ssh-agent.md` § 6.8). `None` where it can't
-    /// be read, or the peer isn't the daemon's own user.
+    /// be read.
     pub command: Option<String>,
 }
 
 impl Requester {
-    /// The peer on `stream`. The daemon's own user is the only one whose
-    /// process is looked at further than its uid: any other is refused by
-    /// whoever accepted it.
+    /// The peer on `stream`: its uid from the socket, and its cgroup and
+    /// command name where they can be read.
     pub fn of(stream: &UnixStream) -> io::Result<Requester> {
         let uid = peer_uid(stream)?;
-        if uid != process_uid() {
-            return Ok(Requester {
-                uid,
-                cgroup: None,
-                command: None,
-            });
-        }
         let cgroup = peer_cgroup(stream)
             .inspect_err(|err| {
                 crate::log::debug(format_args!("could not read the peer's cgroup: {err}"));
@@ -91,67 +68,21 @@ impl Requester {
         })
     }
 
-    /// Where this peer runs, against the display session `session` (`None`
-    /// when there is none). Every failure, from a cgroup that wasn't read to
-    /// one that doesn't parse, is [`Origin::Outside`].
-    pub fn origin(&self, session: Option<&str>) -> Origin {
-        match &self.cgroup {
-            Some(cgroup) => classify(cgroup, self.uid, session),
-            None => Origin::Outside,
+    /// This process as a requester: what the tray's menu acts as, since a
+    /// click has no peer. Its uid is [`process_uid`], its cgroup this
+    /// process's own, its command `kpa`.
+    pub fn of_this_process() -> Requester {
+        let cgroup = read_bounded("/proc/self/cgroup")
+            .inspect_err(|err| {
+                crate::log::debug(format_args!("could not read the daemon's cgroup: {err}"));
+            })
+            .ok();
+        Requester {
+            uid: process_uid(),
+            cgroup,
+            command: Some("kpa".to_string()),
         }
     }
-}
-
-/// Classify the peer on `stream`. `uid` is the peer's (already checked to
-/// be the daemon's own), `session` the id of the user's display session,
-/// `None` when there is none.
-pub fn of_peer(stream: &UnixStream, uid: u32, session: Option<&str>) -> Origin {
-    if session.is_none() {
-        return Origin::Outside;
-    }
-    match peer_cgroup(stream) {
-        Ok(cgroup) => classify(&cgroup, uid, session),
-        Err(err) => {
-            crate::log::debug(format_args!("could not read the peer's cgroup: {err}"));
-            Origin::Outside
-        }
-    }
-}
-
-/// Classify the contents of a `/proc/<pid>/cgroup` file. Pure, so it can be
-/// tested on any input.
-///
-/// Only the unified hierarchy's line (`0::<path>`) is read. The peer is on
-/// the desktop when that path is under `/user.slice/user-<uid>.slice/`,
-/// in either `user@<uid>.service` or `session-<session>.scope`.
-pub fn classify(cgroup: &str, uid: u32, session: Option<&str>) -> Origin {
-    let Some(session) = session.filter(|id| !id.is_empty()) else {
-        return Origin::Outside;
-    };
-    let Some(path) = unified_path(cgroup) else {
-        return Origin::Outside;
-    };
-    let Some(rest) = path.strip_prefix(&format!("/user.slice/user-{uid}.slice/")) else {
-        return Origin::Outside;
-    };
-    let unit = rest.split('/').next().unwrap_or_default();
-    if unit == format!("user@{uid}.service") || unit == format!("session-{session}.scope") {
-        Origin::Desktop
-    } else {
-        Origin::Outside
-    }
-}
-
-/// The path on the file's one `0::` line. `None` if there is no such line,
-/// more than one, or its path isn't absolute (a cgroup namespace shows a
-/// path outside it as `/..`, which fails the prefix check anyway).
-fn unified_path(cgroup: &str) -> Option<&str> {
-    let mut lines = cgroup.lines().filter_map(|line| line.strip_prefix("0::"));
-    let path = lines.next()?;
-    if lines.next().is_some() || !path.starts_with('/') {
-        return None;
-    }
-    Some(path)
 }
 
 /// The contents of the peer's `/proc/<pid>/cgroup`: see [`peer_proc_file`].
@@ -270,102 +201,6 @@ fn read_bounded(path: &str) -> io::Result<String> {
 mod tests {
     use super::*;
 
-    const UID: u32 = 1000;
-    const SESSION: &str = "3";
-
-    fn origin(cgroup: &str) -> Origin {
-        classify(cgroup, UID, Some(SESSION))
-    }
-
-    #[test]
-    fn the_desktop_is_the_service_manager_and_the_display_session() {
-        let desktop = [
-            // A compositor child: an app the compositor or launcher spawned.
-            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-foot-1234.scope\n",
-            // The compositor itself, run as a user service.
-            "0::/user.slice/user-1000.slice/user@1000.service/session.slice/compositor.service\n",
-            // The service manager's own cgroup.
-            "0::/user.slice/user-1000.slice/user@1000.service\n",
-            // The display session's scope: a compositor started from a
-            // login shell, and everything it spawns.
-            "0::/user.slice/user-1000.slice/session-3.scope\n",
-            // A hybrid hierarchy: only the `0::` line counts.
-            "12:pids:/user.slice\n1:name=systemd:/user.slice\n0::/user.slice/user-1000.slice/session-3.scope\n",
-        ];
-        for cgroup in desktop {
-            assert_eq!(origin(cgroup), Origin::Desktop, "{cgroup:?}");
-        }
-    }
-
-    #[test]
-    fn everything_else_is_outside() {
-        let outside = [
-            // An SSH login, or any other session that isn't the display one.
-            "0::/user.slice/user-1000.slice/session-5.scope\n",
-            // A session id that only starts with the display session's.
-            "0::/user.slice/user-1000.slice/session-31.scope\n",
-            // A system service: a cron job, or a terminal server's shell,
-            // even one used at the desk.
-            "0::/system.slice/cron.service\n",
-            "0::/system.slice/terminal-server.service/shell-7.scope\n",
-            // A terminal server registered as a logind session: each
-            // connection is its own remote session under the user's slice,
-            // with a scope that isn't the display session's.
-            "0::/user.slice/user-1000.slice/session-12.scope/shell.scope\n",
-            // Another user's service manager and session.
-            "0::/user.slice/user-1001.slice/user@1001.service/app.slice/a.scope\n",
-            "0::/user.slice/user-1001.slice/session-3.scope\n",
-            // Names that only start like the desktop's units.
-            "0::/user.slice/user-1000.slice/user@1000.service-x/a.scope\n",
-            "0::/user.slice/user-1000.slice/session-3.scope.d\n",
-            // The user slice itself, and the root.
-            "0::/user.slice/user-1000.slice\n",
-            "0::/\n",
-        ];
-        for cgroup in outside {
-            assert_eq!(origin(cgroup), Origin::Outside, "{cgroup:?}");
-        }
-    }
-
-    #[test]
-    fn malformed_input_is_outside() {
-        let malformed = [
-            "",
-            "\n",
-            "garbage",
-            // No unified line: a v1-only hierarchy.
-            "1:name=systemd:/user.slice/user-1000.slice/session-3.scope\n",
-            // A relative path, and a path outside a cgroup namespace.
-            "0::user.slice/user-1000.slice/session-3.scope\n",
-            "0::/../../user.slice/user-1000.slice/session-3.scope\n",
-            // Two unified lines.
-            "0::/user.slice/user-1000.slice/session-3.scope\n0::/system.slice/x.service\n",
-            "0::/system.slice/x.service\n0::/user.slice/user-1000.slice/session-3.scope\n",
-            // The prefix without its separator.
-            "0::/user.slice/user-1000.sliceuser@1000.service\n",
-        ];
-        for cgroup in malformed {
-            assert_eq!(origin(cgroup), Origin::Outside, "{cgroup:?}");
-        }
-    }
-
-    #[test]
-    fn nothing_is_the_desktop_without_a_display_session() {
-        let cgroups = [
-            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-foot-1234.scope\n",
-            "0::/user.slice/user-1000.slice/session-3.scope\n",
-            "0::/user.slice/user-1000.slice/session-.scope\n",
-        ];
-        for cgroup in cgroups {
-            assert_eq!(classify(cgroup, UID, None), Origin::Outside, "{cgroup:?}");
-            assert_eq!(
-                classify(cgroup, UID, Some("")),
-                Origin::Outside,
-                "{cgroup:?}"
-            );
-        }
-    }
-
     #[test]
     fn the_peer_of_a_socket_pair_is_this_process() {
         let (ours, _theirs) = UnixStream::pair().expect("socket pair");
@@ -382,31 +217,6 @@ mod tests {
         let (ours, _theirs) = UnixStream::pair().expect("socket pair");
         let own = std::fs::read_to_string("/proc/self/comm").expect("own comm");
         assert_eq!(peer_command(&ours), Some(own.trim_end().to_string()));
-    }
-
-    fn requester(cgroup: Option<&str>) -> Requester {
-        Requester {
-            uid: UID,
-            cgroup: cgroup.map(str::to_string),
-            command: None,
-        }
-    }
-
-    /// Where a requester runs is asked of it against the session as it is
-    /// then: the same cgroup is the desktop in one session and outside it in
-    /// another, or once there is none.
-    #[test]
-    fn a_requester_is_classified_against_the_session_it_is_asked_with() {
-        let in_session = requester(Some("0::/user.slice/user-1000.slice/session-3.scope\n"));
-
-        assert_eq!(in_session.origin(Some("3")), Origin::Desktop);
-        assert_eq!(in_session.origin(Some("4")), Origin::Outside);
-        assert_eq!(in_session.origin(None), Origin::Outside);
-    }
-
-    #[test]
-    fn a_requester_whose_cgroup_was_not_read_is_outside() {
-        assert_eq!(requester(None).origin(Some("3")), Origin::Outside);
     }
 
     #[test]
@@ -426,5 +236,17 @@ mod tests {
         );
         let own = std::fs::read_to_string("/proc/self/comm").expect("own comm");
         assert_eq!(requester.command.as_deref(), Some(own.trim_end()));
+    }
+
+    #[test]
+    fn this_process_as_a_requester_has_its_own_uid_cgroup_and_the_name_kpa() {
+        let requester = Requester::of_this_process();
+
+        assert_eq!(requester.uid, process_uid());
+        assert_eq!(
+            requester.cgroup,
+            Some(std::fs::read_to_string("/proc/self/cgroup").expect("own cgroup"))
+        );
+        assert_eq!(requester.command.as_deref(), Some("kpa"));
     }
 }

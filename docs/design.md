@@ -289,13 +289,16 @@ A request line is capped at 64 KiB and must arrive within 5 seconds; a
 line over the cap is answered `malformed_request`, and a connection that
 sends nothing is dropped.
 
-**Every connection is classified by where it comes from** (`authn.rs`,
-[`headless.md`](./headless.md) § 3). After the uid check the daemon takes
-the peer's pidfd (`SO_PEERPIDFD`, or the `SO_PEERCRED` pid on kernels
-without it) and reads its `/proc/<pid>/cgroup` once, when the connection
-is accepted. The cgroup is classified against the display session each
-time a decision asks, not once at connect, so a connection that outlives a
-login session stops counting as the desktop with it. The peer is **on the
+**Every connection is classified by where it comes from**
+([`headless.md`](./headless.md) § 3). `authn.rs` identifies the caller as a
+`Requester`: its uid, the peer's pidfd (`SO_PEERPIDFD`, or the
+`SO_PEERCRED` pid on kernels without it) read for its
+`/proc/<pid>/cgroup` once when the connection is accepted, and its command
+name. `authz.rs` holds the checks both sockets share, pure functions of a
+`Requester` and the display session: only the daemon's own uid may connect
+(`authz::may_connect`), and the cgroup is classified against the display
+session each time a decision asks, not once at connect, so a connection
+that outlives a login session stops counting as the desktop with it. The peer is **on the
 desktop** when the user has a
 display session (`User.Display` is not `/`, § Lock policy) and the unified hierarchy's
 path is under `/user.slice/user-<uid>.slice/`, in `user@<uid>.service` or
@@ -305,9 +308,9 @@ that registers each connection as a remote logind session), a system
 service (a cron job, a terminal server's shells), no display session at
 all, and any
 peer whose cgroup can't be read or parsed, including one that exited
-first. The origin is logged at `debug` when the connection is accepted, and
-decides whether `unlock` may prompt on screen (`DisplaySession::may_prompt_on_screen`) and
-which session `copy` may put on the clipboard of (`DisplaySession::clipboard_session`, § Clipboard). It decides where to ask, not
+first. Whether the peer is on the desktop is logged at `debug` when the connection is accepted, and
+decides whether `unlock` may prompt on screen (`request_policy::unlock`) and
+which session `copy` may put on the clipboard of (`request_policy::copy`, § Clipboard). It decides where to ask, not
 who may ask: a same-uid process can start work in another cgroup.
 
 **`list` never returns secrets** — it is an index. That holds for any field
