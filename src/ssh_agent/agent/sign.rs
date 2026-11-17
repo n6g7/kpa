@@ -252,7 +252,7 @@ impl<H: SshHost> Agent<H> {
             let path = self.known_hosts.as_deref()?;
             message::known_hosts_name(path, dest)
         });
-        let message = message::message(
+        let message = message::approval(
             key,
             &request.purpose,
             destination,
@@ -441,7 +441,7 @@ mod tests {
         assert!(signed(&sign(&agent, &key)));
         assert!(approved(&host, &key));
         assert!(signed(&sign(&agent, &key)));
-        assert_eq!(prompts.shown(), ["Approve github"]);
+        assert_eq!(prompts.shown(), ["Approve use of key \"github\"?"]);
     }
 
     #[test]
@@ -754,11 +754,11 @@ mod tests {
         assert_eq!(
             prompts.shown(),
             [
+                "Approve use of key \"github\" on github.com?".to_string(),
                 format!(
-                    "On github.com ({}): approve github",
-                    dest.fingerprint(HashAlg::Sha256)
+                    "Approve use of key \"github\" on host key {}?",
+                    other.fingerprint(HashAlg::Sha256)
                 ),
-                format!("On {}: approve github", other.fingerprint(HashAlg::Sha256)),
             ]
         );
     }

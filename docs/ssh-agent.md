@@ -452,17 +452,25 @@ contract as `prompt`, in dmenu style:
   `kpa serve` refuses to start.
 
 The message, delivered the same way `prompt`'s is (`KPA_PROMPT_MESSAGE`),
-carries:
+is one question, "Approve use of key (name) to (purpose)?":
 
-- the key name and purpose;
-- for a forwarded request, the forwarding host and the destination, by
-  host-key fingerprint, plus the host name when `~/.ssh/known_hosts` has
-  an unhashed entry for it;
-- the remote user name from the login request.
+| Request | Message |
+| --- | --- |
+| Login, no binding | `Approve use of key "github" to log in as git?` |
+| Login, bound to a host `~/.ssh/known_hosts` names | `Approve use of key "github" to log in to git@github.com?` |
+| Login, bound to any other host | `Approve use of key "github" to log in as git to host key SHA256:…?` |
+| `SSHSIG` | `Approve use of key "github" to sign for namespace git?`, with `on github.com` or `on host key SHA256:…` after the namespace for a bound connection |
+| Anything else | `Approve use of key "github"?`, with the same `on …` for a bound connection |
 
-Request-derived text passes through the escaping the CLI uses for
-terminal output (T-13), with tab and newline escaped too so the message
-stays one line, and is length-capped.
+The destination is the connection's last binding's host key, named by the
+host name `~/.ssh/known_hosts` has an unhashed entry for, else by its
+fingerprint. Every piece that comes from outside kpa's own text (the key
+name, the remote user, the namespace, the host name) passes through the
+escaping the CLI uses for terminal output (T-13), with tab and newline
+escaped too so the message stays one line, and gets its own length budget,
+so no piece can push the destination past the prompt's cap. The key name's
+quotes are escaped, so a name can't end its quotation and carry on the
+sentence.
 
 Approvals live in memory only and are dropped on lock. A forwarded
 approval is remembered under (key, forwarding session identifier,
