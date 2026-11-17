@@ -44,8 +44,8 @@ static LIVE_CLIPBOARD: Mutex<()> = Mutex::new(());
 
 /// An in-process daemon (`common::InProcessDaemon`) for
 /// `common::password_db()`, whose prompt echoes `password`. In-process
-/// because these tests unlock, and a spawned `kpa serve` answers an
-/// `unlock` from outside the desktop with `no_display`.
+/// because these tests unlock through that prompt, and a spawned
+/// `kpa serve` asks for an `unlock` from outside the desktop on a terminal.
 fn start(password: &str) -> InProcessDaemon {
     InProcessDaemon::start(&common::config_toml(
         &format!("printf %s {password}"),

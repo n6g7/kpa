@@ -527,8 +527,8 @@ needs an approval is refused, and kpa remembers it as pending:
   5 minutes, all dropped on lock.
 
 `kpa ssh approve` lists the pending requests on its terminal and asks
-about each one: allow or deny. It reads the answers from its controlling
-terminal, as terminal unlock does, so it needs one. An approval it grants
+about each one: allow or deny. It reads the answers from its own controlling
+terminal, so it needs one. An approval it grants
 is the same as one granted on screen, with the same scope. For a key with
 `confirm = "always"`, it covers one signature: the retry. The user then
 retries the command, and it signs. A forwarded request's approval is
@@ -575,9 +575,14 @@ kpa also logs each refusal.
 ### 6.10 Unlocking from a terminal
 
 S4 unlocks with `kpa unlock` on the terminal, as
-[`headless.md`](./headless.md) § 4 describes. The usual case is an SSH
-login or a terminal-server shell into the machine that runs kpa, with no
-agent forwarded, used to pull a git repository over SSH.
+[`headless.md`](./headless.md) § 4 describes: `kpa unlock` passes its
+terminal along with the request, and the daemon asks for the password on it,
+so the password never crosses the socket or passes through the CLI. The
+usual case is an SSH login or a terminal-server shell into the machine that
+runs kpa, with no agent forwarded, used to pull a git repository over SSH.
+
+The agent socket takes no terminal. A signature's unlock on demand (§ 6.6)
+asks on screen, where § 6.8 allows a prompt, and nowhere else.
 
 The agent adds one rejected alternative: **agent `UNLOCK`
 (`ssh-add -X`)**. The agent socket is reachable from forwarded hosts, so

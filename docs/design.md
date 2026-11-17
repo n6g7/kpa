@@ -37,7 +37,7 @@ that can modify a database. `keepass` is also built without its
 | 6   | **TOTP via `keepass`'s `totp` feature, read-only**                                                       | `copy` generates the current code from the `otp` field at copy time; the seed never leaves the process. HOTP is permanently out — counters need writes.                                                                     |
 | 7   | **Idle timeout 30 min per database**, config-overridable                                                               | logind's `Lock` signal already covers screen-lock; this only catches walking away without locking.                                                                                                                            |
 | 8   | **Daemon autostarts locked**                                                                              | A tray should show state from login onward, and nothing prompts until something actually asks.                                                                                                                                |
-| 9   | **Unlock prompt: a `--dmenu`-style password prompt** (e.g. `fuzzel --password --dmenu`) in v1, config key; the client's own terminal otherwise | Trivial to wire up and fits most Wayland setups out of the box. `pinentry` is the better long-term answer for secure memory, but driving Assuan is fiddly — so the prompt is swappable from day one rather than hardcoded. A request from outside the desktop never raises it; `kpa unlock` reads the terminal instead (`docs/headless.md` § 4). |
+| 9   | **Unlock prompt: a `--dmenu`-style password prompt** (e.g. `fuzzel --password --dmenu`) in v1, config key; the terminal the client passes with its request otherwise | Trivial to wire up and fits most Wayland setups out of the box. `pinentry` is the better long-term answer for secure memory, but driving Assuan is fiddly — so the prompt is swappable from day one rather than hardcoded. A request from outside the desktop never raises it; the daemon asks on the terminal `kpa unlock` passed instead, so the password never crosses the socket (`docs/headless.md` § 4). |
 | 10  | **Multiple databases**, TOML array of tables                                                              | Per-database unlock, per-database tray state.                                                                                                                                                                                 |
 | 11  | **Linux only, with OS-neutral interfaces**                                                                | macOS support is planned, so each OS-specific part sits behind an interface a macOS implementation can share. Windows is out of scope. Rules and the list of OS seams: [`portability.md`](./portability.md).                     |
 | 12  | **Subsystem dependencies form a DAG**                                                                     | Each top-level module exports a small API and depends on others in one direction, with decisions kept pure, so it reads and tests on its own. Rules: [`module-structure.md`](./module-structure.md).                          |
@@ -151,7 +151,7 @@ no meaningful round-trip cost) that there's no performance reason to keep a
 connection open across multiple requests either. A client that wants to
 issue several ops just opens several connections.
 
-Both requests and responses carry `"v": 1`. On the request side, a mismatch
+Both requests and responses carry `"v": 2`. On the request side, a mismatch
 is rejected rather than negotiated — the daemon's response still carries its
 own `v`, which is how the client learns which version the daemon is
 actually running without a separate pair of fields for it. This is
@@ -162,26 +162,35 @@ restarting it costs one re-unlock.
 ### Requests
 
 ```json
-{"v":1,"op":"status"}
-{"v":1,"op":"unlock","db":"personal"}
-{"v":1,"op":"unlock","db":"personal","password":"<base64>"}  // no prompt
-{"v":1,"op":"lock","db":"personal"}          // db omitted = lock all
-{"v":1,"op":"list"}                          // db omitted = all unlocked
-{"v":1,"op":"copy","db":"personal","uuid":"…","field":"password"}
-{"v":1,"op":"copy","db":"personal","uuid":"…","field":"custom:Password"}
-{"v":1,"op":"ssh_keys"}                     // db omitted = all unlocked
-{"v":1,"op":"ssh_keys","db":"personal"}     // the SSH keys the vault holds
+{"v":2,"op":"status"}
+{"v":2,"op":"unlock","db":"personal"}
+{"v":2,"preferred_prompt":"terminal","op":"unlock","db":"personal"}
+{"v":2,"op":"lock","db":"personal"}          // db omitted = lock all
+{"v":2,"op":"list"}                          // db omitted = all unlocked
+{"v":2,"op":"copy","db":"personal","uuid":"…","field":"password"}
+{"v":2,"op":"copy","db":"personal","uuid":"…","field":"custom:Password"}
+{"v":2,"op":"ssh_keys"}                     // db omitted = all unlocked
+{"v":2,"op":"ssh_keys","db":"personal"}     // the SSH keys the vault holds
 ```
 
-An `unlock` that carries `password` unlocks with it and never runs the
-prompt, so it goes ahead from outside the desktop and while the screen is
-locked, where an `unlock` without one gets `no_display` (below). A wrong
-one fails with `wrong_credentials`, with no backoff. The
-password is base64 (standard alphabet, padded) so that its JSON string
-never needs escaping: the daemon decodes it straight from the request line
-into a zeroizing buffer, and refuses one longer than 4096 bytes, one that
-isn't valid base64 or UTF-8, or one written with JSON escapes, as
-`malformed_request`.
+No request carries the master password. An `unlock` is asked for it by the
+daemon, on screen or on the terminal the request passed.
+
+**A request may pass one terminal.** Any request may attach one file
+descriptor, as `SCM_RIGHTS` ancillary data on the `sendmsg` that sends its
+line. The JSON declares nothing. The daemon refuses a request with more than
+one descriptor, or with one that isn't a terminal (`isatty`), as
+`malformed_request`, and keeps the descriptor in the request's `Requester`
+for the daemon to use if it has to ask. Only `unlock` can ask. `kpa unlock`
+passes its controlling terminal, and no other command passes anything.
+
+**Where an `unlock` asks.** On screen when the requester is on the desktop
+and the screen isn't known to be locked, otherwise on the passed terminal. A
+top-level `preferred_prompt` beside `v` and `op` names a place instead:
+`"terminal"` (`kpa unlock --tty`) asks on the terminal even where the daemon
+could ask on screen, and `"screen"` asks on screen or nowhere, never on the
+terminal. The daemon answers `no_prompt` when it has nowhere to ask
+(`headless.md` § 4).
 
 `field` accepts any name `list`'s `fields` array returns for that entry
 (below): `username`, `password`, `url`, `notes`, `totp`, or a custom
@@ -221,27 +230,28 @@ response line with or without it.
 ### Responses
 
 ```json
-{"ok":true,"v":1,"databases":[{"name":"personal","locked":false,"entries":341},
+{"ok":true,"v":2,"databases":[{"name":"personal","locked":false,"entries":341},
                               {"name":"work","locked":true}],"version":"1.2.3"}
 
-{"ok":true,"v":1,"entries":[{"db":"personal","uuid":"…","title":"GitHub",
+{"ok":true,"v":2,"entries":[{"db":"personal","uuid":"…","title":"GitHub",
                              "username":"alice","url":"https://github.com",
                              "group":"Dev",
                              "fields":["username","password","totp","custom:Password"]}]}
 
-{"ok":true,"v":1,"copied":"password","expires_in":30}
+{"ok":true,"v":2,"copied":"password","expires_in":30}
 
-{"ok":true,"v":1,"keys":[{"db":"personal","type":"ssh-ed25519",
+{"ok":true,"v":2,"keys":[{"db":"personal","type":"ssh-ed25519",
                           "fingerprint":"SHA256:…","title":"Deploy",
                           "attachment":"id_ed25519"}],
                 "skipped":[{"db":"personal","title":"Old","attachment":"id_rsa",
                             "reason":"PEM format; …"}],
                 "locked":["work"]}
 
-{"ok":false,"v":1,"error":"locked","db":"personal"}
-{"ok":false,"v":1,"error":"unlock_in_progress","db":"personal"}
-{"ok":false,"v":1,"error":"stale","db":"personal","detail":"database changed on disk"}
-{"ok":false,"v":1,"error":"no_display","detail":"no display to prompt on"}
+{"ok":false,"v":2,"error":"locked","db":"personal"}
+{"ok":false,"v":2,"error":"unlock_in_progress","db":"personal"}
+{"ok":false,"v":2,"error":"stale","db":"personal","detail":"database changed on disk"}
+{"ok":false,"v":2,"error":"no_prompt","detail":"no screen or terminal to prompt on"}
+{"ok":false,"v":2,"error":"no_display","detail":"no active, unlocked display session for the requester to paste into"}
 
 {"ok":false,"v":2,"error":"version_mismatch","detail":"client sent v1; restart the daemon or upgrade the client"}
 ```
@@ -272,18 +282,24 @@ and a KDF) and happens outside the vault mutex:
   discarded rather than silently reopening a vault the user just locked,
   and a prompt still open is killed.
 
-An `unlock` without a password fails with `no_display`, without
-prompting, when nobody could answer the prompt: the request comes from
-outside the desktop (below), or the screen is known to be locked (§ Lock
-policy). It names no database: the refusal is about where the request can
-be answered, not about the database. `kpa unlock` answers `no_display` by
-reading the password from its own controlling terminal, with echo off, and
-sending it in a second request; `--tty` reads the terminal right away
-instead of trying a plain request first, which is how a desktop terminal
-asks for the terminal read instead of the graphical prompt
-([`headless.md`](./headless.md) § 4). Without a controlling terminal,
-`kpa unlock` reports `no_display` and exits non-zero. The tray's menu is
-clicked at the desk, so its unlocks count as from the desktop.
+An `unlock` fails with `no_prompt`, without prompting, when nobody could
+answer a prompt: the request can't be asked on screen, because it comes from
+outside the desktop (below) or the screen is known to be locked (§ Lock
+policy), or because it asked for the terminal, and it passed no terminal.
+It names no database: the refusal is about where the request can be
+answered, not about the database. `no_display` is `copy`'s, for a request
+with no clipboard to paste into.
+
+On the terminal the daemon writes the prompt's message with echo off, reads
+one line and puts the terminal back, so the master password goes from the
+user's keyboard to the daemon without crossing the socket or passing through
+the CLI. Like a screen prompt, any lock ends it, `prompt_timeout` applies,
+and so does the requester closing its connection. It doesn't wait in the
+screen prompt queue, and each database still allows one unlock at a time.
+`kpa unlock` waits for the daemon to close the connection after `^C`, so the
+daemon has put the terminal back before the shell takes it
+([`headless.md`](./headless.md) § 4). The tray's menu is clicked at the desk,
+so its unlocks count as from the desktop.
 
 A request line is capped at 64 KiB and must arrive within 5 seconds; a
 line over the cap is answered `malformed_request`, and a connection that
@@ -456,17 +472,19 @@ strongest argument for owning it natively rather than shelling out.
 Locking means: drop the `Database`, zeroize what can be zeroized, end any
 clipboard offer that database's `copy` started, and update the tray icon.
 A lock also cancels any `unlock` still in flight for that database (see §
-Protocol), and kills its prompt if one is still open.
+Protocol), and ends its prompt if one is still open, on screen or on a
+terminal.
 
 Prompts are bounded too:
 
 - **Timeout.** A prompt left unanswered for `prompt_timeout` (default
-  60 s) is killed, and the unlock fails with `prompt_cancelled`.
-- **No prompt while the screen is known to be locked**, that is while the
-  display session's `LockedHint` is true. The unlock fails with
-  `no_display` instead. A locker that only sends the `Lock` signal never
-  reports the unlock (threat model ASM-7), so kpa doesn't know the screen
-  is locked, and the timeout bounds the cost.
+  60 s) is ended, and the unlock fails with `prompt_cancelled`.
+- **No prompt on screen while the screen is known to be locked**, that is
+  while the display session's `LockedHint` is true. The unlock is asked on
+  the terminal the request passed, or fails with `no_prompt` without one. A
+  locker that only sends the `Lock` signal never reports the unlock (threat
+  model ASM-7), so kpa doesn't know the screen is locked, and the timeout
+  bounds the cost.
 
 `session_watch.rs` is the OS side of these triggers, and only reports: it
 knows nothing about databases or locking. Its events are the display
@@ -555,17 +573,15 @@ Held while unlocked:
 | Keyfile contents   | No — kpa's buffer zeroized; `keepass`'s parse copies not²  |
 | Decrypted database | **Yes** — the real exposure, same as any KeePass client    |
 
-¹The password arrives on the prompt command's stdout, which kpa reads into
-a fixed-size `Zeroizing` buffer that never grows (a growing buffer would
-leave unwiped copies behind each time it reallocates), then into a
-`Zeroizing<String>`. A password carried in an `unlock` request takes the
-same path: the request line is read into a fixed-size `Zeroizing` buffer
-of its own, and its base64 decoded from there. Both buffers are wiped once
-the request is handled. `DatabaseKey` zeroizes its own copy. Two copies are
-outside kpa's reach: whatever the prompt program (or the client) itself
-held, and `keepass`'s key-derivation intermediates (e.g. the SHA-256 of
-the password, which is password-equivalent), which are not zeroized
-upstream.
+¹The password arrives on the prompt command's stdout, or from a terminal the
+daemon reads, and kpa reads it into a fixed-size `Zeroizing` buffer that
+never grows (a growing buffer would leave unwiped copies behind each time it
+reallocates), then into a `Zeroizing<String>`. The CLI never holds it, and
+it is in no request or response. The buffer is wiped once the prompt has
+answered. `DatabaseKey` zeroizes its own copy. Two copies are outside kpa's
+reach: whatever the prompt program itself held, and `keepass`'s
+key-derivation intermediates (e.g. the SHA-256 of the password, which is
+password-equivalent), which are not zeroized upstream.
 
 ²`DatabaseKey`'s keyfile bytes are zeroized, but `keepass`'s XML keyfile
 parser makes several unzeroized intermediate copies, which together can
@@ -584,14 +600,12 @@ running kpa:
   guarantee about itself.
 
 Every kpa process sets `PR_SET_DUMPABLE=0` at startup, before dispatching to
-any subcommand — before `kpa serve` reads its config, and before `kpa
-unlock` reads the master password from the terminal. That keeps a crash
+any subcommand — before `kpa serve` reads its config. That keeps a crash
 from writing a user-readable core dump of whatever secret the process
-holds — the decrypted database in the daemon, the master password in `kpa
-unlock` — and also makes `/proc/<pid>/mem` root-owned, which blocks
-same-uid ptrace regardless of the Yama setting above. One host caveat, like
-the two bullets above: with `fs.suid_dumpable = 2` the kernel still writes
-a root-owned dump.
+holds — the decrypted database in the daemon — and also makes
+`/proc/<pid>/mem` root-owned, which blocks same-uid ptrace regardless of the
+Yama setting above. One host caveat, like the two bullets above: with
+`fs.suid_dumpable = 2` the kernel still writes a root-owned dump.
 
 **Non-goals, stated explicitly:** kpa does not defend against an attacker who
 already has code execution as the user running it. Nothing at this layer can. It reduces

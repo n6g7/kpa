@@ -161,10 +161,8 @@ impl TrayItem {
         let _ = thread::Builder::new().spawn(move || {
             // A click has no peer: the daemon itself asks.
             let result = server.unlock(
-                &UnlockRequest {
-                    db: name.clone(),
-                    password: None,
-                },
+                &UnlockRequest { db: name.clone() },
+                None,
                 &Requester::of_this_process(),
                 None,
             );
@@ -194,7 +192,7 @@ fn unlock_error_code(err: &UnlockError) -> &'static str {
         UnlockError::InProgress { .. } => "unlock_in_progress",
         UnlockError::LockedDuringUnlock { .. } => "locked",
         UnlockError::Stale { .. } => "stale",
-        UnlockError::NoDisplay => "no_display",
+        UnlockError::NoPrompt => "no_prompt",
     }
 }
 
@@ -548,7 +546,7 @@ mod tests {
             (UnlockError::InProgress { db: db() }, "unlock_in_progress"),
             (UnlockError::LockedDuringUnlock { db: db() }, "locked"),
             (UnlockError::Stale { db: db() }, "stale"),
-            (UnlockError::NoDisplay, "no_display"),
+            (UnlockError::NoPrompt, "no_prompt"),
         ];
         for (err, code) in cases {
             let got = unlock_error_code(&err);

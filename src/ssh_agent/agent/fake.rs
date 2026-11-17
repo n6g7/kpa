@@ -12,7 +12,7 @@ use super::{SlotView, SshHost, SshSlot};
 use crate::authn::Requester;
 use crate::authz;
 use crate::config::DatabaseConfig;
-use crate::prompt::{CancelSource, Prompt, PromptOutcome, PromptQueue, Scripted};
+use crate::prompt::{CancelSource, Prompt, PromptOn, PromptOutcome, PromptQueue, Scripted};
 use crate::proto::{Unlock, UnlockError, UnlockRequest};
 use crate::session_watch::DisplaySession;
 
@@ -233,6 +233,7 @@ impl Unlock for FakeHost {
     fn unlock(
         &self,
         request: &UnlockRequest,
+        _preferred: Option<PromptOn>,
         requester: &Requester,
         message: Option<&str>,
     ) -> Result<String, UnlockError> {
@@ -252,7 +253,7 @@ impl Unlock for FakeHost {
                 return Ok(named());
             }
             if !authz::may_prompt_on_screen(requester, &self.display_session) {
-                return Err(UnlockError::NoDisplay);
+                return Err(UnlockError::NoPrompt);
             }
             slot.lock_signal.token()
         };

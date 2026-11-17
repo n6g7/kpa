@@ -21,8 +21,9 @@ pub enum ErrorCode {
     UnknownDb,
     Locked,
     WrongCredentials,
-    /// The configured prompt command exited unsuccessfully (e.g. the user
-    /// dismissed a dmenu-style prompt) rather than returning a password.
+    /// The prompt ended without a password: the configured prompt command
+    /// exited unsuccessfully (e.g. the user dismissed a dmenu-style prompt),
+    /// or the terminal it was on went away, or nothing was entered in time.
     PromptCancelled,
     NotFound,
     Corrupt,
@@ -37,9 +38,12 @@ pub enum ErrorCode {
     /// `copy`'s uuid names a real entry, but the requested field is absent
     /// or empty on it — there is nothing to put on the clipboard.
     FieldEmpty,
-    /// Nobody can answer a prompt where the daemon would raise it: the
-    /// screen is known to be locked.
+    /// A `copy` has no clipboard to put its secret on: the requester isn't
+    /// on the desktop, or the display session isn't active and unlocked.
     NoDisplay,
+    /// An `unlock` has nowhere to ask for the password: no screen it may
+    /// prompt on, and no terminal passed with the request.
+    NoPrompt,
 }
 
 /// What an error response puts on the wire, however it arose. Each op
@@ -138,6 +142,7 @@ mod tests {
             (ErrorCode::UnknownUuid, "unknown_uuid"),
             (ErrorCode::FieldEmpty, "field_empty"),
             (ErrorCode::NoDisplay, "no_display"),
+            (ErrorCode::NoPrompt, "no_prompt"),
         ];
 
         for (code, expected) in cases {

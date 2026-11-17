@@ -1329,7 +1329,6 @@ dependencies = [
 name = "kpa-fuzz"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
  "kpa",
  "libfuzzer-sys",
  "ssh-key",

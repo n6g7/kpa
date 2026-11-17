@@ -695,8 +695,8 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         server.unlock(
             &UnlockRequest {
                 db: "personal".to_string(),
-                password: None,
             },
+            None,
             &Requester {
                 uid: kpa::authn::process_uid(),
                 // On the desktop of the mock's display session.
@@ -707,7 +707,7 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
             None,
         )
     };
-    let refused = Err(UnlockError::NoDisplay);
+    let refused = Err(UnlockError::NoPrompt);
 
     // 1. While the display session is known locked, no prompt runs. Until kpa has
     //    subscribed it doesn't know, so the marker is cleared before each

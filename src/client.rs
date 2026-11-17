@@ -3,30 +3,29 @@
 //! response line verbatim (`docs/design.md`'s "hand-debuggable with socat"
 //! argument, applied to the CLI itself rather than just `socat`), or, once
 //! it has a text view, that view of it unless `--json` asks for the line
-//! ([`run`]). `unlock` is the one command that can send two requests: a
-//! plain one first, then — on the daemon's `no_display` — the master
-//! password read from this process's own controlling terminal
-//! (`docs/headless.md` § 4).
+//! ([`run`]). `unlock` is the one command that passes this process's
+//! controlling terminal along, for the daemon to ask for the master
+//! password on when it can't ask on screen (`docs/headless.md` § 4).
 
 use std::fmt;
-use std::io::{BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use kpa::authn;
 use kpa::output::{print_escaped, report_error};
-use kpa::proto::{self, ErrorCode, Op, Password, Request, Response, UnlockError, UnlockRequest};
+use kpa::proto::{self, ErrorCode, Op, PromptOn, Request, UnlockRequest};
+use kpa::socket;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use super::tty::{self, TtyReadError};
+use super::tty;
 
 pub(super) fn run_client(socket_path: &Path, op: Op) -> ExitCode {
-    let request = Request {
-        v: proto::VERSION,
-        op,
-    };
+    let request = Request::new(op);
 
     match send_request(socket_path, &request) {
         Ok(line) => print_and_exit(&line),
@@ -68,11 +67,7 @@ pub(super) fn run<T: DeserializeOwned>(
     format: Format,
     show: impl FnOnce(T) -> String,
 ) -> ExitCode {
-    let request = Request {
-        v: proto::VERSION,
-        op,
-    };
-    let line = match send_request(socket_path, &request) {
+    let line = match send_request(socket_path, &Request::new(op)) {
         Ok(line) => line,
         Err(err) => return report_client_error(err),
     };
@@ -198,11 +193,7 @@ pub(super) fn run_version(socket_path: Option<PathBuf>) -> ExitCode {
         return ExitCode::SUCCESS;
     };
 
-    let request = Request {
-        v: proto::VERSION,
-        op: Op::Status,
-    };
-    match send_request(&socket_path, &request) {
+    match send_request(&socket_path, &Request::new(Op::Status)) {
         Ok(line) => {
             let daemon_version = serde_json::from_str::<serde_json::Value>(&line)
                 .ok()
@@ -237,6 +228,8 @@ pub(super) enum ClientError {
     Encode(serde_json::Error),
     #[error("sending request: {0}")]
     Send(std::io::Error),
+    #[error("setting up to be interrupted: {0}")]
+    Interrupt(std::io::Error),
     #[error("reading response: {0}")]
     Read(std::io::Error),
     #[error(
@@ -271,12 +264,36 @@ fn check_peer_uid(
 /// included. Deliberately not decoded into a typed `Response` — see the
 /// comment in `run_client` on why that type has no generic `Deserialize`.
 pub(super) fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
-    let mut stream = UnixStream::connect(socket_path)
+    exchange(socket_path, request, None)
+}
+
+/// Like [`send_request`], with `terminal` passed along: the daemon may ask
+/// the user something on it before it answers. An interrupt while it waits
+/// ends the asking cleanly rather than the process at once
+/// ([`tty::end_on_interrupt`]).
+pub(super) fn send_request_with_terminal(
+    socket_path: &Path,
+    request: &Request,
+    terminal: &File,
+) -> Result<String, ClientError> {
+    exchange(socket_path, request, Some(terminal))
+}
+
+fn exchange(
+    socket_path: &Path,
+    request: &Request,
+    terminal: Option<&File>,
+) -> Result<String, ClientError> {
+    let stream = UnixStream::connect(socket_path)
         .map_err(|err| ClientError::Connect(socket_path.to_path_buf(), err))?;
     check_peer_uid(socket_path, &stream, authn::process_uid())?;
 
     let line = proto::encode_request(request).map_err(ClientError::Encode)?;
-    stream.write_all(&line).map_err(ClientError::Send)?;
+    if terminal.is_some() {
+        tty::end_on_interrupt(&stream).map_err(ClientError::Interrupt)?;
+    }
+    socket::send_with_fd(&stream, &line, terminal.map(|terminal| terminal.as_fd()))
+        .map_err(ClientError::Send)?;
 
     let mut line = String::new();
     let n = BufReader::new(stream)
@@ -289,104 +306,24 @@ pub(super) fn send_request(socket_path: &Path, request: &Request) -> Result<Stri
     Ok(line)
 }
 
-/// Whether `line` is the daemon's `no_display` error: nobody could answer
-/// an on-screen prompt for this request (`docs/headless.md` § 4).
-fn is_no_display(line: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(line)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .is_some_and(|code| code == "no_display")
-}
-
-/// The line the daemon would send for `no_display`, built from the same
-/// type it serializes rather than a hand-written literal. Used when
-/// `--tty` skips the first request, so there is no real one to show: the
-/// outcome — nobody could be asked — is the same either way.
-fn synthetic_no_display_line() -> String {
-    let response = Response::Unlock(Err(UnlockError::NoDisplay));
-    format!(
-        "{}\n",
-        serde_json::to_string(&response).expect("Response::Unlock serializes")
-    )
-}
-
-/// `kpa unlock`: a plain request first, unless `tty`. The daemon raises its
-/// own prompt when the request comes from the desktop; everywhere else it
-/// answers `no_display`, which is when this reads the password from the
-/// terminal and sends it in a second request (`docs/headless.md` § 4).
-/// `--tty` skips straight to the terminal read, which is how a desktop
-/// terminal asks for it instead of the graphical prompt.
+/// `kpa unlock`: the daemon asks for the master password, on screen where it
+/// can and otherwise on this process's controlling terminal, which the
+/// request passes along (`docs/headless.md` § 4). `tty` asks on the terminal
+/// even where the daemon could ask on screen. A process with no controlling
+/// terminal passes none, and the daemon answers `no_prompt` where it can't
+/// ask on screen either.
 pub(super) fn run_unlock(socket_path: &Path, db: String, tty: bool) -> ExitCode {
-    if !tty {
-        let request = Request {
-            v: proto::VERSION,
-            op: Op::Unlock(UnlockRequest {
-                db: db.clone(),
-                password: None,
-            }),
-        };
-        match send_request(socket_path, &request) {
-            Ok(line) if !is_no_display(&line) => return print_and_exit(&line),
-            Ok(line) => return unlock_from_terminal(socket_path, db, Some(line)),
-            Err(err @ ClientError::Connect(..)) => {
-                report_error(format_args!("{err} (is `kpa serve` running?)"));
-                return ExitCode::FAILURE;
-            }
-            Err(err) => {
-                report_error(err);
-                return ExitCode::FAILURE;
-            }
-        }
-    }
-    unlock_from_terminal(socket_path, db, None)
-}
-
-/// Reads the master password from this process's controlling terminal and
-/// sends it in a second `unlock` request. `no_display_line` is the first
-/// request's actual response when there was one; `--tty` has none, so a
-/// line built from the same error the daemon would have sent
-/// (`synthetic_no_display_line`) stands in. Printed unchanged, without
-/// ever touching the terminal, when there's no controlling terminal to
-/// read.
-fn unlock_from_terminal(
-    socket_path: &Path,
-    db: String,
-    no_display_line: Option<String>,
-) -> ExitCode {
-    let password = match tty::read_tty_password(b"Master password: ") {
-        Ok(password) => password,
-        Err(TtyReadError::NoTty(_)) => {
-            let line = no_display_line.unwrap_or_else(synthetic_no_display_line);
-            return print_and_exit(&line);
-        }
-        Err(err) => {
-            report_error(err);
-            return ExitCode::FAILURE;
-        }
-    };
-
     let request = Request {
-        v: proto::VERSION,
-        op: Op::Unlock(UnlockRequest {
-            db,
-            password: Some(Password::new(password)),
-        }),
+        preferred_prompt: tty.then_some(PromptOn::Terminal),
+        ..Request::new(Op::Unlock(UnlockRequest { db }))
     };
-    match send_request(socket_path, &request) {
+    let answer = match tty::controlling_terminal() {
+        Some(terminal) => send_request_with_terminal(socket_path, &request, &terminal),
+        None => send_request(socket_path, &request),
+    };
+    match answer {
         Ok(line) => print_and_exit(&line),
-        Err(err @ ClientError::Connect(..)) => {
-            report_error(format_args!("{err} (is `kpa serve` running?)"));
-            ExitCode::FAILURE
-        }
-        Err(err) => {
-            report_error(err);
-            ExitCode::FAILURE
-        }
+        Err(err) => report_client_error(err),
     }
 }
 
@@ -396,9 +333,7 @@ mod tests {
 
     use serde::Deserialize;
 
-    use super::{
-        ClientError, check_peer_uid, is_no_display, parse_response, synthetic_no_display_line,
-    };
+    use super::{ClientError, check_peer_uid, parse_response};
 
     /// `UnixStream::pair()` gives both ends our own real uid, so the
     /// mismatch is simulated the same way `server.rs`'s
@@ -422,32 +357,6 @@ mod tests {
 
         check_peer_uid(Path::new("/dev/null"), &theirs, our_uid)
             .expect("our own uid must be accepted");
-    }
-
-    #[test]
-    fn recognizes_no_display_and_nothing_else() {
-        assert!(is_no_display(
-            r#"{"ok":false,"v":1,"error":"no_display","detail":"no display to prompt on"}"#
-        ));
-        assert!(!is_no_display(
-            r#"{"ok":false,"v":1,"error":"wrong_credentials","db":"personal"}"#
-        ));
-        assert!(!is_no_display(r#"{"ok":true,"v":1,"db":"personal"}"#));
-        assert!(!is_no_display("not json"));
-    }
-
-    /// What `--tty` prints when there's no controlling terminal — built
-    /// from the same `Response`/`UnlockError` the daemon serializes, so it
-    /// can't drift from the real wire form a plain `unlock` gets.
-    #[test]
-    fn synthetic_no_display_line_matches_the_daemons_own() {
-        let line = synthetic_no_display_line();
-        assert!(line.ends_with('\n'));
-        assert!(is_no_display(&line));
-        assert_eq!(
-            line,
-            "{\"v\":1,\"ok\":false,\"error\":\"no_display\",\"detail\":\"no display to prompt on\"}\n"
-        );
     }
 
     /// An answer whose every field is optional, which any JSON object fits.

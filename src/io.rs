@@ -1,6 +1,5 @@
 //! A small `Write` helper with nothing specific to the wire protocol or the
-//! daemon, shared by the two places that need it: `proto::encode_request`
-//! and `server::write_response` both serialize once into a [`ByteCounter`]
+//! daemon: `server::write_response` serializes once into a [`ByteCounter`]
 //! to measure a value's encoded size, then once more into a buffer
 //! allocated at exactly that size, so the real pass never reallocates — a
 //! `Vec` that grows while being filled frees an unwiped copy of its earlier

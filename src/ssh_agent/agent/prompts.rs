@@ -144,10 +144,9 @@ impl<H: SshHost> Agent<H> {
         );
         let unlock = UnlockRequest {
             db: key.database.clone(),
-            password: None,
         };
         self.host
-            .unlock(&unlock, requester, Some(&message))
+            .unlock(&unlock, None, requester, Some(&message))
             .map(|_| ())
             .map_err(Refused::Unlock)
     }

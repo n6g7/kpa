@@ -3,17 +3,18 @@
 //! subcommands — not a hand-rolled socket client — so this exercises the
 //! real protocol round-trip an operator would see. The raw-socket tests are
 //! the exception: they send requests no client subcommand builds on its
-//! own, such as a wrong `v` or a password typed directly into the request
-//! rather than read from a terminal.
+//! own, such as a wrong `v` or a terminal passed with the request.
 //!
-//! Tests that unlock through the prompt run the daemon in-process
+//! Tests that unlock through the screen prompt run the daemon in-process
 //! (`common::InProcessDaemon`), where every connection counts as coming
 //! from the desktop: a test runner is rarely in the display session, and
-//! the spawned `kpa serve` would answer its `unlock` with `no_display`. The
-//! rest spawn the real binary — including the `terminal_unlock` module at
-//! the bottom, which drives `kpa unlock`'s terminal read
+//! a spawned `kpa serve` classifies its `unlock` as from outside the
+//! desktop, so asks for the password on the terminal. The rest spawn the
+//! real binary — including the `terminal_unlock` module at the bottom,
+//! which drives `kpa unlock` and the daemon's prompt on its terminal
 //! (`docs/headless.md` § 4) through a real pty, and relies on exactly that
-//! `no_display` to exercise the two-step flow against a spawned daemon.
+//! classification to exercise the terminal prompt against a spawned
+//! daemon.
 
 mod common;
 
@@ -263,33 +264,45 @@ fn lock_all_locks_every_database() {
 fn version_mismatch_is_rejected() {
     let daemon = Daemon::start(common::PASSWORD);
 
-    let mut stream =
-        UnixStream::connect(&daemon.socket).expect("failed to connect to daemon socket");
-    writeln!(stream, r#"{{"v":99,"op":"status"}}"#).expect("failed to write request");
+    // 1 is the version before the master password left the protocol: a
+    // client that old, even one that sends a password, is told so.
+    for (claimed, request) in [
+        (99, r#"{"v":99,"op":"status"}"#),
+        (
+            1,
+            r#"{"v":1,"op":"unlock","db":"personal","password":"aHVudGVyMg=="}"#,
+        ),
+    ] {
+        let mut stream =
+            UnixStream::connect(&daemon.socket).expect("failed to connect to daemon socket");
+        writeln!(stream, "{request}").expect("failed to write request");
 
-    let mut line = String::new();
-    BufReader::new(stream)
-        .read_line(&mut line)
-        .expect("failed to read response");
+        let mut line = String::new();
+        BufReader::new(stream)
+            .read_line(&mut line)
+            .expect("failed to read response");
 
-    let response: Value = serde_json::from_str(line.trim()).expect("failed to decode response");
-    assert_eq!(response["ok"], false);
-    assert_eq!(response["error"], "version_mismatch");
-    // The response always carries the daemon's own version, not the
-    // client's claimed one — that's the whole point (docs/design.md).
-    assert_eq!(response["v"], kpa::proto::VERSION);
-    // `docs/plan.md` step 2 asks for "a clear error naming both versions".
-    let detail = response["detail"]
-        .as_str()
-        .expect("version mismatch should explain itself");
-    assert!(
-        detail.contains('1'),
-        "should name the daemon's version: {detail}"
-    );
-    assert!(
-        detail.contains("99"),
-        "should name the client's claimed version: {detail}"
-    );
+        let response: Value = serde_json::from_str(line.trim()).expect("failed to decode response");
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"], "version_mismatch");
+        // The response always carries the daemon's own version, not the
+        // client's claimed one — that's the whole point (docs/design.md).
+        assert_eq!(response["v"], kpa::proto::VERSION);
+        // `docs/plan.md` step 2 asks for "a clear error naming both versions".
+        let detail = response["detail"]
+            .as_str()
+            .expect("version mismatch should explain itself");
+        assert!(
+            detail.contains(&format!("v{}", kpa::proto::VERSION)),
+            "should name the daemon's version: {detail}"
+        );
+        assert!(
+            detail.contains(&format!("v{claimed}")),
+            "should name the client's claimed version: {detail}"
+        );
+    }
+    // Nothing was unlocked by the v1 request's password.
+    assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], true);
 }
 
 /// Malformed JSON must get a clean error, never take the daemon down —
@@ -317,85 +330,11 @@ fn malformed_request_is_rejected_without_crashing_the_daemon() {
     assert_eq!(daemon.run(&["status"])["ok"], true);
 }
 
-/// A daemon whose prompt always fails, so any `unlock` that prompts comes
-/// back `prompt_cancelled`: getting anything else proves it didn't.
-fn no_prompt_daemon() -> Daemon {
+/// A daemon whose prompt always fails, so any `unlock` that prompts on
+/// screen comes back `prompt_cancelled`: getting anything else proves it
+/// didn't.
+fn failing_prompt_daemon() -> Daemon {
     Daemon::spawn("exit 1", Stdio::null())
-}
-
-/// Sends `line` straight to the socket and decodes the one-line reply.
-fn send_raw(daemon: &Daemon, line: &str) -> Value {
-    let mut stream =
-        UnixStream::connect(&daemon.socket).expect("failed to connect to daemon socket");
-    writeln!(stream, "{line}").expect("failed to write request");
-    let mut reply = String::new();
-    BufReader::new(stream)
-        .read_line(&mut reply)
-        .expect("failed to read response");
-    serde_json::from_str(reply.trim())
-        .unwrap_or_else(|err| panic!("could not decode response {reply:?}: {err}"))
-}
-
-fn unlock_line(password: &str) -> String {
-    format!(r#"{{"v":1,"op":"unlock","db":"personal","password":"{password}"}}"#)
-}
-
-fn base64(bytes: impl AsRef<[u8]>) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-#[test]
-fn an_unlock_carrying_the_password_unlocks_without_prompting() {
-    let daemon = no_prompt_daemon();
-
-    let unlocked = send_raw(&daemon, &unlock_line(&base64(common::PASSWORD)));
-    assert_eq!(unlocked["ok"], true, "{unlocked}");
-    assert_eq!(unlocked["db"], "personal");
-
-    let listed = daemon.run(&["list", "personal"]);
-    assert_eq!(listed["entries"][0]["title"], "Example", "{listed}");
-}
-
-#[test]
-fn an_unlock_carrying_a_wrong_password_is_wrong_credentials() {
-    let daemon = no_prompt_daemon();
-
-    let unlocked = send_raw(&daemon, &unlock_line(&base64("not-the-real-password")));
-    assert_eq!(unlocked["ok"], false);
-    assert_eq!(unlocked["error"], "wrong_credentials", "{unlocked}");
-    assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], true);
-
-    // No backoff: the right password straight after still works.
-    let unlocked = send_raw(&daemon, &unlock_line(&base64(common::PASSWORD)));
-    assert_eq!(unlocked["ok"], true, "{unlocked}");
-}
-
-/// An oversized password, one that isn't base64, and one whose JSON string
-/// needs unescaping are all refused before anything is tried, and the
-/// daemon keeps serving. The escaped one is the right password with its
-/// first character written as a `\u` escape, so only the escape is wrong.
-#[test]
-fn an_unlock_carrying_an_unusable_password_is_malformed() {
-    let daemon = no_prompt_daemon();
-    let encoded = base64(common::PASSWORD);
-    let first = encoded.chars().next().expect("non-empty");
-    let escaped = format!("{}u{:04x}{}", '\u{5c}', u32::from(first), &encoded[1..]);
-
-    for (what, password) in [
-        (
-            "oversized",
-            base64("a".repeat(kpa::proto::MAX_PASSWORD_LEN + 1)),
-        ),
-        ("invalid base64", "not base64!".to_string()),
-        ("escaped", escaped),
-    ] {
-        let reply = send_raw(&daemon, &unlock_line(&password));
-        assert_eq!(reply["ok"], false, "{what}: {reply}");
-        assert_eq!(reply["error"], "malformed_request", "{what}: {reply}");
-    }
-
-    assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], true);
 }
 
 /// A `lock` issued while an `unlock` is still prompting wins: the unlock
@@ -1153,7 +1092,7 @@ mod terminal_passed_with_the_request {
         let mut stream = UnixStream::connect(socket).expect("connect");
         kpa::socket::send_with_fd(
             &stream,
-            b"{\"v\":1,\"op\":\"unlock\",\"db\":\"personal\"}\n",
+            b"{\"v\":2,\"op\":\"unlock\",\"db\":\"personal\"}\n",
             Some(pty.open_slave().as_fd()),
         )
         .expect("send the request");
@@ -1226,14 +1165,17 @@ mod terminal_passed_with_the_request {
     }
 }
 
-/// `kpa unlock`'s terminal read (`docs/headless.md` § 4): `--tty` and the
-/// two-step flow it falls back to from a plain `no_display`, both driven
-/// through a real pty so the password really does go in with echo off.
+/// `kpa unlock` passes its controlling terminal to the daemon, which asks
+/// for the master password on it where it can't ask on screen
+/// (`docs/headless.md` § 4). Driven through a real pty, so the password
+/// really does go in with echo off, and the typing and the interrupts are the
+/// user's.
 mod terminal_unlock {
-    use std::process::{Command, Stdio};
-    use std::time::Duration;
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Child, Command, Output, Stdio};
+    use std::time::{Duration, Instant};
 
-    use super::{in_process_with_prompt, no_prompt_daemon};
+    use super::{failing_prompt_daemon, in_process_with_prompt};
     use crate::common::{self, Pty};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
@@ -1241,7 +1183,7 @@ mod terminal_unlock {
     /// Spawns `kpa --socket <socket> unlock [args]` attached to `pty` as
     /// its controlling terminal, stdin/stdout/stderr included, so
     /// `/dev/tty` inside it resolves to `pty`'s slave.
-    fn spawn_unlock(socket: &std::path::Path, args: &[&str], pty: &Pty) -> std::process::Child {
+    fn spawn_unlock(socket: &std::path::Path, args: &[&str], pty: &Pty) -> Child {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_kpa"));
         cmd.arg("--socket")
             .arg(socket)
@@ -1254,15 +1196,47 @@ mod terminal_unlock {
         cmd.spawn().expect("failed to spawn kpa unlock")
     }
 
-    /// `--tty` skips straight to the terminal: a prompt that would fail is
-    /// configured and never has to run for this to succeed.
+    /// Runs `kpa unlock [args]` with no controlling terminal at all (a cron
+    /// job, say): `setsid` detaches the child from whatever controlling
+    /// terminal the test binary itself might have.
+    fn unlock_without_a_terminal(socket: &std::path::Path, args: &[&str]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kpa"));
+        cmd.arg("--socket")
+            .arg(socket)
+            .arg("unlock")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        // SAFETY: `setsid` alone is async-signal-safe. It puts the child
+        // in a new session with no controlling terminal, which is exactly
+        // the condition under test.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        cmd.output().expect("failed to run kpa unlock")
+    }
+
+    /// The JSON line a `kpa unlock` printed.
+    fn printed(output: &Output) -> serde_json::Value {
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
+            .expect("printed line should be the daemon's JSON response")
+    }
+
+    /// `--tty` asks on the terminal even on the desktop: the configured
+    /// prompt would fail, and never has to run for this to succeed.
     #[test]
-    fn unlock_tty_reads_the_password_with_echo_off() {
+    fn unlock_tty_is_asked_on_the_terminal_with_echo_off() {
         let daemon = in_process_with_prompt("exit 1");
         let pty = Pty::open();
         let mut child = spawn_unlock(&daemon.socket, &["--tty", "personal"], &pty);
 
-        pty.read_until("Master password: ", TIMEOUT);
+        pty.read_until("Unlock personal: ", TIMEOUT);
         assert!(
             !pty.echoing(),
             "echo should be off while reading the password"
@@ -1283,20 +1257,20 @@ mod terminal_unlock {
                 .success(),
             "kpa unlock --tty should exit 0 on success"
         );
+        assert!(pty.echoing(), "echo is back");
     }
 
-    /// The headless flow end to end: a plain request from a spawned
-    /// daemon (classified `Outside`, `docs/headless.md` § 3) gets
-    /// `no_display` without ever running its failing prompt, which is
-    /// what sends `kpa unlock` to the terminal on its own, with no
-    /// `--tty`.
+    /// The headless flow end to end: a request from a spawned daemon's
+    /// point of view comes from outside the desktop
+    /// (`docs/headless.md` § 3), so it is asked on the terminal without
+    /// `--tty`, and the failing prompt never runs.
     #[test]
-    fn a_plain_unlock_falls_back_to_the_terminal_on_no_display() {
-        let daemon = no_prompt_daemon();
+    fn a_plain_unlock_from_outside_the_desktop_is_asked_on_the_terminal() {
+        let daemon = failing_prompt_daemon();
         let pty = Pty::open();
         let mut child = spawn_unlock(&daemon.socket, &["personal"], &pty);
 
-        pty.read_until("Master password: ", TIMEOUT);
+        pty.read_until("Unlock personal: ", TIMEOUT);
         assert!(!pty.echoing());
 
         pty.type_text(&format!("{}\n", common::PASSWORD));
@@ -1311,13 +1285,34 @@ mod terminal_unlock {
         );
     }
 
+    /// On the desktop the daemon asks on screen, and the terminal the CLI
+    /// passed is left alone.
+    #[test]
+    fn a_plain_unlock_on_the_desktop_is_asked_on_screen() {
+        let daemon = in_process_with_prompt(&format!("printf %s {}", common::PASSWORD));
+        let pty = Pty::open();
+        let mut child = spawn_unlock(&daemon.socket, &["personal"], &pty);
+
+        let output = pty.read_until(r#""ok":true"#, TIMEOUT);
+        assert!(
+            !output.contains("Unlock personal"),
+            "the terminal was asked: {output}"
+        );
+        assert!(
+            child
+                .wait()
+                .expect("failed to wait for kpa unlock")
+                .success()
+        );
+    }
+
     #[test]
     fn unlock_tty_with_a_wrong_password_is_wrong_credentials() {
         let daemon = in_process_with_prompt("exit 1");
         let pty = Pty::open();
         let mut child = spawn_unlock(&daemon.socket, &["--tty", "personal"], &pty);
 
-        pty.read_until("Master password: ", TIMEOUT);
+        pty.read_until("Unlock personal: ", TIMEOUT);
         pty.type_text("not-the-real-password\n");
 
         let output = pty.read_until(r#""error""#, TIMEOUT);
@@ -1330,83 +1325,59 @@ mod terminal_unlock {
         );
     }
 
-    /// No controlling terminal at all (a cron job, say): `kpa unlock`
-    /// reports `no_display` and exits non-zero, without ever touching a
-    /// terminal — `setsid` here detaches the child from whatever
-    /// controlling terminal the test binary itself might have.
+    /// `^C` while the daemon is reading the password: the daemon has put the
+    /// terminal back by the time the CLI exits, so the shell that takes the
+    /// terminal over finds echo on, and the unlock ends as cancelled.
     #[test]
-    fn unlock_without_a_controlling_terminal_reports_no_display() {
-        use std::os::unix::process::CommandExt as _;
+    fn interrupting_the_unlock_restores_the_terminal_before_the_cli_exits() {
+        let daemon = in_process_with_prompt("exit 1");
+        let pty = Pty::open();
+        let mut child = spawn_unlock(&daemon.socket, &["--tty", "personal"], &pty);
 
-        let daemon = no_prompt_daemon();
+        pty.read_until("Unlock personal: ", TIMEOUT);
+        assert!(!pty.echoing());
+        pty.type_text("\u{3}");
 
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kpa"));
-        cmd.arg("--socket")
-            .arg(&daemon.socket)
-            .arg("unlock")
-            .arg("personal")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        // SAFETY: `setsid` alone is async-signal-safe. It puts the child
-        // in a new session with no controlling terminal, which is exactly
-        // the condition under test.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let output = cmd.output().expect("failed to run kpa unlock");
-
-        assert!(!output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("no_display"), "{stdout}");
+        let started = Instant::now();
+        let status = child.wait().expect("failed to wait for kpa unlock");
+        assert!(pty.echoing(), "the terminal was handed back with echo off");
+        assert!(!status.success());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the CLI waited for the daemon's timeout instead of its answer"
+        );
+        let output = pty.read_until("prompt_cancelled", TIMEOUT);
+        assert!(output.contains("prompt_cancelled"), "{output}");
+        assert_eq!(
+            daemon.run(&["status"])["databases"][0]["locked"],
+            true,
+            "nothing was unlocked"
+        );
     }
 
-    /// Without `--tty`, the same `no_display` line the first request got
-    /// is what's printed — this pins it down to the exact bytes, not just
-    /// the error code.
+    /// No controlling terminal at all: the CLI passes none, and a daemon
+    /// that can't ask on screen has nowhere to ask. It says `no_prompt`, and
+    /// so does the CLI's exit status.
     #[test]
-    fn unlock_without_a_controlling_terminal_prints_the_original_no_display_line() {
-        use std::os::unix::process::CommandExt as _;
+    fn unlock_without_a_controlling_terminal_has_nowhere_to_ask() {
+        let daemon = failing_prompt_daemon();
 
-        let daemon = no_prompt_daemon();
-        let direct = daemon.run(&["unlock", "personal"]);
-        assert_eq!(direct["error"], "no_display", "{direct}");
+        for args in [&["personal"][..], &["--tty", "personal"][..]] {
+            let output = unlock_without_a_terminal(&daemon.socket, args);
 
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kpa"));
-        cmd.arg("--socket")
-            .arg(&daemon.socket)
-            .arg("unlock")
-            .arg("personal")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+            assert!(!output.status.success(), "{args:?}");
+            let line = printed(&output);
+            assert_eq!(line["error"], "no_prompt", "{args:?}: {line}");
         }
-        let output = cmd.output().expect("failed to run kpa unlock");
-        let printed: serde_json::Value =
-            serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
-                .expect("printed line should be the daemon's JSON response");
-        assert_eq!(printed, direct);
     }
 
-    // No pty test for a password that overflows `MAX_PASSWORD_LEN`: the
+    // No pty test for a password that overflows the answer limit: the
     // kernel's own canonical-mode line buffer caps an unterminated line at
     // very close to that same size, with no documented, version-stable
     // behavior for what happens past it (deliver what's queued so far,
     // drop the rest, or block the writer) — exactly the ambiguity that
     // makes a real tty the wrong tool for pinning this bound down. That
-    // bound is `read_password_line`'s own, tested deterministically
-    // against a plain pipe in `src/main.rs`'s
-    // `a_line_over_the_limit_is_refused_rather_than_read_in_parts`.
+    // bound is the prompt's own, tested deterministically against a socket
+    // pair in `src/prompt/terminal.rs`'s
+    // `a_line_over_the_limit_is_refused_and_one_at_the_limit_is_not`.
 }

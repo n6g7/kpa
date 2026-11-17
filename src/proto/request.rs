@@ -6,8 +6,6 @@
 //! at the point they arise, which op was asked for isn't known.
 
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
-use zeroize::Zeroizing;
 
 use super::VERSION;
 use super::copy::CopyRequest;
@@ -16,16 +14,34 @@ use super::list::ListRequest;
 use super::lock::LockRequest;
 use super::ssh_keys::SshKeysRequest;
 use super::unlock::UnlockRequest;
-use crate::io::ByteCounter;
+use crate::prompt::PromptOn;
 
 /// One request. `op` is `#[serde(flatten)]`ed so the wire shape is a single
-/// flat object (`{"v":1,"op":"unlock","db":"personal"}`) rather than
+/// flat object (`{"v":2,"op":"unlock","db":"personal"}`) rather than
 /// `op` nesting its own sub-object.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Request {
     pub v: u32,
+    /// Where the request would like to be asked, if it ever has to ask the
+    /// user something (`unlock`'s password): `"terminal"` on the terminal
+    /// passed with it, even where the daemon could ask on screen;
+    /// `"screen"` only on screen, never on the terminal. Omitted when the
+    /// requester leaves it to the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_prompt: Option<PromptOn>,
     #[serde(flatten)]
     pub op: Op,
+}
+
+impl Request {
+    /// A request for `op` that leaves where to ask to the daemon.
+    pub fn new(op: Op) -> Request {
+        Request {
+            v: VERSION,
+            preferred_prompt: None,
+            op,
+        }
+    }
 }
 
 /// Which op, plus its payload. Each variant wraps the request type from
@@ -52,71 +68,43 @@ pub enum Op {
 /// `serde_json`'s own error text is never forwarded to the client.
 #[derive(Debug)]
 pub enum DecodeError {
-    /// Not valid JSON, missing/non-numeric `v`, an `op` shape this build
-    /// doesn't recognize, or a `password` that `Password` refuses.
+    /// Not valid JSON, missing/non-numeric `v`, or an `op` shape this build
+    /// doesn't recognize.
     MalformedRequest,
     /// The request's own `v` didn't match `VERSION`. Carries the client's
     /// claimed version so the response can name both.
     VersionMismatch(u64),
 }
 
-/// The fields `decode_request` reads before the request is matched against
-/// `Op`. Every other field is skipped without being copied.
+/// The one field `decode_request` reads before the request is matched
+/// against `Request`. Every other field is skipped without being copied.
 #[derive(Deserialize)]
-struct Envelope<'a> {
+struct Envelope {
     v: u64,
-    /// Raw JSON text, never unescaped: `serde_json` only finds where it
-    /// ends.
-    #[serde(borrow, default)]
-    password: Option<&'a RawValue>,
 }
 
-/// Decode one request line. Two passes over `line`, both straight from the
-/// text:
+/// Decode one request line. Two passes over `line`:
 ///
-/// 1. `v` first, before the rest of the request is asked to match `Op`'s
-///    shape at all — a client running a different protocol version may not
-///    even have a compatible `op` shape, and the version mismatch is the
-///    more useful thing to report in that case. The same pass refuses a
-///    `password` with escapes in it, before anything has unescaped it into
-///    a buffer kpa can't wipe (see `Password`).
-/// 2. The whole request. Strings arrive as slices of `line`, so the only
-///    copy of a password is the zeroizing one `Password` decodes into.
-///
-/// Never through a `serde_json::Value`, which would copy every string in
-/// the request, the password's base64 included, into a plain `String`.
+/// 1. `v` first, before the rest of the request is asked to match
+///    `Request`'s shape at all — a client running a different protocol
+///    version may not even have a compatible `op` shape, and the version
+///    mismatch is the more useful thing to report in that case.
+/// 2. The whole request.
 pub fn decode_request(line: &str) -> Result<Request, DecodeError> {
     let envelope: Envelope =
         serde_json::from_str(line).map_err(|_| DecodeError::MalformedRequest)?;
     if envelope.v != u64::from(VERSION) {
         return Err(DecodeError::VersionMismatch(envelope.v));
     }
-    if envelope
-        .password
-        .is_some_and(|raw| raw.get().contains('\\'))
-    {
-        return Err(DecodeError::MalformedRequest);
-    }
-
     serde_json::from_str(line).map_err(|_| DecodeError::MalformedRequest)
 }
 
 /// Serialize `request` into a newline-terminated line, for `send_request`
 /// to write to the socket.
-///
-/// Serialized twice on purpose, the same technique `write_response` uses
-/// for the daemon's replies: once into a [`ByteCounter`] to measure, once
-/// into a `Zeroizing` buffer allocated at exactly that size. An `unlock`
-/// carrying the master password is the one request that holds a secret
-/// (as base64, inside `Password`'s `Serialize`), and a buffer that grows
-/// while being filled frees an unwiped copy at each reallocation.
-pub fn encode_request(request: &Request) -> Result<Zeroizing<Vec<u8>>, serde_json::Error> {
-    let mut counter = ByteCounter(0);
-    serde_json::to_writer(&mut counter, request)?;
-    let mut buf = Zeroizing::new(Vec::with_capacity(counter.0 + 1));
-    serde_json::to_writer(&mut *buf, request)?;
-    buf.push(b'\n');
-    Ok(buf)
+pub fn encode_request(request: &Request) -> Result<Vec<u8>, serde_json::Error> {
+    let mut line = serde_json::to_vec(request)?;
+    line.push(b'\n');
+    Ok(line)
 }
 
 /// Failures that precede dispatch. Unlike an op's error type, this one
@@ -149,13 +137,10 @@ impl ProtocolError {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
     use serde_json::json;
     use uuid::Uuid;
 
     use super::super::copy::Field;
-    use super::super::unlock::{MAX_PASSWORD_LEN, Password};
     use super::*;
 
     /// The nil uuid, used everywhere below a request needs one — these
@@ -172,44 +157,43 @@ mod tests {
     #[test]
     fn requests_match_the_documented_wire_shape() {
         let cases = [
-            (Op::Status, json!({"v": 1, "op": "status"})),
+            (Op::Status, json!({"v": 2, "op": "status"})),
             (
                 Op::Unlock(UnlockRequest {
                     db: "personal".to_string(),
-                    password: None,
                 }),
-                json!({"v": 1, "op": "unlock", "db": "personal"}),
+                json!({"v": 2, "op": "unlock", "db": "personal"}),
             ),
             (
                 Op::Lock(LockRequest {
                     db: Some("personal".to_string()),
                 }),
-                json!({"v": 1, "op": "lock", "db": "personal"}),
+                json!({"v": 2, "op": "lock", "db": "personal"}),
             ),
             // Omitted, not null: the doc's "db omitted = lock all".
             (
                 Op::Lock(LockRequest { db: None }),
-                json!({"v": 1, "op": "lock"}),
+                json!({"v": 2, "op": "lock"}),
             ),
             (
                 Op::List(ListRequest {
                     db: Some("personal".to_string()),
                 }),
-                json!({"v": 1, "op": "list", "db": "personal"}),
+                json!({"v": 2, "op": "list", "db": "personal"}),
             ),
             (
                 Op::List(ListRequest { db: None }),
-                json!({"v": 1, "op": "list"}),
+                json!({"v": 2, "op": "list"}),
             ),
             (
                 Op::SshKeys(SshKeysRequest {
                     db: Some("personal".to_string()),
                 }),
-                json!({"v": 1, "op": "ssh_keys", "db": "personal"}),
+                json!({"v": 2, "op": "ssh_keys", "db": "personal"}),
             ),
             (
                 Op::SshKeys(SshKeysRequest { db: None }),
-                json!({"v": 1, "op": "ssh_keys"}),
+                json!({"v": 2, "op": "ssh_keys"}),
             ),
             (
                 Op::Copy(CopyRequest {
@@ -218,7 +202,7 @@ mod tests {
                     field: Field::Password,
                 }),
                 json!({
-                    "v": 1,
+                    "v": 2,
                     "op": "copy",
                     "db": "personal",
                     "uuid": uuid(),
@@ -228,12 +212,39 @@ mod tests {
         ];
 
         for (op, expected) in cases {
-            let request = Request { v: VERSION, op };
+            let request = Request::new(op);
             assert_eq!(
                 serde_json::to_value(&request).expect("request should serialize"),
                 expected,
                 "wrong wire shape for {:?}",
                 request.op
+            );
+        }
+    }
+
+    /// The preference sits beside `v` and `op`, and is left out when there
+    /// is none.
+    #[test]
+    fn a_preferred_prompt_is_a_top_level_field() {
+        let unlock = Op::Unlock(UnlockRequest {
+            db: "personal".to_string(),
+        });
+        for (preferred, wire) in [
+            (PromptOn::Terminal, "terminal"),
+            (PromptOn::Screen, "screen"),
+        ] {
+            let request = Request {
+                preferred_prompt: Some(preferred),
+                ..Request::new(unlock.clone())
+            };
+            assert_eq!(
+                serde_json::to_value(&request).expect("request should serialize"),
+                json!({
+                    "v": 2,
+                    "preferred_prompt": wire,
+                    "op": "unlock",
+                    "db": "personal",
+                })
             );
         }
     }
@@ -244,46 +255,45 @@ mod tests {
     #[test]
     fn decodes_each_documented_request() {
         let cases = [
-            (r#"{"v":1,"op":"status"}"#, Op::Status),
+            (r#"{"v":2,"op":"status"}"#, Op::Status),
             (
-                r#"{"v":1,"op":"unlock","db":"personal"}"#,
+                r#"{"v":2,"op":"unlock","db":"personal"}"#,
                 Op::Unlock(UnlockRequest {
                     db: "personal".to_string(),
-                    password: None,
                 }),
             ),
             (
-                r#"{"v":1,"op":"lock","db":"personal"}"#,
+                r#"{"v":2,"op":"lock","db":"personal"}"#,
                 Op::Lock(LockRequest {
                     db: Some("personal".to_string()),
                 }),
             ),
-            (r#"{"v":1,"op":"lock"}"#, Op::Lock(LockRequest { db: None })),
+            (r#"{"v":2,"op":"lock"}"#, Op::Lock(LockRequest { db: None })),
             // An explicit null reads the same as omitting it, so a client
             // that spells out its empty fields is still understood.
             (
-                r#"{"v":1,"op":"lock","db":null}"#,
+                r#"{"v":2,"op":"lock","db":null}"#,
                 Op::Lock(LockRequest { db: None }),
             ),
             (
-                r#"{"v":1,"op":"list","db":"personal"}"#,
+                r#"{"v":2,"op":"list","db":"personal"}"#,
                 Op::List(ListRequest {
                     db: Some("personal".to_string()),
                 }),
             ),
-            (r#"{"v":1,"op":"list"}"#, Op::List(ListRequest { db: None })),
+            (r#"{"v":2,"op":"list"}"#, Op::List(ListRequest { db: None })),
             (
-                r#"{"v":1,"op":"ssh_keys","db":"personal"}"#,
+                r#"{"v":2,"op":"ssh_keys","db":"personal"}"#,
                 Op::SshKeys(SshKeysRequest {
                     db: Some("personal".to_string()),
                 }),
             ),
             (
-                r#"{"v":1,"op":"ssh_keys"}"#,
+                r#"{"v":2,"op":"ssh_keys"}"#,
                 Op::SshKeys(SshKeysRequest { db: None }),
             ),
             (
-                r#"{"v":1,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"password"}"#,
+                r#"{"v":2,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"password"}"#,
                 Op::Copy(CopyRequest {
                     db: "personal".to_string(),
                     uuid: uuid(),
@@ -295,8 +305,26 @@ mod tests {
         for (line, expected) in cases {
             let request = decode_request(line).unwrap_or_else(|err| panic!("{line}: {err:?}"));
             assert_eq!(request.v, VERSION);
+            assert_eq!(request.preferred_prompt, None, "{line}");
             assert_eq!(request.op, expected, "wrong decode for {line}");
         }
+    }
+
+    #[test]
+    fn decodes_a_preferred_prompt() {
+        let line = r#"{"v":2,"preferred_prompt":"terminal","op":"unlock","db":"personal"}"#;
+        let request = decode_request(line).expect("should decode");
+        assert_eq!(request.preferred_prompt, Some(PromptOn::Terminal));
+        assert_eq!(
+            request.op,
+            Op::Unlock(UnlockRequest {
+                db: "personal".to_string()
+            })
+        );
+
+        let line = r#"{"v":2,"op":"unlock","db":"personal","preferred_prompt":"screen"}"#;
+        let request = decode_request(line).expect("should decode");
+        assert_eq!(request.preferred_prompt, Some(PromptOn::Screen));
     }
 
     /// What the client encodes, the daemon decodes back to the same thing.
@@ -306,7 +334,6 @@ mod tests {
             Op::Status,
             Op::Unlock(UnlockRequest {
                 db: "personal".to_string(),
-                password: None,
             }),
             Op::Lock(LockRequest { db: None }),
             Op::Lock(LockRequest {
@@ -328,10 +355,18 @@ mod tests {
         ];
 
         for op in ops {
-            let request = Request { v: VERSION, op };
-            let text = serde_json::to_string(&request).expect("request should serialize");
-            let decoded = decode_request(&text).unwrap_or_else(|err| panic!("{text}: {err:?}"));
-            assert_eq!(decoded, request);
+            for preferred_prompt in [None, Some(PromptOn::Terminal), Some(PromptOn::Screen)] {
+                let request = Request {
+                    preferred_prompt,
+                    ..Request::new(op.clone())
+                };
+                let line = encode_request(&request).expect("request should encode");
+                let line = std::str::from_utf8(&line).expect("a request is UTF-8");
+                assert!(line.ends_with('\n'));
+                let decoded =
+                    decode_request(line.trim_end()).unwrap_or_else(|err| panic!("{line}: {err:?}"));
+                assert_eq!(decoded, request);
+            }
         }
     }
 
@@ -339,9 +374,24 @@ mod tests {
     fn rejects_a_mismatched_version_before_the_op_shape() {
         // The `op` here isn't one this build knows; the version mismatch is
         // still what comes back, since that's the more useful thing to say.
-        let err =
-            decode_request(r#"{"v":2,"op":"teleport"}"#).expect_err("a v2 request must not decode");
-        assert!(matches!(err, DecodeError::VersionMismatch(2)));
+        let err = decode_request(r#"{"v":99,"op":"teleport"}"#)
+            .expect_err("a v99 request must not decode");
+        assert!(matches!(err, DecodeError::VersionMismatch(99)));
+    }
+
+    /// A client from before the protocol's second version is told so, however
+    /// its request is shaped.
+    #[test]
+    fn a_request_of_the_first_version_is_a_version_mismatch() {
+        for line in [
+            r#"{"v":1,"op":"status"}"#,
+            r#"{"v":1,"op":"unlock","db":"personal","password":"aHVudGVyMg=="}"#,
+        ] {
+            assert!(
+                matches!(decode_request(line), Err(DecodeError::VersionMismatch(1))),
+                "{line}"
+            );
+        }
     }
 
     #[test]
@@ -351,10 +401,13 @@ mod tests {
             "",
             "{}",
             r#"{"op":"status"}"#,                     // no `v`
-            r#"{"v":"1","op":"status"}"#,             // `v` not a number
-            r#"{"v":1,"op":"teleport"}"#,             // unknown op
-            r#"{"v":1,"op":"unlock"}"#,               // `unlock` needs a `db`
-            r#"{"v":1,"op":"copy","db":"personal"}"#, // `copy` needs a `uuid` and `field`
+            r#"{"v":"2","op":"status"}"#,             // `v` not a number
+            r#"{"v":2,"op":"teleport"}"#,             // unknown op
+            r#"{"v":2,"op":"unlock"}"#,               // `unlock` needs a `db`
+            r#"{"v":2,"op":"copy","db":"personal"}"#, // `copy` needs a `uuid` and `field`
+            // `preferred_prompt` has two values, and these aren't them.
+            r#"{"v":2,"preferred_prompt":"tty","op":"status"}"#,
+            r#"{"v":2,"preferred_prompt":true,"op":"status"}"#,
         ] {
             assert!(
                 matches!(decode_request(line), Err(DecodeError::MalformedRequest)),
@@ -370,7 +423,7 @@ mod tests {
     /// (`FieldEmpty`), not at decode time.
     #[test]
     fn an_unrecognized_field_name_still_decodes() {
-        let line = r#"{"v":1,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"notes_dump"}"#;
+        let line = r#"{"v":2,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"notes_dump"}"#;
         let request = decode_request(line).expect("an unrecognized field name should still decode");
         assert_eq!(
             request.op,
@@ -380,109 +433,5 @@ mod tests {
                 field: Field::Custom("notes_dump".to_string()),
             })
         );
-    }
-
-    fn unlock_with(password: &str) -> String {
-        format!(r#"{{"v":1,"op":"unlock","db":"personal","password":"{password}"}}"#)
-    }
-
-    /// The decoded password only compares equal if it came through
-    /// `PasswordVisitor::visit_borrowed_str`, the only path that accepts
-    /// it: this also pins that `#[serde(flatten)]` and `#[serde(tag)]`
-    /// hand the string over borrowed.
-    #[test]
-    fn decodes_an_unlock_that_carries_a_password() {
-        let request = decode_request(&unlock_with("aHVudGVyMg==")).expect("should decode");
-        assert_eq!(
-            request.op,
-            Op::Unlock(UnlockRequest {
-                db: "personal".to_string(),
-                password: Some(Password::new(zeroize::Zeroizing::new(
-                    "hunter2".to_string()
-                ))),
-            })
-        );
-
-        // An explicit null reads the same as omitting it.
-        let line = r#"{"v":1,"op":"unlock","db":"personal","password":null}"#;
-        let request = decode_request(line).expect("should decode");
-        assert_eq!(
-            request.op,
-            Op::Unlock(UnlockRequest {
-                db: "personal".to_string(),
-                password: None,
-            })
-        );
-    }
-
-    #[test]
-    fn a_password_round_trips() {
-        let request = Request {
-            v: VERSION,
-            op: Op::Unlock(UnlockRequest {
-                db: "personal".to_string(),
-                password: Some(Password::new(zeroize::Zeroizing::new(
-                    "pa\"ss\\wörd\n".to_string(),
-                ))),
-            }),
-        };
-        let text = serde_json::to_string(&request).expect("request should serialize");
-        assert!(!text.contains('\\'), "base64 never needs escaping: {text}");
-        assert_eq!(decode_request(&text).expect("should decode"), request);
-    }
-
-    #[test]
-    fn rejects_a_password_it_cannot_use() {
-        let oversized = STANDARD.encode("a".repeat(MAX_PASSWORD_LEN + 1));
-        for line in [
-            unlock_with("not base64!"),
-            unlock_with(&oversized),
-            unlock_with(&STANDARD.encode(b"\xff")),
-            r#"{"v":1,"op":"unlock","db":"personal","password":42}"#.to_string(),
-            r#"{"v":1,"op":"unlock","db":"personal","password":["aGk="]}"#.to_string(),
-        ] {
-            assert!(
-                matches!(decode_request(&line), Err(DecodeError::MalformedRequest)),
-                "should have been rejected: {line:?}"
-            );
-        }
-    }
-
-    /// For building the JSON escapes below.
-    const BACKSLASH: char = '\u{5c}';
-
-    /// Each of these unescapes to valid base64 (`aHVudGVyMg==`, `aGk=`), so
-    /// only the escape gets them refused.
-    #[test]
-    fn rejects_a_password_with_escapes() {
-        let b = BACKSLASH;
-        for line in [
-            unlock_with(&format!("aHVudGVy{b}u004dg==")),
-            unlock_with(&format!("aHVudGVyMg{b}u003d{b}u003d")),
-            unlock_with(&format!("aHVu{b}/dGVyMg==")),
-            // The escape check reads the raw field wherever it sits, and an
-            // escaped key still names it.
-            format!(r#"{{"password":"aGk{b}u003d","v":1,"op":"unlock","db":"personal"}}"#),
-            format!(r#"{{"v":1,"op":"unlock","db":"personal","pass{b}u0077ord":"aGk{b}u003d"}}"#),
-        ] {
-            assert!(
-                matches!(decode_request(&line), Err(DecodeError::MalformedRequest)),
-                "should have been rejected: {line:?}"
-            );
-        }
-    }
-
-    /// The `v` check still comes first, so a client on another protocol
-    /// version hears about that rather than about its password.
-    #[test]
-    fn a_mismatched_version_is_reported_before_a_bad_password() {
-        let line = format!(
-            r#"{{"v":2,"op":"unlock","db":"personal","password":"{}u0041"}}"#,
-            BACKSLASH
-        );
-        assert!(matches!(
-            decode_request(&line),
-            Err(DecodeError::VersionMismatch(2))
-        ));
     }
 }
