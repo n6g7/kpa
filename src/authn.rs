@@ -26,6 +26,12 @@ use crate::socket;
 /// this. `comm` is at most 16 bytes.
 const MAX_PROC_FILE_LEN: u64 = 16 * 1024;
 
+/// The uid this process acts as (its effective uid): the one every
+/// same-user check compares against and the one kpa looks the user up by.
+pub fn process_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
 /// Where a connected peer runs, relative to the user's display session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
@@ -59,7 +65,7 @@ impl Requester {
     /// whoever accepted it.
     pub fn of(stream: &UnixStream) -> io::Result<Requester> {
         let uid = socket::peer_uid(stream)?;
-        if uid != rustix::process::geteuid().as_raw() {
+        if uid != process_uid() {
             return Ok(Requester {
                 uid,
                 cgroup: None,
@@ -402,7 +408,7 @@ mod tests {
 
         let requester = Requester::of(&ours).expect("peer credentials");
 
-        assert_eq!(requester.uid, rustix::process::geteuid().as_raw());
+        assert_eq!(requester.uid, process_uid());
         assert_eq!(
             requester.cgroup.as_deref(),
             Some(

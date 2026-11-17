@@ -77,7 +77,7 @@ fn compositor() -> Option<String> {
 /// for the compositor to pass as being on the desktop when it runs in
 /// that session's scope.
 fn display_session() -> Option<String> {
-    let uid = rustix::process::getuid().as_raw().to_string();
+    let uid = kpa::authn::process_uid().to_string();
     let shown = Command::new("loginctl")
         .args(["show-user", &uid, "--property=Display", "--value"])
         .output()

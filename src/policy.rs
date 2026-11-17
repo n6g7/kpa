@@ -318,7 +318,7 @@ pub fn start<L: Locks + 'static>(locks: L, bus: Bus) -> Sender<Event> {
     thread::spawn(move || run(rx, policy));
 
     let watch_tx = tx.clone();
-    let uid = rustix::process::getuid().as_raw();
+    let uid = crate::authn::process_uid();
     thread::spawn(move || watch_forever(&bus, uid, &watch_tx));
     tx
 }

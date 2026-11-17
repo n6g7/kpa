@@ -647,7 +647,7 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
                 password: None,
             },
             &Requester {
-                uid: rustix::process::geteuid().as_raw(),
+                uid: kpa::authn::process_uid(),
                 cgroup: None,
                 command: None,
             },

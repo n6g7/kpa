@@ -32,7 +32,7 @@ fn a_local_client_is_classified_by_its_own_cgroup() {
     let peer = authn::peer_cgroup(&stream).expect("the peer's cgroup");
     assert_eq!(peer, own, "the peer is the client process");
 
-    let uid = rustix::process::geteuid().as_raw();
+    let uid = kpa::authn::process_uid();
     let session = "1";
     let origin = authn::of_peer(&stream, uid, Some(session));
     assert_eq!(origin, authn::classify(&own, uid, Some(session)));

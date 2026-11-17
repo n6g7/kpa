@@ -273,7 +273,7 @@ fn check_peer_uid(
 pub(super) fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|err| ClientError::Connect(socket_path.to_path_buf(), err))?;
-    check_peer_uid(socket_path, &stream, rustix::process::geteuid().as_raw())?;
+    check_peer_uid(socket_path, &stream, kpa::authn::process_uid())?;
 
     let line = proto::encode_request(request).map_err(ClientError::Encode)?;
     stream.write_all(&line).map_err(ClientError::Send)?;
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn refuses_a_socket_belonging_to_another_uid() {
         let (_ours, theirs) = std::os::unix::net::UnixStream::pair().expect("socket pair");
-        let other = rustix::process::geteuid().as_raw().wrapping_add(1);
+        let other = kpa::authn::process_uid().wrapping_add(1);
 
         let err = check_peer_uid(Path::new("/dev/null"), &theirs, other)
             .expect_err("a uid mismatch must be refused");
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn accepts_a_socket_belonging_to_our_own_uid() {
         let (_ours, theirs) = std::os::unix::net::UnixStream::pair().expect("socket pair");
-        let our_uid = rustix::process::geteuid().as_raw();
+        let our_uid = kpa::authn::process_uid();
 
         check_peer_uid(Path::new("/dev/null"), &theirs, our_uid)
             .expect("our own uid must be accepted");

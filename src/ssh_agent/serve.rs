@@ -98,7 +98,7 @@ impl Drop for CapSlot {
 /// pauses rather than spins, and a connection over the cap is dropped.
 pub fn serve<S: SshSign + Send + Sync + 'static>(server: Arc<S>, listener: UnixListener) {
     let limits = Arc::new(Limits::new());
-    let owner = rustix::process::geteuid().as_raw();
+    let owner = crate::authn::process_uid();
     for conn in listener.incoming() {
         let stream = match conn {
             Ok(stream) => stream,
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn a_connection_answers_each_frame_in_order() {
         let signer = FakeSigner::new();
-        let owner = rustix::process::geteuid().as_raw();
+        let owner = crate::authn::process_uid();
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
 
         std::thread::scope(|scope| {
@@ -442,7 +442,7 @@ mod tests {
             drop(ours);
         });
 
-        let owner_uid = rustix::process::geteuid().as_raw();
+        let owner_uid = crate::authn::process_uid();
         assert_eq!(signer.calls()[0].requester.uid, owner_uid);
     }
 
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn an_oversize_frame_closes_the_connection() {
         let signer = FakeSigner::new();
-        let owner = rustix::process::geteuid().as_raw();
+        let owner = crate::authn::process_uid();
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
 
         std::thread::scope(|scope| {
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn a_peer_of_another_uid_is_closed_unanswered() {
         let signer = FakeSigner::new();
-        let other = rustix::process::geteuid().as_raw().wrapping_add(1);
+        let other = crate::authn::process_uid().wrapping_add(1);
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
         send(&mut ours, &[11]); // REQUEST_IDENTITIES
 
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn a_frame_that_trickles_in_is_closed_at_its_deadline() {
         let signer = FakeSigner::new();
-        let owner = rustix::process::geteuid().as_raw();
+        let owner = crate::authn::process_uid();
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
         let limits = Limits {
             frame_timeout: Duration::from_millis(200),
@@ -544,7 +544,7 @@ mod tests {
     #[test]
     fn the_forwarded_cap_closes_a_connection_that_becomes_forwarded() {
         let signer = FakeSigner::new();
-        let owner = rustix::process::geteuid().as_raw();
+        let owner = crate::authn::process_uid();
         // SSH_AGENTC_EXTENSION carrying a real forwarding session-bind.
         let forwarding_bind = || {
             let bind = signed_bind(&test_key(1), b"sid", true);

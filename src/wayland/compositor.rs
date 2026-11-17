@@ -97,7 +97,7 @@ fn runtime_dir() -> Result<PathBuf, Error> {
 /// desktop. Like `origin`, this tells the desktop from outside it, not an
 /// honest process from a hostile one of the same uid (NG-1).
 fn check_listener(stream: &UnixStream, session: &str) -> Result<(), Error> {
-    let uid = rustix::process::getuid().as_raw();
+    let uid = crate::authn::process_uid();
     let listener = crate::socket::peer_uid(stream)
         .map_err(|err| Error(format!("couldn't identify the compositor: {err}")))?;
     if listener != uid {

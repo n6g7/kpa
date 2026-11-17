@@ -1063,7 +1063,7 @@ pub fn serve(server: Arc<Server>, listener: UnixListener) {
     let _ = thread::Builder::new().spawn(move || watch_idle(&watcher));
 
     let active = Arc::new(AtomicUsize::new(0));
-    let owner = rustix::process::geteuid().as_raw();
+    let owner = crate::authn::process_uid();
     for conn in listener.incoming() {
         let stream = match conn {
             Ok(stream) => stream,
@@ -1292,7 +1292,7 @@ mod tests {
     /// A requester that runs where `origin` says, against a display session with
     /// `SESSION` as its display session.
     fn requester_in(origin: Origin) -> Requester {
-        let uid = rustix::process::geteuid().as_raw();
+        let uid = crate::authn::process_uid();
         let cgroup = match origin {
             Origin::Desktop => format!("0::/user.slice/user-{uid}.slice/session-{SESSION}.scope\n"),
             Origin::Outside => "0::/system.slice/cron.service\n".to_string(),
@@ -1323,7 +1323,7 @@ mod tests {
     /// return whatever it replies.
     fn exchange(request: &[u8]) -> String {
         let server = empty_server();
-        let owner = rustix::process::geteuid().as_raw();
+        let owner = crate::authn::process_uid();
         let (ours, theirs) = UnixStream::pair().expect("socket pair");
         thread::scope(|scope| {
             scope.spawn(|| handle_connection(&server, theirs, owner));
@@ -1411,7 +1411,7 @@ mod tests {
         ours.write_all(b"{\"v\":1,\"op\":\"status\"}\n")
             .expect("write");
         // Any uid other than ours stands in for a peer we must refuse.
-        let other = rustix::process::geteuid().as_raw().wrapping_add(1);
+        let other = crate::authn::process_uid().wrapping_add(1);
 
         thread::scope(|scope| {
             scope.spawn(|| handle_connection(&server, theirs, other));
@@ -1429,7 +1429,7 @@ mod tests {
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
         ours.write_all(b"{\"v\":1,\"op\":\"status\"}\n")
             .expect("write");
-        let owner = rustix::process::geteuid().as_raw();
+        let owner = crate::authn::process_uid();
 
         thread::scope(|scope| {
             scope.spawn(|| handle_connection(&server, theirs, owner));
