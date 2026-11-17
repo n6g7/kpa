@@ -51,7 +51,7 @@ logind session, or lingering can be enabled.
 Both operations ask where the user is, from the requester's
 classification. A prompt must appear where someone can answer it, and a
 secret must land where the requester can paste it. `copy` also needs the
-desk unlocked (§ 5).
+display session unlocked (§ 5).
 
 ## 3. Telling the desktop from outside it
 
@@ -227,7 +227,7 @@ The lock triggers don't change. What changes is which of them can fire:
   unlocked. A terminal unlock while the desk is already locked stays
   unlocked until the next trigger.
 
-Unlocking from a terminal while the desk is locked is allowed. The user
+Unlocking from a terminal while the display session is locked is allowed. The user
 typed the master password, the same consent the graphical prompt collects.
 The desk's lock protects the desk, and the desk still gets nothing: `copy`
 stays refused while it is locked (§ 5).
@@ -269,9 +269,9 @@ stays refused while it is locked (§ 5).
 | File          | Role                                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------------------- |
 | `origin.rs`   | Peer pidfd or pid → cgroup path → `Origin::{Desktop, Outside}`. The cgroup-path classifier is pure and table-tested |
-| `policy.rs`   | Also publishes the desk's state (no session, locked, unlocked), which `copy` and classification read      |
+| `policy.rs`   | Also publishes the display session's state (no session, locked, unlocked), which `copy` and classification read      |
 | `proto/unlock.rs` | `UnlockRequest` gains `password: Option<Password>`: a zeroizing newtype, decoded from base64 by a borrowing visitor, with a redacting `Debug`. `no_display` joins the error codes |
-| `server.rs`   | Reads request lines into a fixed zeroizing buffer; prompt timeout; lock kills prompts; `copy` gated on origin and the desk's state |
+| `server.rs`   | Reads request lines into a fixed zeroizing buffer; prompt timeout; lock kills prompts; `copy` gated on origin and the display session's state |
 | `main.rs`     | `kpa unlock` handles `no_display` with a `/dev/tty` read, and gains `--tty`                              |
 
 **Tests**
@@ -281,7 +281,7 @@ stays refused while it is locked (§ 5).
 - `tests/`: unlock with a password in the request, against the fixture
   database; a wrong password; an oversized one, invalid base64, and an
   escaped `password` string all refused; `copy` refused from outside the
-  desktop, and while the fake desk state is locked or absent.
+  desktop, and while the fake display session state is locked or absent.
 - The terminal read: a pty-driven test of `kpa unlock --tty`, echo off,
   password delivered.
 - Fuzzing: the request decoder's target gains the `password` field.
@@ -290,7 +290,7 @@ stays refused while it is locked (§ 5).
 
 1. Prompt timeout and lock kills prompts. These help the desktop today.
 2. Classification, `no_display`, terminal unlock.
-3. `copy` gated on origin and the desk's state.
+3. `copy` gated on origin and the display session's state.
 
 ## 10. Open questions
 

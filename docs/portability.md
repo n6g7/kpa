@@ -7,7 +7,7 @@ slot in behind each OS-specific part without its callers changing.
 ## The rule
 
 - **Every interface added or changed must be OS-neutral.** Shape it around
-  what kpa needs ("who is the peer", "is the desk locked", "serve this
+  what kpa needs ("who is the peer", "is the display session locked", "serve this
   secret on the clipboard"), not around the Linux mechanism behind it
   (`SO_PEERCRED`, logind's `LockedHint`, a Wayland data source).
 - **Linux types stay inside the module that uses them.** No pidfds, cgroup
@@ -60,8 +60,8 @@ These traits often sit on an OS boundary already. Keep their method
 signatures OS-neutral, like any other interface.
 
 **Answers and events are kpa's own types.** `origin::Origin`
-(desktop or outside), `policy::Event` (screen locked, sleeping, the desk's
-state) and `prompt::PromptOutcome<T>` (generic over the answer, so a prompt
+(desktop or outside), `policy::Event` (screen locked, sleeping, the display
+session's state) and `prompt::PromptOutcome<T>` (generic over the answer, so a prompt
 needn't return a string) are the pattern to follow.
 
 ## Seams
@@ -93,6 +93,6 @@ work next changes that code:
 
 - `clip::Backend::start` and `Clipboard::offer` take a logind session id
   and return `wayland::Offer`, which `clip.rs` re-exports.
-- `policy::Desk::{Locked, Unlocked}` carry the display session's logind id,
+- `policy::DisplaySession::{Locked, Unlocked}` carry the display session's logind id,
   which the clipboard uses to find the compositor. Callers other than the
   clipboard must treat it as opaque.

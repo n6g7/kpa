@@ -19,7 +19,7 @@ mod common;
 use kpa::config::Config;
 use kpa::origin::Origin;
 use kpa::paths::Paths;
-use kpa::policy::{self, Bus, Desk, Locks};
+use kpa::policy::{self, Bus, DisplaySession, Locks};
 use kpa::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::server::Server;
 use zbus::blocking::Connection;
@@ -42,26 +42,26 @@ fn session_id(path: &str) -> &'static str {
     }
 }
 
-/// An unlocked desk, active unless the test says otherwise (the mock's
+/// An unlocked display session, active unless the test says otherwise (the mock's
 /// `Active` property defaults to `true` — a session is active until a
 /// test says it isn't).
-fn unlocked(session: &str) -> Desk {
-    Desk::Unlocked {
-        session: session.to_string(),
+fn unlocked(session: &str) -> DisplaySession {
+    DisplaySession::Unlocked {
+        id: session.to_string(),
         active: true,
     }
 }
 
-fn locked(session: &str) -> Desk {
-    Desk::Locked {
-        session: session.to_string(),
+fn locked(session: &str) -> DisplaySession {
+    DisplaySession::Locked {
+        id: session.to_string(),
         active: true,
     }
 }
 
-fn unlocked_inactive(session: &str) -> Desk {
-    Desk::Unlocked {
-        session: session.to_string(),
+fn unlocked_inactive(session: &str) -> DisplaySession {
+    DisplaySession::Unlocked {
+        id: session.to_string(),
         active: false,
     }
 }
@@ -366,7 +366,7 @@ impl MockLogind {
 #[derive(Default)]
 struct Recorder {
     unlocked: AtomicBool,
-    desk: Mutex<Desk>,
+    display_session: Mutex<DisplaySession>,
     log: Mutex<Vec<&'static str>>,
 }
 
@@ -378,14 +378,14 @@ impl Locks for Recorder {
     fn any_unlocked(&self) -> bool {
         self.unlocked.load(Ordering::SeqCst)
     }
-    fn set_desk(&self, desk: Desk) {
-        *self.desk.lock().unwrap() = desk;
+    fn set_display_session(&self, display_session: DisplaySession) {
+        *self.display_session.lock().unwrap() = display_session;
     }
 }
 
 impl Recorder {
-    fn desk(&self) -> Desk {
-        self.desk.lock().unwrap().clone()
+    fn display_session(&self) -> DisplaySession {
+        self.display_session.lock().unwrap().clone()
     }
 
     fn locks(&self) -> usize {
@@ -437,18 +437,18 @@ fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
     recorder.log.lock().unwrap().clear();
 
     assert!(
-        !recorder.desk().is_locked(),
-        "a Lock signal alone doesn't mark the desk locked"
+        !recorder.display_session().is_locked(),
+        "a Lock signal alone doesn't mark the display session locked"
     );
 
-    // 2. LockedHint turning true locks and marks the desk locked; turning
+    // 2. LockedHint turning true locks and marks the display session locked; turning
     //    false unmarks it and locks nothing.
     mock.set_hint(SESSION_1, true);
     eventually("LockedHint=true to lock", || recorder.locks() == 1);
-    assert!(recorder.desk().is_locked());
+    assert!(recorder.display_session().is_locked());
     mock.set_hint(SESSION_1, false);
-    eventually("LockedHint=false to unmark the desk", || {
-        !recorder.desk().is_locked()
+    eventually("LockedHint=false to unmark the display session", || {
+        !recorder.display_session().is_locked()
     });
     quiet();
     assert_eq!(recorder.locks(), 1, "LockedHint=false is not a lock");
@@ -496,51 +496,59 @@ fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
     eventually("a lost bus to lock", || recorder.locks() == 1);
 }
 
-/// The desk's state as published to the server: the display session's id
+/// The display session's state as published to the server: its id
 /// and `LockedHint`, following display changes, with no session when
 /// logind reports none or the watch is lost.
 #[test]
-fn the_desk_state_follows_logind_over_a_bus() {
+fn the_display_session_state_follows_logind_over_a_bus() {
     let mut bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
     let recorder = Arc::new(Recorder::default());
     let _events = policy::start(recorder.clone(), Bus::Address(bus.address.clone()));
 
     // 1. Subscribing reads the display session and its hint.
-    eventually("the first desk state", || recorder.desk() == unlocked("31"));
+    eventually("the first display session state", || {
+        recorder.display_session() == unlocked("31")
+    });
 
     // 2. LockedHint changes on the display session move it between locked
     //    and unlocked.
     mock.set_hint(SESSION_1, true);
-    eventually("LockedHint=true", || recorder.desk() == locked("31"));
+    eventually("LockedHint=true", || {
+        recorder.display_session() == locked("31")
+    });
     mock.set_hint(SESSION_1, false);
-    eventually("LockedHint=false", || recorder.desk() == unlocked("31"));
+    eventually("LockedHint=false", || {
+        recorder.display_session() == unlocked("31")
+    });
 
     // 3. Neither a Lock signal nor another session's hint changes it.
     mock.lock_signal(SESSION_1);
     mock.set_hint(SESSION_2, true);
     eventually("the Lock signal to lock", || recorder.locks() > 0);
     quiet();
-    assert_eq!(recorder.desk(), unlocked("31"));
+    assert_eq!(recorder.display_session(), unlocked("31"));
 
     // 4. A display change reads the new session's hint.
     mock.set_display(SESSION_2);
     eventually("the new display session", || {
-        recorder.desk() == locked("32")
+        recorder.display_session() == locked("32")
     });
 
     // 5. No display session.
     mock.set_display("/");
-    eventually("no display session", || recorder.desk() == Desk::NoSession);
+    eventually("no display session", || {
+        recorder.display_session() == DisplaySession::None
+    });
     mock.set_display(SESSION_1);
     eventually("the display session back", || {
-        recorder.desk() == unlocked("31")
+        recorder.display_session() == unlocked("31")
     });
 
     // 6. A lost watch can't say, so there is no session until it's back.
     bus.kill();
-    eventually("a lost bus to forget the desk", || {
-        recorder.desk() == Desk::NoSession
+    eventually("a lost bus to forget the display session", || {
+        recorder.display_session() == DisplaySession::None
     });
 }
 
@@ -557,36 +565,40 @@ fn the_active_state_follows_logind_and_never_locks() {
     let _events = policy::start(recorder.clone(), Bus::Address(bus.address.clone()));
 
     // 1. Subscribing reads the session as active.
-    eventually("the first desk state", || recorder.desk() == unlocked("31"));
+    eventually("the first display session state", || {
+        recorder.display_session() == unlocked("31")
+    });
 
     // 2. Turning `Active` off is published, but locks nothing.
     mock.set_active(SESSION_1, false);
     eventually("Active=false", || {
-        recorder.desk() == unlocked_inactive("31")
+        recorder.display_session() == unlocked_inactive("31")
     });
     quiet();
     assert_eq!(recorder.locks(), 0, "an inactive session is not a lock");
     assert!(
-        !recorder.desk().is_locked(),
-        "Active alone never marks the desk locked"
+        !recorder.display_session().is_locked(),
+        "Active alone never marks the display session locked"
     );
 
     // 3. Turning it back on is published too.
     mock.set_active(SESSION_1, true);
-    eventually("Active=true", || recorder.desk() == unlocked("31"));
+    eventually("Active=true", || {
+        recorder.display_session() == unlocked("31")
+    });
 
     // 4. `LockedHint` and `Active` are tracked independently: locking
     //    while inactive keeps `active` on the published state, and it
     //    still locks everything, same as while active.
     mock.set_active(SESSION_1, false);
     eventually("Active=false again", || {
-        recorder.desk() == unlocked_inactive("31")
+        recorder.display_session() == unlocked_inactive("31")
     });
     mock.set_hint(SESSION_1, true);
     eventually("LockedHint=true while inactive", || {
-        recorder.desk()
-            == Desk::Locked {
-                session: "31".to_string(),
+        recorder.display_session()
+            == DisplaySession::Locked {
+                id: "31".to_string(),
                 active: false,
             }
     });
@@ -598,7 +610,7 @@ fn the_active_state_follows_logind_and_never_locks() {
 /// prompt runs and the fixture unlocks; and a `Lock` signal ends a prompt
 /// still open.
 #[test]
-fn the_desk_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
+fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
     let bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
     // Locked before kpa subscribes, so it reads the hint on subscribing.
@@ -637,10 +649,10 @@ fn the_desk_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
     };
     let refused = Err(UnlockError::NoDisplay);
 
-    // 1. While the desk is known locked, no prompt runs. Until kpa has
+    // 1. While the display session is known locked, no prompt runs. Until kpa has
     //    subscribed it doesn't know, so the marker is cleared before each
     //    try: only the last, refused, one counts.
-    eventually("a locked desk to refuse the unlock", || {
+    eventually("a locked display session to refuse the unlock", || {
         let _ = std::fs::remove_file(&prompted);
         unlock() == refused
     });
@@ -648,9 +660,11 @@ fn the_desk_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
 
     // 2. Once the hint clears, the prompt runs and the fixture unlocks.
     mock.set_hint(SESSION_1, false);
-    eventually("an unlocked desk to allow the prompt", || unlock().is_ok());
+    eventually("an unlocked display session to allow the prompt", || {
+        unlock().is_ok()
+    });
     assert!(prompted.exists());
-    assert_eq!(server.desk(), unlocked("31"));
+    assert_eq!(server.display_session(), unlocked("31"));
 
     // 3. A Lock signal ends a prompt still open.
     mock.lock_signal(SESSION_1);
