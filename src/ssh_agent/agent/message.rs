@@ -1,5 +1,6 @@
-//! What the confirm prompt says (`docs/ssh-agent.md` § 6.7): the key, what
-//! it is for and where the signature goes, as one question.
+//! What the unlock and approval prompts say (`docs/ssh-agent.md` § 6.6,
+//! § 6.7): the key, what it is for and where the signature goes, as one
+//! question.
 
 use std::path::Path;
 
@@ -13,17 +14,18 @@ use crate::ssh_agent::keys::ServedKey;
 
 /// The most bytes (escaped) each piece of a message may take. The message
 /// is one line the prompt caps at 256 bytes, and the destination comes last,
-/// so every variable piece is cut well short of that: the worst message, an
-/// `SSHSIG` on a host `known_hosts` doesn't name, is 204 bytes
-/// (`the_worst_message_fits_the_prompt_cap`), and the destination is always
-/// whole.
+/// so every variable piece is cut well short of that: the worst message,
+/// an unlock prompt for an `SSHSIG` on a host `known_hosts` doesn't name,
+/// is 238 bytes (`the_worst_message_fits_the_prompt_cap`), and the
+/// destination is always whole.
+const MAX_DATABASE_LEN: usize = 24;
 const MAX_KEY_NAME_LEN: usize = 64;
 /// The login user or `SSHSIG` namespace, from the request.
 const MAX_REQUESTED_LEN: usize = 32;
 /// A host name from `known_hosts`.
 const MAX_HOST_NAME_LEN: usize = 56;
 
-/// The confirm prompt's message, a question the user answers yes or no to:
+/// The approval prompt's message, a question the user answers yes or no to:
 /// "Approve use of key "github" to log in to git@github.com?". The key is
 /// shown by its name, quoted. What follows says what it is for and, for a
 /// connection bound to a destination, where: the host name `known_hosts`
@@ -37,6 +39,23 @@ pub(super) fn approval(
     known_hosts_name: Option<&str>,
 ) -> String {
     let lead = format!("Approve use of {}", key(served));
+    question(&lead, purpose, destination, known_hosts_name)
+}
+
+/// The unlock prompt's message: the approval question, led by the database
+/// it unlocks. "Unlock database personal and use key "github" to log in as
+/// git?".
+pub(super) fn unlock(
+    served: &ServedKey,
+    purpose: &Purpose,
+    destination: Option<&KeyData>,
+    known_hosts_name: Option<&str>,
+) -> String {
+    let lead = format!(
+        "Unlock database {} and use {}",
+        escape_one_line(&served.database, MAX_DATABASE_LEN),
+        key(served)
+    );
     question(&lead, purpose, destination, known_hosts_name)
 }
 
@@ -159,6 +178,10 @@ mod tests {
         approval(&served("github"), purpose, dest, name)
     }
 
+    fn unlocked(purpose: &Purpose, dest: Option<&KeyData>, name: Option<&str>) -> String {
+        unlock(&served("github"), purpose, dest, name)
+    }
+
     /// Every purpose and destination, as an approval question.
     #[test]
     fn an_approval_asks_about_the_key_its_purpose_and_destination() {
@@ -194,18 +217,49 @@ mod tests {
         );
     }
 
-    /// Whatever the key, user, namespace and host name are, the
+    /// The unlock question is the approval question, led by the database.
+    #[test]
+    fn an_unlock_asks_the_same_question_led_by_its_database() {
+        let (dest, fingerprint) = (dest(), fingerprint());
+
+        assert_eq!(
+            unlocked(&login("git"), None, None),
+            "Unlock database personal and use key \"github\" to log in as git?"
+        );
+        assert_eq!(
+            unlocked(&login("git"), Some(&dest), Some("github.com")),
+            "Unlock database personal and use key \"github\" to log in to git@github.com?"
+        );
+        assert_eq!(
+            unlocked(&login("git"), Some(&dest), None),
+            format!(
+                "Unlock database personal and use key \"github\" \
+                 to log in as git to host key {fingerprint}?"
+            )
+        );
+        assert_eq!(
+            unlocked(&sshsig("git"), None, None),
+            "Unlock database personal and use key \"github\" to sign for namespace git?"
+        );
+        assert_eq!(
+            unlocked(&Purpose::Other, Some(&dest), None),
+            format!("Unlock database personal and use key \"github\" on host key {fingerprint}?")
+        );
+    }
+
+    /// Whatever the key, user, namespace, database and host name are, the
     /// whole message, destination included, fits the prompt's cap, and the
     /// destination is its end: each piece is cut on its own.
     #[test]
     fn the_worst_message_fits_the_prompt_cap() {
         let (dest, fingerprint) = (dest(), fingerprint());
         let long = "w".repeat(1000);
-        let key = served(&long);
+        let mut key = served(&long);
+        key.database = long.clone();
         let purposes = [login(&long), sshsig(&long), Purpose::Other];
         let mut longest = 0;
 
-        for message in [approval] {
+        for message in [approval, unlock] {
             for purpose in &purposes {
                 for name in [None, Some(long.as_str())] {
                     let text = message(&key, purpose, Some(&dest), name);
@@ -219,7 +273,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(longest, 204);
+        assert_eq!(longest, 238);
     }
 
     /// A key name can't close its quotes and carry on the sentence, nor

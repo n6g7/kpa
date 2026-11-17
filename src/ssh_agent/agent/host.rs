@@ -6,8 +6,10 @@ use std::time::Instant;
 use keepass::Database;
 
 use super::SshSlot;
+use crate::authn::Requester;
 use crate::config::DatabaseConfig;
 use crate::prompt::{CancelSource, CancelToken};
+use crate::proto::{UnlockError, Unlocked};
 use crate::session_watch::DisplaySession;
 
 /// What the agent needs from the daemon that hosts it. The daemon
@@ -29,6 +31,21 @@ pub trait SshHost {
     /// (`docs/ssh-agent.md` § 6.8), inside `with_slot`, so the answer holds
     /// for the hold it is asked in.
     fn display_session(&self) -> DisplaySession;
+
+    /// The current time, for backoff deadlines.
+    fn now(&self) -> Instant;
+
+    /// Unlocks `db` as `kpa unlock` does: the same prompt, in the same
+    /// queue, and the same key derivation and scan. The prompt says
+    /// `message`. A user's own unlock that is already prompting for `db`
+    /// makes this fail as [`UnlockError::InProgress`]. Not called inside
+    /// `with_slot`: it blocks on the user.
+    fn unlock(
+        &self,
+        db: &str,
+        message: &str,
+        requester: &Requester,
+    ) -> Result<Unlocked, UnlockError>;
 }
 
 /// One database's slot as the agent sees it, while the host holds its
@@ -41,6 +58,10 @@ pub struct SlotView<'a> {
     last_activity: &'a mut Instant,
     /// What the database's next lock cancels.
     lock_signal: &'a CancelSource,
+    /// Until when no prompt is raised for this database's signatures
+    /// (`docs/ssh-agent.md` § 6.6). A lock doesn't clear it; the host
+    /// clears it when it installs an unlocked database.
+    backoff: &'a mut Option<Instant>,
 }
 
 impl<'a> SlotView<'a> {
@@ -49,13 +70,30 @@ impl<'a> SlotView<'a> {
         ssh: &'a mut SshSlot,
         last_activity: &'a mut Instant,
         lock_signal: &'a CancelSource,
+        backoff: &'a mut Option<Instant>,
     ) -> SlotView<'a> {
         SlotView {
             db,
             ssh,
             last_activity,
             lock_signal,
+            backoff,
         }
+    }
+
+    /// Whether the database is unlocked.
+    pub(super) fn is_open(&self) -> bool {
+        self.db.is_some()
+    }
+
+    /// Whether prompts are held back at `now`.
+    pub(super) fn backing_off(&self, now: Instant) -> bool {
+        self.backoff.is_some_and(|until| now < until)
+    }
+
+    /// Holds prompts back until `until`.
+    pub(super) fn back_off(&mut self, until: Instant) {
+        *self.backoff = Some(until);
     }
 
     /// Resets the database's idle timer to now.

@@ -133,7 +133,8 @@ mod tests {
     ) -> Result<Vec<u8>, Refused> {
         let mut last_activity = Instant::now();
         let lock_signal = CancelSource::new();
-        let mut slot = SlotView::new(db, ssh, &mut last_activity, &lock_signal);
+        let mut backoff = None;
+        let mut slot = SlotView::new(db, ssh, &mut last_activity, &lock_signal, &mut backoff);
         sign(&mut slot, fingerprint, b"data", SignFlags::new(flags))
     }
 

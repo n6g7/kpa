@@ -1,16 +1,19 @@
 //! [`FakeHost`]: an in-memory [`SshHost`] for this module's tests.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use keepass::Database;
+use zeroize::Zeroizing;
 
 use super::{SlotView, SshHost, SshSlot};
 use crate::authn::Requester;
+use crate::authz;
 use crate::config::DatabaseConfig;
-use crate::prompt::CancelSource;
+use crate::prompt::{CancelSource, Prompt, PromptOutcome, PromptQueue, Scripted};
+use crate::proto::{UnlockError, Unlocked};
 use crate::session_watch::DisplaySession;
 
 /// The display session the fake host starts with.
@@ -34,10 +37,12 @@ struct FakeSlot {
     ssh: SshSlot,
     last_activity: Instant,
     lock_signal: CancelSource,
+    backoff: Option<Instant>,
 }
 
 impl FakeSlot {
-    /// Locks the database, as the daemon's `Slot::lock` does.
+    /// Locks the database, as the daemon's `Slot::lock` does: the backoff
+    /// stays.
     fn lock(&mut self) {
         self.db = None;
         self.ssh = SshSlot::default();
@@ -45,9 +50,15 @@ impl FakeSlot {
     }
 }
 
+/// A step to run at the start of an unlock.
+type Hook = Box<dyn FnOnce() + Send>;
+
 /// Configured databases, each with its slot; at most the first one open.
 /// Prompts may appear for [`requester`] unless [`FakeHost::without_prompts`]
 /// says otherwise.
+/// Its unlock raises a prompt that a test scripts, in the queue the
+/// agent's approval prompt shares, and its clock moves only when a test
+/// says.
 pub(super) struct FakeHost {
     databases: Vec<DatabaseConfig>,
     slots: Mutex<HashMap<String, FakeSlot>>,
@@ -57,6 +68,13 @@ pub(super) struct FakeHost {
     /// The first database's file has changed: the next freshness guard
     /// locks it.
     stale: AtomicBool,
+    clock: Mutex<Instant>,
+    queue: Arc<PromptQueue>,
+    unlock_prompt: Prompt<Zeroizing<String>>,
+    unlocks: Scripted<Zeroizing<String>>,
+    before_unlock: Mutex<Option<Hook>>,
+    /// How many times `with_slot` has run.
+    holds: AtomicUsize,
 }
 
 impl FakeHost {
@@ -70,10 +88,13 @@ impl FakeHost {
                     ssh: SshSlot::default(),
                     last_activity: Instant::now(),
                     lock_signal: CancelSource::new(),
+                    backoff: None,
                 };
                 (cfg.name.clone(), slot)
             })
             .collect();
+        let queue = Arc::new(PromptQueue::new());
+        let unlocks = Scripted::new();
         FakeHost {
             databases,
             slots: Mutex::new(slots),
@@ -83,6 +104,16 @@ impl FakeHost {
             },
             opened: None,
             stale: AtomicBool::new(false),
+            clock: Mutex::new(Instant::now()),
+            unlock_prompt: Prompt::new(
+                Arc::clone(&queue),
+                unlocks.clone(),
+                Duration::from_secs(60),
+            ),
+            queue,
+            unlocks,
+            before_unlock: Mutex::new(None),
+            holds: AtomicUsize::new(0),
         }
     }
 
@@ -96,7 +127,7 @@ impl FakeHost {
     }
 
     /// Opens the first database again as `unlocked` opened it, scanned and
-    /// installed as an unlock would.
+    /// installed as an unlock would, which ends its backoff.
     pub(super) fn reopen(&self) {
         let cfg = &self.databases[0];
         let db = self.opened.clone().expect("opened by `unlocked`");
@@ -104,6 +135,34 @@ impl FakeHost {
         let slot = slots.get_mut(&cfg.name).expect("configured");
         slot.ssh = SshSlot::scan(&db, cfg);
         slot.db = Some(db);
+        slot.backoff = None;
+    }
+
+    /// The queue the host's unlock prompt waits in: the agent's approval
+    /// prompt waits in it too.
+    pub(super) fn queue(&self) -> Arc<PromptQueue> {
+        Arc::clone(&self.queue)
+    }
+
+    /// The script the host's unlock prompt follows.
+    pub(super) fn unlocks(&self) -> Scripted<Zeroizing<String>> {
+        self.unlocks.clone()
+    }
+
+    /// Runs `f` at the start of the next unlock, before it looks at the
+    /// database: a user's own unlock getting there first, say.
+    pub(super) fn before_unlock(&self, f: impl FnOnce() + Send + 'static) {
+        *self.before_unlock.lock().expect("hook") = Some(Box::new(f));
+    }
+
+    /// Moves the clock on.
+    pub(super) fn advance(&self, by: Duration) {
+        *self.clock.lock().expect("clock") += by;
+    }
+
+    /// How many holds on a slot have run so far.
+    pub(super) fn holds(&self) -> usize {
+        self.holds.load(Ordering::SeqCst)
     }
 
     /// The first database's file changes on disk.
@@ -146,6 +205,7 @@ impl SshHost for FakeHost {
     }
 
     fn with_slot<R>(&self, db: &str, f: impl FnOnce(SlotView<'_>) -> R) -> Option<R> {
+        self.holds.fetch_add(1, Ordering::SeqCst);
         let mut slots = self.slots.lock().expect("slots");
         let slot = slots.get_mut(db)?;
         if db == self.databases[0].name && self.stale.swap(false, Ordering::SeqCst) {
@@ -156,10 +216,63 @@ impl SshHost for FakeHost {
             &mut slot.ssh,
             &mut slot.last_activity,
             &slot.lock_signal,
+            &mut slot.backoff,
         )))
     }
 
     fn display_session(&self) -> DisplaySession {
         self.display_session.clone()
+    }
+
+    fn now(&self) -> Instant {
+        *self.clock.lock().expect("clock")
+    }
+
+    /// As the daemon's unlock does, for the first database: its prompt
+    /// answers as the script says, and an answer opens the database.
+    fn unlock(
+        &self,
+        db: &str,
+        message: &str,
+        requester: &Requester,
+    ) -> Result<Unlocked, UnlockError> {
+        let named = || db.to_string();
+        let hook = self.before_unlock.lock().expect("hook").take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        let token = {
+            let slots = self.slots.lock().expect("slots");
+            let slot = slots
+                .get(db)
+                .ok_or(UnlockError::UnknownDb { db: named() })?;
+            if slot.db.is_some() {
+                return Ok(Unlocked::AlreadyOpen);
+            }
+            if !authz::may_prompt_on_screen(requester, &self.display_session) {
+                return Err(UnlockError::NoDisplay);
+            }
+            slot.lock_signal.token()
+        };
+        match self.unlock_prompt.ask(message, &token) {
+            Ok(PromptOutcome::Answer(_)) => {}
+            Ok(PromptOutcome::Cancelled | PromptOutcome::TimedOut) => {
+                return Err(UnlockError::PromptCancelled { db: named() });
+            }
+            Ok(PromptOutcome::Interrupted) => {
+                return Err(UnlockError::LockedDuringUnlock { db: named() });
+            }
+            Err(err) => {
+                return Err(UnlockError::PromptFailed {
+                    db: named(),
+                    detail: err.to_string(),
+                });
+            }
+        }
+        if token.is_cancelled() {
+            return Err(UnlockError::LockedDuringUnlock { db: named() });
+        }
+        self.reopen();
+        Ok(Unlocked::Opened)
     }
 }

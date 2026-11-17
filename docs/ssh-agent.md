@@ -381,15 +381,28 @@ A signature for a served key whose database is locked runs the normal
 
 **When kpa prompts**
 
-- Prompts must be allowed (§ 6.8).
+- Prompts must be allowed (§ 6.8). Otherwise the signature is refused, with
+  no prompt.
 - The database must not be in backoff.
-- There is at most one prompt per database. Concurrent signers wait on the
-  in-flight unlock instead of getting `unlock_in_progress`.
+- There is at most one prompt per database. A signature that needs a
+  prompt takes the database's prompt lock first, and concurrent signers wait on it
+  instead of getting `unlock_in_progress`. Each looks again once the lock is
+  its own, so it sees what the prompt before it got: an unlocked database,
+  an approval, or a backoff. N identical requests for a key that needs an
+  approval therefore show one approval prompt.
 
-**What the prompt says.** It names its reason, for example "Unlock
-personal: key github for git@github.com". Answering it approves that key
-(§ 6.7), and for a forwarded request, that forwarding session and
-destination. `prompt` runs exactly as configured; kpa sets
+The unlock is the one `kpa unlock` runs: the same `prompt`, in the same
+queue. A `kpa unlock` typed while a signature's unlock prompt is up gets
+`unlock_in_progress`, as it does for any unlock already prompting.
+
+**What the prompt says.** It asks the approval prompt's question (§ 6.7),
+led by the database it unlocks: "Unlock database personal and use key
+"github" to log in as git?" for a connection with no binding, and "Unlock
+database personal and use key "github" to log in to git@github.com?" for
+one bound to a destination. A key without a `name` override is named
+`<database> <fingerprint>` there, since the vault is locked and its entry
+titles are unknown. Answering it approves that key (§ 6.7), and for a
+forwarded request, that forwarding session and destination. `prompt` runs exactly as configured; kpa sets
 `KPA_PROMPT_MESSAGE` in its environment instead, so a prompt program that
 reads it — directly, or through a wrapper script — can show the reason:
 
@@ -406,10 +419,14 @@ approval prompt after `ssh_agent.confirm_prompt_timeout` if that is set,
 and a lock kills an open prompt ([`headless.md`](./headless.md) § 6). On top of
 that, cancelling or timing out an unlock or approval prompt raised by a
 signature puts that database in backoff for `ssh_agent.backoff` (default
-2 minutes). Signatures from it then fail at once without prompting, which
-stops prompt storms from loops, submodules and background fetches. A
-`kpa unlock` or `kpa ssh approve` typed by the user is never held back by
-it.
+2 minutes). A deny, a prompt that fails to run and a lock that ends the
+prompt don't. Backoff only suppresses prompts: during it, a signature that
+needs one fails at once, without prompting, which stops prompt storms from
+loops, submodules and background fetches, and a signature that needs none
+(the database is unlocked and the key already approved, or `confirm =
+"never"`) still signs. Only time, or an unlock of the database, the user's
+`kpa unlock` included, ends a backoff early; a lock does not. A `kpa
+unlock` or `kpa ssh approve` typed by the user is never held back by it.
 
 ### 6.7 Approval
 
@@ -465,12 +482,12 @@ is one question, "Approve use of key (name) to (purpose)?":
 The destination is the connection's last binding's host key, named by the
 host name `~/.ssh/known_hosts` has an unhashed entry for, else by its
 fingerprint. Every piece that comes from outside kpa's own text (the key
-name, the remote user, the namespace, the host name) passes through the
-escaping the CLI uses for terminal output (T-13), with tab and newline
-escaped too so the message stays one line, and gets its own length budget,
-so no piece can push the destination past the prompt's cap. The key name's
-quotes are escaped, so a name can't end its quotation and carry on the
-sentence.
+name, the database name, the remote user, the namespace, the host name)
+passes through the escaping the CLI uses for terminal output (T-13), with
+tab and newline escaped too so the message stays one line, and gets its
+own length budget, so no piece can push the destination past the prompt's
+cap. The key name's quotes are escaped, so a name can't end its quotation
+and carry on the sentence.
 
 Approvals live in memory only and are dropped on lock. A forwarded
 approval is remembered under (key, forwarding session identifier,
@@ -571,7 +588,7 @@ password-guessing oracle.
 | `socket` | `[ssh_agent]` | `$XDG_RUNTIME_DIR/kpa/ssh-agent` | The agent socket |
 | `confirm_prompt` | `[ssh_agent]` | none; required once a database opts in | The approval program, dmenu style (§ 6.7) |
 | `confirm_prompt_timeout` | `[ssh_agent]` | `prompt_timeout` | How long the approval prompt may stay open unanswered before it is killed and the signature refused |
-| `backoff` | `[ssh_agent]` | `"2m"` | How long a cancelled prompt holds back signatures from its database (§ 6.6) |
+| `backoff` | `[ssh_agent]` | `"2m"` | How long a cancelled prompt holds back prompts for its database (§ 6.6) |
 | `fingerprint` | `[[database.ssh_key]]` | required | Which key the override is for, as `ssh-add -l` and `kpa ssh keys` print it |
 | `name` | `[[database.ssh_key]]` | the entry's title | Identity comment, shown in prompts and logs |
 | `confirm` | `[[database.ssh_key]]` | `"once"` | Local approval: `"once"`, `"always"` or `"never"` (§ 6.7) |
@@ -724,7 +741,7 @@ programs' settings.
 
 | Action                                                     | What happens                                                                                                                                         |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git push` at the desk, vault locked                       | The prompt asks "Unlock personal: key github for git@github.com", then the push goes through. The key is approved for that destination until lock    |
+| `git push` at the desk, vault locked                       | The prompt asks "Unlock database personal and use key "github" to log in to git@github.com?", then the push goes through. The key is approved for that destination until lock    |
 | `git push` at the desk, vault unlocked, key not yet used   | An approval prompt names the key and destination. Later uses of that destination don't ask until lock                                                |
 | `ssh -A` to a headless host, then `git pull` there         | The login is local use. The pull is forwarded, and the desktop asks once, naming the host, the destination, the key and the remote user. The approval covers the rest of that SSH session |
 | IDE remote session to a headless host, then a fetch        | The same: one approval per destination per connection                                                                                                |
@@ -872,7 +889,7 @@ programs' settings.
 | `keys.rs`     | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                   |
 | `approve.rs`  | Approvals and pending requests: their scopes, limits and expiry                                                                                 |
 | `serve.rs`    | Listener, per-connection thread, connection cap, and the `SshSign` trait it answers each request through                                         |
-| `agent/`      | The agent's own logic, crate-private: per-database key state and the scan at unlock (`state.rs`), identities (`identities.rs`), the sign flow (`sign.rs`), what the approval prompt says (`message.rs`) and signing (`signer.rs`). `Agent` implements `SshSign` over `SshHost`, the database access the daemon implements |
+| `agent/`      | The agent's own logic, crate-private: per-database key state and the scan at unlock (`state.rs`), identities (`identities.rs`), the sign flow (`sign.rs`), what its prompts say (`message.rs`) and signing (`signer.rs`). `Agent` implements `SshSign` over `SshHost`, the database access the daemon implements |
 
 **Server changes**
 
@@ -888,7 +905,12 @@ programs' settings.
   ever on screen, unlock's included. `server::serve_ssh_agent` runs the
   agent with that queue, and is all the binary needs. `ssh_agent` never
   imports `server`.
-- Unlock waiters use a condvar.
+- `Slot` gains the agent's backoff deadline, kept outside `SshSlot` so a
+  lock leaves it be, and cleared by `Slot::install`. `SshHost` gains
+  `unlock` and `now`. `Server::unlock_db` is the unlock behind both
+  `kpa unlock` and `SshHost::unlock`; only the prompt's message differs.
+  Unlock waiters wait on the agent's per-database prompt lock, so the daemon needs
+  no condvar for them.
 - The prompt and approval runner gains `KPA_PROMPT_MESSAGE` and the shared
   queue. The timeout and lock-kills-prompt come from
   [`headless.md`](./headless.md).

@@ -29,7 +29,9 @@ pub use ssh_keys::{
     SshKeys, SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey,
 };
 pub use status::{DatabaseStatus, Status};
-pub use unlock::{MAX_PASSWORD_LEN, Password, PasswordError, Unlock, UnlockError, UnlockRequest};
+pub use unlock::{
+    MAX_PASSWORD_LEN, Password, PasswordError, Unlock, UnlockError, UnlockRequest, Unlocked,
+};
 
 use serde::Serialize;
 

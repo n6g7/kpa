@@ -224,25 +224,108 @@ fn signing_and_verifying_works_after_unlock_and_approval() {
     }
 }
 
+/// A config whose unlock prompt answers with the password until `flag`
+/// exists and appends a line to `unlocks` and fails from then on, and whose
+/// approval prompt appends a line to `approvals` and allows.
+fn config_with_cancelling_unlock(
+    db_path: &Path,
+    flag: &Path,
+    unlocks: &Path,
+    approvals: &Path,
+) -> String {
+    format!(
+        "prompt = [\"/bin/sh\", \"-c\", \"if [ -e '{flag}' ]; then echo x >> '{unlocks}'; exit 1; fi; printf {password}\"]\n\n\
+         [ssh_agent]\n\
+         confirm_prompt = [\"/bin/sh\", \"-c\", \"echo x >> '{approvals}'; head -n1\"]\n\n\
+         [[database]]\n\
+         name = \"personal\"\n\
+         path = \"{path}\"\n\
+         serve_ssh_keys = true\n",
+        flag = flag.display(),
+        unlocks = unlocks.display(),
+        approvals = approvals.display(),
+        password = common::PASSWORD,
+        path = db_path.display(),
+    )
+}
+
+/// A signature for a locked database unlocks it, and answering that prompt
+/// is the key's approval: no approval prompt follows (`docs/ssh-agent.md`
+/// § 6.6).
 #[test]
-fn locking_makes_signing_fail_again() {
-    let daemon = InProcessDaemon::start(&config(&common::ssh_db()));
+fn a_signature_for_a_locked_database_unlocks_it_and_needs_no_second_prompt() {
+    let counters = tempfile::tempdir().expect("tempdir");
+    let (unlocks, approvals) = (
+        counters.path().join("unlocks"),
+        counters.path().join("approvals"),
+    );
+    let daemon = InProcessDaemon::start(&config_with_cancelling_unlock(
+        &common::ssh_db(),
+        &counters.path().join("never-created"),
+        &unlocks,
+        &approvals,
+    ));
     let agent = start_ssh_agent(&daemon);
     let dir = tempfile::tempdir().expect("tempdir");
 
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let listed = stdout(&ssh_add(&agent, ["-L"]));
-    let pubkey_line = public_key_line(&listed, "Ed25519");
-    let pubkey_path = write_pubkey(dir.path(), "key.pub", &pubkey_line);
+    let pubkey_path = write_pubkey(dir.path(), "key.pub", &public_key_line(&listed, "Ed25519"));
     let data_path = dir.path().join("data");
-    std::fs::write(&data_path, b"hello again").expect("write data");
-
+    std::fs::write(&data_path, b"hello").expect("write data");
     assert_eq!(daemon.run(&["lock", "personal"])["ok"], true);
 
+    let signed = sign(&agent, &pubkey_path, &data_path);
     assert!(
-        !sign(&agent, &pubkey_path, &data_path).status.success(),
-        "signing with a locked database must fail"
+        signed.status.success(),
+        "a signature for a locked database should unlock it: {}",
+        String::from_utf8_lossy(&signed.stderr)
     );
+    assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], false);
+    assert_eq!(count_lines(&approvals), 0, "the unlock was the approval");
+}
+
+/// A cancelled unlock prompt fails the signature, and the next one fails at
+/// once, without a prompt, until the backoff has passed or the database is
+/// unlocked. Locking doesn't end it.
+#[test]
+fn a_cancelled_unlock_prompt_holds_back_the_next_one() {
+    let counters = tempfile::tempdir().expect("tempdir");
+    let (flag, unlocks, approvals) = (
+        counters.path().join("cancel-from-now-on"),
+        counters.path().join("unlocks"),
+        counters.path().join("approvals"),
+    );
+    let daemon = InProcessDaemon::start(&config_with_cancelling_unlock(
+        &common::ssh_db(),
+        &flag,
+        &unlocks,
+        &approvals,
+    ));
+    let agent = start_ssh_agent(&daemon);
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let listed = stdout(&ssh_add(&agent, ["-L"]));
+    let pubkey_path = write_pubkey(dir.path(), "key.pub", &public_key_line(&listed, "Ed25519"));
+    let data_path = dir.path().join("data");
+    std::fs::write(&data_path, b"hello").expect("write data");
+    assert_eq!(daemon.run(&["lock", "personal"])["ok"], true);
+    std::fs::write(&flag, b"").expect("create flag");
+
+    assert!(!sign(&agent, &pubkey_path, &data_path).status.success());
+    assert_eq!(
+        count_lines(&unlocks),
+        1,
+        "the prompt was shown and cancelled"
+    );
+    assert!(!sign(&agent, &pubkey_path, &data_path).status.success());
+    assert_eq!(
+        count_lines(&unlocks),
+        1,
+        "no second prompt during the backoff"
+    );
+    assert_eq!(count_lines(&approvals), 0);
 }
 
 /// A config whose confirm prompt appends a line to `counter` on every

@@ -7,12 +7,12 @@
 //!   each slot and locks with it.
 //! - `identities`: which keys a connection sees, and which key a request
 //!   names.
-//! - `sign`: the sign flow, with `message` for what the confirm prompt
-//!   says and `signer` for the signature itself.
+//! - `sign`: the sign flow, with `message` for what its unlock and approval
+//!   prompts say and `signer` for the signature itself.
 //! - [`Agent`]: all of it behind [`SshSign`], the interface
 //!   [`serve`](super::serve) speaks.
 //!
-//! It reaches the daemon only through [`SshHost`] and the confirm prompt
+//! It reaches the daemon only through [`SshHost`] and the approval prompt
 //! the daemon hands it; nothing here names `server`.
 
 #[cfg(test)]
@@ -24,8 +24,10 @@ mod sign;
 mod signer;
 mod state;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub use host::{SlotView, SshHost};
 pub use state::SshSlot;
@@ -41,24 +43,41 @@ use crate::prompt::{ConfirmAnswer, Prompt};
 /// The SSH agent for one host: what [`serve`](super::serve::serve) runs.
 pub struct Agent<H> {
     host: Arc<H>,
-    /// The confirm prompt. It waits its turn in the daemon's prompt
-    /// queue, so only one prompt is on screen at a time, unlock's
-    /// included.
+    /// The approval prompt. It waits its turn in the daemon's prompt
+    /// queue, so only one prompt is on screen at a time, the unlock
+    /// prompt (`SshHost::unlock`) included.
     approval: Prompt<ConfirmAnswer>,
     /// Where the public-key cache lives, `None` without a cache directory.
     cache_dir: Option<PathBuf>,
-    /// OpenSSH's known-hosts file, for naming a confirm prompt's
-    /// destination.
+    /// OpenSSH's known-hosts file, for naming a prompt's destination.
     known_hosts: Option<PathBuf>,
+    /// How long a cancelled or timed-out prompt holds this database's
+    /// prompts back (`docs/ssh-agent.md` § 6.6).
+    backoff: Duration,
+    /// One per database, held by the one signature that is raising a
+    /// prompt for it (`sign`). The others wait on it, then look again.
+    prompt_locks: HashMap<String, Mutex<()>>,
 }
 
 impl<H: SshHost> Agent<H> {
-    pub fn new(host: Arc<H>, approval: Prompt<ConfirmAnswer>, paths: &Paths) -> Agent<H> {
+    pub fn new(
+        host: Arc<H>,
+        approval: Prompt<ConfirmAnswer>,
+        backoff: Duration,
+        paths: &Paths,
+    ) -> Agent<H> {
+        let prompt_locks = host
+            .databases()
+            .iter()
+            .map(|cfg| (cfg.name.clone(), Mutex::new(())))
+            .collect();
         Agent {
             host,
             approval,
             cache_dir: keys::cache_dir(paths),
             known_hosts: paths.known_hosts.clone(),
+            backoff,
+            prompt_locks,
         }
     }
 }
@@ -106,7 +125,7 @@ mod tests {
             Scripted::new(),
             Duration::from_secs(60),
         );
-        let agent = Agent::new(host, approval, &paths);
+        let agent = Agent::new(host, approval, Duration::from_secs(120), &paths);
 
         assert_eq!(
             agent

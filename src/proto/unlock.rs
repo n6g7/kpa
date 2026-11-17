@@ -147,6 +147,18 @@ impl<'de> Visitor<'de> for PasswordVisitor {
     }
 }
 
+/// How an unlock that didn't fail ended, for the daemon's callers: the
+/// `unlock` request itself answers with the database's name either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unlocked {
+    /// The call's own prompt, or password, was answered and the database
+    /// opened.
+    Opened,
+    /// The database was already open: someone else unlocked it first, and
+    /// this call prompted for nothing.
+    AlreadyOpen,
+}
+
 /// Everything `unlock` can fail with. Every variant but `NoDisplay` names
 /// the database the unlock was for, even when the cause isn't about the
 /// database itself (a dismissed prompt). `NoDisplay` is about where the

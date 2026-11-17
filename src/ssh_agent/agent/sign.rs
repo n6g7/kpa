@@ -1,21 +1,34 @@
-//! The sign flow (`docs/ssh-agent.md` § 6.3, § 6.7, § 6.9): a
+//! The sign flow (`docs/ssh-agent.md` § 6.3, § 6.6, § 6.7, § 6.9): a
 //! `SIGN_REQUEST` becomes a signature, or `Failure` for every refusal.
 //!
 //! [`Agent::authorized_sign`] puts the authorization around
-//! [`signer::sign`], which signs and nothing else, in three steps:
+//! [`signer::sign`], which signs and nothing else, in five steps:
 //!
-//! 1. Under the host's lock, look at the database: which approval does the
-//!    request still lack ([`missing_approval`]), and is it refused as
-//!    things stand ([`refusal_before_prompting`])?
-//! 2. Outside the lock, ask for the approval it lacks, if any. The prompt
-//!    ends when a lock cancels the token step 1 took.
-//! 3. Under the lock again: the signature, unless the token says a lock
-//!    came in since step 1, and the approval the user's `Allow` keeps.
+//! 1. Policy: [`authorize_sign`] says whether the request is allowed at
+//!    all, and which approval it needs.
+//! 2. Look at the database, under the host's lock: is it open, which
+//!    approval does the request still lack ([`missing_approval`]), and a
+//!    token its next lock cancels. A request that has to ask for something
+//!    and may not is refused now ([`refusal_before_prompting`]): the
+//!    database is locked, or the approval is lacking, where no prompt may
+//!    appear, or prompts are held back after a cancel.
+//! 3. Wait for our turn and look again. Only one signature at a time
+//!    prompts for a database, and the one before may have unlocked it or
+//!    approved the key.
+//! 4. SignatureApproval, outside the lock. First the unlock of a locked database:
+//!    answering it is the approval too. Then the approval, if it is still
+//!    lacking. A prompt the user cancels, or leaves unanswered, holds the
+//!    database's prompts back for a while (backoff).
+//! 5. Sign and record, under the lock again: the signature, unless the
+//!    token says a lock came in since step 2, and the approval the user's
+//!    answer gave.
 //!
 //! Both holds run behind the freshness guard (`SshHost::with_slot`), so a
 //! database whose file changed is locked, and its token cancelled, before
-//! either sees it. Forwarded connections are refused outright, and a locked
-//! database is refused rather than unlocked on demand.
+//! either sees it. Forwarded connections are refused outright.
+
+use std::sync::MutexGuard;
+use std::time::Instant;
 
 use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg, PublicKey};
@@ -26,6 +39,7 @@ use crate::authz::may_prompt_on_screen;
 use crate::log;
 use crate::output;
 use crate::prompt::{CancelToken, Declined};
+use crate::proto::{UnlockError, Unlocked};
 use crate::ssh_agent::authz::{Refusal, SignatureApproval, authorize_sign};
 use crate::ssh_agent::bind::ConnectionClass;
 use crate::ssh_agent::classify::{self, Purpose};
@@ -51,14 +65,34 @@ pub(super) enum Refused {
     /// to ask for one.
     #[error("refused: needs approval")]
     NeedsApproval,
+    /// A prompt the user cancelled or left unanswered holds this
+    /// database's prompts back for a while, and this signature needs one.
+    #[error("refused: prompts held back after a cancel")]
+    BackingOff,
     #[error("refused: SHA-1 RSA signature")]
     Sha1Rsa,
     #[error("approval {0}")]
     Declined(Declined),
-    #[error("confirm prompt failed: {0}")]
+    /// The unlock the signature needed didn't open the database.
+    #[error("unlock failed: {0:?}")]
+    Unlock(UnlockError),
+    #[error("approval prompt failed: {0}")]
     PromptFailed(std::io::Error),
     #[error("loading or signing failed")]
     SigningFailed,
+}
+
+impl Refused {
+    /// Whether this is the user declining to answer a prompt, as opposed to
+    /// answering no, or a lock ending it: what puts the database's prompts
+    /// in backoff (`docs/ssh-agent.md` § 6.6).
+    fn starts_backoff(&self) -> bool {
+        matches!(
+            self,
+            Refused::Declined(Declined::Cancelled | Declined::TimedOut)
+                | Refused::Unlock(UnlockError::PromptCancelled { .. })
+        )
+    }
 }
 
 /// One `SIGN_REQUEST`, as the flow and its log line see it.
@@ -121,13 +155,43 @@ fn missing_approval<'n>(
     needed.filter(|approval| !slot.ssh.approvals.covers(&approval.scope))
 }
 
-/// Why a request is refused before anyone is asked, if it is: it lacks an
-/// approval, and no prompt may appear (`may_prompt_on_screen`) to ask for it.
+/// Why a request is refused before anyone is asked, if it is. A request
+/// that has to ask for something, the unlock of a locked database or the
+/// approval it is `missing`, is refused where no prompt may appear
+/// (`may_prompt_on_screen`), and while the database's prompts are held back after a
+/// cancel (`now` is before the end of the backoff). One that has to ask for
+/// nothing is never refused here.
 fn refusal_before_prompting(
+    slot: &SlotView<'_>,
     missing: Option<&SignatureApproval>,
     may_prompt_on_screen: bool,
+    now: Instant,
 ) -> Option<Refused> {
-    (missing.is_some() && !may_prompt_on_screen).then_some(Refused::NeedsApproval)
+    let open = slot.is_open();
+    if open && missing.is_none() {
+        return None;
+    }
+    if !may_prompt_on_screen {
+        return Some(if open {
+            Refused::NeedsApproval
+        } else {
+            Refused::Locked
+        });
+    }
+    slot.backing_off(now).then_some(Refused::BackingOff)
+}
+
+/// What the flow found out about the database, under the host's lock.
+///
+/// A struct because the three go together: they are looked at again after
+/// the prompt lock, all at once, and steps 4 and 5 read all of them.
+struct Facts {
+    /// The database is unlocked.
+    open: bool,
+    /// The approval the request still lacks (`missing_approval`).
+    missing: Option<SignatureApproval>,
+    /// What the database's next lock cancels.
+    cancel_token: CancelToken,
 }
 
 impl<H: SshHost> Agent<H> {
@@ -144,57 +208,110 @@ impl<H: SshHost> Agent<H> {
             return AgentResponse::Failure;
         };
         let cache_dir = self.cache_dir.as_deref();
-        let Some(db) = identities::find_key(self.host.as_ref(), cache_dir, request.fingerprint)
+        let Some(found) = identities::find_key(self.host.as_ref(), cache_dir, request.fingerprint)
         else {
             return AgentResponse::Failure;
         };
-        let outcome = self.authorized_sign(&db, &request, requester);
-        log_sign(&db, self.configured_name(&db, &request), &request, &outcome);
+        let db = found.database.as_str();
+        let outcome = self.authorized_sign(&found, &request, requester);
+        log_sign(db, self.configured_name(db, &request), &request, &outcome);
         match outcome {
             Ok(signature) => AgentResponse::SignResponse(signature),
             Err(_) => AgentResponse::Failure,
         }
     }
 
-    /// Signs `request` with the key `db` serves, if the policy lets it and,
-    /// when it needs an approval nothing covers yet, once the user has
-    /// allowed it.
+    /// Signs `request` with the key `found` names, if the policy lets it
+    /// and, when it has to ask for something first, once the user has
+    /// answered. `found` is the key as `identities::find_key` lists it: from
+    /// its slot if its database is open, from the cache if not.
     fn authorized_sign(
         &self,
-        db: &str,
+        found: &ServedKey,
         request: &Request<'_>,
         requester: &Requester,
     ) -> Result<Vec<u8>, Refused> {
         if !signer::supported(request.key.key_data(), request.sign.flags) {
             return Err(Refused::Sha1Rsa);
         }
-        // 1. Under the lock: look at the database. A request that is refused
-        // as things stand ends here.
-        let (key, missing, cancel_token) = self.hold(db, |slot| {
-            let key = slot.served(request.fingerprint)?.clone();
-            let approval = authorize_sign(
-                &key,
-                request.class,
-                &request.purpose,
-                request.login_session_id,
-            )
-            .map_err(Refused::Policy)?;
-            let missing = missing_approval(&slot, approval.as_ref());
-            let may_prompt_on_screen =
-                may_prompt_on_screen(requester, &self.host.display_session());
-            if let Some(refused) = refusal_before_prompting(missing, may_prompt_on_screen) {
-                return Err(refused);
+        let db = found.database.as_str();
+
+        // 1. Policy.
+        let approval = authorize_sign(
+            found,
+            request.class,
+            &request.purpose,
+            request.login_session_id,
+        )
+        .map_err(Refused::Policy)?;
+
+        // 2. Look at the database. A request that has to ask for something
+        // and may not is refused here.
+        let look_at_database = || {
+            self.hold(db, |slot| {
+                let now = self.host.now();
+                let missing = missing_approval(&slot, approval.as_ref());
+                let may_prompt_on_screen =
+                    may_prompt_on_screen(requester, &self.host.display_session());
+                if let Some(refused) =
+                    refusal_before_prompting(&slot, missing, may_prompt_on_screen, now)
+                {
+                    return Err(refused);
+                }
+                Ok(Facts {
+                    open: slot.is_open(),
+                    missing: missing.cloned(),
+                    cancel_token: slot.cancel_token(),
+                })
+            })
+        };
+        let mut facts = look_at_database()?;
+
+        // 3. Wait for our turn, and look again. We keep the prompt lock
+        // until we have signed, so the next signature sees what our prompts
+        // got.
+        let has_to_ask = !facts.open || facts.missing.is_some();
+        let _prompt_lock = if has_to_ask {
+            let prompt_lock = self.prompt_lock(db)?;
+            facts = look_at_database()?;
+            Some(prompt_lock)
+        } else {
+            None
+        };
+
+        // 4. SignatureApproval, outside the lock.
+        let mut approval_missing = facts.missing.is_some();
+        if !facts.open {
+            match self.unlock_prompt(found, request, requester) {
+                // Answering the unlock prompt is the approval.
+                Ok(Unlocked::Opened) => approval_missing = false,
+                // Someone else's unlock got there first, so nobody was
+                // asked: the approval prompt still follows.
+                Ok(Unlocked::AlreadyOpen) => {}
+                Err(refused) => {
+                    if refused.starts_backoff() {
+                        self.back_off(db);
+                    }
+                    return Err(refused);
+                }
             }
-            Ok((key, missing.cloned(), slot.cancel_token()))
-        })?;
-        // 2. Outside the lock: ask for the approval the request lacks.
-        if missing.is_some() {
-            self.ask(&key, request, &cancel_token)?;
         }
-        // 3. Under the lock again: sign, unless the database locked since
-        // step 1.
+        if approval_missing {
+            match self.approval_prompt(found, request, &facts.cancel_token) {
+                Ok(()) => {}
+                Err(refused) => {
+                    if refused.starts_backoff() {
+                        self.back_off(db);
+                    }
+                    return Err(refused);
+                }
+            }
+        }
+
+        // 5. Sign and record, under the lock again, unless the database
+        // locked since step 2.
         self.hold(db, |mut slot| {
-            if cancel_token.is_cancelled() {
+            if facts.cancel_token.is_cancelled() {
                 return Err(Refused::Locked);
             }
             let signature = signer::sign(
@@ -203,7 +320,7 @@ impl<H: SshHost> Agent<H> {
                 &request.sign.data,
                 request.sign.flags,
             )?;
-            if let Some(approval) = missing
+            if let Some(approval) = facts.missing
                 && approval.remember
             {
                 slot.ssh.approvals.grant(approval.scope);
@@ -238,31 +355,75 @@ impl<H: SshHost> Agent<H> {
             .unwrap_or(Err(Refused::NotServed))
     }
 
-    /// Shows the confirm prompt for signing `request` with `key`, and
-    /// whether the user allowed it. It ends when `cancel_token` is
-    /// cancelled.
-    fn ask(
+    /// Shows the approval prompt for signing `request` with `key`, and
+    /// whether the user allowed it. It ends on `cancel_token`.
+    ///
+    /// `key` is the key as the cache or the open database listed it when
+    /// the request came in, so a prompt raised after someone else unlocked
+    /// the database names it as the cache does, not by its entry's title.
+    fn approval_prompt(
         &self,
         key: &ServedKey,
         request: &Request<'_>,
         cancel_token: &CancelToken,
     ) -> Result<(), Refused> {
-        let destination = request.destination();
-        let known_hosts_name = destination.and_then(|dest| {
-            let path = self.known_hosts.as_deref()?;
-            message::known_hosts_name(path, dest)
-        });
         let message = message::approval(
             key,
             &request.purpose,
-            destination,
-            known_hosts_name.as_deref(),
+            request.destination(),
+            self.known_hosts_name(request).as_deref(),
         );
         self.approval
             .ask(&message, cancel_token)
             .map_err(Refused::PromptFailed)?
             .allowed()
             .map_err(Refused::Declined)
+    }
+
+    /// Unlocks `key`'s database as `kpa unlock` does, with a prompt that
+    /// says why the signature needs it.
+    fn unlock_prompt(
+        &self,
+        key: &ServedKey,
+        request: &Request<'_>,
+        requester: &Requester,
+    ) -> Result<Unlocked, Refused> {
+        let message = message::unlock(
+            key,
+            &request.purpose,
+            request.destination(),
+            self.known_hosts_name(request).as_deref(),
+        );
+        self.host
+            .unlock(&key.database, &message, requester)
+            .map_err(Refused::Unlock)
+    }
+
+    /// The host name `known_hosts` gives the connection's destination, if
+    /// it is bound to one that has one.
+    fn known_hosts_name(&self, request: &Request<'_>) -> Option<String> {
+        let path = self.known_hosts.as_deref()?;
+        message::known_hosts_name(path, request.destination()?)
+    }
+
+    /// `db`'s prompt lock, once whoever holds it is done. Held by the one
+    /// signature raising a prompt for `db`, until it has signed.
+    fn prompt_lock(&self, db: &str) -> Result<MutexGuard<'_, ()>, Refused> {
+        let lock = self.prompt_locks.get(db).ok_or(Refused::NotServed)?;
+        Ok(lock.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Holds `db`'s prompts back for `backoff` from now, as a prompt the
+    /// user cancelled or left unanswered does. A lock doesn't end it; an
+    /// unlock does.
+    fn back_off(&self, db: &str) {
+        let Some(until) = self.host.now().checked_add(self.backoff) else {
+            return;
+        };
+        let _ = self.hold(db, |mut slot| {
+            slot.back_off(until);
+            Ok(())
+        });
     }
 }
 
@@ -324,10 +485,12 @@ fn sign_line(
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, mpsc};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
+    use keepass::Database;
     use ssh_key::encoding::Decode;
-    use ssh_key::{PrivateKey, Signature};
+    use ssh_key::{HashAlg, PrivateKey, PublicKey, Signature};
+    use zeroize::Zeroizing;
 
     use super::super::SshSlot;
     use super::super::fake::{FakeHost, requester};
@@ -335,8 +498,9 @@ mod tests {
     use crate::config::{SshKeyConfig, SshKeyConfirm};
     use crate::paths::Paths;
     use crate::prompt::{
-        CancelSource, ConfirmAnswer, Prompt, PromptOutcome, PromptQueue, Scripted, Step,
+        CancelSource, ConfirmAnswer, Declined, Prompt, PromptOutcome, Scripted, Step,
     };
+    use crate::proto::UnlockError;
     use crate::ssh_agent::approve::Scope;
     use crate::ssh_agent::keys;
     use crate::ssh_agent::serve::SshSign;
@@ -359,20 +523,39 @@ mod tests {
         )
     }
 
-    /// An agent on `host`, its prompts answered by the returned script.
+    /// How long a cancelled prompt holds its database's prompts back.
+    const BACKOFF: Duration = Duration::from_secs(120);
+
+    /// An agent on `host`, its approval prompts answered by the returned
+    /// script, and its unlock prompts by `host.unlocks()`.
     fn agent(
         host: FakeHost,
         paths: &Paths,
     ) -> (Arc<FakeHost>, Arc<Agent<FakeHost>>, Scripted<ConfirmAnswer>) {
         let prompts = Scripted::new();
-        let approval = Prompt::new(
-            Arc::new(PromptQueue::new()),
-            prompts.clone(),
-            Duration::from_secs(60),
-        );
+        let approval = Prompt::new(host.queue(), prompts.clone(), Duration::from_secs(60));
         let host = Arc::new(host);
-        let agent = Arc::new(Agent::new(Arc::clone(&host), approval, paths));
+        let agent = Arc::new(Agent::new(Arc::clone(&host), approval, BACKOFF, paths));
         (host, agent, prompts)
+    }
+
+    /// `host`, locked as an earlier unlock leaves it: its key cache lists
+    /// `key`, in the directory `paths` names.
+    fn locked(host: FakeHost, key: &PrivateKey) -> (FakeHost, tempfile::TempDir, Paths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths {
+            cache_dir: Some(dir.path().to_path_buf()),
+            ..Paths::default()
+        };
+        let cache = keys::cache_dir(&paths).expect("cache dir");
+        keys::write_cache(&cache, "personal", &[key.public_key().clone()]).expect("write cache");
+        host.lock("personal");
+        (host, dir, paths)
+    }
+
+    /// A prompt that types the master password.
+    fn typed() -> Step<Zeroizing<String>> {
+        Step::new(PromptOutcome::Answer(Zeroizing::new("hunter2".to_string())))
     }
 
     fn request_with(key: &PrivateKey, flags: u32) -> SignRequest {
@@ -395,11 +578,16 @@ mod tests {
         sign_as(agent, key, &ConnectionClass::LocalUnbound)
     }
 
+    /// `key` as `personal` serves it, as `find_key` lists it.
+    fn found(agent: &Agent<FakeHost>, key: &PrivateKey) -> ServedKey {
+        keys::resolve_cached(&agent.host.databases()[0], vec![key.public_key().clone()]).remove(0)
+    }
+
     /// What `sign` would log for an unbound request for `key`.
     fn outcome(agent: &Agent<FakeHost>, key: &PrivateKey) -> Result<Vec<u8>, Refused> {
         let sign = request_with(key, 0);
         let request = Request::parse(&ConnectionClass::LocalUnbound, &sign, None).expect("parses");
-        agent.authorized_sign("personal", &request, &requester())
+        agent.authorized_sign(&found(agent, key), &request, &requester())
     }
 
     fn signed(response: &AgentResponse) -> bool {
@@ -478,8 +666,9 @@ mod tests {
         assert_eq!(prompts.shown().len(), 2);
     }
 
-    /// Every answer other than `Allow` refuses, and grants nothing: the
-    /// next request asks again.
+    /// Every answer other than `Allow` refuses, and grants nothing: once
+    /// any backoff a cancel or a timeout started has passed, the next
+    /// request asks again.
     #[test]
     fn a_prompt_that_does_not_allow_refuses_and_grants_nothing() {
         let key = test_key(1);
@@ -496,6 +685,7 @@ mod tests {
                 matches!(outcome(&agent, &key), Err(Refused::Declined(_))),
                 "{name}"
             );
+            host.advance(BACKOFF);
             assert!(
                 matches!(outcome(&agent, &key), Err(Refused::PromptFailed(_))),
                 "{name}"
@@ -503,6 +693,304 @@ mod tests {
             assert_eq!(prompts.shown().len(), 2, "{name}");
             assert!(!approved(&host, &key), "{name}");
         }
+    }
+
+    /// The prompts a cancel or a timeout ended hold the database's prompts
+    /// back, and nothing else does: not a deny, nor a prompt that doesn't
+    /// run.
+    #[test]
+    fn only_a_cancel_or_a_timeout_backs_the_database_off() {
+        let key = test_key(1);
+        let ends = [
+            (
+                "deny",
+                Step::new(PromptOutcome::Answer(ConfirmAnswer::Deny)),
+                false,
+            ),
+            ("fail", Step::fails(), false),
+            ("cancel", Step::new(PromptOutcome::Cancelled), true),
+            ("time out", Step::new(PromptOutcome::TimedOut), true),
+        ];
+        for (name, end, backs_off) in ends {
+            let (_host, agent, prompts) = agent(host(&key, SshKeyConfirm::Once), &Paths::default());
+            prompts.push(end);
+            assert!(outcome(&agent, &key).is_err(), "{name}");
+
+            prompts.push(Step::allow());
+            let second = outcome(&agent, &key);
+            assert_eq!(
+                matches!(second, Err(Refused::BackingOff)),
+                backs_off,
+                "{name}"
+            );
+            assert_eq!(
+                prompts.shown().len(),
+                if backs_off { 1 } else { 2 },
+                "{name}"
+            );
+        }
+    }
+
+    /// Cancelling an approval prompt makes the next request that needs a
+    /// prompt fail at once, without one, until the backoff has passed.
+    #[test]
+    fn a_cancelled_prompt_backs_off_until_the_backoff_has_passed() {
+        let key = test_key(1);
+        let (host, agent, prompts) = agent(host(&key, SshKeyConfirm::Once), &Paths::default());
+        prompts.push(Step::new(PromptOutcome::Cancelled));
+
+        assert!(matches!(
+            outcome(&agent, &key),
+            Err(Refused::Declined(Declined::Cancelled))
+        ));
+        assert!(matches!(outcome(&agent, &key), Err(Refused::BackingOff)));
+        host.advance(BACKOFF - Duration::from_secs(1));
+        assert!(matches!(outcome(&agent, &key), Err(Refused::BackingOff)));
+        assert_eq!(prompts.shown().len(), 1);
+
+        host.advance(Duration::from_secs(1));
+        prompts.push(Step::allow());
+        assert!(signed(&sign(&agent, &key)));
+        assert_eq!(prompts.shown().len(), 2);
+    }
+
+    /// Backoff holds back prompts only: a signature that needs none still
+    /// signs, whether its key never asks or is already approved.
+    #[test]
+    fn a_signature_that_needs_no_prompt_signs_during_a_backoff() {
+        let key = test_key(1);
+        let backed_off = |confirm| {
+            let (host, agent, prompts) = agent(host(&key, confirm), &Paths::default());
+            let until = host.now() + BACKOFF;
+            host.with_slot("personal", |mut slot| slot.back_off(until));
+            (host, agent, prompts)
+        };
+
+        let (_host, never, prompts) = backed_off(SshKeyConfirm::Never);
+        assert!(signed(&sign(&never, &key)));
+        assert!(prompts.shown().is_empty());
+
+        let (host, once, prompts) = backed_off(SshKeyConfirm::Once);
+        assert!(matches!(outcome(&once, &key), Err(Refused::BackingOff)));
+        let scope = Scope::new(key.public_key().fingerprint(HashAlg::Sha256), None);
+        host.with_slot("personal", |slot| slot.ssh.approvals.grant(scope));
+        assert!(signed(&sign(&once, &key)));
+        assert!(prompts.shown().is_empty());
+    }
+
+    /// A lock leaves a backoff in place: the locked database is not
+    /// offered an unlock prompt until it has passed.
+    #[test]
+    fn a_lock_does_not_end_a_backoff() {
+        let key = test_key(1);
+        let (host, agent, prompts) = agent(host(&key, SshKeyConfirm::Once), &Paths::default());
+        prompts.push(Step::new(PromptOutcome::Cancelled));
+        assert!(outcome(&agent, &key).is_err());
+
+        host.lock("personal");
+
+        assert!(matches!(outcome(&agent, &key), Err(Refused::BackingOff)));
+        assert!(host.unlocks().shown().is_empty());
+    }
+
+    /// An unlock, whoever prompted for it, ends a backoff: the user is
+    /// here and unlocking.
+    #[test]
+    fn an_unlock_ends_a_backoff() {
+        let key = test_key(1);
+        let (host, _dir, paths) = locked(host(&key, SshKeyConfirm::Once), &key);
+        let (host, agent, prompts) = agent(host, &paths);
+        host.unlocks().push(Step::new(PromptOutcome::Cancelled));
+        assert!(matches!(
+            outcome(&agent, &key),
+            Err(Refused::Unlock(UnlockError::PromptCancelled { .. }))
+        ));
+        assert!(matches!(outcome(&agent, &key), Err(Refused::BackingOff)));
+
+        // The user types `kpa unlock`.
+        host.reopen();
+
+        prompts.push(Step::allow());
+        assert!(signed(&sign(&agent, &key)));
+        assert_eq!(prompts.shown(), ["Approve use of key \"github\"?"]);
+    }
+
+    /// A locked database's signature runs the unlock, which says why, and
+    /// the user's answer to it is that signature's approval: a `once` key
+    /// is approved for good, an `always` key for this signature only, and a
+    /// `never` key needed none.
+    #[test]
+    fn the_unlock_prompt_is_the_approval() {
+        let key = test_key(1);
+        let named = format!(
+            "Unlock database personal and use key \"personal {}\"?",
+            key.public_key().fingerprint(HashAlg::Sha256)
+        );
+        for (confirm, kept) in [
+            (SshKeyConfirm::Once, true),
+            (SshKeyConfirm::Always, false),
+            (SshKeyConfirm::Never, false),
+        ] {
+            let (host, _dir, paths) = locked(host(&key, confirm), &key);
+            let (host, agent, prompts) = agent(host, &paths);
+            host.unlocks().push(typed());
+
+            assert!(signed(&sign(&agent, &key)));
+            assert_eq!(host.unlocks().shown(), [named.as_str()]);
+            assert!(prompts.shown().is_empty());
+            assert_eq!(approved(&host, &key), kept);
+        }
+    }
+
+    /// An unlock that finds the database open already, because the user
+    /// unlocked it first, prompted for nothing and approves nothing: the
+    /// signature goes on to ask for its approval, naming the key as the
+    /// cache lists it.
+    #[test]
+    fn an_unlock_that_finds_the_database_open_is_not_an_approval() {
+        let key = test_key(1);
+        let (host, _dir, paths) = locked(host(&key, SshKeyConfirm::Once), &key);
+        let (host, agent, prompts) = agent(host, &paths);
+        let user = Arc::clone(&host);
+        host.before_unlock(move || user.reopen());
+        prompts.push(Step::allow());
+
+        assert!(signed(&sign(&agent, &key)));
+        assert!(host.unlocks().shown().is_empty());
+        assert_eq!(
+            prompts.shown(),
+            [format!(
+                "Approve use of key \"personal {}\"?",
+                key.public_key().fingerprint(HashAlg::Sha256)
+            )]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_unlock_refuses_and_backs_off() {
+        let key = test_key(1);
+        let (host, _dir, paths) = locked(host(&key, SshKeyConfirm::Never), &key);
+        let (host, agent, _prompts) = agent(host, &paths);
+        host.unlocks().push(Step::new(PromptOutcome::TimedOut));
+
+        assert!(matches!(
+            outcome(&agent, &key),
+            Err(Refused::Unlock(UnlockError::PromptCancelled { .. }))
+        ));
+        assert!(matches!(outcome(&agent, &key), Err(Refused::BackingOff)));
+        assert_eq!(host.unlocks().shown().len(), 1);
+
+        host.advance(BACKOFF);
+        host.unlocks().push(typed());
+        assert!(signed(&sign(&agent, &key)));
+    }
+
+    /// Nobody to answer, no prompt: a locked database is refused without
+    /// an unlock prompt and without a backoff.
+    #[test]
+    fn nothing_prompts_to_unlock_where_no_prompt_may_appear() {
+        let key = test_key(1);
+        let (host, _dir, paths) = locked(host(&key, SshKeyConfirm::Once).without_prompts(), &key);
+        let (host, agent, prompts) = agent(host, &paths);
+
+        assert!(matches!(outcome(&agent, &key), Err(Refused::Locked)));
+        assert!(host.unlocks().shown().is_empty() && prompts.shown().is_empty());
+        assert_eq!(
+            host.with_slot("personal", |slot| slot.backing_off(host.now())),
+            Some(false)
+        );
+    }
+
+    /// A lock while the unlock prompt is up ends it and fails the
+    /// signature, without a backoff: the next request asks again.
+    #[test]
+    fn a_lock_while_the_unlock_prompt_is_up_fails_the_signature() {
+        let key = test_key(1);
+        let (host, _dir, paths) = locked(host(&key, SshKeyConfirm::Never), &key);
+        let (host, agent, _prompts) = agent(host, &paths);
+        host.unlocks().push(typed().while_up(locking(&host)));
+
+        assert!(matches!(
+            outcome(&agent, &key),
+            Err(Refused::Unlock(UnlockError::LockedDuringUnlock { .. }))
+        ));
+        assert!(host.peek("personal", |open, _| !open));
+
+        host.unlocks().push(typed());
+        assert!(signed(&sign(&agent, &key)));
+        assert_eq!(host.unlocks().shown().len(), 2);
+    }
+
+    /// Waits until `n` holds on the host's slots have run: the signers a
+    /// test started have looked, and are waiting on the prompt lock.
+    fn wait_for_holds(host: &FakeHost, n: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while host.holds() < n {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the signers never looked"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// Starts `n` signers from inside a prompt that is on screen, and
+    /// waits until each has looked (a `find_key` hold and a look) and so is
+    /// waiting on the gate. Their handles go to `tx`.
+    fn signers_while_up(
+        n: usize,
+        agent: &Arc<Agent<FakeHost>>,
+        host: &Arc<FakeHost>,
+        key: &PrivateKey,
+        tx: mpsc::Sender<std::thread::JoinHandle<AgentResponse>>,
+    ) -> impl FnOnce() + Send + 'static {
+        let (agent, host, key) = (Arc::clone(agent), Arc::clone(host), key.clone());
+        move || {
+            let before = host.holds();
+            for _ in 0..n {
+                let (agent, key) = (Arc::clone(&agent), key.clone());
+                let signer = std::thread::spawn(move || sign(&agent, &key));
+                tx.send(signer).expect("send");
+            }
+            wait_for_holds(&host, before + 2 * n);
+        }
+    }
+
+    /// Two signers for a locked database get one unlock prompt: the second
+    /// waits for the first, then looks again and finds the database open
+    /// and the key approved.
+    #[test]
+    fn concurrent_signers_share_one_unlock_prompt() {
+        let key = test_key(1);
+        let (host, _dir, paths) = locked(host(&key, SshKeyConfirm::Once), &key);
+        let (host, agent, prompts) = agent(host, &paths);
+        let (tx, second) = mpsc::channel();
+        host.unlocks()
+            .push(typed().while_up(signers_while_up(1, &agent, &host, &key, tx)));
+
+        assert!(signed(&sign(&agent, &key)));
+        let second = second.recv().expect("second signer");
+        assert!(signed(&second.join().expect("second signer")));
+        assert_eq!(host.unlocks().shown().len(), 1);
+        assert!(prompts.shown().is_empty());
+    }
+
+    /// N identical requests for a key that needs an approval show one
+    /// approval prompt, not N.
+    #[test]
+    fn identical_concurrent_requests_share_one_approval_prompt() {
+        let key = test_key(1);
+        let (host, agent, prompts) = agent(host(&key, SshKeyConfirm::Once), &Paths::default());
+        let (tx, others) = mpsc::channel();
+        prompts.push(Step::allow().while_up(signers_while_up(4, &agent, &host, &key, tx)));
+
+        assert!(signed(&sign(&agent, &key)));
+        let others: Vec<_> = others.try_iter().collect();
+        assert_eq!(others.len(), 4);
+        for other in others {
+            assert!(signed(&other.join().expect("signer")));
+        }
+        assert_eq!(prompts.shown().len(), 1);
     }
 
     #[test]
@@ -589,8 +1077,10 @@ mod tests {
     #[test]
     fn a_changed_file_is_never_signed_with() {
         let key = test_key(1);
-        let (unasked, unasked_agent, _prompts) =
-            agent(host(&key, SshKeyConfirm::Never), &Paths::default());
+        let (unasked, unasked_agent, _prompts) = agent(
+            host(&key, SshKeyConfirm::Never).without_prompts(),
+            &Paths::default(),
+        );
         unasked.mark_stale();
         assert!(matches!(
             outcome(&unasked_agent, &key),
@@ -606,18 +1096,13 @@ mod tests {
         assert_eq!(prompts.shown().len(), 1);
     }
 
+    /// Where no prompt may appear, a locked database is refused rather
+    /// than unlocked, and the cache still lists its keys.
     #[test]
-    fn a_locked_database_refuses_without_prompting() {
+    fn a_locked_database_refuses_where_no_prompt_may_appear() {
         let key = test_key(1);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let paths = Paths {
-            cache_dir: Some(dir.path().to_path_buf()),
-            ..Paths::default()
-        };
-        let cache = keys::cache_dir(&paths).expect("cache dir");
-        keys::write_cache(&cache, "personal", &[key.public_key().clone()]).expect("write cache");
-        let (_host, agent, prompts) =
-            agent(FakeHost::locked(vec![database("personal", vec![])]), &paths);
+        let (host, _dir, paths) = locked(host(&key, SshKeyConfirm::Never).without_prompts(), &key);
+        let (host, agent, prompts) = agent(host, &paths);
 
         assert_eq!(
             agent
@@ -627,7 +1112,7 @@ mod tests {
         );
         assert!(matches!(outcome(&agent, &key), Err(Refused::Locked)));
         assert!(!signed(&sign(&agent, &key)));
-        assert!(prompts.shown().is_empty());
+        assert!(prompts.shown().is_empty() && host.unlocks().shown().is_empty());
     }
 
     #[test]
@@ -662,7 +1147,7 @@ mod tests {
         let sha1 = request_with(&key, 0);
         let request = Request::parse(&unbound, &sha1, None).expect("parses");
         assert!(matches!(
-            agent.authorized_sign("personal", &request, &requester()),
+            agent.authorized_sign(&found(&agent, &key), &request, &requester()),
             Err(Refused::Sha1Rsa)
         ));
         assert!(prompts.shown().is_empty());
@@ -771,49 +1256,137 @@ mod tests {
         }
     }
 
-    /// `missing_approval` for a database that holds `approved`, if anything.
-    fn missing_given(
+    /// A database as `missing_approval` and `refusal_before_prompting` find
+    /// it.
+    struct Found {
+        open: bool,
         approved: Option<SignatureApproval>,
-        needed: Option<&SignatureApproval>,
-    ) -> Option<SignatureApproval> {
+        backoff: Option<Instant>,
+    }
+
+    fn open_db() -> Found {
+        Found {
+            open: true,
+            approved: None,
+            backoff: None,
+        }
+    }
+
+    fn locked_db() -> Found {
+        Found {
+            open: false,
+            ..open_db()
+        }
+    }
+
+    /// Runs `check` on a slot as `found` describes it.
+    fn on_slot<R>(found: Found, check: impl FnOnce(&SlotView<'_>) -> R) -> R {
         let mut ssh = SshSlot::default();
-        if let Some(approved) = approved {
+        if let Some(approved) = found.approved {
             ssh.approvals.grant(approved.scope);
         }
-        let (mut last_activity, lock_signal) = (std::time::Instant::now(), CancelSource::new());
-        let slot = SlotView::new(None, &mut ssh, &mut last_activity, &lock_signal);
-        missing_approval(&slot, needed).cloned()
+        let db = Database::new();
+        let (mut last_activity, lock_signal) = (Instant::now(), CancelSource::new());
+        let mut backoff = found.backoff;
+        let slot = SlotView::new(
+            found.open.then_some(&db),
+            &mut ssh,
+            &mut last_activity,
+            &lock_signal,
+            &mut backoff,
+        );
+        check(&slot)
+    }
+
+    fn missing_in(found: Found, needed: Option<&SignatureApproval>) -> Option<SignatureApproval> {
+        on_slot(found, |slot| missing_approval(slot, needed).cloned())
+    }
+
+    fn refusal_in(
+        found: Found,
+        missing: Option<&SignatureApproval>,
+        may_prompt_on_screen: bool,
+        now: Instant,
+    ) -> Option<Refused> {
+        on_slot(found, |slot| {
+            refusal_before_prompting(slot, missing, may_prompt_on_screen, now)
+        })
     }
 
     #[test]
     fn a_request_that_needs_nothing_lacks_nothing() {
-        assert_eq!(missing_given(None, None), None);
+        assert_eq!(missing_in(open_db(), None), None);
     }
 
     #[test]
     fn an_approval_nothing_covers_is_what_the_request_lacks() {
         for remember in [true, false] {
             let needed = approval(remember);
-            assert_eq!(missing_given(None, Some(&needed)), Some(approval(remember)));
+            assert_eq!(
+                missing_in(open_db(), Some(&needed)),
+                Some(approval(remember))
+            );
         }
     }
 
     #[test]
     fn an_approval_the_database_holds_is_not_lacking() {
         let needed = approval(true);
-        assert_eq!(missing_given(Some(approval(true)), Some(&needed)), None);
+        let holding = Found {
+            approved: Some(approval(true)),
+            ..open_db()
+        };
+        assert_eq!(missing_in(holding, Some(&needed)), None);
+    }
+
+    /// An open database whose request lacks an approval is refused only
+    /// where no prompt may appear; a locked one is refused there too.
+    #[test]
+    fn a_request_that_has_to_ask_is_refused_where_no_prompt_may_appear() {
+        let now = Instant::now();
+        let missing = approval(true);
+        assert!(matches!(
+            refusal_in(open_db(), Some(&missing), false, now),
+            Some(Refused::NeedsApproval)
+        ));
+        assert!(refusal_in(open_db(), Some(&missing), true, now).is_none());
+        for missing in [None, Some(&missing)] {
+            assert!(matches!(
+                refusal_in(locked_db(), missing, false, now),
+                Some(Refused::Locked)
+            ));
+            assert!(refusal_in(locked_db(), missing, true, now).is_none());
+        }
     }
 
     #[test]
-    fn only_a_missing_approval_with_no_prompt_allowed_is_refused() {
-        let missing = approval(true);
-        assert!(matches!(
-            refusal_before_prompting(Some(&missing), false),
-            Some(Refused::NeedsApproval)
-        ));
-        assert!(refusal_before_prompting(Some(&missing), true).is_none());
+    fn a_request_that_has_to_ask_nothing_is_never_refused() {
         for may_prompt_on_screen in [true, false] {
-            assert!(refusal_before_prompting(None, may_prompt_on_screen).is_none());
+            assert!(refusal_in(open_db(), None, may_prompt_on_screen, Instant::now()).is_none());
         }
+    }
+
+    /// While prompts are held back, a request that has to ask is refused,
+    /// and one that doesn't is not. The backoff ends at its deadline.
+    #[test]
+    fn a_backoff_refuses_what_has_to_ask_until_it_has_passed() {
+        let now = Instant::now();
+        let until = now + Duration::from_secs(120);
+        let backed_off = |found: Found| Found {
+            backoff: Some(until),
+            ..found
+        };
+        let missing = approval(true);
+
+        assert!(matches!(
+            refusal_in(backed_off(open_db()), Some(&missing), true, now),
+            Some(Refused::BackingOff)
+        ));
+        assert!(matches!(
+            refusal_in(backed_off(locked_db()), None, true, now),
+            Some(Refused::BackingOff)
+        ));
+        assert!(refusal_in(backed_off(open_db()), None, true, now).is_none());
+        assert!(refusal_in(backed_off(open_db()), Some(&missing), true, until).is_none());
     }
 }
