@@ -37,7 +37,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use common::InProcessDaemon;
-use kpa::policy::{DisplaySession, Locks};
+use kpa::session_watch::DisplaySession;
 
 /// Held by each test that drives the live clipboard, for its whole run.
 static LIVE_CLIPBOARD: Mutex<()> = Mutex::new(());
@@ -88,13 +88,10 @@ fn display_session() -> Option<String> {
 /// A daemon like `start`'s, whose state names the real display session.
 fn start_on_the_display_session(config: &str, session: String) -> InProcessDaemon {
     let daemon = InProcessDaemon::start(config);
-    Locks::set_display_session(
-        &*daemon.server,
-        DisplaySession::Unlocked {
-            id: session,
-            active: true,
-        },
-    );
+    daemon.server.set_display_session(DisplaySession::Unlocked {
+        id: session,
+        active: true,
+    });
     daemon
 }
 
@@ -112,7 +109,7 @@ fn fixture_entry_uuid(daemon: &InProcessDaemon) -> String {
 
 /// `docs/design.md` § Clipboard explicitly plans for a daemon run without
 /// Wayland reachable — logind-less hosts get the analogous treatment in
-/// `policy.rs`. `copy` must answer with a clean error, not hang the
+/// `session_watch.rs`. `copy` must answer with a clean error, not hang the
 /// connection or take the daemon down, so every other request still gets
 /// answered afterward.
 #[test]
@@ -195,7 +192,7 @@ fn copy_from_the_desktop_is_refused_without_an_active_unlocked_display_session()
         DisplaySession::None,
     ];
     for display_session in cases {
-        Locks::set_display_session(&*daemon.server, display_session.clone());
+        daemon.server.set_display_session(display_session.clone());
         let copied = daemon.run(&[
             "copy",
             "personal",

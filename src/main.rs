@@ -18,9 +18,9 @@ use kpa::config::Config;
 use kpa::log::{self, Level};
 use kpa::output::report_error;
 use kpa::paths::Paths;
-use kpa::policy;
 use kpa::proto::{CopyRequest, Field, ListRequest, LockRequest, Op, SshKeysReport, SshKeysRequest};
 use kpa::server::{self, Server};
+use kpa::session_watch::{self, Bus};
 use kpa::socket;
 use kpa::tray;
 use uuid::Uuid;
@@ -251,10 +251,16 @@ fn run_serve(
         kpa::VERSION,
         socket_path.display()
     ));
-    let server = Arc::new(Server::new(config, paths));
-    // Before serving, so no unlock can happen without the policy hearing of it.
-    let events = policy::start(server.clone(), policy::Bus::System);
-    server.set_policy_events(events);
+    // Before serving, so no unlock can happen without the sleep delay
+    // hearing of it.
+    let (session_events, sleep_delay) = session_watch::start(Bus::System);
+    let server = Arc::new(Server::new(config, paths, sleep_delay));
+    let reacting = server.clone();
+    std::thread::spawn(move || {
+        for event in session_events {
+            reacting.on_session_event(event);
+        }
+    });
     tray::start(server.clone());
     if let Some((path, listener)) = ssh_agent {
         let ssh_server = server.clone();

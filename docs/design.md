@@ -468,7 +468,16 @@ Prompts are bounded too:
   reports the unlock (threat model ASM-7), so kpa doesn't know the screen
   is locked, and the timeout bounds the cost.
 
-The logind watch publishes **the display session's state** to the server: no display
+`session_watch.rs` is the OS side of these triggers, and only reports: it
+knows nothing about databases or locking. Its events are the display
+session's state, a lock request (the `Lock` signal), suspend and a lost
+watch, and the server reacts to them in one place,
+`Server::on_session_event`. The other direction is a `SleepDelay`: the
+server tells it after every change to what is unlocked, and a thread of
+`session_watch` of its own holds or releases the sleep inhibitor, so no
+request ever waits on D-Bus.
+
+The logind watch reports **the display session's state** to the server: no display
 session, or the display session's id with its `LockedHint` (locked or
 unlocked) and its `Active`. It is read on subscribing, whenever
 `User.Display` changes, and on each `LockedHint` or `Active` change, and

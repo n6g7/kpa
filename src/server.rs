@@ -22,8 +22,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,7 +37,6 @@ use crate::config::{Config, DatabaseConfig};
 use crate::io::ByteCounter;
 use crate::log;
 use crate::paths::Paths;
-use crate::policy;
 use crate::prompt::{
     self, CancelSource, ConfirmProgram, Prompt, PromptOutcome, PromptQueue, SecretProgram,
 };
@@ -48,6 +46,7 @@ use crate::proto::{
     SshKeysError, SshKeysReport, SshKeysRequest, Status, Unlock, UnlockError, UnlockRequest,
     WireEntry, WireSkippedKey, WireSshKey,
 };
+use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
 use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
 use crate::vault::{self, Fingerprint, VaultError};
 
@@ -156,9 +155,9 @@ pub struct Server {
     /// back.
     paths: Paths,
     dbs: Mutex<HashMap<String, Slot>>,
-    /// Told about each successful unlock, so the lock policy can take its
-    /// sleep inhibitor. Set once by `set_policy_events`; absent in tests.
-    policy_events: OnceLock<Sender<policy::Event>>,
+    /// Told after every change to what is unlocked, so the machine's
+    /// suspend is delayed exactly while something is unlocked.
+    sleep_delay: SleepDelay,
     /// The clipboard `copy` hands secrets to. `Arc` so the thread that
     /// schedules an offer's expiry (spawned by `copy`, below) can outlive
     /// the request that started it.
@@ -166,7 +165,7 @@ pub struct Server {
     /// Which database the clipboard's current offer, if any, was copied
     /// from — `None` once nothing is offered. `copy` sets this on a
     /// successful handoff; every lock path (`Lock::lock`,
-    /// `policy::Locks::lock_all`, `expire_idle`) and the freshness guard
+    /// `lock_all`, `expire_idle`) and the freshness guard
     /// (`drop_stale`) read it to decide whether the database being locked
     /// or dropped is the one holding the clipboard, in which case
     /// `docs/threat-model.md` G-6 ("lock clears what kpa owns") says the
@@ -177,10 +176,10 @@ pub struct Server {
     /// outlives the request, same as `clip` above) can clear it too, once
     /// its natural timeout fires with nothing newer having replaced it.
     clip_db: Arc<Mutex<Option<String>>>,
-    /// The display session's state, as the lock policy last published it
-    /// (`policy::Event::DisplaySession`). `authz` decides against it each
-    /// time a request is answered.
-    display_session: Mutex<policy::DisplaySession>,
+    /// The display session's state, as `session_watch` last reported it
+    /// (`SessionEvent::Changed`). `authz` decides against it each time a
+    /// request is answered.
+    display_session: Mutex<DisplaySession>,
     /// The daemon's one prompt queue, so only one prompt is ever on screen
     /// (`docs/ssh-agent.md` § 6.7): the unlock prompt's, and the SSH
     /// agent's approval prompts, which `serve_ssh_agent` builds on it.
@@ -190,8 +189,8 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(config: Config, paths: Paths) -> Server {
-        Server::with_clipboard(config, paths, clip::WaylandBackend)
+    pub fn new(config: Config, paths: Paths, sleep_delay: SleepDelay) -> Server {
+        Server::with_clipboard(config, paths, sleep_delay, clip::WaylandBackend)
     }
 
     /// Like `new`, but with an injected clipboard backend — real tests use
@@ -200,10 +199,11 @@ impl Server {
     pub fn with_clipboard(
         config: Config,
         paths: Paths,
+        sleep_delay: SleepDelay,
         backend: impl clip::Backend + 'static,
     ) -> Server {
         let unlock_prompt = SecretProgram::new(config.prompt.clone());
-        Server::with_backends(config, paths, backend, unlock_prompt)
+        Server::with_backends(config, paths, sleep_delay, backend, unlock_prompt)
     }
 
     /// Like `with_clipboard`, but with an injected unlock prompt backend
@@ -211,6 +211,7 @@ impl Server {
     fn with_backends(
         config: Config,
         paths: Paths,
+        sleep_delay: SleepDelay,
         clipboard: impl clip::Backend + 'static,
         unlock_prompt: impl prompt::Backend<Zeroizing<String>> + 'static,
     ) -> Server {
@@ -235,10 +236,10 @@ impl Server {
             config,
             paths,
             dbs: Mutex::new(dbs),
-            policy_events: OnceLock::new(),
+            sleep_delay,
             clip: Arc::new(Clipboard::new(clipboard)),
             clip_db: Arc::new(Mutex::new(None)),
-            display_session: Mutex::new(policy::DisplaySession::None),
+            display_session: Mutex::new(DisplaySession::None),
             prompt_queue,
             unlock_prompt,
         }
@@ -269,7 +270,7 @@ impl Server {
         // Outside the `dbs` guard, same reasoning as `Lock::lock`: ending
         // a clipboard offer is a round trip to the backend, not bookkeeping.
         for name in &locked {
-            self.end_clipboard_for(name);
+            self.after_lock(name);
         }
         // Logged after the guard is released: a stalled stdout must not
         // hold up every other request.
@@ -282,27 +283,82 @@ impl Server {
         locked
     }
 
-    /// Ends the clipboard's current offer if (and only if) it was copied
-    /// from database `name` — see `clip_db`'s doc. A lock of some other
-    /// database, or a lock while the clipboard holds nothing, is a no-op.
-    fn end_clipboard_for(&self, name: &str) {
+    /// Reacts to what `session_watch` reports. Everything it asks for is a
+    /// lock of every database, except recording the display session's
+    /// state, which comes first (`set_display_session`).
+    pub fn on_session_event(&self, event: SessionEvent) {
+        match event {
+            SessionEvent::Changed(display_session) => {
+                let locked = display_session.is_locked();
+                self.set_display_session(display_session);
+                if locked {
+                    self.lock_all();
+                    log::info(format_args!("locked all databases (screen lock)"));
+                }
+            }
+            SessionEvent::LockRequested => {
+                self.lock_all();
+                log::info(format_args!("locked all databases (screen lock)"));
+            }
+            SessionEvent::Sleeping => {
+                // Locked before the sleep delay is released (by `lock_all`):
+                // releasing is what lets the machine sleep.
+                self.lock_all();
+                log::info(format_args!("locked all databases (suspending)"));
+            }
+            SessionEvent::WatchLost => {
+                // The display session's state is unknown until the watch is
+                // back.
+                self.set_display_session(DisplaySession::None);
+                self.lock_all();
+                log::warn(format_args!(
+                    "locked all databases (logind subscription lost)"
+                ));
+            }
+        }
+    }
+
+    /// Locks every database, ends the clipboard's offer and lets the sleep
+    /// delay go.
+    fn lock_all(&self) {
+        slots(&self.dbs).values_mut().for_each(Slot::lock);
+        self.after_lock_all();
+    }
+
+    /// What a lock of database `name` owes once the slots mutex is
+    /// released. The clipboard's current offer ends if (and only if) it was
+    /// copied from `name` (see `clip_db`'s doc); a lock of some other
+    /// database, or a lock while the clipboard holds nothing, leaves it.
+    /// And the sleep delay is told what is still unlocked.
+    fn after_lock(&self, name: &str) {
         let mut clip_db = self.clip_db.lock().unwrap_or_else(|e| e.into_inner());
         if clip_db.as_deref() == Some(name) {
             *clip_db = None;
             drop(clip_db);
             self.clip.end_now();
         }
+        self.sync_sleep_delay();
     }
 
-    /// Ends the clipboard's current offer unconditionally, whichever
-    /// database it came from — for the "every database locks" paths
-    /// (`Lock::lock`'s bare `lock` form, and `policy::Locks::lock_all`,
-    /// which screen lock, suspend and bus loss all go through), where
-    /// nothing stays unlocked for a copied secret to legitimately belong
-    /// to anymore.
-    fn end_clipboard_all(&self) {
+    /// What locking every database owes once the slots mutex is released:
+    /// the clipboard's offer ends whichever database it came from (nothing
+    /// stays unlocked for a copied secret to legitimately belong to), and
+    /// the sleep delay is released.
+    fn after_lock_all(&self) {
         *self.clip_db.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.clip.end_now();
+        self.sync_sleep_delay();
+    }
+
+    /// Tells the sleep delay whether anything is unlocked. Read and sent
+    /// under the slots mutex, so the answers reach it in the order the
+    /// states they report happened, whichever threads change them. Called
+    /// after every install and every drop of a database: `unlock`, and each
+    /// path that ends in `after_lock` or `after_lock_all`.
+    fn sync_sleep_delay(&self) {
+        let dbs = slots(&self.dbs);
+        self.sleep_delay
+            .hold_while(dbs.values().any(|slot| slot.db.is_some()));
     }
 
     /// Freshness guard (`docs/threat-model.md` T-12) for the databases
@@ -332,23 +388,28 @@ impl Server {
                 .collect()
         };
         for name in &dropped {
-            self.end_clipboard_for(name);
+            self.after_lock(name);
         }
         dropped
     }
 
-    /// The display session's state, as the lock policy last published it. No display
-    /// session until the logind watch says otherwise.
-    pub fn display_session(&self) -> policy::DisplaySession {
+    /// The display session's state, as `session_watch` last reported it. No
+    /// display session until the logind watch says otherwise.
+    pub fn display_session(&self) -> DisplaySession {
         self.display_session
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
-    /// Where to report unlocks. Called once, before the server takes requests.
-    pub fn set_policy_events(&self, events: Sender<policy::Event>) {
-        let _ = self.policy_events.set(events);
+    /// Records the display session's state. Done before anything is locked
+    /// for it, so an unlock that starts after the lock sees it and raises no
+    /// prompt behind the locker.
+    pub fn set_display_session(&self, display_session: DisplaySession) {
+        *self
+            .display_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = display_session;
     }
 
     /// Whether any database is unlocked right now.
@@ -391,41 +452,6 @@ impl Server {
                 }
             })
             .collect()
-    }
-
-    fn notify_unlocked(&self) {
-        if let Some(events) = self.policy_events.get() {
-            let _ = events.send(policy::Event::Unlocked);
-        }
-    }
-
-    /// Told about every explicit `lock`, so the policy can release its
-    /// sleep inhibitor if that was the last unlocked database. Without
-    /// this, manually locking the last database leaves the inhibitor held
-    /// until some unrelated event (a screen lock, a sleep attempt, or an
-    /// unlock) happens to run `Policy::reconcile` again.
-    fn notify_locked(&self) {
-        if let Some(events) = self.policy_events.get() {
-            let _ = events.send(policy::Event::Locked);
-        }
-    }
-}
-
-impl policy::Locks for Server {
-    fn lock_all(&self) {
-        slots(&self.dbs).values_mut().for_each(Slot::lock);
-        self.end_clipboard_all();
-    }
-
-    fn any_unlocked(&self) -> bool {
-        Server::any_unlocked(self)
-    }
-
-    fn set_display_session(&self, display_session: policy::DisplaySession) {
-        *self
-            .display_session
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = display_session;
     }
 }
 
@@ -623,7 +649,7 @@ impl Server {
         if let Some(cache) = cache {
             cache.write(&self.paths);
         }
-        self.notify_unlocked();
+        self.sync_sleep_delay();
         // Logged here rather than in `log_response`: only this path knows
         // the database was actually opened, as opposed to already unlocked.
         log::info(format_args!("unlocked {name:?}"));
@@ -653,7 +679,7 @@ impl SshHost for Server {
         };
         // As `drop_stale` does: the clipboard is ended after the mutex.
         if stale {
-            self.end_clipboard_for(db);
+            self.after_lock(db);
         }
         Some(result)
     }
@@ -666,7 +692,7 @@ impl SshHost for Server {
 impl Lock for Server {
     fn lock(&self, request: &LockRequest) -> Result<Option<String>, LockError> {
         let mut dbs = slots(&self.dbs);
-        let result = match request.db.as_deref() {
+        match request.db.as_deref() {
             Some(name) => {
                 let Some(slot) = dbs.get_mut(name) else {
                     return Err(LockError::UnknownDb {
@@ -675,18 +701,16 @@ impl Lock for Server {
                 };
                 slot.lock();
                 drop(dbs);
-                self.end_clipboard_for(name);
+                self.after_lock(name);
                 Ok(Some(name.to_string()))
             }
             None => {
                 dbs.values_mut().for_each(Slot::lock);
                 drop(dbs);
-                self.end_clipboard_all();
+                self.after_lock_all();
                 Ok(None)
             }
-        };
-        self.notify_locked();
-        result
+        }
     }
 }
 
@@ -1272,6 +1296,7 @@ mod tests {
         Server::new(
             Config::parse("").expect("an empty config is valid"),
             Paths::default(),
+            SleepDelay::new().0,
         )
     }
 
@@ -1405,6 +1430,7 @@ mod tests {
         Server::new(
             Config::parse(&config).expect("valid config"),
             Paths::default(),
+            SleepDelay::new().0,
         )
     }
 
@@ -1420,6 +1446,7 @@ mod tests {
         let server = Server::with_clipboard(
             Config::parse(&config).expect("valid config"),
             Paths::default(),
+            SleepDelay::new().0,
             backend,
         );
         allow_copy(&server);
@@ -1431,13 +1458,10 @@ mod tests {
     /// isn't itself about the gate calls this on its server, the same way
     /// those tests always ran before the clipboard session existed.
     fn allow_copy(server: &Server) {
-        policy::Locks::set_display_session(
-            server,
-            policy::DisplaySession::Unlocked {
-                id: SESSION.to_string(),
-                active: true,
-            },
-        );
+        server.set_display_session(DisplaySession::Unlocked {
+            id: SESSION.to_string(),
+            active: true,
+        });
     }
 
     /// Stands in for a successful unlock without a file or a prompt. Does not
@@ -1478,6 +1502,7 @@ mod tests {
             )
             .expect("valid config"),
             Paths::default(),
+            SleepDelay::new().0,
         );
         unlock_directly(&server, "personal");
         {
@@ -1544,6 +1569,7 @@ mod tests {
             Config::parse("[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n")
                 .expect("valid config"),
             Paths::default(),
+            SleepDelay::new().0,
             backend,
         );
         allow_copy(&server);
@@ -1615,17 +1641,17 @@ mod tests {
         );
 
         for display_session in [
-            policy::DisplaySession::Locked {
+            DisplaySession::Locked {
                 id: SESSION.to_string(),
                 active: true,
             },
-            policy::DisplaySession::Unlocked {
+            DisplaySession::Unlocked {
                 id: SESSION.to_string(),
                 active: false,
             },
-            policy::DisplaySession::None,
+            DisplaySession::None,
         ] {
-            policy::Locks::set_display_session(&server, display_session.clone());
+            server.set_display_session(display_session.clone());
             assert_eq!(
                 CopyEntry::copy(&server, &request(), &desktop()),
                 Err(refused.clone()),
@@ -1724,6 +1750,7 @@ mod tests {
             )
             .expect("valid config"),
             Paths::default(),
+            SleepDelay::new().0,
             backend,
         );
         allow_copy(&server);
@@ -1829,10 +1856,10 @@ mod tests {
     }
 
     /// Screen lock, suspend and bus loss all go through
-    /// `policy::Locks::lock_all` directly, bypassing `Lock::lock` — this
+    /// `lock_all` directly, bypassing `Lock::lock` — this
     /// path needs the same clipboard-clearing behavior.
     #[test]
-    fn policy_lock_all_ends_the_clipboard_offer() {
+    fn lock_all_ends_the_clipboard_offer() {
         let (server, offers) = copy_server_two_dbs_tracking();
         let uuid = unlock_with_entry(&server, "personal");
         CopyEntry::copy(
@@ -1847,11 +1874,11 @@ mod tests {
         .expect("entry and field exist");
         let offer = offers.lock().unwrap()[0].clone();
 
-        policy::Locks::lock_all(&server);
+        server.lock_all();
 
         assert!(
             !offer.is_live(),
-            "policy::Locks::lock_all must end an outstanding clipboard offer"
+            "lock_all must end an outstanding clipboard offer"
         );
     }
 
@@ -1868,6 +1895,7 @@ mod tests {
             )
             .expect("valid config"),
             Paths::default(),
+            SleepDelay::new().0,
             backend,
         );
         allow_copy(&server);
@@ -2105,6 +2133,7 @@ mod tests {
             )
             .expect("valid config"),
             Paths::default(),
+            SleepDelay::new().0,
             backend,
             prompts,
         );
@@ -2377,6 +2406,7 @@ mod tests {
             )
             .expect("valid config"),
             Paths::default(),
+            SleepDelay::new().0,
             clip::WaylandBackend,
             prompts.clone(),
         );
@@ -2413,23 +2443,17 @@ mod tests {
         let (server, prompts) = prompt_server();
         prompts.push(Step::new(PromptOutcome::Cancelled));
 
-        policy::Locks::set_display_session(
-            &*server,
-            policy::DisplaySession::Locked {
-                id: SESSION.to_string(),
-                active: true,
-            },
-        );
+        server.set_display_session(DisplaySession::Locked {
+            id: SESSION.to_string(),
+            active: true,
+        });
         assert_eq!(unlock(&server, "personal"), Err(UnlockError::NoDisplay));
         assert!(prompts.shown().is_empty(), "a prompt ran behind the locker");
 
-        policy::Locks::set_display_session(
-            &*server,
-            policy::DisplaySession::Unlocked {
-                id: SESSION.to_string(),
-                active: true,
-            },
-        );
+        server.set_display_session(DisplaySession::Unlocked {
+            id: SESSION.to_string(),
+            active: true,
+        });
         assert_eq!(
             unlock(&server, "personal"),
             Err(UnlockError::PromptCancelled {
@@ -2447,13 +2471,10 @@ mod tests {
     fn no_prompt_is_raised_for_a_requester_outside_the_desktop() {
         let (server, prompts) = prompt_server();
         prompts.push(Step::new(PromptOutcome::Cancelled));
-        policy::Locks::set_display_session(
-            &*server,
-            policy::DisplaySession::Unlocked {
-                id: SESSION.to_string(),
-                active: true,
-            },
-        );
+        server.set_display_session(DisplaySession::Unlocked {
+            id: SESSION.to_string(),
+            active: true,
+        });
 
         assert_eq!(
             unlock_from(&server, "personal", &outside()),
@@ -2485,13 +2506,13 @@ mod tests {
         let (server, prompts) = prompt_server();
 
         for display_session in [
-            policy::DisplaySession::None,
-            policy::DisplaySession::Locked {
+            DisplaySession::None,
+            DisplaySession::Locked {
                 id: SESSION.to_string(),
                 active: true,
             },
         ] {
-            policy::Locks::set_display_session(&*server, display_session);
+            server.set_display_session(display_session);
             let result = Unlock::unlock(
                 &*server,
                 &UnlockRequest {
@@ -2515,11 +2536,210 @@ mod tests {
         );
     }
 
+    /// Two configured databases, both locked, and what the server tells its
+    /// sleep delay.
+    fn watched_server() -> (Server, std::sync::mpsc::Receiver<bool>) {
+        let (delay, requests) = SleepDelay::new();
+        let server = Server::new(
+            Config::parse(
+                "[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
+                 [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n",
+            )
+            .expect("valid config"),
+            Paths::default(),
+            delay,
+        );
+        (server, requests)
+    }
+
+    /// `unlock_directly`, then what an unlock tells the sleep delay.
+    fn unlock_and_tell(server: &Server, name: &str) {
+        unlock_directly(server, name);
+        server.sync_sleep_delay();
+    }
+
+    fn locked_session() -> DisplaySession {
+        DisplaySession::Locked {
+            id: SESSION.to_string(),
+            active: true,
+        }
+    }
+
+    fn unlocked_session() -> DisplaySession {
+        DisplaySession::Unlocked {
+            id: SESSION.to_string(),
+            active: true,
+        }
+    }
+
+    #[test]
+    fn a_lock_request_locks_everything() {
+        let (server, _requests) = watched_server();
+        unlock_directly(&server, "personal");
+        unlock_directly(&server, "work");
+
+        server.on_session_event(SessionEvent::LockRequested);
+
+        assert!(!server.any_unlocked());
+    }
+
+    /// A lock request is not a locked display session: a locker that only
+    /// sends the signal never reports the unlock (ASM-7).
+    #[test]
+    fn a_lock_request_does_not_mark_the_display_session_locked() {
+        let (server, _requests) = watched_server();
+        server.on_session_event(SessionEvent::Changed(unlocked_session()));
+
+        server.on_session_event(SessionEvent::LockRequested);
+
+        assert_eq!(server.display_session(), unlocked_session());
+    }
+
+    /// The display session is marked locked before anything is locked, so an
+    /// unlock starting in between can't raise a prompt behind the locker.
+    /// The slots mutex is held here, which keeps the lock waiting.
+    #[test]
+    fn a_locked_display_session_is_marked_before_everything_is_locked() {
+        let (server, _requests) = watched_server();
+        unlock_directly(&server, "personal");
+
+        thread::scope(|scope| {
+            let held = slots(&server.dbs);
+            let reacting = scope.spawn(|| {
+                server.on_session_event(SessionEvent::Changed(locked_session()));
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !server.display_session().is_locked() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the display session was never marked"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(held["personal"].db.is_some(), "marked before the lock");
+            drop(held);
+            reacting.join().expect("the reaction");
+        });
+
+        assert!(!server.any_unlocked());
+        assert_eq!(server.display_session(), locked_session());
+    }
+
+    #[test]
+    fn a_display_session_that_is_not_locked_is_recorded_and_locks_nothing() {
+        let (server, _requests) = watched_server();
+        unlock_directly(&server, "personal");
+        server.on_session_event(SessionEvent::Changed(locked_session()));
+        unlock_directly(&server, "personal");
+
+        server.on_session_event(SessionEvent::Changed(unlocked_session()));
+
+        assert_eq!(server.display_session(), unlocked_session());
+        assert!(server.any_unlocked());
+
+        server.on_session_event(SessionEvent::Changed(DisplaySession::None));
+
+        assert_eq!(server.display_session(), DisplaySession::None);
+        assert!(server.any_unlocked());
+    }
+
+    #[test]
+    fn a_lost_watch_forgets_the_display_session_and_locks_everything() {
+        let (server, _requests) = watched_server();
+        server.on_session_event(SessionEvent::Changed(unlocked_session()));
+        unlock_directly(&server, "personal");
+
+        server.on_session_event(SessionEvent::WatchLost);
+
+        assert_eq!(server.display_session(), DisplaySession::None);
+        assert!(!server.any_unlocked());
+    }
+
+    /// The delay is told after each change to what is unlocked, and holds
+    /// exactly while something is.
+    #[test]
+    fn the_sleep_delay_is_told_what_is_unlocked() {
+        let (server, requests) = watched_server();
+        unlock_and_tell(&server, "personal");
+        unlock_and_tell(&server, "work");
+        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [true, true]);
+
+        let lock = |db: &str| {
+            Lock::lock(
+                &server,
+                &LockRequest {
+                    db: Some(db.to_string()),
+                },
+            )
+            .expect("lock")
+        };
+        lock("personal");
+        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [true]);
+        lock("work");
+        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [false]);
+    }
+
+    #[test]
+    fn every_way_a_database_gets_locked_tells_the_sleep_delay() {
+        let (server, requests) = watched_server();
+
+        unlock_and_tell(&server, "personal");
+        Lock::lock(&server, &LockRequest { db: None }).expect("lock");
+        unlock_and_tell(&server, "personal");
+        server.on_session_event(SessionEvent::LockRequested);
+        unlock_and_tell(&server, "personal");
+        server.on_session_event(SessionEvent::WatchLost);
+        unlock_and_tell(&server, "personal");
+        assert_eq!(
+            server
+                .expire_idle(Instant::now() + Duration::from_secs(10_000))
+                .len(),
+            1
+        );
+
+        assert_eq!(
+            requests.try_iter().collect::<Vec<_>>(),
+            [true, false, true, false, true, false, true, false]
+        );
+    }
+
+    /// Everything is locked before the delay is released: releasing is what
+    /// lets the machine sleep. The slots mutex is held here, which keeps the
+    /// lock waiting, and nothing may be sent while it does.
+    #[test]
+    fn suspend_locks_before_the_sleep_delay_is_released() {
+        let (server, requests) = watched_server();
+        unlock_and_tell(&server, "personal");
+        assert_eq!(requests.try_recv(), Ok(true));
+
+        thread::scope(|scope| {
+            let held = slots(&server.dbs);
+            let reacting = scope.spawn(|| server.on_session_event(SessionEvent::Sleeping));
+            thread::sleep(Duration::from_millis(200));
+            assert!(held["personal"].db.is_some(), "still unlocked");
+            assert!(requests.try_recv().is_err(), "released before the lock");
+            drop(held);
+            reacting.join().expect("the reaction");
+        });
+
+        assert!(!server.any_unlocked());
+        assert_eq!(requests.try_recv(), Ok(false));
+    }
+
+    #[test]
+    fn suspend_with_nothing_unlocked_still_releases_the_delay() {
+        let (server, requests) = watched_server();
+
+        server.on_session_event(SessionEvent::Sleeping);
+
+        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [false]);
+    }
+
     #[test]
     fn lock_all_ends_a_prompt_in_flight() {
         let (server, prompts) = prompt_server();
         let locker = Arc::clone(&server);
-        prompts.push(typed().while_up(move || policy::Locks::lock_all(&*locker)));
+        prompts.push(typed().while_up(move || locker.lock_all()));
 
         assert_eq!(
             unlock(&server, "personal"),

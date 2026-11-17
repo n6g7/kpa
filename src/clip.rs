@@ -1,7 +1,6 @@
 //! The clipboard (`docs/plan.md` step 3, `docs/design.md` § Clipboard).
 //!
-//! Two layers, mirroring `policy.rs`'s split between [`policy::Policy`]
-//! (what to decide) and `watch_forever` (the real D-Bus backend):
+//! Two layers, a real backend and the part that decides:
 //!
 //! - [`Backend`] is the primitive a real clipboard gives us: the ability to
 //!   start serving a secret as an [`Offer`]. [`WaylandBackend`] implements
@@ -33,7 +32,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use zeroize::Zeroizing;
 
-use crate::policy::DisplaySession;
+use crate::session_watch::DisplaySession;
 use crate::wayland;
 pub use crate::wayland::Offer;
 
@@ -67,9 +66,8 @@ pub trait Backend: Send + Sync {
 /// Tracks the most recently started offer, so a later timeout can tell
 /// whether it's still the one to drop. Backend-agnostic: everything here is
 /// decided against [`Backend`] alone, which is what makes it
-/// testable with a fake backend (see `tests` below) the same way
-/// `policy::Policy` is tested against `Locks`/`SleepInhibitor` with no real
-/// D-Bus connection.
+/// testable with a fake backend (see `tests` below), with no Wayland
+/// connection.
 pub struct Clipboard {
     backend: Box<dyn Backend>,
     current: Mutex<Option<Arc<Offer>>>,
@@ -119,8 +117,8 @@ impl Clipboard {
     /// Ends whatever offer is current right now, unconditionally — unlike
     /// [`expire`](Self::expire), this isn't told which offer it means, so
     /// it ends the current one regardless of which `copy` started it.
-    /// Called on `lock` (`server.rs`'s `Lock`/`policy::Locks::lock_all`
-    /// impls and the idle timer): a database locking is exactly the
+    /// Called on `lock` (`server.rs`'s `Lock::lock` and `lock_all`
+    /// and the idle timer): a database locking is exactly the
     /// moment `docs/threat-model.md` G-6 ("lock clears what kpa owns")
     /// says a copied secret kpa still owns should stop being served. A
     /// `current` that is `None`, or already not live (already superseded
@@ -235,7 +233,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{Backend, Clipboard, ClipboardError, Offer};
-    use crate::policy::DisplaySession;
+    use crate::session_watch::DisplaySession;
 
     /// A backend whose offers have no Wayland connection at all.
     struct FakeBackend {

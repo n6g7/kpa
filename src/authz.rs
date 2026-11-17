@@ -21,8 +21,8 @@
 //! wasn't read to one that doesn't parse, counts as outside the desktop.
 
 use crate::authn::Requester;
-use crate::policy::DisplaySession;
 use crate::proto::{CopyError, UnlockError, UnlockRequest};
+use crate::session_watch::DisplaySession;
 
 /// Whether `requester` may talk to the daemon at all: only `owner`, the
 /// daemon's own user, may.

@@ -26,10 +26,10 @@ together freely, and the rest of the crate sees only the API it exports.
 - **Keep decisions pure; use a trait only for a real callback.** When a
   lower subsystem needs something from a higher one, first try to make it
   pure: data in, a decision out, and the caller does the I/O, as
-  `ssh_agent::policy::decide`, `policy::Policy` and `clip::Clipboard` do.
+  `ssh_agent::policy::decide` and `clip::Clipboard` do.
   When a callback can't be avoided, or a test needs a fake, the lower
   subsystem defines a trait for exactly what it needs, and the higher one
-  implements it (`policy::Locks`, `ssh_agent::agent::SshHost`). Don't add a trait with one implementation
+  implements it (`ssh_agent::agent::SshHost`). Don't add a trait with one implementation
   and no test using a second.
 
 ## Within a subsystem

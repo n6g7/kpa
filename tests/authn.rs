@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 
 use kpa::authn::Requester;
 use kpa::authz;
-use kpa::policy::DisplaySession;
+use kpa::session_watch::DisplaySession;
 
 #[test]
 fn a_local_client_is_classified_by_its_own_cgroup() {

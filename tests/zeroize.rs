@@ -31,6 +31,7 @@ use kpa::config::Config;
 use kpa::paths::Paths;
 use kpa::proto::{self, Op, Password, Request, UnlockRequest};
 use kpa::server::{self, Server};
+use kpa::session_watch::SleepDelay;
 use zeroize::Zeroizing;
 
 const PLAINTEXT: &[u8] = b"kpa-zeroize-canary-7c1e9a4f";
@@ -123,6 +124,7 @@ fn a_password_in_a_request_leaves_no_copy_in_freed_memory() {
     let daemon = Arc::new(Server::new(
         Config::parse("").expect("empty config"),
         Paths::default(),
+        SleepDelay::new().0,
     ));
     std::thread::spawn(move || server::serve(daemon, listener));
 

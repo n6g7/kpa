@@ -154,7 +154,7 @@ pub fn cgroup_on(on_desktop: bool, session: &str) -> String {
 /// raises the configured prompt wherever the tests run: a test runner is
 /// rarely in the display session. No logind watch runs, so nothing
 /// publishes the display session's state on its own: `with_config` and `with_requester_on`
-/// seed it as an active, unlocked session (`policy::Locks::set_display_session`),
+/// seed it as an active, unlocked session (`Server::set_display_session`),
 /// standing in for logind the same way `authn::assume_cgroup` stands in for the
 /// peer's cgroup, so `copy` passes its gate the way it always did before
 /// that gate existed. A test about the gate itself (a requester outside the desktop, or
@@ -198,16 +198,17 @@ impl InProcessDaemon {
             known_hosts: Some(dir.path().join("known_hosts")),
             ..kpa::paths::Paths::default()
         };
-        let server = Arc::new(kpa::server::Server::new(config, paths.clone()));
+        let server = Arc::new(kpa::server::Server::new(
+            config,
+            paths.clone(),
+            kpa::session_watch::SleepDelay::new().0,
+        ));
         let cgroup = cgroup_on(on_desktop, "test");
         kpa::authn::assume_cgroup(&socket, &cgroup);
-        kpa::policy::Locks::set_display_session(
-            &server,
-            kpa::policy::DisplaySession::Unlocked {
-                id: "test".to_string(),
-                active: true,
-            },
-        );
+        server.set_display_session(kpa::session_watch::DisplaySession::Unlocked {
+            id: "test".to_string(),
+            active: true,
+        });
         // Not `socket::bind_socket`: it sets the process-wide umask for the
         // bind, and a directory another test thread created meanwhile
         // would come out without its search bit.

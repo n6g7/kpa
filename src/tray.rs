@@ -371,6 +371,7 @@ fn build_menu(
 mod tests {
     use super::*;
     use crate::paths::Paths;
+    use crate::session_watch::SleepDelay;
 
     fn locked(name: &str) -> DatabaseStatus {
         DatabaseStatus {
@@ -415,6 +416,7 @@ mod tests {
             server: Arc::new(Server::new(
                 Config::parse("").expect("empty config is valid"),
                 Paths::default(),
+                SleepDelay::new().0,
             )),
             handle: None,
             last_error: None,
@@ -660,7 +662,7 @@ mod tests {
         let config = Config::parse("[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n")
             .expect("valid config");
         let item = TrayItem {
-            server: Arc::new(Server::new(config, Paths::default())),
+            server: Arc::new(Server::new(config, Paths::default(), SleepDelay::new().0)),
             handle: None,
             last_error: None,
         };
@@ -680,7 +682,7 @@ mod tests {
 
         let config = Config::parse("").expect("empty config is valid");
         let item = TrayItem {
-            server: Arc::new(Server::new(config, Paths::default())),
+            server: Arc::new(Server::new(config, Paths::default(), SleepDelay::new().0)),
             handle: None,
             last_error: Some(("personal".to_string(), "wrong_credentials")),
         };
@@ -702,6 +704,7 @@ mod tests {
             server: Arc::new(Server::new(
                 Config::parse("").expect("empty config is valid"),
                 Paths::default(),
+                SleepDelay::new().0,
             )),
             handle: None,
             last_error: None,
