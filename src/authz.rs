@@ -4,11 +4,11 @@
 //!
 //! There are two layers here, and a third policy elsewhere. The checks
 //! (`may_connect`, `on_desktop`, `may_prompt_on_screen`) are shared by both
-//! sockets. The `authorize_*` functions are kpa's own socket's policy, one
-//! per request type, built on the checks and returning what the request may
-//! use or the refusal it gets. The SSH agent's policy is
-//! `ssh_agent::policy`. `policy` is unrelated: it holds the auto-lock rules
-//! and the [`DisplaySession`] type.
+//! sockets. `authorize_copy` and `choose_unlock_prompt` are kpa's own
+//! socket's policy, one per request type, built on the checks and returning
+//! what the request may use or the refusal it gets. The SSH agent's policy is
+//! `ssh_agent::policy`. `session_watch` is unrelated: it reports what the
+//! OS says about the display session ([`DisplaySession`]).
 //!
 //! A requester holds facts read from its socket. Whether it runs on the
 //! desktop is not one of them: it depends on which session is the display
@@ -21,6 +21,7 @@
 //! wasn't read to one that doesn't parse, counts as outside the desktop.
 
 use crate::authn::Requester;
+use crate::prompt::PromptOn;
 use crate::proto::{CopyError, UnlockError, UnlockRequest};
 use crate::session_watch::DisplaySession;
 
@@ -64,20 +65,23 @@ pub fn authorize_copy<'s>(
     }
 }
 
-/// Whether `request` may go on to unlock: a request that carries its
-/// password needs no prompt, so it goes ahead from anywhere (that is how an
-/// unlock from outside the desktop is answered). One that needs a prompt
-/// may be answered only where a prompt may appear
-/// ([`may_prompt_on_screen`]), else it is `no_display`.
-pub fn authorize_unlock(
+/// The prompt, if any, that may ask for the password of an unlock: `None`
+/// for a request that carries its password, which needs no prompt and so
+/// goes ahead from anywhere (that is how an unlock from outside the desktop
+/// is answered). One that needs a prompt gets the screen where a prompt may
+/// appear ([`may_prompt_on_screen`]), else it is `no_display`.
+pub fn choose_unlock_prompt(
     request: &UnlockRequest,
     requester: &Requester,
     display_session: &DisplaySession,
-) -> Result<(), UnlockError> {
-    if request.password.is_none() && !may_prompt_on_screen(requester, display_session) {
-        return Err(UnlockError::NoDisplay);
+) -> Result<Option<PromptOn>, UnlockError> {
+    if request.password.is_some() {
+        Ok(None)
+    } else if may_prompt_on_screen(requester, display_session) {
+        Ok(Some(PromptOn::Screen))
+    } else {
+        Err(UnlockError::NoDisplay)
     }
-    Ok(())
 }
 
 /// Whether the requester's cgroup is the desktop of the logind session
@@ -324,19 +328,19 @@ mod tests {
         let (desktop, outside) = (requester(DESKTOP), requester(CRON));
         let asking = unlock_request(None);
         assert_eq!(
-            authorize_unlock(&asking, &desktop, &unlocked("3", true)),
-            Ok(())
+            choose_unlock_prompt(&asking, &desktop, &unlocked("3", true)),
+            Ok(Some(PromptOn::Screen))
         );
         assert_eq!(
-            authorize_unlock(&asking, &desktop, &locked("3")),
+            choose_unlock_prompt(&asking, &desktop, &locked("3")),
             Err(UnlockError::NoDisplay)
         );
         assert_eq!(
-            authorize_unlock(&asking, &outside, &unlocked("3", true)),
+            choose_unlock_prompt(&asking, &outside, &unlocked("3", true)),
             Err(UnlockError::NoDisplay)
         );
         assert_eq!(
-            authorize_unlock(&asking, &desktop, &DisplaySession::None),
+            choose_unlock_prompt(&asking, &desktop, &DisplaySession::None),
             Err(UnlockError::NoDisplay)
         );
     }
@@ -346,9 +350,12 @@ mod tests {
         let carrying = unlock_request(Some("hunter2"));
         let outside = requester(CRON);
         assert_eq!(
-            authorize_unlock(&carrying, &outside, &DisplaySession::None),
-            Ok(())
+            choose_unlock_prompt(&carrying, &outside, &DisplaySession::None),
+            Ok(None)
         );
-        assert_eq!(authorize_unlock(&carrying, &outside, &locked("3")), Ok(()));
+        assert_eq!(
+            choose_unlock_prompt(&carrying, &outside, &locked("3")),
+            Ok(None)
+        );
     }
 }

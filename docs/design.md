@@ -309,7 +309,7 @@ service (a cron job, a terminal server's shells), no display session at
 all, and any
 peer whose cgroup can't be read or parsed, including one that exited
 first. Whether the peer is on the desktop is logged at `debug` when the connection is accepted, and
-decides whether `unlock` may prompt on screen (`authz::authorize_unlock`) and
+decides whether `unlock` may prompt on screen (`authz::choose_unlock_prompt`) and
 which session `copy` may put on the clipboard of (`authz::authorize_copy`, § Clipboard). It decides where to ask, not
 who may ask: a same-uid process can start work in another cgroup.
 

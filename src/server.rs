@@ -38,7 +38,7 @@ use crate::io::ByteCounter;
 use crate::log;
 use crate::paths::Paths;
 use crate::prompt::{
-    self, CancelSource, ConfirmProgram, Prompt, PromptOutcome, PromptQueue, SecretProgram,
+    self, CancelSource, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue, SecretProgram,
 };
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
@@ -405,7 +405,7 @@ impl Server {
     /// Records the display session's state. Done before anything is locked
     /// for it, so an unlock that starts after the lock sees it and raises no
     /// prompt behind the locker.
-    pub fn set_display_session(&self, display_session: DisplaySession) {
+    fn set_display_session(&self, display_session: DisplaySession) {
         *self
             .display_session
             .lock()
@@ -515,19 +515,6 @@ impl Unlock for Server {
         request: &UnlockRequest,
         requester: &Requester,
     ) -> Result<String, UnlockError> {
-        self.unlock_db(request, requester)
-    }
-}
-
-impl Server {
-    /// The unlock `kpa unlock` and the tray's menu run, for `requester`.
-    /// Whether a prompt may appear for it is decided under the mutex
-    /// (`authz::authorize_unlock`).
-    fn unlock_db(
-        &self,
-        request: &UnlockRequest,
-        requester: &Requester,
-    ) -> Result<String, UnlockError> {
         let name = request.db.as_str();
         let db = || name.to_string();
 
@@ -544,7 +531,7 @@ impl Server {
         // How a lock ends this unlock: the token is cancelled by the next
         // `Slot::lock`, which kills the prompt and keeps what this opens
         // from being installed.
-        let cancel_token = {
+        let (cancel_token, prompt_on) = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
                 return Err(UnlockError::UnknownDb { db: db() });
@@ -555,19 +542,21 @@ impl Server {
             if slot.db.is_some() {
                 return Ok(db());
             }
-            // No prompt where nobody can answer it: from outside the
-            // desktop, or behind a locker. Read under the mutex: the policy
-            // marks the display session before its `lock_all` takes it, so either this
-            // sees the mark or that lock cancels the token taken below and
-            // ends the prompt. A request that carries its password needs no
-            // prompt, so it goes ahead from anywhere: that is how an
-            // unlock from outside the desktop is answered.
-            authz::authorize_unlock(request, requester, &self.display_session())?;
+            // Which prompt may ask for the password, if any: none where
+            // nobody can answer it (from outside the desktop, or behind a
+            // locker). Read under the mutex: `on_session_event` marks the
+            // display session before its `lock_all` takes it, so either
+            // this sees the mark and refuses, or that lock cancels the token
+            // taken below and ends the prompt. A request that carries its
+            // password needs no prompt, so it goes ahead from anywhere: that
+            // is how an unlock from outside the desktop is answered.
+            let prompt_on =
+                authz::choose_unlock_prompt(request, requester, &self.display_session())?;
             if slot.unlocking {
                 return Err(UnlockError::InProgress { db: db() });
             }
             slot.unlocking = true;
-            slot.lock_signal.token()
+            (slot.lock_signal.token(), prompt_on)
         };
         // Declared before `dbs` below, so it drops after that guard has
         // released the mutex — `UnlockingFlag::drop` takes it again.
@@ -577,12 +566,15 @@ impl Server {
         };
 
         let prompted;
-        let password = match &request.password {
+        let password = match prompt_on {
             // A request that carries a password never prompts. A wrong one
             // fails like a wrong one typed at the prompt, with no backoff:
             // any same-uid process can read the `.kdbx` and guess offline.
-            Some(password) => password.as_zeroizing(),
-            None => {
+            None => request
+                .password
+                .as_ref()
+                .map(|password| password.as_zeroizing()),
+            Some(PromptOn::Screen) => {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
                 prompted = match self
@@ -611,12 +603,12 @@ impl Server {
                         });
                     }
                 };
-                &prompted
+                Some(&prompted)
             }
         };
         // Empty means "no password" — the only way to reach a keyfile-only
         // database from a prompt that always asks.
-        let password = Some(password).filter(|password| !password.is_empty());
+        let password = password.filter(|password| !password.is_empty());
 
         // Note: a file with pathological KDF parameters can make this hang
         // indefinitely or abort the process — upstream in `keepass`, which
@@ -827,6 +819,14 @@ impl SshKeys for Server {
 
 impl CopyEntry for Server {
     fn copy(&self, request: &CopyRequest, requester: &Requester) -> Result<CopyOutcome, CopyError> {
+        // No secret reaches the clipboard where nobody can paste it from
+        // (`docs/headless.md` § 5). Checked first, before the freshness
+        // guard and the database lookup, so a refused caller gets
+        // `no_display` before anything else happens and learns nothing about
+        // the database names.
+        let display_session = self.display_session();
+        let clipboard_session = authz::authorize_copy(requester, &display_session)?;
+
         let name = request.db.as_str();
         let db = || name.to_string();
 
@@ -840,19 +840,11 @@ impl CopyEntry for Server {
         // which must not stall every other request behind it, the same
         // reasoning that keeps `unlock`'s prompt-and-KDF step outside the
         // mutex too.
-        let display_session = self.display_session();
-        let clipboard_session = authz::authorize_copy(requester, &display_session);
         let value = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
                 return Err(CopyError::UnknownDb { db: db() });
             };
-            // No secret reaches the clipboard where nobody can paste it
-            // from (`docs/headless.md` § 5) — checked here, same place
-            // `unlock` asks `authz::authorize_unlock`, and before the `Locked`
-            // check below so an outside caller learns no more than an
-            // unknown database does.
-            let session = clipboard_session?;
             let Some(database) = slot.db.as_ref() else {
                 return Err(CopyError::Locked { db: db() });
             };
@@ -863,7 +855,7 @@ impl CopyEntry for Server {
                     value,
                     vault::entry_title(database, request.uuid)
                         .unwrap_or_else(|| request.uuid.to_string()),
-                    session,
+                    clipboard_session,
                 ),
             }
         };

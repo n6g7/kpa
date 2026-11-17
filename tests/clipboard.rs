@@ -37,7 +37,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use common::InProcessDaemon;
-use kpa::session_watch::DisplaySession;
+use kpa::session_watch::{DisplaySession, SessionEvent};
 
 /// Held by each test that drives the live clipboard, for its whole run.
 static LIVE_CLIPBOARD: Mutex<()> = Mutex::new(());
@@ -88,10 +88,12 @@ fn display_session() -> Option<String> {
 /// A daemon like `start`'s, whose state names the real display session.
 fn start_on_the_display_session(config: &str, session: String) -> InProcessDaemon {
     let daemon = InProcessDaemon::start(config);
-    daemon.server.set_display_session(DisplaySession::Unlocked {
-        id: session,
-        active: true,
-    });
+    daemon
+        .server
+        .on_session_event(SessionEvent::Changed(DisplaySession::Unlocked {
+            id: session,
+            active: true,
+        }));
     daemon
 }
 
@@ -192,7 +194,9 @@ fn copy_from_the_desktop_is_refused_without_an_active_unlocked_display_session()
         DisplaySession::None,
     ];
     for display_session in cases {
-        daemon.server.set_display_session(display_session.clone());
+        daemon
+            .server
+            .on_session_event(SessionEvent::Changed(display_session.clone()));
         let copied = daemon.run(&[
             "copy",
             "personal",
