@@ -676,8 +676,8 @@ impl SshHost for Server {
         Some(result)
     }
 
-    fn may_prompt_on_screen(&self, requester: &Requester) -> bool {
-        authz::may_prompt_on_screen(requester, &self.display_session())
+    fn display_session(&self) -> DisplaySession {
+        Server::display_session(self)
     }
 }
 

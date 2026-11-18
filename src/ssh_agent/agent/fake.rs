@@ -11,13 +11,19 @@ use super::{SlotView, SshHost, SshSlot};
 use crate::authn::Requester;
 use crate::config::DatabaseConfig;
 use crate::prompt::CancelSource;
+use crate::session_watch::DisplaySession;
 
-/// A requester. Where it runs is the host's to say (`may_prompt_on_screen`), so the
-/// facts are none.
+/// The display session the fake host starts with.
+const SESSION: &str = "3";
+
+/// A requester on the desktop of the display session the fake host starts
+/// with, so prompts may appear for it.
 pub(super) fn requester() -> Requester {
     Requester {
         uid: 0,
-        cgroup: None,
+        cgroup: Some(format!(
+            "0::/user.slice/user-0.slice/session-{SESSION}.scope\n"
+        )),
         command: None,
     }
 }
@@ -40,11 +46,12 @@ impl FakeSlot {
 }
 
 /// Configured databases, each with its slot; at most the first one open.
-/// Prompts may appear unless [`FakeHost::without_prompts`] says otherwise.
+/// Prompts may appear for [`requester`] unless [`FakeHost::without_prompts`]
+/// says otherwise.
 pub(super) struct FakeHost {
     databases: Vec<DatabaseConfig>,
     slots: Mutex<HashMap<String, FakeSlot>>,
-    may_prompt_on_screen: bool,
+    display_session: DisplaySession,
     /// What `unlocked` opened the first database as, for reopening it.
     opened: Option<Database>,
     /// The first database's file has changed: the next freshness guard
@@ -70,7 +77,10 @@ impl FakeHost {
         FakeHost {
             databases,
             slots: Mutex::new(slots),
-            may_prompt_on_screen: true,
+            display_session: DisplaySession::Unlocked {
+                id: SESSION.to_string(),
+                active: true,
+            },
             opened: None,
             stale: AtomicBool::new(false),
         }
@@ -101,9 +111,9 @@ impl FakeHost {
         self.stale.store(true, Ordering::SeqCst);
     }
 
-    /// No prompt may appear, as outside the desktop.
+    /// No prompt may appear: there is no display session.
     pub(super) fn without_prompts(mut self) -> FakeHost {
-        self.may_prompt_on_screen = false;
+        self.display_session = DisplaySession::None;
         self
     }
 
@@ -149,7 +159,7 @@ impl SshHost for FakeHost {
         )))
     }
 
-    fn may_prompt_on_screen(&self, _: &Requester) -> bool {
-        self.may_prompt_on_screen
+    fn display_session(&self) -> DisplaySession {
+        self.display_session.clone()
     }
 }

@@ -6,9 +6,9 @@ use std::time::Instant;
 use keepass::Database;
 
 use super::SshSlot;
-use crate::authn::Requester;
 use crate::config::DatabaseConfig;
 use crate::prompt::{CancelSource, CancelToken};
+use crate::session_watch::DisplaySession;
 
 /// What the agent needs from the daemon that hosts it. The daemon
 /// implements it as a thin adapter over its database slots; the agent's
@@ -24,10 +24,11 @@ pub trait SshHost {
     /// `f` must not block.
     fn with_slot<R>(&self, db: &str, f: impl FnOnce(SlotView<'_>) -> R) -> Option<R>;
 
-    /// Whether a prompt may appear on screen for a connection from
-    /// `requester` (`docs/ssh-agent.md` § 6.8). Asked inside `with_slot`, so
-    /// the answer holds for the hold it is asked in.
-    fn may_prompt_on_screen(&self, requester: &Requester) -> bool;
+    /// The display session as it is now. The agent decides against it
+    /// (`authz`) whether a prompt may appear on screen for a requester
+    /// (`docs/ssh-agent.md` § 6.8), inside `with_slot`, so the answer holds
+    /// for the hold it is asked in.
+    fn display_session(&self) -> DisplaySession;
 }
 
 /// One database's slot as the agent sees it, while the host holds its

@@ -22,6 +22,7 @@ use ssh_key::{Fingerprint, HashAlg, PublicKey};
 
 use super::{Agent, SlotView, SshHost, identities, message, signer};
 use crate::authn::Requester;
+use crate::authz;
 use crate::log;
 use crate::output;
 use crate::prompt::{CancelToken, Declined};
@@ -176,7 +177,8 @@ impl<H: SshHost> Agent<H> {
             )
             .map_err(Refused::Policy)?;
             let missing = missing_approval(&slot, &need);
-            let may_prompt_on_screen = self.host.may_prompt_on_screen(requester);
+            let may_prompt_on_screen =
+                authz::may_prompt_on_screen(requester, &self.host.display_session());
             if let Some(refused) = refusal_before_prompting(missing, may_prompt_on_screen) {
                 return Err(refused);
             }
