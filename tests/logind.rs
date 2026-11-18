@@ -9,19 +9,19 @@ use std::io::{BufRead, BufReader, ErrorKind, Read};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 mod common;
 
+use kpa::authn::Requester;
 use kpa::config::Config;
-use kpa::origin::Origin;
 use kpa::paths::Paths;
-use kpa::policy::{self, Bus, DisplaySession, Locks};
 use kpa::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::server::Server;
+use kpa::session_watch::{self, Bus, DisplaySession, SessionEvent};
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::zvariant::{self, OwnedObjectPath, Value};
@@ -362,39 +362,65 @@ impl MockLogind {
     }
 }
 
-/// Records what the policy does to the databases.
+/// What the watcher reported, as a test sees it: events collected by a
+/// thread of their own.
 #[derive(Default)]
-struct Recorder {
-    unlocked: AtomicBool,
-    display_session: Mutex<DisplaySession>,
-    log: Mutex<Vec<&'static str>>,
+struct Observed {
+    events: Mutex<Vec<SessionEvent>>,
 }
 
-impl Locks for Recorder {
-    fn lock_all(&self) {
-        self.unlocked.store(false, Ordering::SeqCst);
-        self.log.lock().unwrap().push("lock");
-    }
-    fn any_unlocked(&self) -> bool {
-        self.unlocked.load(Ordering::SeqCst)
-    }
-    fn set_display_session(&self, display_session: DisplaySession) {
-        *self.display_session.lock().unwrap() = display_session;
-    }
+/// Collects `events` until the watcher is gone.
+fn observe(events: Receiver<SessionEvent>) -> Arc<Observed> {
+    let observed = Arc::new(Observed::default());
+    let collecting = observed.clone();
+    thread::spawn(move || {
+        for event in events {
+            collecting.events.lock().unwrap().push(event);
+        }
+    });
+    observed
 }
 
-impl Recorder {
+impl Observed {
+    /// The display session as the last report left it: no session after a
+    /// lost watch.
     fn display_session(&self) -> DisplaySession {
-        self.display_session.lock().unwrap().clone()
+        let events = self.events.lock().unwrap();
+        events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                SessionEvent::Changed(display_session) => Some(display_session.clone()),
+                SessionEvent::WatchLost => Some(DisplaySession::None),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
+    /// How many reports the server answers with a lock of everything.
     fn locks(&self) -> usize {
-        self.log
+        self.events
             .lock()
             .unwrap()
             .iter()
-            .filter(|e| **e == "lock")
+            .filter(|event| match event {
+                SessionEvent::Changed(display_session) => display_session.is_locked(),
+                _ => true,
+            })
             .count()
+    }
+
+    fn sleeps(&self) -> usize {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| **event == SessionEvent::Sleeping)
+            .count()
+    }
+
+    fn clear(&self) {
+        self.events.lock().unwrap().clear();
     }
 }
 
@@ -413,87 +439,111 @@ fn quiet() {
 }
 
 #[test]
-fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
+fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
     let mut bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let recorder = Arc::new(Recorder::default());
-    let events = policy::start(recorder.clone(), Bus::Address(bus.address.clone()));
+    let (events, delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let observed = observe(events);
 
     // Wait for the watcher to subscribe: a lock signal sent before that is
     // simply lost, so keep sending until one gets through.
-    eventually("the first lock signal to be acted on", || {
+    eventually("the first lock signal to be reported", || {
         mock.lock_signal(SESSION_1);
         thread::sleep(Duration::from_millis(50));
-        recorder.locks() > 0
+        observed.locks() > 0
     });
     quiet();
-    recorder.log.lock().unwrap().clear();
+    observed.clear();
 
-    // 1. A Lock signal on the display session locks.
+    // 1. A Lock signal on the display session is reported once.
     mock.lock_signal(SESSION_1);
-    eventually("a Lock signal to lock", || recorder.locks() == 1);
+    eventually("a Lock signal to be reported", || observed.locks() == 1);
     quiet();
-    assert_eq!(recorder.locks(), 1, "one Lock signal, one lock");
-    recorder.log.lock().unwrap().clear();
+    assert_eq!(observed.locks(), 1, "one Lock signal, one report");
+    observed.clear();
 
     assert!(
-        !recorder.display_session().is_locked(),
+        !observed.display_session().is_locked(),
         "a Lock signal alone doesn't mark the display session locked"
     );
 
-    // 2. LockedHint turning true locks and marks the display session locked; turning
-    //    false unmarks it and locks nothing.
+    // 2. LockedHint turning true is reported as a locked display session;
+    //    turning false as an unlocked one, which asks for no lock.
     mock.set_hint(SESSION_1, true);
-    eventually("LockedHint=true to lock", || recorder.locks() == 1);
-    assert!(recorder.display_session().is_locked());
+    eventually("LockedHint=true to be reported", || observed.locks() == 1);
+    assert!(observed.display_session().is_locked());
     mock.set_hint(SESSION_1, false);
-    eventually("LockedHint=false to unmark the display session", || {
-        !recorder.display_session().is_locked()
+    eventually("LockedHint=false to be reported", || {
+        !observed.display_session().is_locked()
     });
     quiet();
-    assert_eq!(recorder.locks(), 1, "LockedHint=false is not a lock");
-    recorder.log.lock().unwrap().clear();
+    assert_eq!(observed.locks(), 1, "LockedHint=false is not a lock");
+    observed.clear();
 
-    // 3. An unlock takes the inhibitor, once the server has reported it.
-    recorder.unlocked.store(true, Ordering::SeqCst);
-    events.send(policy::Event::Unlocked).unwrap();
+    // 3. Telling the delay that something is unlocked takes the inhibitor.
+    delay.hold_while(true);
     eventually("the sleep inhibitor to be taken", || {
         mock.inhibitor_count() == 1
     });
     assert!(!mock.last_inhibitor_released(), "held while unlocked");
 
-    // 4. PrepareForSleep(true) locks first, then releases the inhibitor.
+    // 4. PrepareForSleep(true) is reported, and releases nothing by
+    //    itself: the server locks first, then says nothing is unlocked.
     mock.prepare_for_sleep(true);
+    eventually("the suspend to be reported", || observed.sleeps() == 1);
+    quiet();
+    assert!(
+        !mock.last_inhibitor_released(),
+        "held until the server has locked"
+    );
+    delay.hold_while(false);
     eventually("the inhibitor to be released", || {
         mock.last_inhibitor_released()
     });
-    assert_eq!(recorder.locks(), 1, "locked before the release");
-    assert!(!recorder.any_unlocked());
 
-    // 5. Resume with nothing unlocked does not take the inhibitor again.
+    // 5. While the machine sleeps nothing is held, but an unlock that came
+    //    in the meantime holds at resume.
+    delay.hold_while(true);
+    quiet();
+    assert_eq!(mock.inhibitor_count(), 1, "no inhibitor while sleeping");
+    mock.prepare_for_sleep(false);
+    eventually("the inhibitor to be taken at resume", || {
+        mock.inhibitor_count() == 2
+    });
+    assert!(!mock.last_inhibitor_released());
+
+    // 6. Resume with nothing unlocked does not take the inhibitor again.
+    delay.hold_while(false);
+    eventually("the inhibitor to be released", || {
+        mock.last_inhibitor_released()
+    });
+    mock.prepare_for_sleep(true);
+    eventually("the second suspend to be reported", || {
+        observed.sleeps() == 2
+    });
     mock.prepare_for_sleep(false);
     quiet();
-    assert_eq!(mock.inhibitor_count(), 1, "no inhibitor without an unlock");
+    assert_eq!(mock.inhibitor_count(), 2, "no inhibitor without an unlock");
+    observed.clear();
 
-    // 6. A display change moves the watch: the old session is ignored,
-    //    the new one locks.
+    // 7. A display change moves the watch: the old session is ignored,
+    //    the new one is reported.
     mock.set_display(SESSION_2);
     quiet();
-    recorder.log.lock().unwrap().clear();
+    observed.clear();
     mock.lock_signal(SESSION_1);
     quiet();
-    assert_eq!(recorder.locks(), 0, "the old session's Lock is ignored");
+    assert_eq!(observed.locks(), 0, "the old session's Lock is ignored");
     mock.lock_signal(SESSION_2);
-    eventually("the new display session's Lock to lock", || {
-        recorder.locks() == 1
+    eventually("the new display session's Lock to be reported", || {
+        observed.locks() == 1
     });
-    recorder.log.lock().unwrap().clear();
+    observed.clear();
 
-    // 7. Losing the bus locks everything, since the watch can no longer
-    //    report the screen state.
-    recorder.unlocked.store(true, Ordering::SeqCst);
+    // 8. Losing the bus is reported, since the watch can no longer say
+    //    what the screen state is.
     bus.kill();
-    eventually("a lost bus to lock", || recorder.locks() == 1);
+    eventually("a lost bus to be reported", || observed.locks() == 1);
 }
 
 /// The display session's state as published to the server: its id
@@ -503,8 +553,8 @@ fn logind_triggers_lock_and_hold_the_sleep_inhibitor_over_a_bus() {
 fn the_display_session_state_follows_logind_over_a_bus() {
     let mut bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let recorder = Arc::new(Recorder::default());
-    let _events = policy::start(recorder.clone(), Bus::Address(bus.address.clone()));
+    let (events, _delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let recorder = observe(events);
 
     // 1. Subscribing reads the display session and its hint.
     eventually("the first display session state", || {
@@ -561,8 +611,8 @@ fn the_display_session_state_follows_logind_over_a_bus() {
 fn the_active_state_follows_logind_and_never_locks() {
     let bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let recorder = Arc::new(Recorder::default());
-    let _events = policy::start(recorder.clone(), Bus::Address(bus.address.clone()));
+    let (events, _delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let recorder = observe(events);
 
     // 1. Subscribing reads the session as active.
     eventually("the first display session state", || {
@@ -605,7 +655,7 @@ fn the_active_state_follows_logind_and_never_locks() {
     assert_eq!(recorder.locks(), 1, "LockedHint still locks while inactive");
 }
 
-/// The real server behind the policy: while the display session's
+/// The real server reacting to what the watcher reports: while the display session's
 /// `LockedHint` is true, an unlock raises no prompt; once it clears, the
 /// prompt runs and the fixture unlocks; and a `Lock` signal ends a prompt
 /// still open.
@@ -633,18 +683,26 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         common::password_db().display().to_string()
     ))
     .unwrap();
-    let server = Arc::new(Server::new(config, Paths::default()));
-    server.set_policy_events(policy::start(
-        server.clone(),
-        Bus::Address(bus.address.clone()),
-    ));
+    let (events, delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let server = Arc::new(Server::new(config, Paths::default(), delay));
+    let reacting = server.clone();
+    thread::spawn(move || {
+        for event in events {
+            reacting.on_session_event(event);
+        }
+    });
     let unlock = || {
         server.unlock(
             &UnlockRequest {
                 db: "personal".to_string(),
                 password: None,
             },
-            Origin::Desktop,
+            &Requester {
+                uid: kpa::authn::process_uid(),
+                // On the desktop of the mock's display session.
+                cgroup: Some(common::cgroup_on(true, "31")),
+                command: None,
+            },
         )
     };
     let refused = Err(UnlockError::NoDisplay);

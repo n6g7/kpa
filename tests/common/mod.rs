@@ -135,18 +135,29 @@ pub fn run_cli(socket: &Path, args: &[&str]) -> serde_json::Value {
         .unwrap_or_else(|err| panic!("could not decode response {text:?}: {err}"))
 }
 
+/// A cgroup on the desktop of the display session `session`, or in a
+/// system service when not `on_desktop`.
+pub fn cgroup_on(on_desktop: bool, session: &str) -> String {
+    let uid = kpa::authn::process_uid();
+    if on_desktop {
+        format!("0::/user.slice/user-{uid}.slice/session-{session}.scope\n")
+    } else {
+        "0::/system.slice/cron.service\n".to_string()
+    }
+}
+
 /// The daemon, run on threads of the test process rather than as a
 /// spawned `kpa serve`, and driven with the real `kpa` CLI over its socket.
 ///
 /// Every connection counts as coming from the desktop by default
-/// (`Server::assume_origin`; `with_origin` overrides it), so `unlock`
+/// (`authn::assume_cgroup`; `with_requester_on` overrides it), so `unlock`
 /// raises the configured prompt wherever the tests run: a test runner is
 /// rarely in the display session. No logind watch runs, so nothing
-/// publishes the display session's state on its own — `with_config` and `with_origin`
-/// seed it as an active, unlocked session (`policy::Locks::set_display_session`),
-/// standing in for logind the same way `assume_origin` stands in for the
+/// publishes the display session's state on its own: `with_config` and `with_requester_on`
+/// seed it as an active, unlocked session (`Server::on_session_event`),
+/// standing in for logind the same way `authn::assume_cgroup` stands in for the
 /// peer's cgroup, so `copy` passes its gate the way it always did before
-/// that gate existed. A test about the gate itself (an `Outside` origin, or
+/// that gate existed. A test about the gate itself (a requester outside the desktop, or
 /// a locked/inactive/absent display session) overrides either through `self.server`.
 /// No tray is started either. The daemon's threads run until the test
 /// binary exits.
@@ -157,6 +168,9 @@ pub fn run_cli(socket: &Path, args: &[&str]) -> serde_json::Value {
 /// stderr of its own.
 pub struct InProcessDaemon {
     pub socket: PathBuf,
+    /// The cgroup its connections are taken to have, on this socket and on
+    /// an agent socket a test starts (`kpa::authn::assume_cgroup`).
+    pub cgroup: String,
     pub server: Arc<kpa::server::Server>,
     /// The daemon's file locations: its SSH key cache and `known_hosts`
     /// live under its own tempdir, so a test never touches the real ones.
@@ -171,16 +185,12 @@ impl InProcessDaemon {
     }
 
     pub fn with_config(config: kpa::config::Config) -> InProcessDaemon {
-        InProcessDaemon::with_origin(config, kpa::origin::Origin::Desktop)
+        InProcessDaemon::with_requester_on(config, true)
     }
 
-    /// Like `with_config`, but classifies every connection as `origin`
-    /// instead of the default `Desktop` — for copy-gating tests that need
-    /// an `Outside` requester.
-    pub fn with_origin(
-        config: kpa::config::Config,
-        origin: kpa::origin::Origin,
-    ) -> InProcessDaemon {
+    /// Like `with_config`, but every connection runs on the desktop only if
+    /// `on_desktop`: for copy-gating tests that need a requester outside it.
+    pub fn with_requester_on(config: kpa::config::Config, on_desktop: bool) -> InProcessDaemon {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let socket = dir.path().join("sock");
         let paths = kpa::paths::Paths {
@@ -188,15 +198,19 @@ impl InProcessDaemon {
             known_hosts: Some(dir.path().join("known_hosts")),
             ..kpa::paths::Paths::default()
         };
-        let server = Arc::new(kpa::server::Server::new(config, paths.clone()));
-        server.assume_origin(origin);
-        kpa::policy::Locks::set_display_session(
-            &server,
-            kpa::policy::DisplaySession::Unlocked {
+        let server = Arc::new(kpa::server::Server::new(
+            config,
+            paths.clone(),
+            kpa::session_watch::SleepDelay::new().0,
+        ));
+        let cgroup = cgroup_on(on_desktop, "test");
+        kpa::authn::assume_cgroup(&socket, &cgroup);
+        server.on_session_event(kpa::session_watch::SessionEvent::Changed(
+            kpa::session_watch::DisplaySession::Unlocked {
                 id: "test".to_string(),
                 active: true,
             },
-        );
+        ));
         // Not `socket::bind_socket`: it sets the process-wide umask for the
         // bind, and a directory another test thread created meanwhile
         // would come out without its search bit.
@@ -206,6 +220,7 @@ impl InProcessDaemon {
         std::thread::spawn(move || kpa::server::serve(serving, listener));
         InProcessDaemon {
             socket,
+            cgroup,
             server,
             paths,
             _dir: dir,

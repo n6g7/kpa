@@ -21,8 +21,9 @@ use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg, PublicKey};
 
 use super::{Agent, SlotView, SshHost, identities, message, signer};
+use crate::authn::Requester;
+use crate::authz;
 use crate::log;
-use crate::origin::Origin;
 use crate::output;
 use crate::prompt::{CancelToken, Declined};
 use crate::ssh_agent::bind::ConnectionClass;
@@ -121,9 +122,9 @@ fn missing_approval<'n>(slot: &SlotView<'_>, need: &'n Need) -> Option<&'n Ask> 
 }
 
 /// Why a request is refused before anyone is asked, if it is: it lacks an
-/// approval, and no prompt may appear (`may_prompt`) to ask for it.
-fn refusal_before_prompting(missing: Option<&Ask>, may_prompt: bool) -> Option<Refused> {
-    (missing.is_some() && !may_prompt).then_some(Refused::NeedsApproval)
+/// approval, and no prompt may appear (`may_prompt_on_screen`) to ask for it.
+fn refusal_before_prompting(missing: Option<&Ask>, may_prompt_on_screen: bool) -> Option<Refused> {
+    (missing.is_some() && !may_prompt_on_screen).then_some(Refused::NeedsApproval)
 }
 
 impl<H: SshHost> Agent<H> {
@@ -134,7 +135,7 @@ impl<H: SshHost> Agent<H> {
         class: &ConnectionClass,
         sign: &SignRequest,
         login_session_id: Option<&[u8]>,
-        origin: Origin,
+        requester: &Requester,
     ) -> AgentResponse {
         let Some(request) = Request::parse(class, sign, login_session_id) else {
             return AgentResponse::Failure;
@@ -144,7 +145,7 @@ impl<H: SshHost> Agent<H> {
         else {
             return AgentResponse::Failure;
         };
-        let outcome = self.authorized_sign(&db, &request, origin);
+        let outcome = self.authorized_sign(&db, &request, requester);
         log_sign(&db, self.configured_name(&db, &request), &request, &outcome);
         match outcome {
             Ok(signature) => AgentResponse::SignResponse(signature),
@@ -159,7 +160,7 @@ impl<H: SshHost> Agent<H> {
         &self,
         db: &str,
         request: &Request<'_>,
-        origin: Origin,
+        requester: &Requester,
     ) -> Result<Vec<u8>, Refused> {
         if !signer::supported(request.key.key_data(), request.sign.flags) {
             return Err(Refused::Sha1Rsa);
@@ -176,8 +177,9 @@ impl<H: SshHost> Agent<H> {
             )
             .map_err(Refused::Policy)?;
             let missing = missing_approval(&slot, &need);
-            let may_prompt = self.host.may_prompt(origin);
-            if let Some(refused) = refusal_before_prompting(missing, may_prompt) {
+            let may_prompt_on_screen =
+                authz::may_prompt_on_screen(requester, &self.host.display_session());
+            if let Some(refused) = refusal_before_prompting(missing, may_prompt_on_screen) {
                 return Err(refused);
             }
             Ok((key, missing.cloned(), slot.cancel_token()))
@@ -325,7 +327,7 @@ mod tests {
     use ssh_key::{PrivateKey, Signature};
 
     use super::super::SshSlot;
-    use super::super::fake::FakeHost;
+    use super::super::fake::{FakeHost, requester};
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
     use crate::paths::Paths;
@@ -383,7 +385,7 @@ mod tests {
         key: &PrivateKey,
         class: &ConnectionClass,
     ) -> AgentResponse {
-        agent.sign(class, &request_with(key, 0), None, Origin::Desktop)
+        agent.sign(class, &request_with(key, 0), None, &requester())
     }
 
     fn sign(agent: &Agent<FakeHost>, key: &PrivateKey) -> AgentResponse {
@@ -394,7 +396,7 @@ mod tests {
     fn outcome(agent: &Agent<FakeHost>, key: &PrivateKey) -> Result<Vec<u8>, Refused> {
         let sign = request_with(key, 0);
         let request = Request::parse(&ConnectionClass::LocalUnbound, &sign, None).expect("parses");
-        agent.authorized_sign("personal", &request, Origin::Desktop)
+        agent.authorized_sign("personal", &request, &requester())
     }
 
     fn signed(response: &AgentResponse) -> bool {
@@ -616,7 +618,7 @@ mod tests {
 
         assert_eq!(
             agent
-                .ssh_identities(&ConnectionClass::LocalUnbound, Origin::Desktop)
+                .ssh_identities(&ConnectionClass::LocalUnbound, &requester())
                 .len(),
             1
         );
@@ -657,19 +659,14 @@ mod tests {
         let sha1 = request_with(&key, 0);
         let request = Request::parse(&unbound, &sha1, None).expect("parses");
         assert!(matches!(
-            agent.authorized_sign("personal", &request, Origin::Desktop),
+            agent.authorized_sign("personal", &request, &requester()),
             Err(Refused::Sha1Rsa)
         ));
         assert!(prompts.shown().is_empty());
 
         prompts.push(Step::allow());
         let sha512 = request_with(&key, 4);
-        assert!(signed(&agent.sign(
-            &unbound,
-            &sha512,
-            None,
-            Origin::Desktop
-        )));
+        assert!(signed(&agent.sign(&unbound, &sha512, None, &requester())));
     }
 
     /// The log line names a key by the name its config override gives it,
@@ -809,8 +806,8 @@ mod tests {
             Some(Refused::NeedsApproval)
         ));
         assert!(refusal_before_prompting(Some(&missing), true).is_none());
-        for may_prompt in [true, false] {
-            assert!(refusal_before_prompting(None, may_prompt).is_none());
+        for may_prompt_on_screen in [true, false] {
+            assert!(refusal_before_prompting(None, may_prompt_on_screen).is_none());
         }
     }
 }

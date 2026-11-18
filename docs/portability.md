@@ -53,14 +53,13 @@ covers:
 - a choice between backends at runtime, such as an unlock or approval
   prompt run as an external program, or a native one where the OS has it
   (Touch ID answers allow or deny, with no string and no child process);
-- a test double, such as `policy::Locks`, `clip::Backend`,
-  `origin::PeerOrigin` and `ssh_agent::SshHost`.
+- a test double, such as `clip::Backend` and
+  `ssh_agent::SshHost`.
 
 These traits often sit on an OS boundary already. Keep their method
 signatures OS-neutral, like any other interface.
 
-**Answers and events are kpa's own types.** `origin::Origin`
-(desktop or outside), `policy::Event` (screen locked, sleeping, the display
+**Answers and events are kpa's own types.** `session_watch::SessionEvent` (screen locked, sleeping, the display
 session's state) and `prompt::PromptOutcome<T>` (generic over the answer, so a prompt
 needn't return a string) are the pattern to follow.
 
@@ -72,10 +71,10 @@ interface's shape against, not as a plan.
 
 | Seam | Code | Linux | macOS counterpart | Keep the interface to |
 |---|---|---|---|---|
-| Socket peer identity | `socket.rs`, `origin.rs` | `SO_PEERCRED`, `SO_PEERPIDFD` | `getpeereid`, `LOCAL_PEERCRED`, `LOCAL_PEERPID` | a uid, and at most a pid. No pidfd. |
-| Request origin | `origin.rs` | the peer's cgroup, from `/proc` | no cgroups or `/proc` | `Origin`; every failure is `Outside`. |
+| Socket peer identity | `authn.rs` | `SO_PEERCRED`, `SO_PEERPIDFD` | `getpeereid`, `LOCAL_PEERCRED`, `LOCAL_PEERPID` | a uid, and at most a pid. No pidfd. |
+| Request origin | `authn.rs`, `authz.rs` | the peer's cgroup and command name (`comm`), from `/proc` | no cgroups or `/proc`; `proc_name` for the command name | `Requester`: the peer's uid, its cgroup text and its command name, read once at connect. `authz::on_desktop(&Requester, &DisplaySession)` is the one place the cgroup is judged, where every failure is outside the desktop. The command name is `None` on failure and only ever shown to the user. |
 | File locations | `paths.rs` (sockets, caches, `known_hosts`), `config.rs` (the config file) | `$XDG_RUNTIME_DIR`, `$XDG_CONFIG_HOME`, `$XDG_CACHE_HOME`, `$HOME` | `~/Library/…`, the per-user `$TMPDIR` | paths resolved in one helper per location, handed to callers as `Path`s. Socket paths stay under 104 bytes, macOS's `sun_path` limit. |
-| Lock triggers | `policy.rs` | logind over D-Bus: `Lock`, `LockedHint`, `PrepareForSleep`, a sleep inhibitor | screen-lock and sleep notifications | `policy::Event` and the `Locks` / `SleepInhibitor` traits. |
+| Lock triggers | `session_watch.rs` | logind over D-Bus: `Lock`, `LockedHint`, `PrepareForSleep`, a sleep inhibitor | screen-lock and sleep notifications | `session_watch::SessionEvent` and `SleepDelay`: the module reports events and holds the delay, and knows nothing about databases. |
 | Clipboard | `clip.rs`, `wayland/` | kpa's own Wayland client: data-control, serving each paste | `NSPasteboard` | "serve this secret, end it after the timeout, never clear anyone else's". |
 | Tray | `tray.rs` | StatusNotifierItem over D-Bus (`ksni`) | `NSStatusItem` | database states in, menu actions out. |
 | Prompts | `prompt/` | an external program per kind of prompt (`prompt/program.rs`) behind `prompt::Backend<T>`, ended through `prompt/cancel.rs`'s socket pair | another `Backend<T>` for a kind: the same program, or a native dialog, or Touch ID for an approval | `Prompt<T>`, one per kind, sharing one `PromptQueue`; `PromptOutcome<T>`; no assumption of a child process or a string answer; a `CancelToken` ends one. |
@@ -93,6 +92,6 @@ work next changes that code:
 
 - `clip::Backend::start` and `Clipboard::offer` take a logind session id
   and return `wayland::Offer`, which `clip.rs` re-exports.
-- `policy::DisplaySession::{Locked, Unlocked}` carry the display session's logind id,
+- `session_watch::DisplaySession::{Locked, Unlocked}` carry the display session's logind id,
   which the clipboard uses to find the compositor. Callers other than the
   clipboard must treat it as opaque.

@@ -4,17 +4,18 @@
 //! `use kpa::...` — a binary-only crate has nothing for them to link
 //! against. `main.rs` uses these same modules for the actual CLI.
 
+pub mod authn;
+pub mod authz;
 pub mod clip;
 pub mod config;
 mod io;
 pub mod log;
-pub mod origin;
 pub mod output;
 pub mod paths;
-pub mod policy;
 mod prompt;
 pub mod proto;
 pub mod server;
+pub mod session_watch;
 pub mod socket;
 pub mod ssh_agent;
 pub mod tray;

@@ -24,7 +24,6 @@ mod sign;
 mod signer;
 mod state;
 
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,7 +34,7 @@ use super::bind::ConnectionClass;
 use super::keys;
 use super::serve::SshSign;
 use super::wire::{AgentResponse, Identity, SignRequest};
-use crate::origin::{Origin, PeerOrigin};
+use crate::authn::Requester;
 use crate::paths::Paths;
 use crate::prompt::{Approval, Prompt};
 
@@ -64,14 +63,8 @@ impl<H: SshHost> Agent<H> {
     }
 }
 
-impl<H: SshHost> PeerOrigin for Agent<H> {
-    fn origin_of(&self, stream: &UnixStream, owner: u32) -> Origin {
-        self.host.origin_of(stream, owner)
-    }
-}
-
 impl<H: SshHost> SshSign for Agent<H> {
-    fn ssh_identities(&self, class: &ConnectionClass, _origin: Origin) -> Vec<Identity> {
+    fn ssh_identities(&self, class: &ConnectionClass, _requester: &Requester) -> Vec<Identity> {
         identities::identities(self.host.as_ref(), self.cache_dir.as_deref(), class)
     }
 
@@ -80,9 +73,9 @@ impl<H: SshHost> SshSign for Agent<H> {
         class: &ConnectionClass,
         request: &SignRequest,
         login_session_id: Option<&[u8]>,
-        origin: Origin,
+        requester: &Requester,
     ) -> AgentResponse {
-        self.sign(class, request, login_session_id, origin)
+        self.sign(class, request, login_session_id, requester)
     }
 }
 
@@ -90,7 +83,7 @@ impl<H: SshHost> SshSign for Agent<H> {
 mod tests {
     use std::time::Duration;
 
-    use super::fake::FakeHost;
+    use super::fake::{FakeHost, requester};
     use super::*;
     use crate::prompt::{PromptQueue, Scripted};
     use crate::ssh_agent::testing::{database, test_key};
@@ -117,7 +110,7 @@ mod tests {
 
         assert_eq!(
             agent
-                .ssh_identities(&ConnectionClass::LocalUnbound, Origin::Desktop)
+                .ssh_identities(&ConnectionClass::LocalUnbound, &requester())
                 .len(),
             1
         );

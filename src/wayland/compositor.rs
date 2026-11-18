@@ -12,7 +12,7 @@
 //! compositor at all. So the name is only a hint: it must be a bare socket
 //! name inside the daemon's own `$XDG_RUNTIME_DIR`, and the process
 //! listening on it must be the daemon's uid and run on the desktop, judged
-//! the same way a requester is (`origin`). The connection checked is the
+//! the same way a requester is (`authz::on_desktop`). The connection checked is the
 //! one the copy then uses, so nothing can swap the socket in between.
 
 use std::os::unix::net::UnixStream;
@@ -22,7 +22,9 @@ use zbus::blocking::Connection;
 use zbus::zvariant::OwnedValue;
 
 use super::Error;
-use crate::origin::{self, Origin};
+use crate::authn::Requester;
+use crate::authz;
+use crate::session_watch::DisplaySession;
 
 const SYSTEMD: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
@@ -31,9 +33,9 @@ const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 
 const DISPLAY_VAR: &str = "WAYLAND_DISPLAY=";
 
-/// Connects to the compositor of the display session `session` (its logind
-/// id), checked as this module's doc describes.
-pub fn connect(session: &str) -> Result<UnixStream, Error> {
+/// Connects to the compositor of `display_session`, checked as this
+/// module's doc describes.
+pub fn connect(display_session: &DisplaySession) -> Result<UnixStream, Error> {
     let environment = manager_environment()?;
     let name = socket_name(&environment)?;
     let path = runtime_dir()?.join(name);
@@ -42,7 +44,7 @@ pub fn connect(session: &str) -> Result<UnixStream, Error> {
             "couldn't connect to the compositor at {name}: {err}"
         ))
     })?;
-    check_listener(&stream, session)?;
+    check_listener(&stream, display_session)?;
     Ok(stream)
 }
 
@@ -94,18 +96,18 @@ fn runtime_dir() -> Result<PathBuf, Error> {
 }
 
 /// Refuses a socket whose listener isn't the daemon's uid, or isn't on the
-/// desktop. Like `origin`, this tells the desktop from outside it, not an
-/// honest process from a hostile one of the same uid (NG-1).
-fn check_listener(stream: &UnixStream, session: &str) -> Result<(), Error> {
-    let uid = rustix::process::getuid().as_raw();
-    let listener = crate::socket::peer_uid(stream)
+/// desktop. Like `authz`'s other decisions, this tells the desktop from
+/// outside it, not an honest process from a hostile one of the same uid
+/// (NG-1).
+fn check_listener(stream: &UnixStream, display_session: &DisplaySession) -> Result<(), Error> {
+    let listener = Requester::of(stream)
         .map_err(|err| Error(format!("couldn't identify the compositor: {err}")))?;
-    if listener != uid {
+    if !authz::may_connect(&listener, crate::authn::process_uid()) {
         return Err(Error(
             "the compositor's socket belongs to another user".to_string(),
         ));
     }
-    if origin::of_peer(stream, uid, Some(session)) != Origin::Desktop {
+    if !authz::on_desktop(&listener, display_session) {
         return Err(Error(
             "the compositor's socket isn't served from the desktop".to_string(),
         ));

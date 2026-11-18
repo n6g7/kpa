@@ -1,7 +1,6 @@
 //! [`FakeHost`]: an in-memory [`SshHost`] for this module's tests.
 
 use std::collections::HashMap;
-use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -9,9 +8,25 @@ use std::time::Instant;
 use keepass::Database;
 
 use super::{SlotView, SshHost, SshSlot};
+use crate::authn::Requester;
 use crate::config::DatabaseConfig;
-use crate::origin::{Origin, PeerOrigin};
 use crate::prompt::CancelSource;
+use crate::session_watch::DisplaySession;
+
+/// The display session the fake host starts with.
+const SESSION: &str = "3";
+
+/// A requester on the desktop of the display session the fake host starts
+/// with, so prompts may appear for it.
+pub(super) fn requester() -> Requester {
+    Requester {
+        uid: 0,
+        cgroup: Some(format!(
+            "0::/user.slice/user-0.slice/session-{SESSION}.scope\n"
+        )),
+        command: None,
+    }
+}
 
 /// One database's slot, as the daemon keeps it.
 struct FakeSlot {
@@ -31,11 +46,12 @@ impl FakeSlot {
 }
 
 /// Configured databases, each with its slot; at most the first one open.
-/// Prompts may appear unless [`FakeHost::without_prompts`] says otherwise.
+/// Prompts may appear for [`requester`] unless [`FakeHost::without_prompts`]
+/// says otherwise.
 pub(super) struct FakeHost {
     databases: Vec<DatabaseConfig>,
     slots: Mutex<HashMap<String, FakeSlot>>,
-    may_prompt: bool,
+    display_session: DisplaySession,
     /// What `unlocked` opened the first database as, for reopening it.
     opened: Option<Database>,
     /// The first database's file has changed: the next freshness guard
@@ -61,7 +77,10 @@ impl FakeHost {
         FakeHost {
             databases,
             slots: Mutex::new(slots),
-            may_prompt: true,
+            display_session: DisplaySession::Unlocked {
+                id: SESSION.to_string(),
+                active: true,
+            },
             opened: None,
             stale: AtomicBool::new(false),
         }
@@ -92,9 +111,9 @@ impl FakeHost {
         self.stale.store(true, Ordering::SeqCst);
     }
 
-    /// No prompt may appear, as outside the desktop.
+    /// No prompt may appear: there is no display session.
     pub(super) fn without_prompts(mut self) -> FakeHost {
-        self.may_prompt = false;
+        self.display_session = DisplaySession::None;
         self
     }
 
@@ -121,12 +140,6 @@ impl FakeHost {
     }
 }
 
-impl PeerOrigin for FakeHost {
-    fn origin_of(&self, _: &UnixStream, _: u32) -> Origin {
-        Origin::Desktop
-    }
-}
-
 impl SshHost for FakeHost {
     fn databases(&self) -> &[DatabaseConfig] {
         &self.databases
@@ -146,7 +159,7 @@ impl SshHost for FakeHost {
         )))
     }
 
-    fn may_prompt(&self, _: Origin) -> bool {
-        self.may_prompt
+    fn display_session(&self) -> DisplaySession {
+        self.display_session.clone()
     }
 }

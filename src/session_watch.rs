@@ -1,33 +1,30 @@
-//! Lock triggers from logind: screen lock and suspend (`docs/threat-model.md`
-//! T-8 and ASM-7, `docs/design.md` § Lock policy).
+//! The OS side of the lock triggers: what logind reports about the user's
+//! display session and about suspend, and the inhibitor that delays suspend
+//! (`docs/threat-model.md` T-8 and ASM-7, `docs/design.md` § Lock policy).
 //!
-//! Two halves, joined by one channel of [`Event`]s:
-//!
-//! - [`watch_forever`] owns a D-Bus connection to logind. It turns signals
-//!   and property changes into events: a `Lock` signal on the user's
-//!   display session, that session's `LockedHint` and `Active`,
-//!   `PrepareForSleep`, and a lost subscription.
-//! - [`Policy`] decides what to do with an event: lock, tell the server
-//!   the display session's state ([`DisplaySession`]), and hold or release a `delay` sleep
-//!   inhibitor. It sees only the [`Locks`] and
-//!   [`SleepInhibitor`] traits, so it can be tested with injected events and
-//!   no bus at all.
-//!
-//! The server reports successful unlocks on the same channel, so the
-//! inhibitor is taken as soon as something is unlocked.
+//! This module only reports; it knows nothing about databases or locking.
+//! [`start`] returns the [`SessionEvent`]s the daemon reacts to
+//! (`Server::on_session_event`) and a [`SleepDelay`] the daemon tells
+//! whether anything is unlocked. A watcher thread owns a D-Bus connection
+//! to logind and turns its signals and property changes into events: a
+//! `Lock` signal on the user's display session, that session's
+//! `LockedHint` and `Active`, `PrepareForSleep`, and a lost subscription.
+//! A second thread owns the `Inhibit` call and its file descriptor, so no
+//! request ever waits on D-Bus.
 //!
 //! This module needs systemd-logind reachable on the bus it's given
 //! (`Bus::System` in production), which means a systemd Linux host. It
 //! works unmodified on any such host. On a Linux host without systemd, or
 //! on a non-Linux platform such as macOS, there's no logind to connect
-//! to: [`watch_forever`] retries forever and [`LogindInhibitor::hold`]
-//! always fails, so screen-lock and suspend never produce an event and no
-//! inhibitor is ever held. None of that panics or stops the server —
-//! databases still lock on their own idle timer, the only trigger left.
+//! to: the watcher retries forever and the inhibitor never holds, so
+//! screen-lock and suspend never produce an event and no inhibitor is ever
+//! held. None of that panics or stops the server: databases still lock on
+//! their own idle timer, the only trigger left.
 
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -35,8 +32,6 @@ use std::time::Duration;
 use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Message;
 use zbus::zvariant::{self, OwnedObjectPath, OwnedValue};
-
-use crate::origin::Origin;
 
 const LOGIND: &str = "org.freedesktop.login1";
 const MANAGER_PATH: &str = "/org/freedesktop/login1";
@@ -56,27 +51,117 @@ const MATCH_RULES: [&str; 3] = [
 
 const RETRY_DELAY: Duration = Duration::from_secs(5);
 
-/// Something the lock policy reacts to.
+/// What the OS reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event {
+pub enum SessionEvent {
+    /// The display session is new, or its locked or active state changed.
+    /// Read on subscribing, whenever the display session changes, and on
+    /// each change of its `LockedHint` or `Active`.
+    Changed(DisplaySession),
     /// The display session's `Lock` signal. A locker that only sends this
-    /// never reports the unlock (ASM-7), so it locks without marking the
-    /// display session locked.
-    ScreenLocked,
-    /// The display session's state: read on subscribing, whenever the display session
-    /// changes, and on each change of its `LockedHint` or `Active`.
-    /// [`DisplaySession::Locked`] locks; `Active` never does (`DisplaySession`'s own doc
-    /// comment).
-    DisplaySession(DisplaySession),
-    /// logind's `PrepareForSleep`: `true` just before sleep, `false` on resume.
-    Sleeping(bool),
-    /// A database was unlocked; the inhibitor may need to be taken.
-    Unlocked,
-    /// A database was locked (explicitly, via the `lock` op); the
-    /// inhibitor may need to be released, if that was the last one.
-    Locked,
-    /// A subscription that had been working has dropped.
+    /// never reports the unlock (ASM-7), so it doesn't change the display
+    /// session's state.
+    LockRequested,
+    /// The machine is about to suspend.
+    Sleeping,
+    /// A subscription that had been working has dropped: the display
+    /// session's state is unknown until it is back.
     WatchLost,
+}
+
+/// Delays suspend while the daemon says something is unlocked, and never
+/// while the machine is going to sleep. [`SleepDelay::hold_while`] only
+/// sends a message; the thread that owns the `Inhibit` call acts on it.
+#[derive(Debug, Clone)]
+pub struct SleepDelay {
+    requests: Sender<bool>,
+    state: Arc<DelayState>,
+}
+
+/// What the watcher and the inhibitor thread share with the handles.
+#[derive(Debug, Default)]
+struct DelayState {
+    /// The last request: whether anything is unlocked.
+    wanted: AtomicBool,
+    /// Between `PrepareForSleep(true)` and `PrepareForSleep(false)`.
+    sleeping: AtomicBool,
+}
+
+impl SleepDelay {
+    /// A delay that sends its requests to the returned receiver, not to
+    /// logind: what [`start`] builds on, and what tests read.
+    pub fn new() -> (SleepDelay, Receiver<bool>) {
+        let (requests, receiver) = mpsc::channel();
+        let delay = SleepDelay {
+            requests,
+            state: Arc::new(DelayState::default()),
+        };
+        (delay, receiver)
+    }
+
+    /// Asks to delay suspend while `anything_unlocked`, and to let it go
+    /// when it isn't. The daemon says so after every change to what is
+    /// unlocked.
+    pub fn hold_while(&self, anything_unlocked: bool) {
+        self.state.wanted.store(anything_unlocked, Ordering::SeqCst);
+        let _ = self.requests.send(anything_unlocked);
+    }
+
+    /// `PrepareForSleep(true)`: requests to hold are ignored from now on.
+    /// Nothing is released here: the daemon locks first, then says nothing
+    /// is unlocked, and that releases it.
+    fn going_to_sleep(&self) {
+        self.state.sleeping.store(true, Ordering::SeqCst);
+    }
+
+    /// `PrepareForSleep(false)`: holds again if something was unlocked
+    /// while the machine slept.
+    fn resumed(&self) {
+        self.state.sleeping.store(false, Ordering::SeqCst);
+        let _ = self.requests.send(self.state.wanted.load(Ordering::SeqCst));
+    }
+
+    fn sleeping(&self) -> bool {
+        self.state.sleeping.load(Ordering::SeqCst)
+    }
+}
+
+/// What the inhibitor thread does about one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Inhibit {
+    Hold,
+    Release,
+    Keep,
+}
+
+/// What to do about a request that anything is `unlocked`, given whether
+/// the machine is `sleeping` and whether the inhibitor is `held`. Pure, so
+/// the gating can be tested without a bus.
+fn inhibit(unlocked: bool, sleeping: bool, held: bool) -> Inhibit {
+    match (unlocked && !sleeping, held) {
+        (true, false) => Inhibit::Hold,
+        (false, true) => Inhibit::Release,
+        _ => Inhibit::Keep,
+    }
+}
+
+/// Acts on each request until the [`SleepDelay`] is gone.
+fn inhibit_forever(requests: Receiver<bool>, delay: SleepDelay, mut inhibitor: LogindInhibitor) {
+    for unlocked in requests {
+        match inhibit(unlocked, delay.sleeping(), inhibitor.is_held()) {
+            Inhibit::Hold => match inhibitor.hold() {
+                Ok(()) => crate::log::debug(format_args!("holding sleep inhibitor")),
+                Err(err) => {
+                    crate::log::warn(format_args!("could not hold a sleep inhibitor: {err}"))
+                }
+            },
+            Inhibit::Release => {
+                inhibitor.release();
+                crate::log::debug(format_args!("released sleep inhibitor"));
+            }
+            Inhibit::Keep => {}
+        }
+    }
 }
 
 /// The user's display session, as the logind watch last saw it
@@ -85,10 +170,10 @@ pub enum Event {
 /// Only `LockedHint` makes the display session locked. A locker that only sends the
 /// `Lock` signal never reports the unlock (ASM-7), so its display session stays
 /// [`DisplaySession::Unlocked`]. `active` is a separate fact, carried alongside
-/// `LockedHint` for [`may_copy`](DisplaySession::may_copy) alone: counting an
+/// `LockedHint` for `authz::authorize_copy` alone: counting an
 /// inactive session (one a VT switch moved away from) as locked would make
 /// kpa lock the vault just for that, so `active` never touches
-/// [`is_locked`](DisplaySession::is_locked) or [`may_prompt`](DisplaySession::may_prompt).
+/// [`is_locked`](DisplaySession::is_locked) or `authz::may_prompt_on_screen`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DisplaySession {
     /// No display session (`User.Display` is `/`), or no working logind
@@ -153,138 +238,6 @@ impl DisplaySession {
             DisplaySession::Locked { id, .. } | DisplaySession::Unlocked { id, .. } => Some(id),
         }
     }
-
-    /// Whether an unlock from `origin` may raise the graphical prompt: only
-    /// for a requester on the desktop, and not while the display session is known to
-    /// be locked (`docs/headless.md` § 2). Anything else gets `no_display`.
-    /// Never reads `active` — see this type's own doc comment.
-    pub fn may_prompt(&self, origin: Origin) -> bool {
-        origin == Origin::Desktop && !self.is_locked()
-    }
-
-    /// Whether a `copy` from `origin` may reach the clipboard: only for a
-    /// requester on the desktop, with the display session active and
-    /// `LockedHint` false (`docs/headless.md` § 5). Anything else —
-    /// outside the desktop, no session, inactive, or locked — gets
-    /// `no_display`, and the clipboard is never touched.
-    pub fn may_copy(&self, origin: Origin) -> bool {
-        origin == Origin::Desktop && matches!(self, DisplaySession::Unlocked { active: true, .. })
-    }
-}
-
-/// What the policy can do to the databases.
-pub trait Locks: Send + Sync {
-    /// Lock every database. Must return before the inhibitor is released.
-    fn lock_all(&self);
-    /// Whether any database is currently unlocked.
-    fn any_unlocked(&self) -> bool;
-    /// The display session's latest state. No prompt is raised while it is locked.
-    fn set_display_session(&self, display_session: DisplaySession);
-}
-
-impl<T: Locks + ?Sized> Locks for Arc<T> {
-    fn lock_all(&self) {
-        (**self).lock_all();
-    }
-    fn any_unlocked(&self) -> bool {
-        (**self).any_unlocked()
-    }
-    fn set_display_session(&self, display_session: DisplaySession) {
-        (**self).set_display_session(display_session);
-    }
-}
-
-/// A `delay` sleep inhibitor: while held, logind waits (up to
-/// `InhibitDelayMaxUSec`) before suspending.
-pub trait SleepInhibitor: Send {
-    fn hold(&mut self) -> Result<(), String>;
-    fn release(&mut self);
-    fn is_held(&self) -> bool;
-}
-
-/// The policy state. Holds the inhibitor exactly when something is unlocked
-/// and the machine is not in the middle of sleeping.
-pub struct Policy<L, I> {
-    locks: L,
-    inhibitor: I,
-    sleeping: bool,
-}
-
-impl<L: Locks, I: SleepInhibitor> Policy<L, I> {
-    pub fn new(locks: L, inhibitor: I) -> Self {
-        Policy {
-            locks,
-            inhibitor,
-            sleeping: false,
-        }
-    }
-
-    pub fn handle(&mut self, event: Event) {
-        match event {
-            Event::ScreenLocked => {
-                self.locks.lock_all();
-                crate::log::info(format_args!("locked all databases (screen lock)"));
-            }
-            Event::DisplaySession(display_session) if display_session.is_locked() => {
-                // Marked first, so an unlock that starts after `lock_all`
-                // can't raise a prompt behind the locker.
-                self.locks.set_display_session(display_session);
-                self.locks.lock_all();
-                crate::log::info(format_args!("locked all databases (screen lock)"));
-            }
-            Event::DisplaySession(display_session) => {
-                self.locks.set_display_session(display_session)
-            }
-            Event::WatchLost => {
-                // The display session's state is unknown until the watch is back.
-                self.locks.set_display_session(DisplaySession::None);
-                self.locks.lock_all();
-                crate::log::warn(format_args!(
-                    "locked all databases (logind subscription lost)"
-                ));
-            }
-            Event::Sleeping(true) => {
-                // Lock first, release second: releasing is what lets the
-                // machine sleep, so the lock must be complete by then.
-                self.sleeping = true;
-                self.locks.lock_all();
-                self.inhibitor.release();
-                crate::log::info(format_args!("locked all databases (suspending)"));
-            }
-            Event::Sleeping(false) => self.sleeping = false,
-            // Both just change what's unlocked; `reconcile` below, run
-            // unconditionally, is what reads that and takes or releases
-            // the inhibitor.
-            Event::Unlocked | Event::Locked => {}
-        }
-        self.reconcile();
-    }
-
-    /// Take or release the inhibitor so that it is held exactly while
-    /// something is unlocked (and not sleeping). Reads the current state
-    /// rather than trusting the event, so an event that raced an unlock
-    /// still ends in the right state.
-    fn reconcile(&mut self) {
-        let want = !self.sleeping && self.locks.any_unlocked();
-        if want && !self.inhibitor.is_held() {
-            match self.inhibitor.hold() {
-                Ok(()) => crate::log::debug(format_args!("holding sleep inhibitor")),
-                Err(err) => {
-                    crate::log::warn(format_args!("could not hold a sleep inhibitor: {err}"))
-                }
-            }
-        } else if !want && self.inhibitor.is_held() {
-            self.inhibitor.release();
-            crate::log::debug(format_args!("released sleep inhibitor"));
-        }
-    }
-}
-
-/// Handle events until every sender is gone.
-pub fn run<L: Locks, I: SleepInhibitor>(events: Receiver<Event>, mut policy: Policy<L, I>) {
-    for event in events {
-        policy.handle(event);
-    }
 }
 
 /// Where logind is: the system bus in production, a private bus in tests.
@@ -305,34 +258,36 @@ impl Bus {
     }
 }
 
-/// Start the policy thread and the logind watcher. Returns the sender the
-/// server uses to report unlocks.
-pub fn start<L: Locks + 'static>(locks: L, bus: Bus) -> Sender<Event> {
-    let (tx, rx) = mpsc::channel();
-    let inhibitor = LogindInhibitor::new(bus.clone());
-    let policy = Policy::new(locks, inhibitor);
-    thread::spawn(move || run(rx, policy));
+/// Start the logind watcher and the inhibitor thread. The events are what
+/// the watcher reports; the delay is what the daemon tells about unlocks.
+pub fn start(bus: Bus) -> (Receiver<SessionEvent>, SleepDelay) {
+    let (events, session_events) = mpsc::channel();
+    let (delay, requests) = SleepDelay::new();
 
-    let watch_tx = tx.clone();
-    let uid = rustix::process::getuid().as_raw();
-    thread::spawn(move || watch_forever(&bus, uid, &watch_tx));
-    tx
+    let inhibitor = LogindInhibitor::new(bus.clone());
+    let inhibiting = delay.clone();
+    thread::spawn(move || inhibit_forever(requests, inhibiting, inhibitor));
+
+    let watching = delay.clone();
+    let uid = crate::authn::process_uid();
+    thread::spawn(move || watch_forever(&bus, uid, &events, &watching));
+    (session_events, delay)
 }
 
 /// Keep a watch on logind for the life of the process. A subscription that
 /// drops after working locks everything (the lock can't be confirmed to
 /// have been sent) and is re-established with backoff. A first failure is
 /// only logged: nothing can be unlocked before the first subscription.
-fn watch_forever(bus: &Bus, uid: u32, events: &Sender<Event>) {
+fn watch_forever(bus: &Bus, uid: u32, events: &Sender<SessionEvent>, delay: &SleepDelay) {
     let mut last_error: Option<String> = None;
     loop {
         let mut subscribed = false;
         let error = match bus.connect() {
-            Ok(conn) => watch(&conn, uid, events, &mut subscribed),
+            Ok(conn) => watch(&conn, uid, events, delay, &mut subscribed),
             Err(err) => err.to_string(),
         };
         if subscribed {
-            let _ = events.send(Event::WatchLost);
+            let _ = events.send(SessionEvent::WatchLost);
         }
         if last_error.as_deref() != Some(error.as_str()) {
             crate::log::warn(format_args!("logind watch: {error}; retrying"));
@@ -344,7 +299,13 @@ fn watch_forever(bus: &Bus, uid: u32, events: &Sender<Event>) {
 
 /// Subscribe and forward events until the connection fails. Always returns
 /// an error: a watch doesn't end on purpose.
-fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut bool) -> String {
+fn watch(
+    conn: &Connection,
+    uid: u32,
+    events: &Sender<SessionEvent>,
+    delay: &SleepDelay,
+    subscribed: &mut bool,
+) -> String {
     // Created before the match rules are added, so nothing sent after the
     // subscription is missed.
     let messages = MessageIterator::from(conn);
@@ -376,7 +337,7 @@ fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut b
         Ok(display_session) => display_session,
         Err(err) => return err,
     };
-    let _ = events.send(Event::DisplaySession(current.clone()));
+    let _ = events.send(SessionEvent::Changed(current.clone()));
 
     for message in messages {
         let message = match message {
@@ -384,24 +345,32 @@ fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut b
             Err(err) => return err.to_string(),
         };
         match interpret(&message, user.as_str(), session.as_ref()) {
-            Step::Event(event) => {
-                let _ = events.send(event);
+            Step::LockRequested => {
+                let _ = events.send(SessionEvent::LockRequested);
             }
+            Step::Sleeping(true) => {
+                // Marked before it is reported, so nothing taken after the
+                // report holds the machine awake; the delay itself is
+                // released by the server once it has locked.
+                delay.going_to_sleep();
+                let _ = events.send(SessionEvent::Sleeping);
+            }
+            Step::Sleeping(false) => delay.resumed(),
             Step::DisplayChanged(display) => {
                 session = display;
                 current = match display_session(conn, session.as_ref()) {
                     Ok(display_session) => display_session,
                     Err(err) => return err,
                 };
-                let _ = events.send(Event::DisplaySession(current.clone()));
+                let _ = events.send(SessionEvent::Changed(current.clone()));
             }
             Step::Property(Property::Locked(locked)) => {
                 current = current.with_locked(locked);
-                let _ = events.send(Event::DisplaySession(current.clone()));
+                let _ = events.send(SessionEvent::Changed(current.clone()));
             }
             Step::Property(Property::Active(active)) => {
                 current = current.with_active(active);
-                let _ = events.send(Event::DisplaySession(current.clone()));
+                let _ = events.send(SessionEvent::Changed(current.clone()));
             }
             Step::Ignore => {}
         }
@@ -420,7 +389,10 @@ struct LogindSession {
 /// What one incoming message means to the watcher.
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
-    Event(Event),
+    /// The display session's `Lock` signal.
+    LockRequested,
+    /// `PrepareForSleep`: `true` just before sleep, `false` on resume.
+    Sleeping(bool),
     /// The user's display session changed to this one (`None`: no display
     /// session any more).
     DisplayChanged(Option<LogindSession>),
@@ -452,10 +424,10 @@ fn interpret(message: &Message, user: &str, session: Option<&LogindSession>) -> 
 
     match (interface.as_str(), member.as_str()) {
         (MANAGER_IFACE, "PrepareForSleep") => match message.body().deserialize::<bool>() {
-            Ok(starting) => Step::Event(Event::Sleeping(starting)),
+            Ok(starting) => Step::Sleeping(starting),
             Err(_) => Step::Ignore,
         },
-        (SESSION_IFACE, "Lock") if on_session => Step::Event(Event::ScreenLocked),
+        (SESSION_IFACE, "Lock") if on_session => Step::LockRequested,
         (PROPERTIES_IFACE, "PropertiesChanged") => {
             let Ok((changed_iface, changed, _)) =
                 message
@@ -571,23 +543,21 @@ fn get_property(
 
 /// Holds a `delay` inhibitor through logind's `Manager.Inhibit`. Dropping
 /// the returned fd releases it.
-pub struct LogindInhibitor {
+struct LogindInhibitor {
     bus: Bus,
     conn: Option<Connection>,
     fd: Option<OwnedFd>,
 }
 
 impl LogindInhibitor {
-    pub fn new(bus: Bus) -> Self {
+    fn new(bus: Bus) -> Self {
         LogindInhibitor {
             bus,
             conn: None,
             fd: None,
         }
     }
-}
 
-impl SleepInhibitor for LogindInhibitor {
     fn hold(&mut self) -> Result<(), String> {
         if self.fd.is_some() {
             return Ok(());
@@ -624,121 +594,7 @@ impl SleepInhibitor for LogindInhibitor {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use super::*;
-
-    /// Records calls into a shared log so tests can check ordering.
-    struct FakeLocks {
-        unlocked: AtomicBool,
-        display_session: Mutex<DisplaySession>,
-        log: Arc<Mutex<Vec<&'static str>>>,
-    }
-
-    impl FakeLocks {
-        fn display_session(&self) -> DisplaySession {
-            self.display_session.lock().unwrap().clone()
-        }
-    }
-
-    impl Locks for FakeLocks {
-        fn lock_all(&self) {
-            self.unlocked.store(false, Ordering::SeqCst);
-            self.log.lock().unwrap().push("lock");
-        }
-        fn any_unlocked(&self) -> bool {
-            self.unlocked.load(Ordering::SeqCst)
-        }
-        fn set_display_session(&self, display_session: DisplaySession) {
-            self.log.lock().unwrap().push(match display_session {
-                DisplaySession::None => "no display session",
-                DisplaySession::Locked { .. } => "display session locked",
-                DisplaySession::Unlocked { .. } => "display session unlocked",
-            });
-            *self.display_session.lock().unwrap() = display_session;
-        }
-    }
-
-    struct FakeInhibitor {
-        held: bool,
-        log: Arc<Mutex<Vec<&'static str>>>,
-    }
-
-    impl SleepInhibitor for FakeInhibitor {
-        fn hold(&mut self) -> Result<(), String> {
-            self.held = true;
-            self.log.lock().unwrap().push("hold");
-            Ok(())
-        }
-        fn release(&mut self) {
-            if self.held {
-                self.held = false;
-                self.log.lock().unwrap().push("release");
-            }
-        }
-        fn is_held(&self) -> bool {
-            self.held
-        }
-    }
-
-    struct Harness {
-        policy: Policy<Arc<FakeLocks>, FakeInhibitor>,
-        locks: Arc<FakeLocks>,
-        log: Arc<Mutex<Vec<&'static str>>>,
-    }
-
-    impl Harness {
-        fn new() -> Self {
-            let log = Arc::new(Mutex::new(Vec::new()));
-            let locks = Arc::new(FakeLocks {
-                unlocked: AtomicBool::new(false),
-                display_session: Mutex::new(DisplaySession::None),
-                log: log.clone(),
-            });
-            let inhibitor = FakeInhibitor {
-                held: false,
-                log: log.clone(),
-            };
-            Harness {
-                policy: Policy::new(locks.clone(), inhibitor),
-                locks,
-                log,
-            }
-        }
-
-        /// Simulate a successful unlock, then the server's notification.
-        fn unlock(&mut self) {
-            self.locks.unlocked.store(true, Ordering::SeqCst);
-            self.policy.handle(Event::Unlocked);
-        }
-
-        /// Simulate an explicit `lock` (of the last unlocked database),
-        /// then the server's notification. Unlike `ScreenLocked` or
-        /// `WatchLost`, this doesn't go through `Locks::lock_all` — the
-        /// server already locked the one database itself.
-        fn lock(&mut self) {
-            self.locks.unlocked.store(false, Ordering::SeqCst);
-            self.policy.handle(Event::Locked);
-        }
-
-        fn log(&self) -> Vec<&'static str> {
-            self.log.lock().unwrap().clone()
-        }
-
-        fn held(&self) -> bool {
-            self.policy.inhibitor.is_held()
-        }
-    }
-
-    #[test]
-    fn a_screen_lock_locks_everything() {
-        let mut h = Harness::new();
-        h.unlock();
-        h.policy.handle(Event::ScreenLocked);
-        assert!(!h.locks.any_unlocked());
-        assert!(!h.held());
-    }
 
     /// A locked display session, active unless `active` says otherwise.
     fn locked_display_session() -> DisplaySession {
@@ -763,96 +619,6 @@ mod tests {
             id: "31".to_string(),
             active: false,
         }
-    }
-
-    /// The display session is marked locked before anything is locked, so an unlock
-    /// starting in between can't raise a prompt behind the locker.
-    #[test]
-    fn a_locked_hint_marks_the_display_session_locked_then_locks_everything() {
-        let mut h = Harness::new();
-        h.unlock();
-        h.policy
-            .handle(Event::DisplaySession(locked_display_session()));
-        assert!(!h.locks.any_unlocked());
-        assert_eq!(h.locks.display_session(), locked_display_session());
-        assert_eq!(
-            h.log(),
-            vec!["hold", "display session locked", "lock", "release"]
-        );
-    }
-
-    #[test]
-    fn a_cleared_locked_hint_unmarks_the_display_session_and_locks_nothing() {
-        let mut h = Harness::new();
-        h.policy
-            .handle(Event::DisplaySession(locked_display_session()));
-        h.unlock();
-        h.policy
-            .handle(Event::DisplaySession(unlocked_display_session()));
-        assert_eq!(h.locks.display_session(), unlocked_display_session());
-        assert!(h.locks.any_unlocked());
-    }
-
-    #[test]
-    fn no_display_session_is_published_and_locks_nothing() {
-        let mut h = Harness::new();
-        h.policy
-            .handle(Event::DisplaySession(unlocked_display_session()));
-        h.unlock();
-        h.policy.handle(Event::DisplaySession(DisplaySession::None));
-        assert_eq!(h.locks.display_session(), DisplaySession::None);
-        assert!(h.locks.any_unlocked());
-    }
-
-    /// A locker that only sends `Lock` never reports the unlock, so the
-    /// signal alone must not leave the display session marked locked.
-    #[test]
-    fn a_lock_signal_does_not_mark_the_display_session_locked() {
-        let mut h = Harness::new();
-        h.policy
-            .handle(Event::DisplaySession(unlocked_display_session()));
-        h.policy.handle(Event::ScreenLocked);
-        assert_eq!(h.locks.display_session(), unlocked_display_session());
-    }
-
-    #[test]
-    fn a_lost_subscription_forgets_the_display_session_state() {
-        let mut h = Harness::new();
-        h.policy
-            .handle(Event::DisplaySession(locked_display_session()));
-        h.policy.handle(Event::WatchLost);
-        assert_eq!(h.locks.display_session(), DisplaySession::None);
-    }
-
-    #[test]
-    fn only_a_requester_on_the_desktop_may_prompt_and_not_while_locked() {
-        assert!(unlocked_display_session().may_prompt(Origin::Desktop));
-        assert!(!locked_display_session().may_prompt(Origin::Desktop));
-        assert!(!unlocked_display_session().may_prompt(Origin::Outside));
-        assert!(!locked_display_session().may_prompt(Origin::Outside));
-        assert!(!DisplaySession::None.may_prompt(Origin::Outside));
-    }
-
-    /// `may_prompt` never reads `active` — an inactive display session (a VT switch)
-    /// is treated exactly like an active one for prompting.
-    #[test]
-    fn may_prompt_ignores_whether_the_display_session_is_active() {
-        assert!(inactive_unlocked_display_session().may_prompt(Origin::Desktop));
-    }
-
-    /// `docs/headless.md` § 5: `copy` needs a desktop requester, an active
-    /// display session, and `LockedHint` false — every other combination
-    /// gets `no_display`.
-    #[test]
-    fn only_a_desktop_requester_on_an_active_unlocked_display_session_may_copy() {
-        assert!(unlocked_display_session().may_copy(Origin::Desktop));
-        assert!(!unlocked_display_session().may_copy(Origin::Outside));
-        assert!(!locked_display_session().may_copy(Origin::Desktop));
-        assert!(!locked_display_session().may_copy(Origin::Outside));
-        assert!(!inactive_unlocked_display_session().may_copy(Origin::Desktop));
-        assert!(!inactive_unlocked_display_session().may_copy(Origin::Outside));
-        assert!(!DisplaySession::None.may_copy(Origin::Desktop));
-        assert!(!DisplaySession::None.may_copy(Origin::Outside));
     }
 
     #[test]
@@ -894,90 +660,62 @@ mod tests {
     }
 
     #[test]
-    fn the_inhibitor_is_held_while_anything_is_unlocked() {
-        let mut h = Harness::new();
-        assert!(!h.held());
-        h.unlock();
-        assert!(h.held());
-        h.unlock(); // a second unlock doesn't take it twice
-        assert_eq!(h.log(), vec!["hold"]);
+    fn a_request_to_hold_holds_while_the_machine_is_awake_and_never_while_it_sleeps() {
+        // (something unlocked, sleeping, held) and what happens.
+        for (unlocked, sleeping, held, expected) in [
+            (true, false, false, Inhibit::Hold),
+            (true, false, true, Inhibit::Keep),
+            (false, false, true, Inhibit::Release),
+            (false, false, false, Inhibit::Keep),
+            (true, true, false, Inhibit::Keep),
+            (true, true, true, Inhibit::Release),
+            (false, true, true, Inhibit::Release),
+            (false, true, false, Inhibit::Keep),
+        ] {
+            assert_eq!(
+                inhibit(unlocked, sleeping, held),
+                expected,
+                "unlocked: {unlocked}, sleeping: {sleeping}, held: {held}"
+            );
+        }
     }
 
     #[test]
-    fn suspend_locks_before_the_inhibitor_is_released() {
-        let mut h = Harness::new();
-        h.unlock();
-        h.policy.handle(Event::Sleeping(true));
-        assert!(!h.locks.any_unlocked());
-        assert!(!h.held());
-        assert_eq!(h.log(), vec!["hold", "lock", "release"]);
+    fn hold_while_sends_what_it_was_asked() {
+        let (delay, requests) = SleepDelay::new();
+
+        delay.hold_while(true);
+        delay.hold_while(false);
+
+        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [true, false]);
     }
 
+    /// Going to sleep releases nothing (the daemon locks first, then says
+    /// nothing is unlocked); resuming asks again with the last answer, so
+    /// an unlock that came while the machine slept holds at resume, and
+    /// nothing is held at resume when everything is locked.
     #[test]
-    fn nothing_unlocked_means_no_inhibitor_at_suspend() {
-        let mut h = Harness::new();
-        h.policy.handle(Event::Sleeping(true));
-        assert_eq!(h.log(), vec!["lock"]);
-        assert!(!h.held());
-    }
+    fn resuming_asks_again_with_the_last_request() {
+        let (delay, requests) = SleepDelay::new();
+        delay.hold_while(true);
+        let _ = requests.try_iter().count();
 
-    #[test]
-    fn an_unlock_during_sleep_is_not_inhibited_until_resume() {
-        let mut h = Harness::new();
-        h.policy.handle(Event::Sleeping(true));
-        h.unlock();
+        delay.going_to_sleep();
+        assert!(delay.sleeping());
         assert!(
-            !h.held(),
-            "no inhibitor while the machine is going to sleep"
+            requests.try_recv().is_err(),
+            "nothing is released by the report alone"
         );
-        h.policy.handle(Event::Sleeping(false));
-        assert!(h.held(), "re-taken on resume while still unlocked");
-    }
+        delay.hold_while(true);
+        delay.resumed();
 
-    #[test]
-    fn resume_does_not_hold_when_everything_is_locked() {
-        let mut h = Harness::new();
-        h.unlock();
-        h.policy.handle(Event::Sleeping(true));
-        h.policy.handle(Event::Sleeping(false));
-        assert!(!h.held());
-    }
+        assert!(!delay.sleeping());
+        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [true, true]);
 
-    #[test]
-    fn locking_the_last_database_directly_releases_the_inhibitor() {
-        // Regression test: an explicit `lock` of the last unlocked
-        // database (not a screen lock or a sleep) must still run
-        // `reconcile`, or the inhibitor stays held until some unrelated
-        // event happens to trigger it.
-        let mut h = Harness::new();
-        h.unlock();
-        assert!(h.held());
-        h.lock();
-        assert!(!h.held());
-        assert_eq!(h.log(), vec!["hold", "release"]);
-    }
-
-    #[test]
-    fn a_lost_subscription_locks_everything() {
-        let mut h = Harness::new();
-        h.unlock();
-        h.policy.handle(Event::WatchLost);
-        assert!(!h.locks.any_unlocked());
-        assert!(!h.held());
-    }
-
-    #[test]
-    fn run_drains_events_until_the_senders_are_gone() {
-        let (tx, rx) = mpsc::channel();
-        let h = Harness::new();
-        let Harness {
-            policy, locks, log, ..
-        } = h;
-        locks.unlocked.store(true, Ordering::SeqCst);
-        tx.send(Event::ScreenLocked).unwrap();
-        drop(tx);
-        run(rx, policy);
-        assert_eq!(*log.lock().unwrap(), vec!["lock"]);
+        delay.hold_while(false);
+        delay.going_to_sleep();
+        delay.resumed();
+        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [false, false]);
     }
 
     fn signal<B>(path: &str, interface: &str, member: &str, body: &B) -> Message
@@ -1017,7 +755,7 @@ mod tests {
         let msg = signal(SESSION, SESSION_IFACE, "Lock", &());
         assert_eq!(
             interpret(&msg, USER, Some(&session_at("31", SESSION))),
-            Step::Event(Event::ScreenLocked)
+            Step::LockRequested
         );
     }
 
@@ -1059,7 +797,7 @@ mod tests {
     }
 
     /// `Active` is watched the same way as `LockedHint`, and reported as
-    /// its own `Property` — never folded into an `Event::DisplaySession` by
+    /// its own `Property` — never folded into a `SessionEvent::Changed` by
     /// `interpret` itself, since that needs the other property's current
     /// value, which only `watch`'s own state has.
     #[test]
@@ -1089,14 +827,8 @@ mod tests {
     fn prepare_for_sleep_maps_to_sleeping() {
         let start = signal(MANAGER_PATH, MANAGER_IFACE, "PrepareForSleep", &true);
         let end = signal(MANAGER_PATH, MANAGER_IFACE, "PrepareForSleep", &false);
-        assert_eq!(
-            interpret(&start, USER, None),
-            Step::Event(Event::Sleeping(true))
-        );
-        assert_eq!(
-            interpret(&end, USER, None),
-            Step::Event(Event::Sleeping(false))
-        );
+        assert_eq!(interpret(&start, USER, None), Step::Sleeping(true));
+        assert_eq!(interpret(&end, USER, None), Step::Sleeping(false));
     }
 
     #[test]

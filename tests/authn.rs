@@ -2,13 +2,15 @@
 //! and the test reads the peer's cgroup the way the daemon does. Where the
 //! client lands depends on the test runner (a desktop terminal, an SSH
 //! login, a CI service), so this checks that the peer is the client and
-//! that `of_peer` agrees with the pure classifier on it. The classifier's
-//! cases are table-tested in `src/origin.rs`.
+//! that the requester built from the stream carries it. The classifier's
+//! cases are table-tested in `src/authz.rs`.
 
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
 
-use kpa::origin::{self, Origin};
+use kpa::authn::Requester;
+use kpa::authz;
+use kpa::session_watch::DisplaySession;
 
 #[test]
 fn a_local_client_is_classified_by_its_own_cgroup() {
@@ -29,18 +31,22 @@ fn a_local_client_is_classified_by_its_own_cgroup() {
     let (stream, _) = listener.accept().unwrap();
 
     let own = std::fs::read_to_string(format!("/proc/{}/cgroup", client.id())).unwrap();
-    let peer = origin::peer_cgroup(&stream).expect("the peer's cgroup");
-    assert_eq!(peer, own, "the peer is the client process");
-
-    let uid = rustix::process::geteuid().as_raw();
-    let session = "1";
-    let origin = origin::of_peer(&stream, uid, Some(session));
-    assert_eq!(origin, origin::classify(&own, uid, Some(session)));
+    let requester = Requester::of(&stream).expect("the peer's identity");
+    assert_eq!(
+        requester.cgroup.as_deref(),
+        Some(own.as_str()),
+        "the peer is the client process"
+    );
+    let display_session = DisplaySession::Unlocked {
+        id: "1".to_string(),
+        active: true,
+    };
     eprintln!(
-        "the test client classifies as {origin:?}, in {}",
+        "the test client is on the desktop: {}, in {}",
+        authz::on_desktop(&requester, &display_session),
         own.trim()
     );
-    assert_eq!(origin::of_peer(&stream, uid, None), Origin::Outside);
+    assert!(!authz::on_desktop(&requester, &DisplaySession::None));
 
     drop(stream);
     let _ = client.kill();

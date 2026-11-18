@@ -39,6 +39,13 @@ pub use program::{ConfirmProgram, SecretProgram};
 pub use question::Prompt;
 pub use queue::PromptQueue;
 
+/// Where a prompt asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptOn {
+    /// On screen, through a prompt program.
+    Screen,
+}
+
 /// How a prompt whose answer is a `T` is shown. A [`Prompt`] calls it once
 /// the prompt's turn has come, with a `message` that is safe to display.
 /// It ends as [`PromptOutcome::Interrupted`] as soon as `cancel` is

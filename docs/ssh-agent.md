@@ -875,7 +875,7 @@ programs' settings.
   the request was decided.
 - `Server` implements `SshHost` as a thin adapter over its database
   slots (the configured databases, slot access under the mutex behind the
-  freshness guard, `may_prompt`) and `origin::PeerOrigin`. The approval
+  freshness guard, the display session `authz` decides prompts against). The approval
   prompt goes through the daemon's prompt queue, so only one prompt is
   ever on screen, unlock's included. `server::serve_ssh_agent` runs the
   agent with that queue, and is all the binary needs. `ssh_agent` never
@@ -922,7 +922,7 @@ programs' settings.
   otherwise there is no agent socket.
 - **Phase 2** (unlock on demand, requests from outside the desktop) adds:
   `ssh-keygen -Y sign` failing when the scripted prompt cancels, and, from
-  outside the desktop (`Server::assume_origin`), a refused signature that
+  outside the desktop (`authn::assume_cgroup`), a refused signature that
   `ssh_pending` lists and whose retry signs after `ssh_approve`.
 - **Forwarding** (phase 3): an unprivileged `sshd` on a high port with a temporary
   host key, then `ssh -A` to localhost. This covers session-bind for real:

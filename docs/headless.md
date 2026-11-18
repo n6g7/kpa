@@ -268,8 +268,9 @@ stays refused while it is locked (§ 5).
 
 | File          | Role                                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------------------- |
-| `origin.rs`   | Peer pidfd or pid → cgroup path → `Origin::{Desktop, Outside}`. The cgroup-path classifier is pure and table-tested |
-| `policy.rs`   | Also publishes the display session's state (no session, locked, unlocked), which `copy` and classification read      |
+| `authn.rs`   | Peer pidfd or pid → uid, cgroup path and command name, kept in a `Requester`. Plain facts, no rules |
+| `authz.rs`   | Who may do what, as pure functions of a `Requester` and the display session as it is when asked. The checks both sockets share (`may_connect`, `on_desktop`, `may_prompt_on_screen`; the cgroup-path classifier is table-tested), and kpa's own socket's policy, one function per request type (`authorize_copy`: the session whose clipboard may be used, or `no_display`; `choose_unlock_prompt`: a prompt may appear, or `no_display`). The SSH agent's policy is `ssh_agent::policy`; `session_watch.rs` holds `DisplaySession` |
+| `session_watch.rs` | The whole logind side: reports the display session's state (no session, locked, unlocked), which `copy` and classification read, a lock request, suspend and a lost watch as `SessionEvent`s, and holds the sleep inhibitor for the `SleepDelay`. Knows nothing about databases |
 | `proto/unlock.rs` | `UnlockRequest` gains `password: Option<Password>`: a zeroizing newtype, decoded from base64 by a borrowing visitor, with a redacting `Debug`. `no_display` joins the error codes |
 | `server.rs`   | Reads request lines into a fixed zeroizing buffer; prompt timeout; lock kills prompts; `copy` gated on origin and the display session's state |
 | `main.rs`     | `kpa unlock` handles `no_display` with a `/dev/tty` read, and gains `--tty`                              |

@@ -41,6 +41,7 @@ fn start_ssh_agent(daemon: &InProcessDaemon) -> SshAgent {
     let socket_dir = tempfile::tempdir().expect("tempdir");
     let socket = socket_dir.path().join("agent.sock");
     let listener = UnixListener::bind(&socket).expect("bind ssh agent socket");
+    kpa::authn::assume_cgroup(&socket, &daemon.cgroup);
     let server = daemon.server.clone();
     std::thread::spawn(move || kpa::server::serve_ssh_agent(server, listener));
     SshAgent {

@@ -1,6 +1,6 @@
 //! Filesystem and socket helpers for the daemon's Unix socket: the
 //! process-wide umask guard, the owner-only bind, the socket directory
-//! check, and the `SO_PEERCRED` uid lookup. Split out of `server` so that
+//! check. Split out of `server` so that
 //! everything that touches permissions lives in one place.
 
 use std::fs;
@@ -61,7 +61,7 @@ fn ensure_socket_dir(dir: &Path) -> std::io::Result<()> {
         }
         Err(err) => return Err(err),
     };
-    let owner = rustix::process::geteuid().as_raw();
+    let owner = crate::authn::process_uid();
     if !meta.is_dir() || meta.uid() != owner || meta.mode() & 0o022 != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -121,13 +121,4 @@ pub fn bind_socket(path: &Path) -> std::io::Result<UnixListener> {
         }
         Err(err) => Err(err),
     }
-}
-
-/// The uid of the process on the other end of `stream`, from `SO_PEERCRED`.
-/// Fails if the kernel can't say, and the caller must treat that as a
-/// refusal, not as a match.
-pub fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
-    rustix::net::sockopt::socket_peercred(stream)
-        .map(|cred| cred.uid.as_raw())
-        .map_err(std::io::Error::from)
 }

@@ -1,7 +1,6 @@
 //! The clipboard (`docs/plan.md` step 3, `docs/design.md` § Clipboard).
 //!
-//! Two layers, mirroring `policy.rs`'s split between [`policy::Policy`]
-//! (what to decide) and `watch_forever` (the real D-Bus backend):
+//! Two layers, a real backend and the part that decides:
 //!
 //! - [`Backend`] is the primitive a real clipboard gives us: the ability to
 //!   start serving a secret as an [`Offer`]. [`WaylandBackend`] implements
@@ -33,6 +32,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use zeroize::Zeroizing;
 
+use crate::session_watch::DisplaySession;
 use crate::wayland;
 pub use crate::wayland::Offer;
 
@@ -52,20 +52,22 @@ impl std::error::Error for ClipboardError {}
 /// A clipboard able to start serving one offer at a time.
 pub trait Backend: Send + Sync {
     /// Starts serving `secret` as the clipboard content of the display
-    /// session `session` (its logind id), with the password-manager hint
+    /// session `display_session`, with the password-manager hint
     /// alongside it. Blocks only long enough to know whether the backend
     /// accepted the offer — the actual serving runs on a thread of the
     /// backend's own.
-    fn start(&self, secret: Zeroizing<String>, session: &str)
-    -> Result<Arc<Offer>, ClipboardError>;
+    fn start(
+        &self,
+        secret: Zeroizing<String>,
+        display_session: &DisplaySession,
+    ) -> Result<Arc<Offer>, ClipboardError>;
 }
 
 /// Tracks the most recently started offer, so a later timeout can tell
 /// whether it's still the one to drop. Backend-agnostic: everything here is
 /// decided against [`Backend`] alone, which is what makes it
-/// testable with a fake backend (see `tests` below) the same way
-/// `policy::Policy` is tested against `Locks`/`SleepInhibitor` with no real
-/// D-Bus connection.
+/// testable with a fake backend (see `tests` below), with no Wayland
+/// connection.
 pub struct Clipboard {
     backend: Box<dyn Backend>,
     current: Mutex<Option<Arc<Offer>>>,
@@ -86,9 +88,9 @@ impl Clipboard {
     pub fn offer(
         &self,
         secret: Zeroizing<String>,
-        session: &str,
+        display_session: &DisplaySession,
     ) -> Result<Arc<Offer>, ClipboardError> {
-        let offer = self.backend.start(secret, session)?;
+        let offer = self.backend.start(secret, display_session)?;
         *lock(&self.current) = Some(Arc::clone(&offer));
         Ok(offer)
     }
@@ -115,8 +117,8 @@ impl Clipboard {
     /// Ends whatever offer is current right now, unconditionally — unlike
     /// [`expire`](Self::expire), this isn't told which offer it means, so
     /// it ends the current one regardless of which `copy` started it.
-    /// Called on `lock` (`server.rs`'s `Lock`/`policy::Locks::lock_all`
-    /// impls and the idle timer): a database locking is exactly the
+    /// Called on `lock` (`server.rs`'s `Lock::lock` and `lock_all`
+    /// and the idle timer): a database locking is exactly the
     /// moment `docs/threat-model.md` G-6 ("lock clears what kpa owns")
     /// says a copied secret kpa still owns should stop being served. A
     /// `current` that is `None`, or already not live (already superseded
@@ -148,10 +150,10 @@ impl Backend for WaylandBackend {
     fn start(
         &self,
         secret: Zeroizing<String>,
-        session: &str,
+        display_session: &DisplaySession,
     ) -> Result<Arc<Offer>, ClipboardError> {
         let failed = |err: wayland::Error| ClipboardError(err.0);
-        let stream = wayland::connect(session).map_err(failed)?;
+        let stream = wayland::connect(display_session).map_err(failed)?;
         let offer = wayland::offer(stream, secret).map_err(failed)?;
         Ok(Arc::new(offer))
     }
@@ -208,7 +210,7 @@ impl Backend for RecordingBackend {
     fn start(
         &self,
         secret: Zeroizing<String>,
-        _session: &str,
+        _display_session: &DisplaySession,
     ) -> Result<Arc<Offer>, ClipboardError> {
         self.offered
             .lock()
@@ -231,6 +233,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{Backend, Clipboard, ClipboardError, Offer};
+    use crate::session_watch::DisplaySession;
 
     /// A backend whose offers have no Wayland connection at all.
     struct FakeBackend {
@@ -253,7 +256,7 @@ mod tests {
         fn start(
             &self,
             _secret: Zeroizing<String>,
-            _session: &str,
+            _display_session: &DisplaySession,
         ) -> Result<Arc<Offer>, ClipboardError> {
             if self.fail_next.swap(false, Ordering::SeqCst) {
                 return Err(ClipboardError("fake backend refused".to_string()));
@@ -262,7 +265,12 @@ mod tests {
         }
     }
 
-    const SESSION: &str = "2";
+    fn session() -> DisplaySession {
+        DisplaySession::Unlocked {
+            id: "2".to_string(),
+            active: true,
+        }
+    }
 
     fn secret(s: &str) -> Zeroizing<String> {
         Zeroizing::new(s.to_string())
@@ -275,7 +283,7 @@ mod tests {
         let backend = FakeBackend::new();
         let clip = Clipboard::new(backend);
         let offer = clip
-            .offer(secret("hunter2"), SESSION)
+            .offer(secret("hunter2"), &session())
             .expect("fake backend accepts");
 
         clip.expire(&offer);
@@ -292,10 +300,10 @@ mod tests {
         let backend = FakeBackend::new();
         let clip = Clipboard::new(backend);
         let first = clip
-            .offer(secret("first"), SESSION)
+            .offer(secret("first"), &session())
             .expect("fake backend accepts");
         let second = clip
-            .offer(secret("second"), SESSION)
+            .offer(secret("second"), &session())
             .expect("fake backend accepts");
 
         clip.expire(&first);
@@ -320,7 +328,7 @@ mod tests {
         backend.fail_next_start();
         let clip = Clipboard::new(backend);
 
-        assert!(clip.offer(secret("hunter2"), SESSION).is_err());
+        assert!(clip.offer(secret("hunter2"), &session()).is_err());
     }
 
     /// `end_now` is `lock`'s hook (`docs/threat-model.md` G-6): it ends
@@ -331,7 +339,7 @@ mod tests {
         let backend = FakeBackend::new();
         let clip = Clipboard::new(backend);
         let offer = clip
-            .offer(secret("hunter2"), SESSION)
+            .offer(secret("hunter2"), &session())
             .expect("fake backend accepts");
 
         clip.end_now();

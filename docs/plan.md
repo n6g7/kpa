@@ -69,7 +69,7 @@ second client, no second locking implementation.
 
 ## Step 5 — lock policy
 
-`policy.rs` — idle timer, logind `Lock`/`PrepareForSleep` via zbus, and the
+`session_watch.rs` — idle timer, logind `Lock`/`PrepareForSleep` via zbus, and the
 `(dev, ino, mtime, size)` freshness guard.
 
 - **Test:** set `idle_timeout = "10s"` temporarily and watch it lock.
