@@ -147,8 +147,8 @@ impl<'de> Visitor<'de> for PasswordVisitor {
     }
 }
 
-/// How an unlock that didn't fail ended, for the daemon's callers: the
-/// `unlock` request itself answers with the database's name either way.
+/// How an unlock that didn't fail ended. The `unlock` request itself
+/// answers with the database's name either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unlocked {
     /// The call's own prompt, or password, was answered and the database
@@ -249,11 +249,16 @@ impl UnlockError {
 /// it; otherwise the implementor owns credential acquisition, and nothing
 /// about *how* it asks for one appears in this signature.
 pub trait Unlock {
-    /// `Ok` names the database that is now unlocked. `requester` says where
-    /// the request came from, which decides whether a prompt may be raised
-    /// on screen.
-    fn unlock(&self, request: &UnlockRequest, requester: &Requester)
-    -> Result<String, UnlockError>;
+    /// `Ok` says the database is now unlocked. `requester` says where the
+    /// request came from, which decides whether a prompt may be raised on
+    /// screen. `message` is what the prompt says; `None` is the plain
+    /// "Unlock <db>".
+    fn unlock(
+        &self,
+        request: &UnlockRequest,
+        requester: &Requester,
+        message: Option<&str>,
+    ) -> Result<Unlocked, UnlockError>;
 }
 
 #[cfg(test)]

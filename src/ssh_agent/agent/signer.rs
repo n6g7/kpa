@@ -134,7 +134,14 @@ mod tests {
         let mut last_activity = Instant::now();
         let lock_signal = CancelSource::new();
         let mut backoff = None;
-        let mut slot = SlotView::new(db, ssh, &mut last_activity, &lock_signal, &mut backoff);
+        let mut slot = SlotView::new(
+            Instant::now(),
+            db,
+            ssh,
+            &mut last_activity,
+            &lock_signal,
+            &mut backoff,
+        );
         sign(&mut slot, fingerprint, b"data", SignFlags::new(flags))
     }
 

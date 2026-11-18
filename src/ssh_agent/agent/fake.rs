@@ -13,7 +13,7 @@ use crate::authn::Requester;
 use crate::authz;
 use crate::config::DatabaseConfig;
 use crate::prompt::{CancelSource, Prompt, PromptOutcome, PromptQueue, Scripted};
-use crate::proto::{UnlockError, Unlocked};
+use crate::proto::{Unlock, UnlockError, UnlockRequest, Unlocked};
 use crate::session_watch::DisplaySession;
 
 /// The display session the fake host starts with.
@@ -212,6 +212,7 @@ impl SshHost for FakeHost {
             slot.lock();
         }
         Some(f(SlotView::new(
+            *self.clock.lock().expect("clock"),
             slot.db.as_ref(),
             &mut slot.ssh,
             &mut slot.last_activity,
@@ -223,19 +224,19 @@ impl SshHost for FakeHost {
     fn display_session(&self) -> DisplaySession {
         self.display_session.clone()
     }
+}
 
-    fn now(&self) -> Instant {
-        *self.clock.lock().expect("clock")
-    }
-
-    /// As the daemon's unlock does, for the first database: its prompt
-    /// answers as the script says, and an answer opens the database.
+/// As the daemon's unlock does, for the first database: its prompt
+/// answers as the script says, and an answer opens the database.
+impl Unlock for FakeHost {
     fn unlock(
         &self,
-        db: &str,
-        message: &str,
+        request: &UnlockRequest,
         requester: &Requester,
+        message: Option<&str>,
     ) -> Result<Unlocked, UnlockError> {
+        let db = request.db.as_str();
+        let message = message.expect("the agent says why it unlocks");
         let named = || db.to_string();
         let hook = self.before_unlock.lock().expect("hook").take();
         if let Some(hook) = hook {

@@ -519,27 +519,14 @@ impl Drop for UnlockingFlag<'_> {
 }
 
 impl Unlock for Server {
+    /// The unlock `kpa unlock`, the tray's menu and the SSH agent run, for
+    /// `requester`. Whether a prompt may appear for the requester is
+    /// decided under the mutex (`authz::choose_unlock_prompt`).
     fn unlock(
         &self,
         request: &UnlockRequest,
         requester: &Requester,
-    ) -> Result<String, UnlockError> {
-        let name = request.db.as_str();
-        self.unlock_db(request, requester, &format!("Unlock {name}"))
-            .map(|_| name.to_string())
-    }
-}
-
-impl Server {
-    /// The unlock `kpa unlock`, the tray's menu and the SSH agent run, for
-    /// `requester`: `message` is what its prompt says. Whether a prompt may
-    /// appear for the requester is decided under the mutex
-    /// (`authz::choose_unlock_prompt`).
-    fn unlock_db(
-        &self,
-        request: &UnlockRequest,
-        requester: &Requester,
-        message: &str,
+        message: Option<&str>,
     ) -> Result<Unlocked, UnlockError> {
         let name = request.db.as_str();
         let db = || name.to_string();
@@ -603,7 +590,8 @@ impl Server {
             Some(PromptOn::Screen) => {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
-                prompted = match self.unlock_prompt.ask(message, &cancel_token) {
+                let message = message.map_or_else(|| format!("Unlock {name}"), str::to_string);
+                prompted = match self.unlock_prompt.ask(&message, &cancel_token) {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
                     }
@@ -685,6 +673,7 @@ impl SshHost for Server {
             let slot = dbs.get_mut(db)?;
             let stale = drop_if_stale(slot);
             let view = SlotView::new(
+                Instant::now(),
                 slot.db.as_ref(),
                 &mut slot.ssh,
                 &mut slot.last_activity,
@@ -702,23 +691,6 @@ impl SshHost for Server {
 
     fn display_session(&self) -> DisplaySession {
         Server::display_session(self)
-    }
-
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-
-    fn unlock(
-        &self,
-        db: &str,
-        message: &str,
-        requester: &Requester,
-    ) -> Result<Unlocked, UnlockError> {
-        let request = UnlockRequest {
-            db: db.to_string(),
-            password: None,
-        };
-        self.unlock_db(&request, requester, message)
     }
 }
 
@@ -2276,6 +2248,7 @@ mod tests {
                 password: None,
             },
             &desktop(),
+            None,
         );
 
         assert!(
@@ -2340,6 +2313,7 @@ mod tests {
                 password: None,
             },
             &desktop(),
+            None,
         );
 
         assert_eq!(
@@ -2452,23 +2426,23 @@ mod tests {
         (Arc::new(server), prompts)
     }
 
-    fn unlock(server: &Server, name: &str) -> Result<String, UnlockError> {
+    fn unlock(server: &Server, name: &str) -> Result<Unlocked, UnlockError> {
         unlock_from(server, name, &desktop())
+    }
+
+    fn request(db: &str) -> UnlockRequest {
+        UnlockRequest {
+            db: db.to_string(),
+            password: None,
+        }
     }
 
     fn unlock_from(
         server: &Server,
         name: &str,
         requester: &Requester,
-    ) -> Result<String, UnlockError> {
-        Unlock::unlock(
-            server,
-            &UnlockRequest {
-                db: name.to_string(),
-                password: None,
-            },
-            requester,
-        )
+    ) -> Result<Unlocked, UnlockError> {
+        Unlock::unlock(server, &request(name), requester, None)
     }
 
     /// A prompt that types a password, unless something ends it first.
@@ -2560,6 +2534,7 @@ mod tests {
                     ))),
                 },
                 &outside(),
+                None,
             );
             assert_eq!(
                 result,
@@ -2844,11 +2819,11 @@ mod tests {
         });
 
         assert_eq!(
-            SshHost::unlock(
+            Unlock::unlock(
                 &*server,
-                "personal",
-                "Unlock personal: key deploy",
-                &desktop()
+                &request("personal"),
+                &desktop(),
+                Some("Unlock personal: key deploy"),
             ),
             Err(UnlockError::PromptCancelled {
                 db: "personal".to_string()
@@ -2865,7 +2840,12 @@ mod tests {
         unlock_directly(&server, "personal");
 
         assert_eq!(
-            SshHost::unlock(&*server, "personal", "Unlock personal", &desktop()),
+            Unlock::unlock(
+                &*server,
+                &request("personal"),
+                &desktop(),
+                Some("Unlock personal")
+            ),
             Ok(Unlocked::AlreadyOpen)
         );
         assert!(prompts.shown().is_empty());

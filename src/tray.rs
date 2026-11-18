@@ -166,8 +166,9 @@ impl TrayItem {
                     password: None,
                 },
                 &Requester::of_this_process(),
+                None,
             );
-            server::log_response(&Response::Unlock(result.clone()));
+            server::log_response(&Response::Unlock(result.clone().map(|_| name.clone())));
             let Some(handle) = handle else { return };
             handle.update(move |item| {
                 item.last_error = match &result {

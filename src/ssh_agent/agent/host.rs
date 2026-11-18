@@ -1,21 +1,23 @@
 //! [`SshHost`], what the agent needs from the daemon that hosts it, and
 //! [`SlotView`], one database's slot as the agent sees it.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use keepass::Database;
 
 use super::SshSlot;
-use crate::authn::Requester;
 use crate::config::DatabaseConfig;
 use crate::prompt::{CancelSource, CancelToken};
-use crate::proto::{UnlockError, Unlocked};
+use crate::proto::Unlock;
 use crate::session_watch::DisplaySession;
 
 /// What the agent needs from the daemon that hosts it. The daemon
 /// implements it as a thin adapter over its database slots; the agent's
-/// logic stays in this module.
-pub trait SshHost {
+/// logic stays in this module. A host also serves `unlock` (`Unlock`), which
+/// the agent calls as `kpa unlock` does: the same prompt, in the same queue,
+/// and the same key derivation and scan. It is not called inside
+/// `with_slot`: it blocks on the user.
+pub trait SshHost: Unlock {
     /// Every configured database, in config order.
     fn databases(&self) -> &[DatabaseConfig];
 
@@ -31,26 +33,13 @@ pub trait SshHost {
     /// (`docs/ssh-agent.md` § 6.8), inside `with_slot`, so the answer holds
     /// for the hold it is asked in.
     fn display_session(&self) -> DisplaySession;
-
-    /// The current time, for backoff deadlines.
-    fn now(&self) -> Instant;
-
-    /// Unlocks `db` as `kpa unlock` does: the same prompt, in the same
-    /// queue, and the same key derivation and scan. The prompt says
-    /// `message`. A user's own unlock that is already prompting for `db`
-    /// makes this fail as [`UnlockError::InProgress`]. Not called inside
-    /// `with_slot`: it blocks on the user.
-    fn unlock(
-        &self,
-        db: &str,
-        message: &str,
-        requester: &Requester,
-    ) -> Result<Unlocked, UnlockError>;
 }
 
 /// One database's slot as the agent sees it, while the host holds its
 /// slots' lock.
 pub struct SlotView<'a> {
+    /// The time of this hold, which backoff deadlines are measured from.
+    now: Instant,
     /// The open database, `None` while locked.
     pub(super) db: Option<&'a Database>,
     pub(super) ssh: &'a mut SshSlot,
@@ -66,6 +55,7 @@ pub struct SlotView<'a> {
 
 impl<'a> SlotView<'a> {
     pub fn new(
+        now: Instant,
         db: Option<&'a Database>,
         ssh: &'a mut SshSlot,
         last_activity: &'a mut Instant,
@@ -73,6 +63,7 @@ impl<'a> SlotView<'a> {
         backoff: &'a mut Option<Instant>,
     ) -> SlotView<'a> {
         SlotView {
+            now,
             db,
             ssh,
             last_activity,
@@ -86,14 +77,16 @@ impl<'a> SlotView<'a> {
         self.db.is_some()
     }
 
-    /// Whether prompts are held back at `now`.
-    pub(super) fn backing_off(&self, now: Instant) -> bool {
-        self.backoff.is_some_and(|until| now < until)
+    /// Whether prompts are held back.
+    pub(super) fn backing_off(&self) -> bool {
+        self.backoff.is_some_and(|until| self.now < until)
     }
 
-    /// Holds prompts back until `until`.
-    pub(super) fn back_off(&mut self, until: Instant) {
-        *self.backoff = Some(until);
+    /// Holds prompts back for `duration` from now.
+    pub(super) fn back_off(&mut self, duration: Duration) {
+        if let Some(until) = self.now.checked_add(duration) {
+            *self.backoff = Some(until);
+        }
     }
 
     /// Resets the database's idle timer to now.

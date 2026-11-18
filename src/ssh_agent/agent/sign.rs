@@ -28,7 +28,6 @@
 //! either sees it. Forwarded connections are refused outright.
 
 use std::sync::MutexGuard;
-use std::time::Instant;
 
 use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg, PublicKey};
@@ -39,7 +38,7 @@ use crate::authz::may_prompt_on_screen;
 use crate::log;
 use crate::output;
 use crate::prompt::{CancelToken, Declined};
-use crate::proto::{UnlockError, Unlocked};
+use crate::proto::{UnlockError, UnlockRequest, Unlocked};
 use crate::ssh_agent::authz::{Refusal, SignatureApproval, authorize_sign};
 use crate::ssh_agent::bind::ConnectionClass;
 use crate::ssh_agent::classify::{self, Purpose};
@@ -159,13 +158,12 @@ fn missing_approval<'n>(
 /// that has to ask for something, the unlock of a locked database or the
 /// approval it is `missing`, is refused where no prompt may appear
 /// (`may_prompt_on_screen`), and while the database's prompts are held back after a
-/// cancel (`now` is before the end of the backoff). One that has to ask for
+/// cancel. One that has to ask for
 /// nothing is never refused here.
 fn refusal_before_prompting(
     slot: &SlotView<'_>,
     missing: Option<&SignatureApproval>,
     may_prompt_on_screen: bool,
-    now: Instant,
 ) -> Option<Refused> {
     let open = slot.is_open();
     if open && missing.is_none() {
@@ -178,7 +176,7 @@ fn refusal_before_prompting(
             Refused::Locked
         });
     }
-    slot.backing_off(now).then_some(Refused::BackingOff)
+    slot.backing_off().then_some(Refused::BackingOff)
 }
 
 /// What the flow found out about the database, under the host's lock.
@@ -249,12 +247,11 @@ impl<H: SshHost> Agent<H> {
         // and may not is refused here.
         let look_at_database = || {
             self.hold(db, |slot| {
-                let now = self.host.now();
                 let missing = missing_approval(&slot, approval.as_ref());
                 let may_prompt_on_screen =
                     may_prompt_on_screen(requester, &self.host.display_session());
                 if let Some(refused) =
-                    refusal_before_prompting(&slot, missing, may_prompt_on_screen, now)
+                    refusal_before_prompting(&slot, missing, may_prompt_on_screen)
                 {
                     return Err(refused);
                 }
@@ -394,8 +391,12 @@ impl<H: SshHost> Agent<H> {
             request.destination(),
             self.known_hosts_name(request).as_deref(),
         );
+        let request = UnlockRequest {
+            db: key.database.clone(),
+            password: None,
+        };
         self.host
-            .unlock(&key.database, &message, requester)
+            .unlock(&request, requester, Some(&message))
             .map_err(Refused::Unlock)
     }
 
@@ -417,11 +418,8 @@ impl<H: SshHost> Agent<H> {
     /// user cancelled or left unanswered does. A lock doesn't end it; an
     /// unlock does.
     fn back_off(&self, db: &str) {
-        let Some(until) = self.host.now().checked_add(self.backoff) else {
-            return;
-        };
         let _ = self.hold(db, |mut slot| {
-            slot.back_off(until);
+            slot.back_off(self.backoff);
             Ok(())
         });
     }
@@ -761,8 +759,7 @@ mod tests {
         let key = test_key(1);
         let backed_off = |confirm| {
             let (host, agent, prompts) = agent(host(&key, confirm), &Paths::default());
-            let until = host.now() + BACKOFF;
-            host.with_slot("personal", |mut slot| slot.back_off(until));
+            host.with_slot("personal", |mut slot| slot.back_off(BACKOFF));
             (host, agent, prompts)
         };
 
@@ -896,7 +893,7 @@ mod tests {
         assert!(matches!(outcome(&agent, &key), Err(Refused::Locked)));
         assert!(host.unlocks().shown().is_empty() && prompts.shown().is_empty());
         assert_eq!(
-            host.with_slot("personal", |slot| slot.backing_off(host.now())),
+            host.with_slot("personal", |slot| slot.backing_off()),
             Some(false)
         );
     }
@@ -1280,7 +1277,7 @@ mod tests {
     }
 
     /// Runs `check` on a slot as `found` describes it.
-    fn on_slot<R>(found: Found, check: impl FnOnce(&SlotView<'_>) -> R) -> R {
+    fn on_slot<R>(found: Found, now: Instant, check: impl FnOnce(&SlotView<'_>) -> R) -> R {
         let mut ssh = SshSlot::default();
         if let Some(approved) = found.approved {
             ssh.approvals.grant(approved.scope);
@@ -1289,6 +1286,7 @@ mod tests {
         let (mut last_activity, lock_signal) = (Instant::now(), CancelSource::new());
         let mut backoff = found.backoff;
         let slot = SlotView::new(
+            now,
             found.open.then_some(&db),
             &mut ssh,
             &mut last_activity,
@@ -1299,7 +1297,9 @@ mod tests {
     }
 
     fn missing_in(found: Found, needed: Option<&SignatureApproval>) -> Option<SignatureApproval> {
-        on_slot(found, |slot| missing_approval(slot, needed).cloned())
+        on_slot(found, Instant::now(), |slot| {
+            missing_approval(slot, needed).cloned()
+        })
     }
 
     fn refusal_in(
@@ -1308,8 +1308,8 @@ mod tests {
         may_prompt_on_screen: bool,
         now: Instant,
     ) -> Option<Refused> {
-        on_slot(found, |slot| {
-            refusal_before_prompting(slot, missing, may_prompt_on_screen, now)
+        on_slot(found, now, |slot| {
+            refusal_before_prompting(slot, missing, may_prompt_on_screen)
         })
     }
 
