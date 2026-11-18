@@ -196,8 +196,8 @@ pub struct Server {
     /// (`docs/ssh-agent.md` § 6.7): the unlock prompt's, and the SSH
     /// agent's confirm prompts, which `serve_ssh_agent` builds on it.
     prompt_queue: Arc<PromptQueue>,
-    /// The unlock prompt (`Config::prompt`), in `prompt_queue`.
-    unlock_prompt: Prompt<Zeroizing<String>>,
+    /// How the unlock prompt asks on screen (`Config::prompt`).
+    screen_unlock: Arc<dyn prompt::Backend<Zeroizing<String>>>,
 }
 
 impl Server {
@@ -239,11 +239,6 @@ impl Server {
             })
             .collect();
         let prompt_queue = Arc::new(PromptQueue::new());
-        let unlock_prompt = Prompt::new(
-            Arc::clone(&prompt_queue),
-            unlock_prompt,
-            config.prompt_timeout,
-        );
         Server {
             config,
             paths,
@@ -253,7 +248,7 @@ impl Server {
             clip_db: Arc::new(Mutex::new(None)),
             display_session: Mutex::new(DisplaySession::None),
             prompt_queue,
-            unlock_prompt,
+            screen_unlock: Arc::new(unlock_prompt),
         }
     }
 
@@ -594,21 +589,14 @@ impl Unlock for Server {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
                 let message = message.map_or_else(|| format!("Unlock {name}"), str::to_string);
-                // The screen's prompt is the configured program, built once; a
-                // terminal's wraps the terminal this request passed, so it is
-                // built for the request.
-                let outcome = match prompt_on {
-                    PromptOn::Screen => self.unlock_prompt.ask(&message, &cancel_token),
-                    PromptOn::Terminal => {
-                        let terminal = requester.terminal.clone().ok_or(UnlockError::NoDisplay)?;
-                        Prompt::new(
-                            Arc::clone(&self.prompt_queue),
-                            SecretTerminal::new(terminal),
-                            timeout,
-                        )
-                        .ask(&message, &cancel_token)
-                    }
+                let backend: Arc<dyn prompt::Backend<Zeroizing<String>>> = match prompt_on {
+                    PromptOn::Screen => Arc::clone(&self.screen_unlock),
+                    PromptOn::Terminal => Arc::new(SecretTerminal::new(
+                        requester.terminal.clone().ok_or(UnlockError::NoDisplay)?,
+                    )),
                 };
+                let outcome = Prompt::new(Arc::clone(&self.prompt_queue), backend, timeout)
+                    .ask(&message, &cancel_token);
                 prompted = match outcome {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });

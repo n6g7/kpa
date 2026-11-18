@@ -33,6 +33,7 @@ mod terminal;
 pub(crate) mod testing;
 
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustix::event::Timespec;
@@ -75,6 +76,22 @@ pub trait Backend<T>: Send + Sync {
         deadline: Option<Instant>,
         cancel: &CancelToken,
     ) -> io::Result<PromptOutcome<T>>;
+}
+
+/// A backend that several prompts share is shown through the `Arc`.
+impl<T, B: Backend<T> + ?Sized> Backend<T> for Arc<B> {
+    fn is_queued(&self) -> bool {
+        (**self).is_queued()
+    }
+
+    fn show(
+        &self,
+        message: &str,
+        deadline: Option<Instant>,
+        cancel: &CancelToken,
+    ) -> io::Result<PromptOutcome<T>> {
+        (**self).show(message, deadline, cancel)
+    }
 }
 
 /// What a `poll` that waits `left` should be given as its timeout.
