@@ -1,4 +1,4 @@
-//! What the approval prompt says (`docs/ssh-agent.md` § 6.7): the key, what
+//! What the confirm prompt says (`docs/ssh-agent.md` § 6.7): the key, what
 //! it is for and where the signature goes.
 
 use std::path::Path;
@@ -10,12 +10,12 @@ use ssh_key::public::KeyData;
 use crate::ssh_agent::classify::Purpose;
 use crate::ssh_agent::keys::ServedKey;
 
-/// The longest login user or `SSHSIG` namespace an approval prompt's
+/// The longest login user or `SSHSIG` namespace a confirm prompt's
 /// message carries. Both come from the request, so a long one is cut
 /// rather than allowed to crowd the rest of the message out.
 const MAX_REQUESTED_LEN: usize = 64;
 
-/// The approval prompt's message, plain text (`docs/ssh-agent.md` § 6.7).
+/// The confirm prompt's message, plain text (`docs/ssh-agent.md` § 6.7).
 /// The destination comes first, so the prompt's length cap can never hide
 /// where the signature goes: for a connection bound to one, its host-key
 /// fingerprint, with the host name `known_hosts` gives it if it has one.

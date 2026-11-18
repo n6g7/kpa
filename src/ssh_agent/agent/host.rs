@@ -63,7 +63,7 @@ impl<'a> SlotView<'a> {
         *self.last_activity = Instant::now();
     }
 
-    /// A token the database's next lock cancels: what an approval prompt
+    /// A token the database's next lock cancels: what a confirm prompt
     /// raised now ends on, and how a later hold tells that no lock came in
     /// since this one.
     pub(super) fn cancel_token(&self) -> CancelToken {

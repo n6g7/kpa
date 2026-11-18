@@ -1,6 +1,6 @@
 //! Prompts that ask the user something on screen: `unlock`'s prompt
 //! (`docs/design.md` decision #9, `Config::prompt`) and the SSH agent's
-//! approval prompt (`ssh_agent.confirm_prompt`, same contract —
+//! confirm prompt (`ssh_agent.confirm_prompt`, same contract —
 //! `docs/ssh-agent.md` § 6.7).
 //!
 //! - [`Prompt`]: one kind of question, with its own backend and timeout:
@@ -12,7 +12,7 @@
 //!   [`ConfirmProgram`], dmenu-style external programs, are the ones there
 //!   are.
 //! - [`PromptOutcome`]: how a prompt ended, generic over its answer;
-//!   [`Approval`] is an approval prompt's, and [`Declined`] says how one
+//!   [`ConfirmAnswer`] is a confirm prompt's, and [`Declined`] says how one
 //!   that didn't allow ended.
 //! - [`CancelSource`] and [`CancelToken`]: how a lock ends the prompts it
 //!   no longer wants answered.
@@ -34,7 +34,7 @@ use std::time::Instant;
 pub use cancel::{CancelSource, CancelToken};
 #[cfg(test)]
 pub(crate) use fake::{Scripted, Step};
-pub use outcome::{Approval, Declined, PromptOutcome};
+pub use outcome::{ConfirmAnswer, Declined, PromptOutcome};
 pub use program::{ConfirmProgram, SecretProgram};
 pub use question::Prompt;
 pub use queue::PromptQueue;

@@ -1,6 +1,6 @@
 //! Whether a signature goes ahead (`docs/ssh-agent.md` § 5, § 6.3, § 6.7):
-//! [`authorize_sign`] says what a request needs before its key may sign it, or why
-//! it never may. Pure and stateless: no socket, no clock, no mutex, and no
+//! [`authorize_sign`] says what approval a request needs before its key may
+//! sign it (`None`: none), or why it never may. Pure and stateless: no socket, no clock, no mutex, and no
 //! store. Whether an approval it asks for is already held, and whether a
 //! prompt may appear to ask for one, are the caller's questions.
 //! [`may_list`] is the companion question "does this connection even get
@@ -12,19 +12,10 @@ use super::classify::Purpose;
 use super::keys::ServedKey;
 use crate::config::SshKeyConfirm;
 
-/// What a request [`authorize_sign`] lets through needs before it is signed.
+/// The approval a signature needs: what it covers, and whether the user's
+/// confirmation is kept for the next request of that scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Need {
-    /// Nothing: sign (`confirm = "never"`).
-    Nothing,
-    /// The user's approval, unless one already covers its scope.
-    Approval(Ask),
-}
-
-/// The approval a request needs: what it covers, and whether the user's
-/// `Allow` is kept for the next request of that scope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ask {
+pub struct SignatureApproval {
     pub scope: Scope,
     /// Keep the approval until lock (`confirm = "once"`), rather than let
     /// it cover this one signature (`"always"`).
@@ -59,7 +50,7 @@ pub fn authorize_sign(
     class: &ConnectionClass,
     purpose: &Purpose,
     login_session_id: Option<&[u8]>,
-) -> Result<Need, Refusal> {
+) -> Result<Option<SignatureApproval>, Refusal> {
     let destination = match class {
         ConnectionClass::Forwarded { .. } => return Err(Refusal::Forwarded),
         ConnectionClass::LocalBound { dest } => {
@@ -74,11 +65,11 @@ pub fn authorize_sign(
         ConnectionClass::LocalUnbound => None,
     };
     let remember = match key.confirm {
-        SshKeyConfirm::Never => return Ok(Need::Nothing),
+        SshKeyConfirm::Never => return Ok(None),
         SshKeyConfirm::Once => true,
         SshKeyConfirm::Always => false,
     };
-    Ok(Need::Approval(Ask {
+    Ok(Some(SignatureApproval {
         scope: Scope::new(key.fingerprint, destination),
         remember,
     }))
@@ -147,8 +138,12 @@ mod tests {
         }
     }
 
-    fn approval(key: &ServedKey, destination: Option<&KeyData>, remember: bool) -> Need {
-        Need::Approval(Ask {
+    fn approval(
+        key: &ServedKey,
+        destination: Option<&KeyData>,
+        remember: bool,
+    ) -> Option<SignatureApproval> {
+        Some(SignatureApproval {
             scope: Scope::new(key.fingerprint, destination),
             remember,
         })
@@ -230,11 +225,11 @@ mod tests {
         let key = key(SshKeyConfirm::Never);
         assert_eq!(
             authorize_sign(&key, &bound(), &sshsig(), Some(b"sid")),
-            Ok(Need::Nothing)
+            Ok(None)
         );
         assert_eq!(
             authorize_sign(&key, &ConnectionClass::LocalUnbound, &Purpose::Other, None),
-            Ok(Need::Nothing)
+            Ok(None)
         );
     }
 

@@ -7,12 +7,12 @@
 //!   each slot and locks with it.
 //! - `identities`: which keys a connection sees, and which key a request
 //!   names.
-//! - `sign`: the sign flow, with `message` for what the approval prompt
+//! - `sign`: the sign flow, with `message` for what the confirm prompt
 //!   says and `signer` for the signature itself.
 //! - [`Agent`]: all of it behind [`SshSign`], the interface
 //!   [`serve`](super::serve) speaks.
 //!
-//! It reaches the daemon only through [`SshHost`] and the approval prompt
+//! It reaches the daemon only through [`SshHost`] and the confirm prompt
 //! the daemon hands it; nothing here names `server`.
 
 #[cfg(test)]
@@ -36,24 +36,24 @@ use super::serve::SshSign;
 use super::wire::{AgentResponse, Identity, SignRequest};
 use crate::authn::Requester;
 use crate::paths::Paths;
-use crate::prompt::{Approval, Prompt};
+use crate::prompt::{ConfirmAnswer, Prompt};
 
 /// The SSH agent for one host: what [`serve`](super::serve::serve) runs.
 pub struct Agent<H> {
     host: Arc<H>,
-    /// The approval prompt. It waits its turn in the daemon's prompt
+    /// The confirm prompt. It waits its turn in the daemon's prompt
     /// queue, so only one prompt is on screen at a time, unlock's
     /// included.
-    approval: Prompt<Approval>,
+    approval: Prompt<ConfirmAnswer>,
     /// Where the public-key cache lives, `None` without a cache directory.
     cache_dir: Option<PathBuf>,
-    /// OpenSSH's known-hosts file, for naming an approval prompt's
+    /// OpenSSH's known-hosts file, for naming a confirm prompt's
     /// destination.
     known_hosts: Option<PathBuf>,
 }
 
 impl<H: SshHost> Agent<H> {
-    pub fn new(host: Arc<H>, approval: Prompt<Approval>, paths: &Paths) -> Agent<H> {
+    pub fn new(host: Arc<H>, approval: Prompt<ConfirmAnswer>, paths: &Paths) -> Agent<H> {
         Agent {
             host,
             approval,

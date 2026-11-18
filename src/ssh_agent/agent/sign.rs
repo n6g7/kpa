@@ -26,7 +26,7 @@ use crate::authz::may_prompt_on_screen;
 use crate::log;
 use crate::output;
 use crate::prompt::{CancelToken, Declined};
-use crate::ssh_agent::authz::{Ask, Need, Refusal, authorize_sign};
+use crate::ssh_agent::authz::{Refusal, SignatureApproval, authorize_sign};
 use crate::ssh_agent::bind::ConnectionClass;
 use crate::ssh_agent::classify::{self, Purpose};
 use crate::ssh_agent::keys::ServedKey;
@@ -55,7 +55,7 @@ pub(super) enum Refused {
     Sha1Rsa,
     #[error("approval {0}")]
     Declined(Declined),
-    #[error("approval prompt failed: {0}")]
+    #[error("confirm prompt failed: {0}")]
     PromptFailed(std::io::Error),
     #[error("loading or signing failed")]
     SigningFailed,
@@ -112,18 +112,21 @@ impl SlotView<'_> {
     }
 }
 
-/// The approval `need` asks for, if the database `slot` holds doesn't cover
+/// The approval a request needs, if the database `slot` holds doesn't cover
 /// it: what the request still lacks.
-fn missing_approval<'n>(slot: &SlotView<'_>, need: &'n Need) -> Option<&'n Ask> {
-    match need {
-        Need::Approval(ask) if !slot.ssh.approvals.covers(&ask.scope) => Some(ask),
-        Need::Approval(_) | Need::Nothing => None,
-    }
+fn missing_approval<'n>(
+    slot: &SlotView<'_>,
+    needed: Option<&'n SignatureApproval>,
+) -> Option<&'n SignatureApproval> {
+    needed.filter(|approval| !slot.ssh.approvals.covers(&approval.scope))
 }
 
 /// Why a request is refused before anyone is asked, if it is: it lacks an
 /// approval, and no prompt may appear (`may_prompt_on_screen`) to ask for it.
-fn refusal_before_prompting(missing: Option<&Ask>, may_prompt_on_screen: bool) -> Option<Refused> {
+fn refusal_before_prompting(
+    missing: Option<&SignatureApproval>,
+    may_prompt_on_screen: bool,
+) -> Option<Refused> {
     (missing.is_some() && !may_prompt_on_screen).then_some(Refused::NeedsApproval)
 }
 
@@ -169,14 +172,14 @@ impl<H: SshHost> Agent<H> {
         // as things stand ends here.
         let (key, missing, cancel_token) = self.hold(db, |slot| {
             let key = slot.served(request.fingerprint)?.clone();
-            let need = authorize_sign(
+            let approval = authorize_sign(
                 &key,
                 request.class,
                 &request.purpose,
                 request.login_session_id,
             )
             .map_err(Refused::Policy)?;
-            let missing = missing_approval(&slot, &need);
+            let missing = missing_approval(&slot, approval.as_ref());
             let may_prompt_on_screen =
                 may_prompt_on_screen(requester, &self.host.display_session());
             if let Some(refused) = refusal_before_prompting(missing, may_prompt_on_screen) {
@@ -200,10 +203,10 @@ impl<H: SshHost> Agent<H> {
                 &request.sign.data,
                 request.sign.flags,
             )?;
-            if let Some(ask) = missing
-                && ask.remember
+            if let Some(approval) = missing
+                && approval.remember
             {
-                slot.ssh.approvals.grant(ask.scope);
+                slot.ssh.approvals.grant(approval.scope);
             }
             slot.touch();
             Ok(signature)
@@ -235,7 +238,7 @@ impl<H: SshHost> Agent<H> {
             .unwrap_or(Err(Refused::NotServed))
     }
 
-    /// Shows the approval prompt for signing `request` with `key`, and
+    /// Shows the confirm prompt for signing `request` with `key`, and
     /// whether the user allowed it. It ends when `cancel_token` is
     /// cancelled.
     fn ask(
@@ -332,7 +335,7 @@ mod tests {
     use crate::config::{SshKeyConfig, SshKeyConfirm};
     use crate::paths::Paths;
     use crate::prompt::{
-        Approval, CancelSource, Prompt, PromptOutcome, PromptQueue, Scripted, Step,
+        CancelSource, ConfirmAnswer, Prompt, PromptOutcome, PromptQueue, Scripted, Step,
     };
     use crate::ssh_agent::approve::Scope;
     use crate::ssh_agent::keys;
@@ -360,7 +363,7 @@ mod tests {
     fn agent(
         host: FakeHost,
         paths: &Paths,
-    ) -> (Arc<FakeHost>, Arc<Agent<FakeHost>>, Scripted<Approval>) {
+    ) -> (Arc<FakeHost>, Arc<Agent<FakeHost>>, Scripted<ConfirmAnswer>) {
         let prompts = Scripted::new();
         let approval = Prompt::new(
             Arc::new(PromptQueue::new()),
@@ -467,7 +470,7 @@ mod tests {
             let request = std::thread::spawn(move || sign(&second_agent, &second_key));
             second_tx.send(request).expect("send");
         }));
-        prompts.push(Step::new(PromptOutcome::Answer(Approval::Deny)));
+        prompts.push(Step::new(PromptOutcome::Answer(ConfirmAnswer::Deny)));
 
         assert!(signed(&sign(&agent, &key)));
         let second = second.recv().expect("second request");
@@ -481,7 +484,7 @@ mod tests {
     fn a_prompt_that_does_not_allow_refuses_and_grants_nothing() {
         let key = test_key(1);
         let declines = [
-            ("deny", PromptOutcome::Answer(Approval::Deny)),
+            ("deny", PromptOutcome::Answer(ConfirmAnswer::Deny)),
             ("cancel", PromptOutcome::Cancelled),
             ("time out", PromptOutcome::TimedOut),
         ];
@@ -760,47 +763,50 @@ mod tests {
         );
     }
 
-    fn ask(remember: bool) -> Ask {
+    fn approval(remember: bool) -> SignatureApproval {
         let key = test_key(1).public_key().fingerprint(HashAlg::Sha256);
-        Ask {
+        SignatureApproval {
             scope: Scope::new(key, None),
             remember,
         }
     }
 
     /// `missing_approval` for a database that holds `approved`, if anything.
-    fn missing_given(approved: Option<Ask>, need: &Need) -> Option<Ask> {
+    fn missing_given(
+        approved: Option<SignatureApproval>,
+        needed: Option<&SignatureApproval>,
+    ) -> Option<SignatureApproval> {
         let mut ssh = SshSlot::default();
         if let Some(approved) = approved {
             ssh.approvals.grant(approved.scope);
         }
         let (mut last_activity, lock_signal) = (std::time::Instant::now(), CancelSource::new());
         let slot = SlotView::new(None, &mut ssh, &mut last_activity, &lock_signal);
-        missing_approval(&slot, need).cloned()
+        missing_approval(&slot, needed).cloned()
     }
 
     #[test]
     fn a_request_that_needs_nothing_lacks_nothing() {
-        assert_eq!(missing_given(None, &Need::Nothing), None);
+        assert_eq!(missing_given(None, None), None);
     }
 
     #[test]
     fn an_approval_nothing_covers_is_what_the_request_lacks() {
         for remember in [true, false] {
-            let need = Need::Approval(ask(remember));
-            assert_eq!(missing_given(None, &need), Some(ask(remember)));
+            let needed = approval(remember);
+            assert_eq!(missing_given(None, Some(&needed)), Some(approval(remember)));
         }
     }
 
     #[test]
     fn an_approval_the_database_holds_is_not_lacking() {
-        let need = Need::Approval(ask(true));
-        assert_eq!(missing_given(Some(ask(true)), &need), None);
+        let needed = approval(true);
+        assert_eq!(missing_given(Some(approval(true)), Some(&needed)), None);
     }
 
     #[test]
     fn only_a_missing_approval_with_no_prompt_allowed_is_refused() {
-        let missing = ask(true);
+        let missing = approval(true);
         assert!(matches!(
             refusal_before_prompting(Some(&missing), false),
             Some(Refused::NeedsApproval)

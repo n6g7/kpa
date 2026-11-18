@@ -82,7 +82,7 @@ struct Slot {
     /// only stores what it opened if its token is still live afterwards,
     /// so a lock issued mid-unlock can't be undone by the unlock finishing.
     /// The SSH agent takes one the same way for each signature
-    /// (`SlotView::cancel_token`), for its approval prompt and its signing
+    /// (`SlotView::cancel_token`), for its confirm prompt and its signing
     /// hold.
     lock_signal: CancelSource,
     /// An unlock is prompting or deriving the key right now. A second one
@@ -182,7 +182,7 @@ pub struct Server {
     display_session: Mutex<DisplaySession>,
     /// The daemon's one prompt queue, so only one prompt is ever on screen
     /// (`docs/ssh-agent.md` § 6.7): the unlock prompt's, and the SSH
-    /// agent's approval prompts, which `serve_ssh_agent` builds on it.
+    /// agent's confirm prompts, which `serve_ssh_agent` builds on it.
     prompt_queue: Arc<PromptQueue>,
     /// The unlock prompt (`Config::prompt`), in `prompt_queue`.
     unlock_prompt: Prompt<Zeroizing<String>>,
@@ -1004,7 +1004,7 @@ impl Drop for ConnectionSlot {
 
 /// Serves the SSH agent (`docs/ssh-agent.md`) for `server` on `listener`
 /// forever, each connection on its own thread, as `serve` does the JSON
-/// socket. Its approval prompt runs `ssh_agent.confirm_prompt`, with
+/// socket. Its confirm prompt runs `ssh_agent.confirm_prompt`, with
 /// `Config::confirm_prompt_timeout`, and waits its turn in `unlock`'s
 /// queue, so only one prompt is ever on screen.
 pub fn serve_ssh_agent(server: Arc<Server>, listener: UnixListener) {

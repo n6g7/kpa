@@ -10,7 +10,7 @@ use ssh_key::{Fingerprint, PrivateKey, PublicKey};
 use crate::config::DatabaseConfig;
 use crate::log;
 use crate::paths::Paths;
-use crate::ssh_agent::approve::Approvals;
+use crate::ssh_agent::approve::GrantedApprovals;
 use crate::ssh_agent::keys::{self, SkipReason};
 
 /// The SSH-agent half of a database's slot (`docs/ssh-agent.md` § 6.4,
@@ -29,7 +29,7 @@ pub struct SshSlot {
     /// the key for that one signature, zeroizes on drop too.
     pub(super) private_keys: HashMap<Fingerprint, PrivateKey>,
     /// The approvals granted since unlock.
-    pub(super) approvals: Approvals,
+    pub(super) approvals: GrantedApprovals,
 }
 
 impl SshSlot {

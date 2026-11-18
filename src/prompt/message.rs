@@ -8,7 +8,7 @@
 //! text.
 
 /// Longest prompt message kept: generous for "Unlock personal" and for the
-/// key names and destinations an approval prompt adds, short enough that a
+/// key names and destinations a confirm prompt adds, short enough that a
 /// hostile database or entry name can't hand the prompt program an
 /// unbounded message.
 const MAX_PROMPT_MESSAGE_LEN: usize = 256;

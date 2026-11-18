@@ -12,7 +12,7 @@ use common::InProcessDaemon;
 
 /// A config with one database, `personal`, pointed at `db_path`, serving
 /// SSH keys. `prompt` always answers with `common::PASSWORD` — these tests
-/// aren't about the unlock prompt itself — and the approval prompt always
+/// aren't about the unlock prompt itself — and the confirm prompt always
 /// answers `Allow`.
 fn config(db_path: &Path) -> String {
     format!(
@@ -172,7 +172,7 @@ fn sign_and_verify(agent: &SshAgent, dir: &Path, listed: &str, title: &str, coun
     let signed = sign(agent, &pubkey_path, &data_path);
     assert!(
         signed.status.success(),
-        "{title}: signing should succeed after the approval prompt answers Allow: {}",
+        "{title}: signing should succeed after the confirm prompt answers Allow: {}",
         String::from_utf8_lossy(&signed.stderr)
     );
     assert_eq!(count_lines(counter), prompts + 1, "{title}: one prompt");
@@ -245,7 +245,7 @@ fn locking_makes_signing_fail_again() {
     );
 }
 
-/// A config whose approval prompt appends a line to `counter` on every
+/// A config whose confirm prompt appends a line to `counter` on every
 /// invocation (always answering `Allow`), with `[[database.ssh_key]]`
 /// overriding `fingerprint`'s `confirm` setting.
 fn config_with_override(
@@ -315,7 +315,7 @@ fn confirm_always_prompts_every_signature() {
     );
 }
 
-/// `confirm = "never"` never asks for local use — the approval prompt here
+/// `confirm = "never"` never asks for local use — the confirm prompt here
 /// would fail the test outright if it were ever invoked, so a successful
 /// signature already proves it wasn't.
 #[test]
@@ -356,7 +356,7 @@ fn confirm_never_never_prompts() {
     );
     assert!(
         !marker.exists(),
-        "confirm = never must never run the approval prompt"
+        "confirm = never must never run the confirm prompt"
     );
 }
 
@@ -405,7 +405,7 @@ fn locking_clears_approvals() {
     );
 }
 
-/// A lock in flight kills an SSH approval prompt exactly like it kills
+/// A lock in flight kills an SSH confirm prompt exactly like it kills
 /// `unlock`'s own: once the prompt is up (it touches a marker first),
 /// `ssh-keygen -Y sign` fails quickly rather than waiting out the whole
 /// (deliberately long) prompt.
@@ -451,7 +451,7 @@ fn locking_kills_an_open_approval_prompt() {
     while !marker.exists() {
         assert!(
             std::time::Instant::now() < deadline,
-            "the approval prompt never came up"
+            "the confirm prompt never came up"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -461,11 +461,11 @@ fn locking_kills_an_open_approval_prompt() {
     let sign = sign_thread.join().expect("sign thread panicked");
     assert!(
         !sign.status.success(),
-        "a signature whose approval prompt got killed by a lock must not succeed"
+        "a signature whose confirm prompt got killed by a lock must not succeed"
     );
     assert!(
         started.elapsed() < std::time::Duration::from_secs(10),
-        "the approval prompt should have been killed by the lock, not run its full 30s"
+        "the confirm prompt should have been killed by the lock, not run its full 30s"
     );
 }
 
@@ -595,7 +595,7 @@ mod raw {
     }
 }
 
-/// A config whose approval prompt counts its invocations, with no
+/// A config whose confirm prompt counts its invocations, with no
 /// per-key overrides — every served key keeps the default `confirm =
 /// "once"`.
 fn config_counting_prompts(db_path: &Path, counter: &Path) -> String {

@@ -9,7 +9,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::{Approval, Backend, CancelToken, PromptOutcome};
+use super::{Backend, CancelToken, ConfirmAnswer, PromptOutcome};
 
 type Hook = Box<dyn FnOnce() + Send>;
 
@@ -56,10 +56,10 @@ impl<T> Step<T> {
     }
 }
 
-impl Step<Approval> {
-    /// An approval prompt answered `Allow`.
-    pub(crate) fn allow() -> Step<Approval> {
-        Step::new(PromptOutcome::Answer(Approval::Allow))
+impl Step<ConfirmAnswer> {
+    /// A confirm prompt answered `Allow`.
+    pub(crate) fn allow() -> Step<ConfirmAnswer> {
+        Step::new(PromptOutcome::Answer(ConfirmAnswer::Allow))
     }
 }
 
