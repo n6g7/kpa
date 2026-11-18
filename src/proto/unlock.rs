@@ -147,18 +147,6 @@ impl<'de> Visitor<'de> for PasswordVisitor {
     }
 }
 
-/// How an unlock that didn't fail ended. The `unlock` request itself
-/// answers with the database's name either way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Unlocked {
-    /// The call's own prompt, or password, was answered and the database
-    /// opened.
-    Opened,
-    /// The database was already open: someone else unlocked it first, and
-    /// this call prompted for nothing.
-    AlreadyOpen,
-}
-
 /// Everything `unlock` can fail with. Every variant but `NoDisplay` names
 /// the database the unlock was for, even when the cause isn't about the
 /// database itself (a dismissed prompt). `NoDisplay` is about where the
@@ -249,7 +237,7 @@ impl UnlockError {
 /// it; otherwise the implementor owns credential acquisition, and nothing
 /// about *how* it asks for one appears in this signature.
 pub trait Unlock {
-    /// `Ok` says the database is now unlocked. `requester` says where the
+    /// `Ok` names the database that is now unlocked. `requester` says where the
     /// request came from, which decides whether a prompt may be raised on
     /// screen. `message` is what the prompt says; `None` is the plain
     /// "Unlock <db>".
@@ -258,7 +246,7 @@ pub trait Unlock {
         request: &UnlockRequest,
         requester: &Requester,
         message: Option<&str>,
-    ) -> Result<Unlocked, UnlockError>;
+    ) -> Result<String, UnlockError>;
 }
 
 #[cfg(test)]

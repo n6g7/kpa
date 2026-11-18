@@ -1,4 +1,4 @@
-//! What the unlock and approval prompts say (`docs/ssh-agent.md` § 6.6,
+//! What the unlock and confirm prompts say (`docs/ssh-agent.md` § 6.6,
 //! § 6.7): the key, what it is for and where the signature goes, as one
 //! question.
 
@@ -16,7 +16,7 @@ use crate::ssh_agent::keys::ServedKey;
 /// is one line the prompt caps at 256 bytes, and the destination comes last,
 /// so every variable piece is cut well short of that: the worst message,
 /// an unlock prompt for an `SSHSIG` on a host `known_hosts` doesn't name,
-/// is 238 bytes (`the_worst_message_fits_the_prompt_cap`), and the
+/// is 237 bytes (`the_worst_message_fits_the_prompt_cap`), and the
 /// destination is always whole.
 const MAX_DATABASE_LEN: usize = 24;
 const MAX_KEY_NAME_LEN: usize = 64;
@@ -25,7 +25,7 @@ const MAX_REQUESTED_LEN: usize = 32;
 /// A host name from `known_hosts`.
 const MAX_HOST_NAME_LEN: usize = 56;
 
-/// The approval prompt's message, a question the user answers yes or no to:
+/// The confirm prompt's message, a question the user answers yes or no to:
 /// "Approve use of key "github" to log in to git@github.com?". The key is
 /// shown by its name, quoted. What follows says what it is for and, for a
 /// connection bound to a destination, where: the host name `known_hosts`
@@ -42,9 +42,9 @@ pub(super) fn approval(
     question(&lead, purpose, destination, known_hosts_name)
 }
 
-/// The unlock prompt's message: the approval question, led by the database
-/// it unlocks. "Unlock database personal and use key "github" to log in as
-/// git?".
+/// The unlock prompt's message, a question about unlocking that says what
+/// for: "Unlock database personal to use key "github" to log in as git?". It
+/// doesn't ask to approve the key; the confirm prompt does.
 pub(super) fn unlock(
     served: &ServedKey,
     purpose: &Purpose,
@@ -52,7 +52,7 @@ pub(super) fn unlock(
     known_hosts_name: Option<&str>,
 ) -> String {
     let lead = format!(
-        "Unlock database {} and use {}",
+        "Unlock database {} to use {}",
         escape_one_line(&served.database, MAX_DATABASE_LEN),
         key(served)
     );
@@ -217,33 +217,34 @@ mod tests {
         );
     }
 
-    /// The unlock question is the approval question, led by the database.
+    /// The unlock question says what the key is for as the approval question
+    /// does, led by the database it unlocks.
     #[test]
     fn an_unlock_asks_the_same_question_led_by_its_database() {
         let (dest, fingerprint) = (dest(), fingerprint());
 
         assert_eq!(
             unlocked(&login("git"), None, None),
-            "Unlock database personal and use key \"github\" to log in as git?"
+            "Unlock database personal to use key \"github\" to log in as git?"
         );
         assert_eq!(
             unlocked(&login("git"), Some(&dest), Some("github.com")),
-            "Unlock database personal and use key \"github\" to log in to git@github.com?"
+            "Unlock database personal to use key \"github\" to log in to git@github.com?"
         );
         assert_eq!(
             unlocked(&login("git"), Some(&dest), None),
             format!(
-                "Unlock database personal and use key \"github\" \
+                "Unlock database personal to use key \"github\" \
                  to log in as git to host key {fingerprint}?"
             )
         );
         assert_eq!(
             unlocked(&sshsig("git"), None, None),
-            "Unlock database personal and use key \"github\" to sign for namespace git?"
+            "Unlock database personal to use key \"github\" to sign for namespace git?"
         );
         assert_eq!(
             unlocked(&Purpose::Other, Some(&dest), None),
-            format!("Unlock database personal and use key \"github\" on host key {fingerprint}?")
+            format!("Unlock database personal to use key \"github\" on host key {fingerprint}?")
         );
     }
 
@@ -273,7 +274,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(longest, 238);
+        assert_eq!(longest, 237);
     }
 
     /// A key name can't close its quotes and carry on the sentence, nor

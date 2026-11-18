@@ -29,9 +29,7 @@ pub use ssh_keys::{
     SshKeys, SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey,
 };
 pub use status::{DatabaseStatus, Status};
-pub use unlock::{
-    MAX_PASSWORD_LEN, Password, PasswordError, Unlock, UnlockError, UnlockRequest, Unlocked,
-};
+pub use unlock::{MAX_PASSWORD_LEN, Password, PasswordError, Unlock, UnlockError, UnlockRequest};
 
 use serde::Serialize;
 
@@ -71,11 +69,7 @@ where
             databases: handler.status(),
             version: handler.daemon_version(),
         },
-        Op::Unlock(unlock) => Response::Unlock(
-            handler
-                .unlock(unlock, requester, None)
-                .map(|_| unlock.db.clone()),
-        ),
+        Op::Unlock(unlock) => Response::Unlock(handler.unlock(unlock, requester, None)),
         Op::Lock(request) => Response::Lock(handler.lock(request)),
         Op::List(request) => Response::List(handler.list(request)),
         Op::Copy(request) => Response::Copy(handler.copy(request, requester)),

@@ -13,7 +13,7 @@ use crate::authn::Requester;
 use crate::authz;
 use crate::config::DatabaseConfig;
 use crate::prompt::{CancelSource, Prompt, PromptOutcome, PromptQueue, Scripted};
-use crate::proto::{Unlock, UnlockError, UnlockRequest, Unlocked};
+use crate::proto::{Unlock, UnlockError, UnlockRequest};
 use crate::session_watch::DisplaySession;
 
 /// The display session the fake host starts with.
@@ -57,7 +57,7 @@ type Hook = Box<dyn FnOnce() + Send>;
 /// Prompts may appear for [`requester`] unless [`FakeHost::without_prompts`]
 /// says otherwise.
 /// Its unlock raises a prompt that a test scripts, in the queue the
-/// agent's approval prompt shares, and its clock moves only when a test
+/// agent's confirm prompt shares, and its clock moves only when a test
 /// says.
 pub(super) struct FakeHost {
     databases: Vec<DatabaseConfig>,
@@ -70,7 +70,7 @@ pub(super) struct FakeHost {
     stale: AtomicBool,
     clock: Mutex<Instant>,
     queue: Arc<PromptQueue>,
-    unlock_prompt: Prompt<Zeroizing<String>>,
+    prompt_to_unlock: Prompt<Zeroizing<String>>,
     unlocks: Scripted<Zeroizing<String>>,
     before_unlock: Mutex<Option<Hook>>,
     /// How many times `with_slot` has run.
@@ -105,7 +105,7 @@ impl FakeHost {
             opened: None,
             stale: AtomicBool::new(false),
             clock: Mutex::new(Instant::now()),
-            unlock_prompt: Prompt::new(
+            prompt_to_unlock: Prompt::new(
                 Arc::clone(&queue),
                 unlocks.clone(),
                 Duration::from_secs(60),
@@ -234,7 +234,7 @@ impl Unlock for FakeHost {
         request: &UnlockRequest,
         requester: &Requester,
         message: Option<&str>,
-    ) -> Result<Unlocked, UnlockError> {
+    ) -> Result<String, UnlockError> {
         let db = request.db.as_str();
         let message = message.expect("the agent says why it unlocks");
         let named = || db.to_string();
@@ -248,14 +248,14 @@ impl Unlock for FakeHost {
                 .get(db)
                 .ok_or(UnlockError::UnknownDb { db: named() })?;
             if slot.db.is_some() {
-                return Ok(Unlocked::AlreadyOpen);
+                return Ok(named());
             }
             if !authz::may_prompt_on_screen(requester, &self.display_session) {
                 return Err(UnlockError::NoDisplay);
             }
             slot.lock_signal.token()
         };
-        match self.unlock_prompt.ask(message, &token) {
+        match self.prompt_to_unlock.ask(message, &token) {
             Ok(PromptOutcome::Answer(_)) => {}
             Ok(PromptOutcome::Cancelled | PromptOutcome::TimedOut) => {
                 return Err(UnlockError::PromptCancelled { db: named() });
@@ -274,6 +274,6 @@ impl Unlock for FakeHost {
             return Err(UnlockError::LockedDuringUnlock { db: named() });
         }
         self.reopen();
-        Ok(Unlocked::Opened)
+        Ok(named())
     }
 }

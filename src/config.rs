@@ -103,20 +103,20 @@ pub struct SshAgentConfig {
     #[serde(default)]
     pub socket: Option<PathBuf>,
 
-    /// argv for the approval prompt, dmenu style (`docs/ssh-agent.md`
+    /// argv for the confirm prompt, dmenu style (`docs/ssh-agent.md`
     /// § 6.7). Empty (the default) until set — required once any database
     /// has `serve_ssh_keys = true` (`Config::validate`).
     #[serde(default)]
     pub confirm_prompt: Vec<String>,
 
-    /// How long the approval prompt may stay open unanswered before it is
+    /// How long the confirm prompt may stay open unanswered before it is
     /// killed and the signature refused. `None` (unset) means the
     /// top-level `prompt_timeout`, as [`Config::confirm_prompt_timeout`]
     /// resolves it.
     #[serde(with = "humantime_serde", default)]
     pub confirm_prompt_timeout: Option<Duration>,
 
-    /// How long a cancelled or timed-out unlock or approval prompt holds
+    /// How long a cancelled or timed-out unlock or confirm prompt holds
     /// back prompts for its database (`docs/ssh-agent.md` § 6.6).
     #[serde(with = "humantime_serde", default = "default_ssh_agent_backoff")]
     pub backoff: Duration,
@@ -295,7 +295,7 @@ fn default_ssh_agent_backoff() -> Duration {
 }
 
 impl Config {
-    /// How long the SSH agent's approval prompt may stay open:
+    /// How long the SSH agent's confirm prompt may stay open:
     /// `ssh_agent.confirm_prompt_timeout` if set, `prompt_timeout`
     /// otherwise.
     pub fn confirm_prompt_timeout(&self) -> Duration {
@@ -569,7 +569,7 @@ mod tests {
         assert!(config.databases.is_empty());
     }
 
-    /// Without its own timeout, the approval prompt uses `prompt_timeout`.
+    /// Without its own timeout, the confirm prompt uses `prompt_timeout`.
     #[test]
     fn the_confirm_prompt_timeout_falls_back_to_prompt_timeout() {
         let config = Config::parse("prompt_timeout = \"2m\"\n").expect("valid config");
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(default.confirm_prompt_timeout(), default.prompt_timeout);
     }
 
-    /// Set, it overrides `prompt_timeout` for the approval prompt only, and
+    /// Set, it overrides `prompt_timeout` for the confirm prompt only, and
     /// parses as `prompt_timeout` does.
     #[test]
     fn the_confirm_prompt_timeout_overrides_prompt_timeout() {

@@ -44,7 +44,7 @@ use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshKeys,
     SshKeysError, SshKeysReport, SshKeysRequest, Status, Unlock, UnlockError, UnlockRequest,
-    Unlocked, WireEntry, WireSkippedKey, WireSshKey,
+    WireEntry, WireSkippedKey, WireSshKey,
 };
 use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
 use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
@@ -527,7 +527,7 @@ impl Unlock for Server {
         request: &UnlockRequest,
         requester: &Requester,
         message: Option<&str>,
-    ) -> Result<Unlocked, UnlockError> {
+    ) -> Result<String, UnlockError> {
         let name = request.db.as_str();
         let db = || name.to_string();
 
@@ -553,7 +553,7 @@ impl Unlock for Server {
             // its file had changed, so finding it still installed here
             // means the file is unchanged — succeed without re-prompting.
             if slot.db.is_some() {
-                return Ok(Unlocked::AlreadyOpen);
+                return Ok(name.to_string());
             }
             // Which prompt may ask for the password, if any: none where
             // nobody can answer it (from outside the desktop, or behind a
@@ -656,7 +656,7 @@ impl Unlock for Server {
         // Logged here rather than in `log_response`: only this path knows
         // the database was actually opened, as opposed to already unlocked.
         log::info(format_args!("unlocked {name:?}"));
-        Ok(Unlocked::Opened)
+        Ok(name.to_string())
     }
 }
 
@@ -1021,14 +1021,14 @@ impl Drop for ConnectionSlot {
 /// `Config::confirm_prompt_timeout`, and waits its turn in `unlock`'s
 /// queue, so only one prompt is ever on screen.
 pub fn serve_ssh_agent(server: Arc<Server>, listener: UnixListener) {
-    let approval = Prompt::new(
+    let confirm_prompt = Prompt::new(
         Arc::clone(&server.prompt_queue),
         ConfirmProgram::new(server.config.ssh_agent.confirm_prompt.clone()),
         server.config.confirm_prompt_timeout(),
     );
     let agent = Agent::new(
         Arc::clone(&server),
-        approval,
+        confirm_prompt,
         server.config.ssh_agent.backoff,
         &server.paths,
     );
@@ -2426,7 +2426,7 @@ mod tests {
         (Arc::new(server), prompts)
     }
 
-    fn unlock(server: &Server, name: &str) -> Result<Unlocked, UnlockError> {
+    fn unlock(server: &Server, name: &str) -> Result<String, UnlockError> {
         unlock_from(server, name, &desktop())
     }
 
@@ -2441,7 +2441,7 @@ mod tests {
         server: &Server,
         name: &str,
         requester: &Requester,
-    ) -> Result<Unlocked, UnlockError> {
+    ) -> Result<String, UnlockError> {
         Unlock::unlock(server, &request(name), requester, None)
     }
 
@@ -2846,7 +2846,7 @@ mod tests {
                 &desktop(),
                 Some("Unlock personal")
             ),
-            Ok(Unlocked::AlreadyOpen)
+            Ok("personal".to_string())
         );
         assert!(prompts.shown().is_empty());
     }

@@ -226,7 +226,7 @@ fn signing_and_verifying_works_after_unlock_and_approval() {
 
 /// A config whose unlock prompt answers with the password until `flag`
 /// exists and appends a line to `unlocks` and fails from then on, and whose
-/// approval prompt appends a line to `approvals` and allows.
+/// confirm prompt appends a line to `approvals` and allows.
 fn config_with_cancelling_unlock(
     db_path: &Path,
     flag: &Path,
@@ -249,11 +249,11 @@ fn config_with_cancelling_unlock(
     )
 }
 
-/// A signature for a locked database unlocks it, and answering that prompt
-/// is the key's approval: no approval prompt follows (`docs/ssh-agent.md`
-/// § 6.6).
+/// A signature for a locked database unlocks it, and the key's approval
+/// prompt follows: answering the unlock approves nothing (`docs/ssh-agent.md`
+/// § 6.6, § 6.7).
 #[test]
-fn a_signature_for_a_locked_database_unlocks_it_and_needs_no_second_prompt() {
+fn a_signature_for_a_locked_database_unlocks_it_and_then_asks_for_the_approval() {
     let counters = tempfile::tempdir().expect("tempdir");
     let (unlocks, approvals) = (
         counters.path().join("unlocks"),
@@ -282,7 +282,11 @@ fn a_signature_for_a_locked_database_unlocks_it_and_needs_no_second_prompt() {
         String::from_utf8_lossy(&signed.stderr)
     );
     assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], false);
-    assert_eq!(count_lines(&approvals), 0, "the unlock was the approval");
+    assert_eq!(
+        count_lines(&approvals),
+        1,
+        "the approval followed the unlock"
+    );
 }
 
 /// A cancelled unlock prompt fails the signature, and the next one fails at
