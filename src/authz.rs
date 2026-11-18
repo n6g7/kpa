@@ -117,7 +117,7 @@ fn in_desktop_cgroup(requester: &Requester, session: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authn::Terminal;
+    use crate::prompt::Terminal;
     use crate::proto::Password;
     use std::os::unix::net::UnixStream;
     use zeroize::Zeroizing;
@@ -300,7 +300,7 @@ mod tests {
 
     /// A terminal a requester passed: the slave end of a pseudo-terminal.
     fn passed_terminal() -> Terminal {
-        let (_master, slave) = crate::authn::testing::pty();
+        let (_master, slave) = crate::prompt::testing::pty();
         let (_client, connection) = UnixStream::pair().expect("connection");
         Terminal::new(slave, &connection).expect("a terminal")
     }

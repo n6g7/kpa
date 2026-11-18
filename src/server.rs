@@ -31,7 +31,7 @@ use keepass::Database;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::authn::{Requester, Terminal};
+use crate::authn::Requester;
 use crate::authz;
 use crate::clip::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
@@ -40,7 +40,7 @@ use crate::log;
 use crate::paths::Paths;
 use crate::prompt::{
     self, CancelSource, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue,
-    SecretProgram, SecretTerminal,
+    SecretProgram, SecretTerminal, Terminal,
 };
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
@@ -1334,7 +1334,7 @@ mod tests {
     use std::os::fd::AsFd;
 
     use super::*;
-    use crate::authn::testing::{echoing, pty, read_until, shows_anything};
+    use crate::prompt::testing::{echoing, pty, read_until, shows_anything};
     use crate::prompt::{Scripted, Step};
 
     /// The display session the tests' display sessions name, and so the one a

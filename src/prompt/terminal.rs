@@ -1,6 +1,6 @@
-//! The terminal backend: [`SecretTerminal`] asks for a secret on a terminal
-//! a requester passed with its request, with echo off, as `ssh` and `sudo`
-//! do on their own (`docs/headless.md` § 4).
+//! Asking on a terminal a requester passed with its request: [`Terminal`] is
+//! that terminal, and [`SecretTerminal`] asks for a secret on it, with echo
+//! off, as `ssh` and `sudo` do on their own (`docs/headless.md` § 4).
 //!
 //! The daemon is not the terminal's owner and the requester may be
 //! misbehaving, so the prompt never waits on it unbounded. Every wait ends
@@ -9,8 +9,9 @@
 //! one of those paths.
 
 use std::io::{self, ErrorKind};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::time::Instant;
 
 use rustix::event::{PollFd, PollFlags, poll};
@@ -20,7 +21,54 @@ use rustix::termios::{LocalModes, OptionalActions, Termios, tcgetattr, tcsetattr
 use zeroize::Zeroizing;
 
 use super::{Backend, CancelToken, MAX_ANSWER_LEN, PromptOutcome, poll_timeout};
-use crate::authn::Terminal;
+
+/// A terminal the peer passed along with its request, and the connection it
+/// came on: the daemon asks on the terminal, and stops asking once the peer
+/// closes the connection.
+///
+/// Cloned freely: a clone is the same terminal.
+#[derive(Debug, Clone)]
+pub struct Terminal {
+    fd: Arc<OwnedFd>,
+    connection: Arc<UnixStream>,
+}
+
+impl Terminal {
+    /// `fd`, as passed on `connection`. Refused unless it is a terminal: the
+    /// daemon writes a prompt to it and switches its echo off, which it must
+    /// not do to a file or a socket the peer picked.
+    pub fn new(fd: OwnedFd, connection: &UnixStream) -> io::Result<Terminal> {
+        if !rustix::termios::isatty(&fd) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "the descriptor passed is not a terminal",
+            ));
+        }
+        Ok(Terminal {
+            fd: Arc::new(fd),
+            connection: Arc::new(connection.try_clone()?),
+        })
+    }
+
+    pub fn fd(&self) -> &OwnedFd {
+        &self.fd
+    }
+
+    /// The connection the terminal came on, for noticing that the peer left.
+    pub fn connection(&self) -> &UnixStream {
+        &self.connection
+    }
+}
+
+/// Two terminals are equal when one is a clone of the other, so a
+/// [`Requester`](crate::authn::Requester) can be compared.
+impl PartialEq for Terminal {
+    fn eq(&self, other: &Terminal) -> bool {
+        Arc::ptr_eq(&self.fd, &other.fd)
+    }
+}
+
+impl Eq for Terminal {}
 
 /// Asks for a secret on a terminal a requester passed
 /// ([`Requester::terminal`](crate::authn::Requester::terminal)). It shows the
@@ -243,7 +291,7 @@ mod tests {
 
     use super::super::{CancelSource, Prompt, PromptQueue};
     use super::*;
-    use crate::authn::testing::{echoing, pty, read_until};
+    use crate::prompt::testing::{echoing, pty, read_until};
 
     const MESSAGE: &str = "Unlock personal";
 

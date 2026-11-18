@@ -11,7 +11,7 @@
 //! [`Requester`] only keeps the cgroup.
 //!
 //! A peer can also pass a terminal along with its request, for the daemon to
-//! ask on when it can't ask on screen ([`Terminal`]).
+//! ask on when it can't ask on screen ([`Terminal`](crate::prompt::Terminal)).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -19,8 +19,9 @@ use std::io::{self, ErrorKind, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::{LazyLock, Mutex};
+
+use crate::prompt::Terminal;
 
 /// Longest `/proc/<pid>/` file accepted. A unified hierarchy's `cgroup` has
 /// one line; a hybrid one adds a line per v1 controller, still well under
@@ -92,54 +93,6 @@ pub struct Requester {
     /// if it has to ask the user something and can't ask on screen.
     pub terminal: Option<Terminal>,
 }
-
-/// A terminal the peer passed along with its request, and the connection it
-/// came on: the daemon asks on the terminal, and stops asking once the peer
-/// closes the connection.
-///
-/// Cloned freely: a clone is the same terminal.
-#[derive(Debug, Clone)]
-pub struct Terminal {
-    fd: Arc<OwnedFd>,
-    connection: Arc<UnixStream>,
-}
-
-impl Terminal {
-    /// `fd`, as passed on `connection`. Refused unless it is a terminal: the
-    /// daemon writes a prompt to it and switches its echo off, which it must
-    /// not do to a file or a socket the peer picked.
-    pub fn new(fd: OwnedFd, connection: &UnixStream) -> io::Result<Terminal> {
-        if !rustix::termios::isatty(&fd) {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "the descriptor passed is not a terminal",
-            ));
-        }
-        Ok(Terminal {
-            fd: Arc::new(fd),
-            connection: Arc::new(connection.try_clone()?),
-        })
-    }
-
-    pub fn fd(&self) -> &OwnedFd {
-        &self.fd
-    }
-
-    /// The connection the terminal came on, for noticing that the peer left.
-    pub fn connection(&self) -> &UnixStream {
-        &self.connection
-    }
-}
-
-/// Two terminals are equal when one is a clone of the other, so a
-/// [`Requester`] can be compared.
-impl PartialEq for Terminal {
-    fn eq(&self, other: &Terminal) -> bool {
-        Arc::ptr_eq(&self.fd, &other.fd)
-    }
-}
-
-impl Eq for Terminal {}
 
 impl Requester {
     /// The peer on `stream`: its uid from the socket, and its cgroup and
@@ -372,82 +325,5 @@ mod tests {
                     .as_str()
             )
         );
-    }
-}
-
-/// What tests of the code that asks on a requester's terminal share.
-#[cfg(test)]
-pub(crate) mod testing {
-    use std::fs::File;
-    use std::io::Read;
-    use std::os::fd::OwnedFd;
-    use std::time::{Duration, Instant};
-
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    use rustix::fs::{Mode, OFlags, open};
-    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
-    use rustix::termios::{LocalModes, tcgetattr};
-
-    /// A pseudo-terminal: the master end stands for the user's keyboard and
-    /// screen, the slave end for what a client's `/dev/tty` opens to.
-    pub(crate) fn pty() -> (File, OwnedFd) {
-        let master =
-            openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).expect("openpt");
-        grantpt(&master).expect("grantpt");
-        unlockpt(&master).expect("unlockpt");
-        let name = ptsname(&master, Vec::new()).expect("ptsname");
-        let slave = open(
-            name.as_c_str(),
-            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .expect("open the slave");
-        (File::from(master), slave)
-    }
-
-    /// Whether the terminal echoes what is typed, as its master end sees it.
-    pub(crate) fn echoing(master: &File) -> bool {
-        tcgetattr(master)
-            .expect("tcgetattr")
-            .local_modes
-            .contains(LocalModes::ECHO)
-    }
-
-    /// Whether the user's screen has anything on it to read now.
-    pub(crate) fn shows_anything(master: &File) -> bool {
-        let mut fds = [PollFd::new(master, PollFlags::IN)];
-        let now = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        poll(&mut fds, Some(&now)).expect("poll");
-        // Not just any event: the master hangs up once every slave is closed.
-        fds[0].revents().contains(PollFlags::IN)
-    }
-
-    /// Reads from the user's screen until `needle` shows up, and returns
-    /// everything read. Panics after a few seconds instead of hanging.
-    pub(crate) fn read_until(master: &mut File, needle: &str) -> String {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut seen = String::new();
-        let mut buf = [0u8; 256];
-        while !seen.contains(needle) {
-            let left = deadline.saturating_duration_since(Instant::now());
-            assert!(
-                !left.is_zero(),
-                "timed out waiting for {needle:?}; the screen showed {seen:?}"
-            );
-            let mut fds = [PollFd::new(&*master, PollFlags::IN)];
-            let timeout = Timespec {
-                tv_sec: left.as_secs().try_into().unwrap_or(i64::MAX),
-                tv_nsec: left.subsec_nanos().into(),
-            };
-            if poll(&mut fds, Some(&timeout)).is_err() || fds[0].revents().is_empty() {
-                continue;
-            }
-            let read = master.read(&mut buf).expect("read the screen");
-            seen.push_str(&String::from_utf8_lossy(&buf[..read]));
-        }
-        seen
     }
 }

@@ -29,6 +29,8 @@ mod program;
 mod question;
 mod queue;
 mod terminal;
+#[cfg(test)]
+pub(crate) mod testing;
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -42,7 +44,7 @@ pub use outcome::{ConfirmAnswer, Declined, PromptOutcome};
 pub use program::{ConfirmProgram, SecretProgram};
 pub use question::Prompt;
 pub use queue::PromptQueue;
-pub use terminal::SecretTerminal;
+pub use terminal::{SecretTerminal, Terminal};
 
 /// The longest answer read, in bytes; one more byte is an error. An answer
 /// can be a secret, so this is the secrets' length cap.
