@@ -85,7 +85,7 @@ module may use and which use nothing in kpa.
 | `tray` | the status icon and its menu | `databases`, `prompt`, `session_watch` |
 | `auto_lock` | when databases lock besides a request, and the sleep hold | `databases`, `session_watch` |
 | `daemon` | wiring and threads (§ 8) | everything |
-| `main` (the binary) | arguments, hardening | `daemon`, `control`'s client |
+| `main` (the binary) | arguments, hardening, dispatch | `daemon`, `control`'s client |
 
 Between front ends there are no arrows: `control` doesn't use `ssh_agent`,
 `tray` doesn't use `control`. What two of them share is a leaf below them
@@ -351,7 +351,7 @@ gives the database, the agent's state and `unlock_token()`. A flow that
 prompts between two reads takes the token in the first and checks
 `is_cancelled()` in the second; that is how a lock that came in between is
 seen. No trait stands between the agent and the databases, and its tests
-build a real `Databases` (§ 11).
+build a real `Databases` (§ 12).
 
 **Reaction to unlock and lock.** `unlocked` scans the database under the
 core's lock and writes the public-key cache after releasing it; `locked`
@@ -549,7 +549,27 @@ calls, so a test drives it from one thread.
 The in-process daemon the integration tests use builds the same objects with
 the same function and starts the listeners it needs.
 
-## 9. Portability
+## 9. Layout
+
+kpa is one Cargo package with two crates: the library (`src/lib.rs`), which
+holds every module in § 2 but `main`, and the binary (`src/main.rs`).
+
+- **The binary is thin.** It parses arguments, hardens the process, and
+  dispatches: `kpa serve` goes to `daemon::serve`, and every client
+  subcommand goes to `control`'s client.
+- **Each subsystem is a top-level module of the library**: one file, or a
+  directory once it has parts, as [`module-structure.md`](./module-structure.md)
+  says.
+- **Tests.** Unit tests sit inline in the file they test. Integration tests
+  are in `tests/` and build the daemon through `daemon`. The fuzz targets stay
+  their own package under `fuzz/`.
+- **One package, not a workspace.** The dependency rules between subsystems
+  are `module-structure.md`'s, kept by review rather than by crate boundaries,
+  and test fakes (`prompt::Scripted`, `clip::RecordingBackend`) stay usable
+  from every subsystem's unit tests, which separate crates would put behind a
+  feature or a test-support crate.
+
+## 10. Portability
 
 The core is the part of kpa with no OS seam. It reads files through `vault`
 (open, read, `fstat`, `stat`: POSIX calls macOS has) and keeps time with
@@ -568,7 +588,7 @@ The core is the part of kpa with no OS seam. It reads files through `vault`
 `DisplaySession` carries the logind session id the clipboard needs; only
 `session_watch`, `clip`, `wayland` and `authz::on_desktop` read it.
 
-## 10. Names
+## 11. Names
 
 - **`databases`**: a module and type that say what they hold; call sites read
   `databases.open(name)`, `databases.lock_all()`. `core` compiles as a module
@@ -581,7 +601,7 @@ The core is the part of kpa with no OS seam. It reads files through `vault`
 - **`Unlocking`**, **`Open`**, **`Observer`**: an unlock in progress, an
   unlocked database held for reading, a callback for a change.
 
-## 11. Tests
+## 12. Tests
 
 - **`databases`** is tested alone: the state machine (a lock beats an unlock,
   a token is cancelled when its unlock's lock happens, idle expiry per
