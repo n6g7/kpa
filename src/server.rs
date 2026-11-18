@@ -524,7 +524,6 @@ impl Unlock for Server {
     fn unlock(
         &self,
         request: &UnlockRequest,
-        preferred: Option<PromptOn>,
         requester: &Requester,
         message: Option<&str>,
     ) -> Result<String, UnlockError> {
@@ -559,8 +558,7 @@ impl Unlock for Server {
             // `on_session_event` marks the display session before its
             // `lock_all` takes it, so either this sees the mark and refuses,
             // or that lock cancels the token taken below and ends the prompt.
-            let prompt_on =
-                authz::choose_unlock_prompt(requester, &self.display_session(), preferred)?;
+            let prompt_on = authz::choose_unlock_prompt(requester, &self.display_session())?;
             if slot.unlocking {
                 return Err(UnlockError::InProgress { db: db() });
             }
@@ -1329,6 +1327,7 @@ mod tests {
             cgroup: Some(cgroup),
             command: None,
             terminal: None,
+            preferred: None,
         }
     }
 
@@ -2335,7 +2334,6 @@ mod tests {
             &UnlockRequest {
                 db: "personal".to_string(),
             },
-            None,
             &desktop(),
             None,
         );
@@ -2400,7 +2398,6 @@ mod tests {
             &UnlockRequest {
                 db: "personal".to_string(),
             },
-            None,
             &desktop(),
             None,
         );
@@ -2534,16 +2531,7 @@ mod tests {
         name: &str,
         requester: &Requester,
     ) -> Result<String, UnlockError> {
-        unlock_preferring(server, name, None, requester)
-    }
-
-    fn unlock_preferring(
-        server: &Server,
-        name: &str,
-        preferred: Option<PromptOn>,
-        requester: &Requester,
-    ) -> Result<String, UnlockError> {
-        Unlock::unlock(server, &request(name), preferred, requester, None)
+        Unlock::unlock(server, &request(name), requester, None)
     }
 
     /// A requester that passed a terminal with its request, as one at
@@ -2837,8 +2825,16 @@ mod tests {
         line: &str,
     ) -> Result<String, UnlockError> {
         thread::scope(|scope| {
-            let unlocking =
-                scope.spawn(|| unlock_preferring(server, "personal", preferred, requester));
+            let unlocking = scope.spawn(|| {
+                unlock_from(
+                    server,
+                    "personal",
+                    &Requester {
+                        preferred,
+                        ..requester.clone()
+                    },
+                )
+            });
             read_until(master, "Unlock personal: ");
             assert!(!echoing(master), "echo is off while the prompt is up");
             master.write_all(line.as_bytes()).expect("type");
@@ -2911,7 +2907,14 @@ mod tests {
         let (server, prompts) = prompt_server();
 
         assert_eq!(
-            unlock_preferring(&server, "personal", Some(PromptOn::Terminal), &desktop()),
+            unlock_from(
+                &server,
+                "personal",
+                &Requester {
+                    preferred: Some(PromptOn::Terminal),
+                    ..desktop()
+                },
+            ),
             Err(UnlockError::NoPrompt)
         );
         assert!(prompts.shown().is_empty(), "the screen prompt ran");
@@ -2926,7 +2929,14 @@ mod tests {
         let (requester, master, _client) = passing_a_terminal(false);
 
         assert_eq!(
-            unlock_preferring(&server, "personal", Some(PromptOn::Screen), &requester),
+            unlock_from(
+                &server,
+                "personal",
+                &Requester {
+                    preferred: Some(PromptOn::Screen),
+                    ..requester.clone()
+                },
+            ),
             Err(UnlockError::NoPrompt)
         );
         assert!(prompts.shown().is_empty());
@@ -3116,7 +3126,6 @@ mod tests {
             Unlock::unlock(
                 &*server,
                 &request("personal"),
-                None,
                 &desktop(),
                 Some("Unlock personal: key deploy"),
             ),
@@ -3138,7 +3147,6 @@ mod tests {
             Unlock::unlock(
                 &*server,
                 &request("personal"),
-                None,
                 &desktop(),
                 Some("Unlock personal")
             ),

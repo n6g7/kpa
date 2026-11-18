@@ -248,6 +248,7 @@ mod tests {
             cgroup: None,
             command: Some("ssh".to_string()),
             terminal: None,
+            preferred: None,
         }
     }
 

@@ -12,7 +12,7 @@ use super::{SlotView, SshHost, SshSlot};
 use crate::authn::Requester;
 use crate::authz;
 use crate::config::DatabaseConfig;
-use crate::prompt::{CancelSource, Prompt, PromptOn, PromptOutcome, PromptQueue, Scripted};
+use crate::prompt::{CancelSource, Prompt, PromptOutcome, PromptQueue, Scripted};
 use crate::proto::{Unlock, UnlockError, UnlockRequest};
 use crate::session_watch::DisplaySession;
 
@@ -29,6 +29,7 @@ pub(super) fn requester() -> Requester {
         )),
         command: None,
         terminal: None,
+        preferred: None,
     }
 }
 
@@ -233,7 +234,6 @@ impl Unlock for FakeHost {
     fn unlock(
         &self,
         request: &UnlockRequest,
-        _preferred: Option<PromptOn>,
         requester: &Requester,
         message: Option<&str>,
     ) -> Result<String, UnlockError> {

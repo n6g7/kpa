@@ -146,7 +146,7 @@ impl<H: SshHost> Agent<H> {
             db: key.database.clone(),
         };
         self.host
-            .unlock(&unlock, None, requester, Some(&message))
+            .unlock(&unlock, requester, Some(&message))
             .map(|_| ())
             .map_err(Refused::Unlock)
     }

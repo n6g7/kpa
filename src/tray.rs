@@ -162,7 +162,6 @@ impl TrayItem {
             // A click has no peer: the daemon itself asks.
             let result = server.unlock(
                 &UnlockRequest { db: name.clone() },
-                None,
                 &Requester::of_this_process(),
                 None,
             );

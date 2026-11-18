@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{ErrorCode, ErrorFields};
 use crate::authn::Requester;
-use crate::prompt::PromptOn;
 
 /// What `{"op":"unlock", ...}` carries; `Op::Unlock` wraps it. `db` is
 /// required — there is no "unlock everything".
@@ -112,14 +111,12 @@ impl UnlockError {
 /// the request would like to be asked.
 pub trait Unlock {
     /// `Ok` names the database that is now unlocked. `requester` says where
-    /// the request came from and which terminal it passed, and `preferred`
-    /// where the request asked to be asked (`Request::preferred_prompt`).
-    /// Together they decide where the prompt appears. `message` is what the
-    /// prompt says; `None` is the plain "Unlock <db>".
+    /// the request came from, which terminal it passed and where it asked to
+    /// be asked, and together they decide where the prompt appears. `message`
+    /// is what the prompt says; `None` is the plain "Unlock <db>".
     fn unlock(
         &self,
         request: &UnlockRequest,
-        preferred: Option<PromptOn>,
         requester: &Requester,
         message: Option<&str>,
     ) -> Result<String, UnlockError>;

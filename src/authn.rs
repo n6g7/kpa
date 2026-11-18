@@ -21,7 +21,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
-use crate::prompt::Terminal;
+use crate::prompt::{PromptOn, Terminal};
 
 /// Longest `/proc/<pid>/` file accepted. A unified hierarchy's `cgroup` has
 /// one line; a hybrid one adds a line per v1 controller, still well under
@@ -89,9 +89,13 @@ pub struct Requester {
     /// what it asked for (`docs/ssh-agent.md` § 6.8). `None` where it can't
     /// be read.
     pub command: Option<String>,
-    /// A terminal the peer passed with its request. The daemon uses it only
-    /// if it has to ask the user something and can't ask on screen.
+    /// A terminal the peer passed with its request. The daemon asks on it
+    /// when the request prefers the terminal (`preferred`), and when it has
+    /// to ask the user something and can't ask on screen.
     pub terminal: Option<Terminal>,
+    /// Where the request asked to be asked, if it named a place
+    /// (`Request::preferred_prompt`).
+    pub preferred: Option<PromptOn>,
 }
 
 impl Requester {
@@ -111,6 +115,7 @@ impl Requester {
             cgroup,
             command: peer_command(stream),
             terminal: None,
+            preferred: None,
         })
     }
 
@@ -128,6 +133,7 @@ impl Requester {
             cgroup,
             command: Some("kpa".to_string()),
             terminal: None,
+            preferred: None,
         }
     }
 }

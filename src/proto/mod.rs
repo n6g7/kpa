@@ -63,18 +63,23 @@ impl<T: Status + Unlock + Lock + List + CopyEntry + SshKeys> Handler for T {}
 /// the pairing — `Op::Lock` to `Response::Lock` to `LockError` — is stated
 /// once, here, rather than being a convention each handler has to remember
 /// to follow.
+///
+/// The request's own say about where to be asked (`preferred_prompt`) joins
+/// the facts about its requester, so every handler reads them in one place.
 pub fn dispatch<H>(handler: &H, request: &Request, requester: &Requester) -> Response
 where
     H: Handler + ?Sized,
 {
+    let requester = &Requester {
+        preferred: request.preferred_prompt,
+        ..requester.clone()
+    };
     match &request.op {
         Op::Status => Response::Status {
             databases: handler.status(),
             version: handler.daemon_version(),
         },
-        Op::Unlock(unlock) => {
-            Response::Unlock(handler.unlock(unlock, request.preferred_prompt, requester, None))
-        }
+        Op::Unlock(unlock) => Response::Unlock(handler.unlock(unlock, requester, None)),
         Op::Lock(request) => Response::Lock(handler.lock(request)),
         Op::List(request) => Response::List(handler.list(request)),
         Op::Copy(request) => Response::Copy(handler.copy(request, requester)),
