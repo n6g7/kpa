@@ -1,6 +1,6 @@
 //! Approvals and pending requests (`docs/ssh-agent.md` § 6.7, § 6.8): the
 //! [`Scope`] an approval covers, [`GrantedApprovals`], what the user has approved
-//! since unlock, and [`Pending`], the requests refused for want of an
+//! since unlock, and [`PendingRequests`], the requests refused for want of an
 //! approval that an `ssh_approve` can still grant. In memory only, and
 //! dropped with the database's SSH-agent state on lock.
 //!
@@ -104,7 +104,7 @@ impl GrantedApprovals {
 /// text (`user`, `namespace`, `command`) is capped by whoever records it
 /// and escaped by whoever shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Requested {
+pub struct RequestDetails {
     /// The key's name, from its override or its entry's title.
     pub key_name: String,
     /// `Purpose::label`.
@@ -125,17 +125,17 @@ struct Entry {
     /// never means another request, and says nothing about the scope.
     id: Uuid,
     approval: SignatureApproval,
-    requested: Requested,
+    requested: RequestDetails,
     /// When it was last refused.
     at: Instant,
 }
 
-/// One pending request, as [`Pending::list`] shows it.
+/// One pending request, as [`PendingRequests::list`] shows it.
 #[derive(Debug)]
 pub struct Listed<'a> {
     pub id: Uuid,
     pub approval: &'a SignatureApproval,
-    pub requested: &'a Requested,
+    pub requested: &'a RequestDetails,
     /// Since it was last refused.
     pub age: Duration,
 }
@@ -144,14 +144,14 @@ pub struct Listed<'a> {
 /// approval no prompt could ask for (`docs/ssh-agent.md` § 6.8), oldest
 /// first.
 #[derive(Debug, Default)]
-pub struct Pending(Vec<Entry>);
+pub struct PendingRequests(Vec<Entry>);
 
-impl Pending {
+impl PendingRequests {
     /// Records that `requested` was refused for want of `approval`'s approval. A
     /// request identical to a pending one is merged into it, which keeps it
     /// and its id another [`PENDING_TTL`]. Past [`MAX_PENDING`] the oldest
     /// goes.
-    pub fn record(&mut self, approval: SignatureApproval, requested: Requested, now: Instant) {
+    pub fn record(&mut self, approval: SignatureApproval, requested: RequestDetails, now: Instant) {
         self.0.retain(|entry| !expired(entry, now));
         let id = match self
             .0
@@ -226,8 +226,8 @@ mod tests {
         }
     }
 
-    fn requested(command: &str) -> Requested {
-        Requested {
+    fn requested(command: &str) -> RequestDetails {
+        RequestDetails {
             key_name: "github".to_string(),
             purpose: "login",
             user: Some("alice".to_string()),
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn identical_requests_merge_keeping_the_id_and_the_latest_time() {
-        let mut pending = Pending::default();
+        let mut pending = PendingRequests::default();
         let t0 = Instant::now();
         pending.record(approval(1, None, true), requested("ssh"), t0);
         let id = pending.list(t0).next().expect("pending").id;
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn a_request_is_kept_for_five_minutes() {
-        let mut pending = Pending::default();
+        let mut pending = PendingRequests::default();
         let t0 = Instant::now();
         pending.record(approval(1, None, true), requested("ssh"), t0);
         let id = pending.list(t0).next().expect("pending").id;
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn past_the_cap_the_oldest_goes() {
-        let mut pending = Pending::default();
+        let mut pending = PendingRequests::default();
         let t0 = Instant::now();
         for command in 0..=MAX_PENDING {
             pending.record(approval(1, None, true), requested(&command.to_string()), t0);
@@ -359,7 +359,7 @@ mod tests {
     /// nothing.
     #[test]
     fn taking_an_id_removes_its_scopes_requests_and_returns_the_recorded_ask() {
-        let mut pending = Pending::default();
+        let mut pending = PendingRequests::default();
         let now = Instant::now();
         pending.record(approval(1, None, false), requested("ssh"), now);
         pending.record(approval(1, None, false), requested("git"), now);

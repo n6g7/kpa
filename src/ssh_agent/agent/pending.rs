@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::SshHost;
 use crate::log;
-use crate::ssh_agent::approve::Requested;
+use crate::ssh_agent::approve::RequestDetails;
 
 /// One pending request, as `ssh_pending` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,7 +22,7 @@ pub struct PendingRequest {
     pub key: Fingerprint,
     /// The destination's host key, for a bound connection.
     pub destination: Option<Fingerprint>,
-    pub requested: Requested,
+    pub requested: RequestDetails,
     /// Since it was last refused.
     pub age: Duration,
 }
@@ -110,8 +110,8 @@ mod tests {
         ))
     }
 
-    fn requested() -> Requested {
-        Requested {
+    fn requested() -> RequestDetails {
+        RequestDetails {
             key_name: "github".to_string(),
             purpose: "other",
             user: None,

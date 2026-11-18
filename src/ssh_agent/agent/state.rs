@@ -10,7 +10,7 @@ use ssh_key::{Fingerprint, PrivateKey, PublicKey};
 use crate::config::DatabaseConfig;
 use crate::log;
 use crate::paths::Paths;
-use crate::ssh_agent::approve::{GrantedApprovals, Pending};
+use crate::ssh_agent::approve::{GrantedApprovals, PendingRequests};
 use crate::ssh_agent::keys::{self, SkipReason};
 
 /// The SSH-agent half of a database's slot (`docs/ssh-agent.md` § 6.4,
@@ -32,7 +32,7 @@ pub struct SshSlot {
     pub(super) approvals: GrantedApprovals,
     /// The requests refused for want of an approval no prompt could ask
     /// for (`docs/ssh-agent.md` § 6.8).
-    pub(super) pending: Pending,
+    pub(super) pending: PendingRequests,
 }
 
 impl SshSlot {
