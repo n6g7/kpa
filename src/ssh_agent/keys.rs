@@ -260,7 +260,7 @@ pub struct ServedKey {
 /// `[[database.ssh_key]]` settings (`DatabaseConfig::ssh_key_settings`):
 /// drops anything a `serve = false` override names, names the rest with
 /// [`key_name`], and carries each one's `confirm`/`forwarded` policy for
-/// [`super::policy::decide`].
+/// [`super::authz::authorize_sign`].
 pub fn resolve(cfg: &DatabaseConfig, found: &[FoundKey]) -> Vec<ServedKey> {
     found
         .iter()

@@ -13,7 +13,7 @@ use ssh_key::{Fingerprint, HashAlg};
 /// OpenSSH's `ssh`, which never bind at all). Approving a key for one
 /// destination never covers another, or covers unbound use, and vice versa
 /// (`docs/ssh-agent.md` § 6.7). Computed once, by
-/// [`policy::decide`](super::policy::decide), and carried to the lookup and
+/// [`authorize_sign`](super::authz::authorize_sign), and carried to the lookup and
 /// the grant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Scope {

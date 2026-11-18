@@ -2,13 +2,13 @@
 //! answered against the display session as it is then
 //! (`docs/headless.md` §§ 2, 3 and 5).
 //!
-//! There are two layers here, and a third policy elsewhere. The checks
+//! There are two layers here, and a third elsewhere. The checks
 //! (`may_connect`, `on_desktop`, `may_prompt_on_screen`) are shared by both
 //! sockets. `authorize_copy` and `choose_unlock_prompt` are kpa's own
 //! socket's policy, one per request type, built on the checks and returning
-//! what the request may use or the refusal it gets. The SSH agent's policy is
-//! `ssh_agent::policy`. `session_watch` is unrelated: it reports what the
-//! OS says about the display session ([`DisplaySession`]).
+//! what the request may use or the refusal it gets. The SSH agent's
+//! equivalent is `ssh_agent::authz`. `session_watch` is unrelated: it reports
+//! what the OS says about the display session ([`DisplaySession`]).
 //!
 //! A requester holds facts read from its socket. Whether it runs on the
 //! desktop is not one of them: it depends on which session is the display

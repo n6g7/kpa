@@ -11,9 +11,10 @@ use super::SshHost;
 use crate::config::DatabaseConfig;
 use crate::log;
 use crate::output;
+use crate::ssh_agent::authz::may_list;
 use crate::ssh_agent::bind::ConnectionClass;
+use crate::ssh_agent::keys;
 use crate::ssh_agent::wire::{self, Identity};
-use crate::ssh_agent::{keys, policy};
 
 /// The longest identity comment sent: a key's name, from an override or
 /// an entry title, escaped and capped (`docs/ssh-agent.md` § 6.4), so a
@@ -38,7 +39,7 @@ pub(super) fn identities(
         .collect();
     let listed = keys::dedupe_by_config_order(per_database)
         .into_iter()
-        .filter(|key| policy::listable(class, key.forwarded))
+        .filter(|key| may_list(class, key.forwarded))
         .filter_map(|key| {
             let key_blob = key.public_key.to_bytes().ok()?;
             Some(Identity {
