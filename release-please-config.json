@@ -3,6 +3,7 @@
   "packages": {
     ".": {
       "release-type": "rust",
+      "bump-minor-pre-major": true,
       "package-name": "kpa",
       "include-component-in-tag": false
     }
