@@ -7,7 +7,7 @@
 pub mod authn;
 pub mod authz;
 mod cancel;
-pub mod clip;
+pub mod clipboard;
 pub mod config;
 pub mod frontends;
 mod io;
@@ -20,7 +20,6 @@ pub mod session_watch;
 pub mod socket;
 pub mod ssh;
 pub mod vault;
-mod wayland;
 
 /// The crate version alone (e.g. `0.1.0`) when built from an exact release
 /// tag, `{crate_version}+{short hash}` otherwise. Set by `build.rs`.

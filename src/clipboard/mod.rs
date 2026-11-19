@@ -4,7 +4,7 @@
 //!
 //! - [`Backend`] is the primitive a real clipboard gives us: the ability to
 //!   start serving a secret as an [`Offer`]. [`WaylandBackend`] implements
-//!   it on kpa's own Wayland client (`crate::wayland`). Nothing here
+//!   it on kpa's own Wayland client (`wayland`). Nothing here
 //!   decides *when* to stop serving.
 //! - [`Clipboard`] is the part that decides: "a second `copy` replaces the
 //!   first" and "drop the offer after the timeout, but only if nothing else
@@ -28,13 +28,15 @@
 //! data source: the compositor clears the selection only if that source
 //! still holds it. So a copy landing between `is_live` and `end` survives.
 
+mod wayland;
+
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use zeroize::Zeroizing;
 
 use crate::session_watch::DisplaySession;
-use crate::wayland;
-pub use crate::wayland::Offer;
+
+pub use wayland::Offer;
 
 /// What went wrong handing a secret to the clipboard backend. `Display`
 /// text only, and never the secret itself.

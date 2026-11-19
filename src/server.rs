@@ -34,7 +34,7 @@ use zeroize::Zeroizing;
 use crate::authn::Requester;
 use crate::authz;
 use crate::cancel::CancelSource;
-use crate::clip::{self, Clipboard};
+use crate::clipboard::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
 use crate::frontends::control::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
@@ -186,7 +186,7 @@ pub struct Server {
     /// `docs/threat-model.md` G-6 ("lock clears what kpa owns") says the
     /// offer must end too, not just outlive its own `clipboard_timeout`.
     /// `Clipboard` itself stays database-agnostic
-    /// (see `clip.rs`'s doc comment) — this is the one place that
+    /// (see `clipboard/mod.rs`'s doc comment) — this is the one place that
     /// association is tracked. `Arc` so `copy`'s own expiry thread (which
     /// outlives the request, same as `clip` above) can clear it too, once
     /// its natural timeout fires with nothing newer having replaced it.
@@ -205,17 +205,17 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: Config, paths: Paths, sleep_delay: SleepDelay) -> Server {
-        Server::with_clipboard(config, paths, sleep_delay, clip::WaylandBackend)
+        Server::with_clipboard(config, paths, sleep_delay, clipboard::WaylandBackend)
     }
 
     /// Like `new`, but with an injected clipboard backend — real tests use
     /// `new`; unit tests that need to control the clipboard without a
-    /// Wayland connection use this with a fake `clip::Backend`.
+    /// Wayland connection use this with a fake `clipboard::Backend`.
     pub fn with_clipboard(
         config: Config,
         paths: Paths,
         sleep_delay: SleepDelay,
-        backend: impl clip::Backend + 'static,
+        backend: impl clipboard::Backend + 'static,
     ) -> Server {
         let unlock_prompt = SecretProgram::new(config.prompt.clone());
         Server::with_backends(config, paths, sleep_delay, backend, unlock_prompt)
@@ -227,7 +227,7 @@ impl Server {
         config: Config,
         paths: Paths,
         sleep_delay: SleepDelay,
-        clipboard: impl clip::Backend + 'static,
+        clipboard: impl clipboard::Backend + 'static,
         unlock_prompt: impl prompt::Backend<Zeroizing<String>> + 'static,
     ) -> Server {
         let dbs = config
@@ -1603,7 +1603,7 @@ mod tests {
             "idle_timeout = \"{timeout}\"\n\
              [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n"
         );
-        let (backend, _offered) = clip::RecordingBackend::new();
+        let (backend, _offered) = clipboard::RecordingBackend::new();
         let server = Server::with_clipboard(
             Config::parse(&config).expect("valid config"),
             Paths::default(),
@@ -1725,7 +1725,7 @@ mod tests {
     /// clipboard backend — no real Wayland connection anywhere in this
     /// test module. The returned handle is what the backend recorded.
     fn copy_server() -> (Server, Arc<Mutex<Vec<String>>>) {
-        let (backend, offered) = clip::RecordingBackend::new();
+        let (backend, offered) = clipboard::RecordingBackend::new();
         let server = Server::with_clipboard(
             Config::parse("[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n")
                 .expect("valid config"),
@@ -1892,18 +1892,18 @@ mod tests {
         assert_eq!(*offered.lock().unwrap(), vec!["entrypass1".to_string()]);
     }
 
-    /// What `clip::RecordingBackend::new_tracking` hands back: every offer
+    /// What `clipboard::RecordingBackend::new_tracking` hands back: every offer
     /// made so far, each independently queryable for liveness. Named so
     /// the tracking test fixtures below don't each spell out the nested
     /// generic.
-    type TrackedOffers = Arc<Mutex<Vec<Arc<clip::Offer>>>>;
+    type TrackedOffers = Arc<Mutex<Vec<Arc<clipboard::Offer>>>>;
 
     /// A server with two configured, locked databases and a recording
     /// clipboard backend that tracks per-offer liveness — for the
     /// lock-clears-clipboard tests below, which need to tell whether
     /// `lock` actually ended the offer `copy` started.
     fn copy_server_two_dbs_tracking() -> (Server, TrackedOffers) {
-        let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
+        let (backend, _offered, offers) = clipboard::RecordingBackend::new_tracking();
         let server = Server::with_clipboard(
             Config::parse(
                 "[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
@@ -2048,7 +2048,7 @@ mod tests {
     /// database's clipboard offer too, the same as an explicit `lock`.
     #[test]
     fn idle_lock_ends_the_clipboard_offer_for_that_db() {
-        let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
+        let (backend, _offered, offers) = clipboard::RecordingBackend::new_tracking();
         let server = Server::with_clipboard(
             Config::parse(
                 "idle_timeout = \"1s\"\n\
@@ -2284,7 +2284,7 @@ mod tests {
     /// dismissed — for the freshness-guard tests below, which drive
     /// `unlock` far enough to re-prompt without needing it to succeed.
     fn stale_drop_test_server() -> (Server, TrackedOffers) {
-        let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
+        let (backend, _offered, offers) = clipboard::RecordingBackend::new_tracking();
         let prompts = Scripted::new();
         prompts.push(Step::new(PromptOutcome::Cancelled));
         let server = Server::with_backends(
@@ -2319,7 +2319,7 @@ mod tests {
     /// `personal` holds a live clipboard offer and has just gone stale on
     /// disk; `work` is untouched. Returns the offer so a test can check
     /// whether the guard it drives ended it.
-    fn stale_copy_setup() -> (Server, TrackedOffers, Arc<clip::Offer>) {
+    fn stale_copy_setup() -> (Server, TrackedOffers, Arc<clipboard::Offer>) {
         let (server, offers) = stale_drop_test_server();
         let uuid = unlock_with_entry(&server, "personal");
         CopyEntry::copy(
@@ -2574,7 +2574,7 @@ mod tests {
             .expect("valid config"),
             Paths::default(),
             SleepDelay::new().0,
-            clip::WaylandBackend,
+            clipboard::WaylandBackend,
             prompts.clone(),
         );
         allow_copy(&server);

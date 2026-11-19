@@ -20,13 +20,13 @@
 //! ```
 //!
 //! The daemon finds the compositor through the service manager's
-//! environment, not its own (`src/wayland/compositor.rs`), so
+//! environment, not its own (`src/clipboard/wayland/compositor.rs`), so
 //! `compositor` looks it up the same way, and the `wl-paste`/`wl-copy` the
 //! tests run are pointed at it. Where none is reachable, an opted-in test
 //! prints why and skips rather than fails. The state machine those tests
 //! exercise — a timeout or a lock ending the current offer, a second
 //! `copy` replacing the first — is covered without any compositor at all
-//! by `src/clip.rs`'s own unit tests.
+//! by `src/clipboard/mod.rs`'s own unit tests.
 
 mod common;
 
