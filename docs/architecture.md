@@ -182,6 +182,8 @@ ends need, and it never hands out the `keepass` database:
 /// Holds the core's lock. Don't call the core while it lives.
 pub struct Open<'a> { /* guard */ }
 impl Open<'_> {
+    /// The configured name of this database.
+    pub fn name(&self) -> &str;
     /// The token of the unlock this database is in: cancelled by the lock
     /// that ends it (§ 4).
     pub fn unlock_token(&self) -> CancelToken;
@@ -605,11 +607,14 @@ refused for want of an approval ([`ssh-agent.md`](./ssh-agent.md) § 6.7,
 unlock, as an observer that drops what a lock ended.
 
 ```rust
-pub struct Approvals { /* Mutex<HashMap<String, (CancelToken, Granted, Pending)>> */ }
+pub struct Approvals { /* Mutex<HashMap<String, Held>> */ }
+struct Held { unlock: CancelToken, granted: GrantedApprovals, pending: PendingRequests }
 impl Approvals {
+    pub fn new() -> Approvals;
     /// Each call takes the guard of the database it is about, so the caller
-    /// shows it holds it; the state it reads is the one of that guard's unlock.
+    /// shows it holds it; the state it sees is the one of that guard's unlock.
     pub fn covers(&self, open: &Open, scope: &Scope, now: Instant) -> bool;
+    /// Approves `scope` until the lock that ends this unlock.
     pub fn grant(&self, open: &Open, scope: Scope);
     /// Uses up the scope's one-signature approval; one kept until lock stays.
     pub fn spend(&self, open: &Open, scope: &Scope);
@@ -617,17 +622,21 @@ impl Approvals {
     /// This database's pending requests, oldest first.
     pub fn pending(&self, open: &Open, now: Instant) -> Vec<PendingRequest>;
     /// Approves what the request `id` asked for, and answers every request
-    /// pending for its scope. `false` if none has that id.
-    pub fn approve(&self, open: &Open, id: Uuid, now: Instant, window: Duration) -> bool;
+    /// pending for its scope. The approved key; `None` if none has that id.
+    pub fn approve(&self, open: &Open, id: Uuid, now: Instant, window: Duration) -> Option<Fingerprint>;
 }
 impl Observer for Approvals {
+    /// Drops `db`'s state if it is tagged with `unlock`, and nothing else.
     fn locked(&self, _: &Databases, db: &str, unlock: &CancelToken);
 }
 ```
 
-- **Per unlock.** State is tagged with the unlock's token (§ 4): a call whose
-  guard belongs to another unlock than the state's starts afresh, and a late
-  `locked` for an old unlock leaves a new unlock's state. An approval until
+- **Per unlock.** A call finds the state by `open.name()` and compares its
+  token with `open.unlock_token()` (§ 4). State tagged with another token reads
+  as empty (`covers`, `pending`, `approve`, `spend`); `grant` and `record`
+  replace it. A late `locked` for an old unlock leaves a new unlock's state.
+  There is no `unlocked`: the comparison makes a fresh state, and the lock has
+  already dropped the old one. An approval until
   lock covers its scope until the lock that ends its unlock, and not the next
   unlock.
 - **A one-signature approval** (`confirm = "always"`, approved by `ssh
@@ -635,7 +644,8 @@ impl Observer for Approvals {
   checks it, signs and spends it inside one hold of the core's guard, so two
   concurrent retries sign once.
 - **Pending requests** are recorded by the agent when a requester that can't
-  be asked lacks an approval. Identical ones merge, at most 16 are kept, each
+  be asked lacks an approval, with the database open: a locked database has no
+  guard, so nothing is recorded for it. Identical ones merge, at most 16 are kept, each
   for 5 minutes, and they are listed in config order, then oldest first. They
   hold entry titles, so a lock drops them with the approvals.
 - **It reads the core and never drives it.** It calls none of `begin_unlock`,
@@ -826,7 +836,11 @@ src/
   ssh/                  what control and ssh_agent share about SSH
     mod.rs
     keys.rs             finding keys, their config, the public-key cache
-    approvals.rs        approvals and pending requests, and their state per unlock
+    approvals/          approvals and pending requests, and their state per unlock
+      mod.rs            Approvals (the state and its observer), Scope,
+                        SignatureApproval, RequestDetails, PendingRequest
+      granted.rs        GrantedApprovals: what is approved
+      pending.rs        PendingRequests: what was refused
   display_session.rs    DisplaySession, DisplayWriter, DisplayHandle: what authz, clipboard
                         and the front ends read
   clipboard/            mod.rs, and wayland/
