@@ -93,7 +93,7 @@ tokens), which any module may use and which use nothing in kpa.
 | `socket` | the owner-only bind, the socket directory check, a request with a file descriptor attached | nothing |
 | `prompt` | the prompt queue, backends, outcomes, `PromptOn` | nothing |
 | `authn` | `Requester`: who is on the other end of a socket, and where it asked to be prompted | `prompt` |
-| `display_session` | `DisplaySession` and `DisplayHandle`: the current display session, one writer, read-only copies | nothing |
+| `display_session` | `DisplaySession`, a `DisplayWriter` (the one writer) and `DisplayHandle`s (read-only copies) | nothing |
 | `authz` | the checks every front end shares: `may_connect`, `on_desktop`, `display_allows_prompt`, `may_prompt_on_screen` | `authn`, `display_session` |
 | `clipboard` | the clipboard, with its Wayland backend inside | `authn`, `authz`, `display_session` |
 | **`databases`** | **the databases, their lifecycle, `Observer`; `vault` (reads a `.kdbx` with the `keepass` crate) inside** | **`config`** |
@@ -524,11 +524,28 @@ means. It is a directory: `mod.rs` is OS-neutral and names no D-Bus type, and
 - **`mod.rs`** reacts and holds the databases:
 
 ```rust
-pub fn react(databases: &Databases, display: &DisplayHandle, event: SessionEvent);
-pub fn watch_idle(databases: Arc<Databases>, idle_timeout: Duration); // databases.expire_idle(now) on a tick
+/// Where the lock triggers come from. Opaque; it wraps logind's own `Bus`.
+pub struct Source { /* logind::Bus */ }
+impl Source {
+    pub fn system() -> Source;
+    pub fn at(address: impl Into<String>) -> Source; // a private message bus, for tests
+}
+/// Starts the logind watcher and the inhibitor thread; returns the sleep hold
+/// to register (after the secret holders) and the loop to run.
+pub fn start(source: Source, display: DisplayWriter) -> (SleepHold, AutoLock);
+pub struct AutoLock { /* Receiver<SessionEvent>, DisplayWriter */ }
+impl AutoLock {
+    /// Spawns the idle tick, then blocks reacting to events. `daemon` spawns it.
+    pub fn run(self, databases: Arc<Databases>, idle_timeout: Duration);
+}
 pub struct SleepHold { /* SleepDelay, a mutex that orders its answers */ }
 impl Observer for SleepHold { /* hold_while(databases.any_unlocked()) after every change */ }
+
+fn react(databases: &Databases, display: &DisplayWriter, event: SessionEvent); // private
+fn watch_idle(databases: &Databases, idle_timeout: Duration);                  // private: expire_idle(now) on a tick
 ```
+
+`SessionEvent` and `SleepDelay` belong to `logind.rs`; `daemon` sees neither.
 
 `react` locks everything for a lock request, a locked display session, a
 suspend and a lost watch. `SleepHold` reads `any_unlocked()` inside its own
@@ -538,10 +555,11 @@ released when `SleepHold` is told, after the observers registered before it
 have run (§ 4).
 
 **The display session** is `auto_lock`'s to write and everyone else's to
-read. `display_session.rs` holds only the `DisplaySession` type and the
-`DisplayHandle` around it: one writer, which `auto_lock` holds, and read-only
-copies (`display.get()`) for `authz`, the clipboard and the other front ends.
-`react` writes the handle for an event that carries the session's state
+read. `display_session.rs` holds only the `DisplaySession` type and the pair
+`channel()` returns: one `DisplayWriter` (`set`; not `Clone`), which
+`auto_lock` holds, and `DisplayHandle`s (`get`; `Clone`) for `authz`, the
+clipboard and the other front ends. Tests use the same pair. `react` writes
+the writer for an event that carries the session's state
 before it locks: a locked display session is marked locked before anything is
 locked, a lock request alone doesn't mark it, and a lost watch forgets it
 (the state is unknown until the watch is back). So "marked before everything
@@ -730,8 +748,8 @@ what reacts to a lock. It names no D-Bus type: the lock triggers' OS side is
 
 ```rust
 pub fn serve(config: Config, paths: Paths, control_socket: UnixListener, agent_socket: Option<UnixListener>, triggers: auto_lock::Source) {
-    let display = DisplayHandle::new();                 // auto_lock writes it; the rest get display.reader()
-    let (sleep_hold, auto_lock) = auto_lock::start(triggers, display.clone());
+    let (writer, display) = display_session::channel(); // auto_lock writes it; the rest get clones of `display`
+    let (sleep_hold, auto_lock) = auto_lock::start(triggers, writer);
 
     // What reacts to a lock or an unlock, registered before the core is shared.
     // Observers run in this order: the ones that hold secrets, then the sleep hold.
@@ -751,12 +769,12 @@ pub fn serve(config: Config, paths: Paths, control_socket: UnixListener, agent_s
     let unlock = Arc::new(Prompt::new(queue.clone(), SecretProgram::new(config.prompt.clone()), config.prompt_timeout));
 
     spawn(|| auto_lock.run(databases.clone(), config.idle_timeout));
-    spawn(|| tray::run(databases.clone(), display.reader(), unlock.clone(), wake));
+    spawn(|| tray::run(databases.clone(), display.clone(), unlock.clone(), wake));
     if let Some(listener) = agent_socket {
-        let agent = Agent::new(databases.clone(), ssh, approvals.clone(), display.reader(), unlock.clone(), confirm_prompt(&queue, &config), &paths);
+        let agent = Agent::new(databases.clone(), ssh, approvals.clone(), display.clone(), unlock.clone(), confirm_prompt(&queue, &config), &paths);
         spawn(|| ssh_agent::serve(agent, listener));
     }
-    control::serve(Arc::new(control::Api::new(databases, display.reader(), unlock, queue, copies, approvals, &config)), control_socket);
+    control::serve(Arc::new(control::Api::new(databases, display.clone(), unlock, queue, copies, approvals, &config)), control_socket);
 }
 ```
 
@@ -809,7 +827,7 @@ src/
     mod.rs
     keys.rs             finding keys, their config, the public-key cache
     approvals.rs        approvals and pending requests, and their state per unlock
-  display_session.rs    DisplaySession, DisplayHandle: what authz, clipboard
+  display_session.rs    DisplaySession, DisplayWriter, DisplayHandle: what authz, clipboard
                         and the front ends read
   clipboard/            mod.rs, and wayland/
   authn.rs  authz.rs  prompt/  config.rs  paths.rs  socket.rs
@@ -898,10 +916,11 @@ the directory changes. Until then no macOS code or stubs are written.
   retries of a one-signature approval) are tests against it.
 - **`control`** is tested against a real `Databases`, `prompt::Scripted` for
   the unlock prompt, `clipboard::RecordingBackend` for the clipboard and a
-  `DisplayHandle` the test sets: the unlock gates, a lock ending a prompt,
+  `DisplayWriter` the test sets: the unlock gates, a lock ending a prompt,
   and "a lock of the database a copy came from ends the offer; another doesn't".
-- **`auto_lock`** is tested by calling `react` on a `Databases` with a
-  `SleepDelay` whose receiver the test reads; the logind watcher by
-  `tests/logind.rs` against a private bus.
+- **`auto_lock`** is tested by unit tests of `react`, `watch_idle` and
+  `SleepHold` on a `Databases` with a `SleepDelay` whose receiver the test
+  reads; the logind watcher and `auto_lock::start` by `tests/logind.rs`
+  against a private bus.
 - **Integration tests** build the daemon with `daemon` and put the real CLI
   and the OpenSSH tools in front of it.
