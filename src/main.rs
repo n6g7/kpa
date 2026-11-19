@@ -6,23 +6,20 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
 use kpa::config::Config;
-use kpa::frontends::auto_lock::SleepState;
-use kpa::frontends::auto_lock::logind::{self, Bus};
+use kpa::daemon;
+use kpa::frontends::auto_lock::Source;
 use kpa::frontends::control::client::{self, Format, ssh_keys_report, ssh_requests_report};
 use kpa::frontends::control::proto::{
     CopyRequest, Field, ListRequest, LockRequest, Op, SshApproveRequest, SshKeysReport,
     SshKeysRequest,
 };
-use kpa::frontends::tray;
 use kpa::log::{self, Level};
 use kpa::output::report_error;
 use kpa::paths::Paths;
-use kpa::server::{self, Server};
 use kpa::socket;
 use uuid::Uuid;
 
@@ -161,7 +158,7 @@ fn dispatch(cli: Cli) -> ExitCode {
     };
 
     match cli.command {
-        Command::Serve { log_level } => run_serve(&socket_path, cli.config, log_level, paths),
+        Command::Serve { log_level } => run_serve(&socket_path, cli.config, log_level),
         Command::Status => client::run_client(&socket_path, Op::Status),
         Command::Unlock { db, tty } => client::run_unlock(&socket_path, db, tty),
         Command::Lock { db } => client::run_client(&socket_path, Op::Lock(LockRequest { db })),
@@ -228,7 +225,6 @@ fn run_serve(
     socket_path: &Path,
     config_path: Option<PathBuf>,
     log_level: Option<Level>,
-    paths: Paths,
 ) -> ExitCode {
     // `dispatch` already marked this process non-dumpable, before it ever
     // reached this subcommand.
@@ -248,63 +244,13 @@ fn run_serve(
         }
     };
 
-    // The SSH agent's socket (`docs/ssh-agent.md` § 7), bound only once a
-    // database serves SSH keys.
-    let ssh_agent = if config.databases.iter().any(|cfg| cfg.serve_ssh_keys) {
-        let Some(path) = config.ssh_agent.socket_path(paths.runtime_dir.as_deref()) else {
-            report_error(
-                "ssh_agent.socket is unset and XDG_RUNTIME_DIR is not set to an absolute path; \
-                 a database has serve_ssh_keys = true, so the SSH agent socket needs one",
-            );
-            return ExitCode::FAILURE;
-        };
-        match socket::bind_socket(&path) {
-            Ok(listener) => Some((path, listener)),
-            Err(err) => {
-                report_error(format_args!(
-                    "binding the ssh agent socket {}: {err}",
-                    path.display()
-                ));
-                return ExitCode::FAILURE;
-            }
-        }
-    } else {
-        None
-    };
-
     log::set_level(log_level.unwrap_or(config.log_level));
     log::info(format_args!(
         "kpa {} listening on {}",
         kpa::VERSION,
         socket_path.display()
     ));
-    // Before serving, so no unlock can happen without the inhibitor
-    // hearing of it.
-    let (events, incoming) = std::sync::mpsc::channel();
-    let inhibitor = logind::start(Bus::System, events.clone());
-    let server = Arc::new(Server::new(config, paths, events));
-    let reacting = server.clone();
-    std::thread::spawn(move || {
-        let mut sleep = SleepState::default();
-        for event in incoming {
-            let hold = sleep.hold_after(&event);
-            reacting.on_session_event(event);
-            inhibitor.hold(hold);
-        }
-    });
-    tray::start(server.clone());
-    if let Some((path, listener)) = ssh_agent {
-        let ssh_server = server.clone();
-        let spawned = std::thread::Builder::new()
-            .name("ssh-agent".to_string())
-            .spawn(move || server::serve_ssh_agent(ssh_server, listener));
-        if let Err(err) = spawned {
-            report_error(format_args!("starting the ssh agent: {err}"));
-            return ExitCode::FAILURE;
-        }
-        log::info(format_args!("ssh agent listening on {}", path.display()));
-    }
-    server::serve(server, listener);
+    daemon::serve(config, listener, Source::system());
     ExitCode::SUCCESS
 }
 

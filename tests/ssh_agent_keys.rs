@@ -4,16 +4,12 @@
 
 mod common;
 
-use keepass::Database;
-use kpa::databases::vault;
+use kpa::databases::Databases;
 use kpa::ssh::keys::{self, SkipReason};
-use zeroize::Zeroizing;
 
-fn fixture() -> Database {
-    let password = Zeroizing::new(common::PASSWORD.to_string());
-    let (db, _) =
-        vault::open(&common::ssh_db(), Some(&password), None).expect("fixture should open");
-    db
+/// The ssh fixture, unlocked.
+fn fixture() -> Databases {
+    common::unlocked_fixture(&common::ssh_db())
 }
 
 /// Scanning finds exactly the three usable OpenSSH keys (Ed25519, ECDSA
@@ -22,7 +18,7 @@ fn fixture() -> Database {
 /// since one lives only in history and the other only in the recycle bin.
 #[test]
 fn scan_finds_the_three_usable_keys_and_skips_the_encrypted_and_pem_ones() {
-    let result = keys::scan(&fixture());
+    let result = keys::scan(&fixture().open("fixture").expect("unlocked"));
 
     let mut found_names: Vec<&str> = result
         .found
@@ -55,16 +51,19 @@ fn scan_finds_the_three_usable_keys_and_skips_the_encrypted_and_pem_ones() {
 }
 
 /// History and the recycle bin are ignored at the
-/// `vault::for_each_attachment` level already — `"Historical"` and
+/// `Open::for_each_attachment` level already — `"Historical"` and
 /// `"Recycled"` contribute no attachments at all to scan.
 #[test]
 fn history_and_recycle_bin_attachments_are_never_visited() {
     let mut names = Vec::new();
-    vault::for_each_attachment(&fixture(), |a| {
-        if matches!(a.entry_title, Some("Historical" | "Recycled")) {
-            names.push(a.name.to_string());
-        }
-    });
+    fixture()
+        .open("fixture")
+        .expect("unlocked")
+        .for_each_attachment(|a| {
+            if matches!(a.entry_title, Some("Historical" | "Recycled")) {
+                names.push(a.name.to_string());
+            }
+        });
     assert!(names.is_empty(), "unexpected attachments: {names:?}");
 }
 
@@ -72,10 +71,11 @@ fn history_and_recycle_bin_attachments_are_never_visited() {
 /// encrypted one.
 #[test]
 fn parse_private_key_reads_every_found_key_type() {
-    let db = fixture();
+    let databases = fixture();
+    let db = databases.open("fixture").expect("unlocked");
     let parses = |attachment_name: &str| {
         let mut parsed = None;
-        vault::for_each_attachment(&db, |a| {
+        db.for_each_attachment(|a| {
             if a.name == attachment_name {
                 parsed = Some(keys::parse_private_key(a.data).is_some());
             }

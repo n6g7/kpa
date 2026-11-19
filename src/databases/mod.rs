@@ -34,6 +34,11 @@ use vault::Fingerprint;
 pub use observer::Observer;
 pub use unlock::{Begin, BeginError, UnlockFailure, Unlocking};
 pub use vault::AttachmentView as Attachment;
+
+/// The names of the fields every entry has, as `Entry::field` takes them.
+pub mod fields {
+    pub use keepass::db::fields::{NOTES, PASSWORD, URL, USERNAME};
+}
 pub use vault::{EntrySummary, VaultError};
 
 /// Every configured database and the lifecycle around it. `Send + Sync`,

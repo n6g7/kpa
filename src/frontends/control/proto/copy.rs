@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::error::{ErrorCode, ErrorFields};
-use crate::authn::Requester;
 
 /// What `{"op":"copy", ...}` carries; `Op::Copy` wraps it. `field` accepts
 /// any name a KeePass client wrote for this entry — see [`Field`].
@@ -217,7 +216,7 @@ impl CopyError {
 
 /// What a successful `copy` reports. `db` and `entry` are never put on the
 /// wire (the client already named both) — they're here only so
-/// `server.rs`'s operation log can say which database and entry a copy
+/// the operation log can say which database and entry a copy
 /// touched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyOutcome {
@@ -227,18 +226,6 @@ pub struct CopyOutcome {
     pub field: Field,
     /// Whole seconds until the daemon drops its clipboard offer on its own.
     pub expires_in: u64,
-}
-
-/// Serving `copy`. Named `CopyEntry` rather than `Copy` — `std::marker::Copy`
-/// is in the prelude, and `impl Copy for Server` would collide with every
-/// `#[derive(Copy, ...)]` elsewhere in the crate the moment both traits are
-/// in scope together. `Status`/`List`/`Lock`/`Unlock` don't have this
-/// problem; this one does, so it gets a different name.
-pub trait CopyEntry {
-    /// `requester` says where the request came from, and gates the copy
-    /// itself (`docs/headless.md` § 5): only a requester on the desktop,
-    /// with the display session active and unlocked, reaches the clipboard.
-    fn copy(&self, request: &CopyRequest, requester: &Requester) -> Result<CopyOutcome, CopyError>;
 }
 
 #[cfg(test)]

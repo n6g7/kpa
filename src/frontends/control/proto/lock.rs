@@ -26,9 +26,3 @@ impl LockError {
         ErrorFields::new(ErrorCode::UnknownDb).db(db)
     }
 }
-
-/// Serving `lock`.
-pub trait Lock {
-    /// `Ok` echoes back what was locked — `None` meaning "all of them".
-    fn lock(&self, request: &LockRequest) -> Result<Option<String>, LockError>;
-}

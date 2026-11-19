@@ -2,7 +2,7 @@
 //! property of a temp file and checks that the guard reacts. The contents
 //! are arbitrary bytes: the fingerprint is about the file, not its KDBX
 //! structure. The same checks run end to end against the daemon in
-//! `tests/server.rs`.
+//! `tests/control.rs`.
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};

@@ -56,12 +56,6 @@ pub struct WireRequestDetails {
     pub command: Option<String>,
 }
 
-/// Serving `ssh_pending`.
-pub trait SshPending {
-    /// Every database's pending requests, in config order, oldest first.
-    fn ssh_pending(&self) -> Vec<WirePending>;
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;

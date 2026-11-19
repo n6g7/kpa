@@ -34,8 +34,3 @@ impl SshApproveError {
             .detail("no such request is pending; it may have expired or the database locked")
     }
 }
-
-/// Serving `ssh_approve`.
-pub trait SshApprove {
-    fn ssh_approve(&self, request: &SshApproveRequest) -> Result<(), SshApproveError>;
-}

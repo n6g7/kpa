@@ -42,8 +42,18 @@ use crate::cancel::CancelToken;
 
 #[cfg(test)]
 pub(crate) use fake::{Scripted, Step};
-pub use outcome::{ConfirmAnswer, Declined, PromptOutcome};
-pub use program::{ConfirmProgram, SecretProgram};
+#[allow(
+    unused_imports,
+    reason = "the SSH agent is off until it runs on the core"
+)]
+pub use outcome::Declined;
+pub use outcome::{ConfirmAnswer, PromptOutcome};
+#[allow(
+    unused_imports,
+    reason = "the SSH agent is off until it runs on the core"
+)]
+pub use program::ConfirmProgram;
+pub use program::SecretProgram;
 pub use question::Prompt;
 pub use queue::PromptQueue;
 pub use terminal::{SecretTerminal, Terminal};

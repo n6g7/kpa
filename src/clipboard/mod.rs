@@ -14,8 +14,8 @@
 //!
 //! **Why `clipboard_timeout` isn't enforced inside this module.** Driving a
 //! timeout needs a sleep somewhere, and [`Clipboard::expire`] is written so
-//! that sleep can be real (`server.rs` spawns a thread that sleeps then
-//! calls it, the same shape as `server.rs`'s own `watch_idle`) or absent
+//! that sleep can be real (`control::CopyState` spawns a thread that sleeps then
+//! calls it, the same shape as `auto_lock`'s idle tick) or absent
 //! entirely (tests call `expire` immediately). Baking `thread::sleep` into
 //! `Clipboard` itself would make every test either wait out a real timeout
 //! or inject a fake clock; not needing a clock at all is simpler than
@@ -104,7 +104,7 @@ impl Clipboard {
     /// something else already took the clipboard, in which case `is_live`
     /// is already false and no action is taken at all.
     ///
-    /// Called after `clipboard_timeout` elapses for `offer` — `server.rs`
+    /// Called after `clipboard_timeout` elapses for `offer` — `control::CopyState`
     /// spawns a thread that sleeps and then calls this; nothing in this
     /// method itself waits.
     pub fn expire(&self, offer: &Arc<Offer>) {
@@ -119,8 +119,7 @@ impl Clipboard {
     /// Ends whatever offer is current right now, unconditionally — unlike
     /// [`expire`](Self::expire), this isn't told which offer it means, so
     /// it ends the current one regardless of which `copy` started it.
-    /// Called on `lock` (`server.rs`'s `Lock::lock` and `lock_all`
-    /// and the idle timer): a database locking is exactly the
+    /// Called when a lock ends the unlock an offer came from (`control::CopyState`): a database locking is exactly the
     /// moment `docs/threat-model.md` G-6 ("lock clears what kpa owns")
     /// says a copied secret kpa still owns should stop being served. A
     /// `current` that is `None`, or already not live (already superseded
@@ -162,19 +161,19 @@ impl Backend for WaylandBackend {
 }
 
 /// A backend with no Wayland connection, for tests elsewhere in the crate
-/// that need a `Server` with a working `Clipboard` but have nothing to do
+/// that need a working `Clipboard` but have nothing to do
 /// with this module's own state-machine tests (`tests::FakeBackend`,
 /// below, is the richer fake those use). Every offer is a detached
-/// [`Offer`], live until `end` — enough for `server.rs`'s tests to check
+/// [`Offer`], live until `end` — enough for `control`'s tests to check
 /// both that `copy` reaches the clipboard with the right secret,
 /// and that a `lock` actually ends an outstanding offer rather than
 /// leaving it served.
 ///
-/// `new` hands back a second, shared handle to what was offered — the
+/// `new_tracking` hands back a second, shared handle to what was offered — the
 /// backend itself ends up owned by a `Clipboard`, so a test needs that
 /// handle to see what it recorded, the same shape as `tests::FakeBackend`.
 #[cfg(test)]
-type OfferHandles = Arc<Mutex<Vec<Arc<Offer>>>>;
+pub(crate) type OfferHandles = Arc<Mutex<Vec<Arc<Offer>>>>;
 
 #[cfg(test)]
 pub(crate) struct RecordingBackend {
@@ -184,12 +183,7 @@ pub(crate) struct RecordingBackend {
 
 #[cfg(test)]
 impl RecordingBackend {
-    pub(crate) fn new() -> (RecordingBackend, Arc<Mutex<Vec<String>>>) {
-        let (backend, offered, _offers) = RecordingBackend::new_tracking();
-        (backend, offered)
-    }
-
-    /// Like `new`, but also hands back a handle to every offer this
+    /// A backend, with a handle to what it was offered and to every offer this
     /// backend has started (oldest first), so a test can check `is_live`
     /// on a specific one after some later action (e.g. a `lock`) that
     /// should have ended it.

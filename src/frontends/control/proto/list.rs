@@ -84,8 +84,3 @@ impl ListError {
         }
     }
 }
-
-/// Serving `list`.
-pub trait List {
-    fn list(&self, request: &ListRequest) -> Result<Vec<WireEntry>, ListError>;
-}

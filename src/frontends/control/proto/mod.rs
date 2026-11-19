@@ -22,25 +22,21 @@ mod ssh_pending;
 mod status;
 mod unlock;
 
-pub use copy::{CopyEntry, CopyError, CopyOutcome, CopyRequest, Field};
+pub use copy::{CopyError, CopyOutcome, CopyRequest, Field};
 pub use error::ErrorCode;
-pub use list::{List, ListError, ListRequest, WireEntry};
-pub use lock::{Lock, LockError, LockRequest};
+pub use list::{ListError, ListRequest, WireEntry};
+pub use lock::{LockError, LockRequest};
 pub use request::{DecodeError, Op, ProtocolError, Request, decode_request, encode_request};
-pub use ssh_approve::{SshApprove, SshApproveError, SshApproveRequest};
-pub use ssh_keys::{
-    SshKeys, SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey,
-};
-pub use ssh_pending::{SshPending, WirePending, WireRequestDetails, WireScope};
-pub use status::{DatabaseStatus, Status};
-pub use unlock::{Unlock, UnlockError, UnlockRequest};
+pub use ssh_approve::{SshApproveError, SshApproveRequest};
+pub use ssh_keys::{SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey};
+pub use ssh_pending::{WirePending, WireRequestDetails, WireScope};
+pub use status::DatabaseStatus;
+pub use unlock::{UnlockError, UnlockRequest};
 
 /// Where a prompt asks, which a request may name (`Request::preferred_prompt`).
 pub use crate::prompt::PromptOn;
 
 use serde::Serialize;
-
-use crate::authn::Requester;
 
 use error::serialize_error;
 
@@ -49,55 +45,6 @@ use error::serialize_error;
 /// see `decode_request` and `docs/design.md`'s "skew impossible to ignore"
 /// rationale.
 pub const VERSION: u32 = 2;
-
-/// Everything a kpa daemon has to be able to do, as one bound. Each op's
-/// trait is defined next to that op's types; this just gathers them, so
-/// `dispatch` takes one bound instead of one per op and `server::Server` has one
-/// thing to satisfy.
-///
-/// The blanket impl means implementing the op traits is all it takes —
-/// there is nothing extra to write.
-pub trait Handler:
-    Status + Unlock + Lock + List + CopyEntry + SshKeys + SshPending + SshApprove
-{
-}
-
-impl<T: Status + Unlock + Lock + List + CopyEntry + SshKeys + SshPending + SshApprove> Handler
-    for T
-{
-}
-
-/// Turn one decoded request into the response for it.
-///
-/// This is the only place an op's outcome becomes a `Response` variant, so
-/// the pairing — `Op::Lock` to `Response::Lock` to `LockError` — is stated
-/// once, here, rather than being a convention each handler has to remember
-/// to follow.
-///
-/// The request's own say about where to be asked (`preferred_prompt`) joins
-/// the facts about its requester, so every handler reads them in one place.
-pub fn dispatch<H>(handler: &H, request: &Request, requester: &Requester) -> Response
-where
-    H: Handler + ?Sized,
-{
-    let requester = &Requester {
-        preferred: request.preferred_prompt,
-        ..requester.clone()
-    };
-    match &request.op {
-        Op::Status => Response::Status {
-            databases: handler.status(),
-            version: handler.daemon_version(),
-        },
-        Op::Unlock(unlock) => Response::Unlock(handler.unlock(unlock, requester, None)),
-        Op::Lock(request) => Response::Lock(handler.lock(request)),
-        Op::List(request) => Response::List(handler.list(request)),
-        Op::Copy(request) => Response::Copy(handler.copy(request, requester)),
-        Op::SshKeys(request) => Response::SshKeys(handler.ssh_keys(request)),
-        Op::SshPending => Response::SshPending(handler.ssh_pending()),
-        Op::SshApprove(request) => Response::SshApprove(handler.ssh_approve(request)),
-    }
-}
 
 /// One response, one variant per `Op`. Each variant carries a `Result`
 /// whose error type names *exactly* what that op can fail with: `lock` can
@@ -114,7 +61,7 @@ where
 /// (`{"v":1,"ok":true,"db":"personal"}` either way) — the response doesn't
 /// self-describe which op produced it, by design (`docs/design.md` § "which
 /// response is this? answered by which socket it arrived on"). That's fine
-/// for encoding, since `server.rs` always knows which variant it's building,
+/// for encoding, since the daemon always knows which variant it's building,
 /// but it means decoding one generically, without already knowing the
 /// request, isn't meaningful — so this type doesn't implement `Deserialize`.
 /// A reader that isn't the client for its own request (a test, say) should

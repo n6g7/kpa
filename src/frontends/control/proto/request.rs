@@ -125,7 +125,7 @@ pub enum ProtocolError {
 impl ProtocolError {
     pub(super) fn fields(&self) -> ErrorFields<'_> {
         match self {
-            // The wording lives here rather than in `server.rs` because
+            // The wording lives here rather than in `serve.rs` because
             // this is the module that owns `VERSION` — the two have to
             // agree, and this way they can't drift.
             ProtocolError::VersionMismatch { client_v } => {

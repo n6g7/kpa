@@ -74,7 +74,7 @@ impl Limits {
 }
 
 /// Holds one place under a cap of `cap` counted by `count`; gives it back
-/// when dropped. A near-duplicate of `server::ConnectionSlot`: this socket
+/// when dropped. A near-duplicate of `control::serve`'s `ConnectionSlot`: this socket
 /// has caps of its own, and the two are small enough not to share.
 struct CapSlot(Arc<AtomicUsize>);
 
@@ -95,7 +95,7 @@ impl Drop for CapSlot {
 }
 
 /// Accept connections on the SSH agent socket forever, handling each on
-/// its own thread. Mirrors `server::serve`'s shape: a stuck `accept`
+/// its own thread. Mirrors `control::serve`'s shape: a stuck `accept`
 /// pauses rather than spins, and a connection over the cap is dropped.
 pub fn serve<S: SshSign + Send + Sync + 'static>(server: Arc<S>, listener: UnixListener) {
     let limits = Arc::new(Limits::new());
