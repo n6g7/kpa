@@ -8,10 +8,10 @@ use keepass::Database;
 use ssh_key::{Fingerprint, PrivateKey, PublicKey};
 
 use crate::config::DatabaseConfig;
+use crate::frontends::ssh_agent::approve::{GrantedApprovals, PendingRequests};
+use crate::frontends::ssh_agent::keys::{self, SkipReason};
 use crate::log;
 use crate::paths::Paths;
-use crate::ssh_agent::approve::{GrantedApprovals, PendingRequests};
-use crate::ssh_agent::keys::{self, SkipReason};
 
 /// The SSH-agent half of a database's slot (`docs/ssh-agent.md` § 6.4,
 /// § 6.7). Empty while locked, or for a database that doesn't serve SSH
@@ -108,7 +108,7 @@ impl KeyCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssh_agent::testing::{database, key_database, test_key};
+    use crate::frontends::ssh_agent::testing::{database, key_database, test_key};
 
     #[test]
     fn a_scan_serves_the_databases_keys_and_its_cache_holds_their_public_halves() {

@@ -5,7 +5,7 @@
 mod common;
 
 use keepass::Database;
-use kpa::ssh_agent::keys::{self, SkipReason};
+use kpa::frontends::ssh_agent::keys::{self, SkipReason};
 use kpa::vault;
 use zeroize::Zeroizing;
 

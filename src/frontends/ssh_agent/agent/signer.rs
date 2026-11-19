@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use super::SlotView;
 use super::sign::Refused;
-use crate::ssh_agent::keys;
-use crate::ssh_agent::wire::SignFlags;
+use crate::frontends::ssh_agent::keys;
+use crate::frontends::ssh_agent::wire::SignFlags;
 use crate::vault;
 
 /// Decodes a raw public-key blob off the wire (`SIGN_REQUEST`'s
@@ -113,8 +113,8 @@ mod tests {
 
     use super::super::SshSlot;
     use super::*;
+    use crate::frontends::ssh_agent::testing::{RSA_3072, database, key_database, test_key};
     use crate::prompt::CancelSource;
-    use crate::ssh_agent::testing::{RSA_3072, database, key_database, test_key};
 
     /// `key`'s fingerprint, and a database serving it, scanned.
     fn scanned(key: &PrivateKey) -> (Fingerprint, Database, SshSlot) {

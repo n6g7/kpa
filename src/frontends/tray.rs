@@ -250,19 +250,19 @@ fn lock_shape(databases: &[DatabaseStatus], has_error: bool) -> LockShape {
 
 /// Embedded PNGs per state, smallest size first — see `assets/tray/render.sh`.
 const LOCKED_PNGS: [&[u8]; 3] = [
-    include_bytes!("../assets/tray/locked-22.png"),
-    include_bytes!("../assets/tray/locked-32.png"),
-    include_bytes!("../assets/tray/locked-44.png"),
+    include_bytes!("../../assets/tray/locked-22.png"),
+    include_bytes!("../../assets/tray/locked-32.png"),
+    include_bytes!("../../assets/tray/locked-44.png"),
 ];
 const UNLOCKED_PNGS: [&[u8]; 3] = [
-    include_bytes!("../assets/tray/unlocked-22.png"),
-    include_bytes!("../assets/tray/unlocked-32.png"),
-    include_bytes!("../assets/tray/unlocked-44.png"),
+    include_bytes!("../../assets/tray/unlocked-22.png"),
+    include_bytes!("../../assets/tray/unlocked-32.png"),
+    include_bytes!("../../assets/tray/unlocked-44.png"),
 ];
 const ERROR_PNGS: [&[u8]; 3] = [
-    include_bytes!("../assets/tray/error-22.png"),
-    include_bytes!("../assets/tray/error-32.png"),
-    include_bytes!("../assets/tray/error-44.png"),
+    include_bytes!("../../assets/tray/error-22.png"),
+    include_bytes!("../../assets/tray/error-32.png"),
+    include_bytes!("../../assets/tray/error-44.png"),
 ];
 
 /// Decodes one embedded PNG into the ARGB32 `ksni::Icon` StatusNotifierItem

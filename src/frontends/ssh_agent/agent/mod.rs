@@ -114,8 +114,8 @@ mod tests {
 
     use super::fake::{FakeHost, requester};
     use super::*;
+    use crate::frontends::ssh_agent::testing::{database, test_key};
     use crate::prompt::{PromptQueue, Scripted};
-    use crate::ssh_agent::testing::{database, test_key};
 
     /// The agent lists through its host, and finds the cache where `paths`
     /// puts it.

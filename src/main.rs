@@ -16,6 +16,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use client::Format;
 use kpa::config::Config;
+use kpa::frontends::tray;
 use kpa::log::{self, Level};
 use kpa::output::report_error;
 use kpa::paths::Paths;
@@ -26,7 +27,6 @@ use kpa::proto::{
 use kpa::server::{self, Server};
 use kpa::session_watch::{self, Bus};
 use kpa::socket;
-use kpa::tray;
 use uuid::Uuid;
 
 #[derive(Parser)]

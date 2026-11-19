@@ -98,7 +98,7 @@ pub fn ssh_fixture_fingerprint(title: &str) -> String {
     let password = zeroize::Zeroizing::new(PASSWORD.to_string());
     let (db, _) =
         kpa::vault::open(&ssh_db(), Some(&password), None).expect("ssh fixture should open");
-    kpa::ssh_agent::keys::scan(&db)
+    kpa::frontends::ssh_agent::keys::scan(&db)
         .found
         .into_iter()
         .find(|key| key.entry_title.as_deref() == Some(title))

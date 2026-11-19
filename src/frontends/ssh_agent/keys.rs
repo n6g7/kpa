@@ -430,7 +430,7 @@ mod tests {
 
     use super::*;
     use crate::config::SshKeyConfig;
-    use crate::ssh_agent::testing::RSA_3072;
+    use crate::frontends::ssh_agent::testing::RSA_3072;
 
     /// `ssh-key`'s own test vector (`tests/examples/id_ed25519`):
     /// unencrypted Ed25519.

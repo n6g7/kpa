@@ -215,8 +215,8 @@ fn expired(entry: &Entry, now: Instant) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssh_agent::keys;
-    use crate::ssh_agent::testing::{database, test_key};
+    use crate::frontends::ssh_agent::keys;
+    use crate::frontends::ssh_agent::testing::{database, test_key};
 
     const WINDOW: Duration = Duration::from_secs(60);
 

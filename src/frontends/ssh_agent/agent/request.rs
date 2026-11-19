@@ -7,11 +7,11 @@ use ssh_key::{Fingerprint, HashAlg, PublicKey};
 use super::sign::Refused;
 use super::signer;
 use crate::authn::Requester;
+use crate::frontends::ssh_agent::approve::RequestDetails;
+use crate::frontends::ssh_agent::bind::ConnectionClass;
+use crate::frontends::ssh_agent::classify::{self, Purpose};
+use crate::frontends::ssh_agent::wire::SignRequest;
 use crate::log;
-use crate::ssh_agent::approve::RequestDetails;
-use crate::ssh_agent::bind::ConnectionClass;
-use crate::ssh_agent::classify::{self, Purpose};
-use crate::ssh_agent::wire::SignRequest;
 
 /// The longest login user, `SSHSIG` namespace or command name a pending
 /// request keeps: all come from the request.

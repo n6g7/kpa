@@ -8,6 +8,7 @@ pub mod authn;
 pub mod authz;
 pub mod clip;
 pub mod config;
+pub mod frontends;
 mod io;
 pub mod log;
 pub mod output;
@@ -17,8 +18,6 @@ pub mod proto;
 pub mod server;
 pub mod session_watch;
 pub mod socket;
-pub mod ssh_agent;
-pub mod tray;
 pub mod vault;
 mod wayland;
 

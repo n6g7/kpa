@@ -92,8 +92,8 @@ mod tests {
     use ssh_key::public::KeyData;
 
     use super::*;
-    use crate::ssh_agent::classify::LoginRequest;
-    use crate::ssh_agent::testing::test_key;
+    use crate::frontends::ssh_agent::classify::LoginRequest;
+    use crate::frontends::ssh_agent::testing::test_key;
 
     fn key(confirm: SshKeyConfirm) -> ServedKey {
         let public_key = test_key(1).public_key().clone();

@@ -35,6 +35,7 @@ use crate::authn::Requester;
 use crate::authz;
 use crate::clip::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
+use crate::frontends::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
 use crate::io::ByteCounter;
 use crate::log;
 use crate::paths::Paths;
@@ -51,7 +52,6 @@ use crate::proto::{
 };
 use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
 use crate::socket::{self, Received};
-use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
 use crate::vault::{self, Fingerprint, VaultError};
 
 /// Longest request line accepted, and the size of the buffer each one is
@@ -1652,7 +1652,7 @@ mod tests {
     /// so none of it outlives the database.
     #[test]
     fn a_lock_resets_the_ssh_agent_state() {
-        use crate::ssh_agent::testing::{key_database, test_key};
+        use crate::frontends::ssh_agent::testing::{key_database, test_key};
 
         let server = Server::new(
             Config::parse(
