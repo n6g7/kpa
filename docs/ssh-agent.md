@@ -523,7 +523,8 @@ needs an approval is refused, and kpa remembers it as pending:
 - a random id, the approval it asks for (the key, the destination of a
   bound connection, and whether it is kept until lock), what the request
   was (the purpose, the connection class, the remote user or the
-  namespace, the requester's command name), and the time;
+  namespace, the requester's command name), and the time it was last
+  refused;
 - at most 16 pending requests, identical ones merged (a repeat keeps its id
   and is kept another 5 minutes), each kept for 5 minutes, all dropped on
   lock.
@@ -532,7 +533,8 @@ needs an approval is refused, and kpa remembers it as pending:
 approve <id>` approves one. Neither needs a terminal: they send
 `ssh_pending` and `ssh_approve`. A request nobody approves just expires
 after 5 minutes; nothing is blocked meanwhile. One request `ssh_pending`
-lists is its id and age in seconds, the `scope` the approval covers,
+lists is its id, `refused_at` (when it was last refused, in Unix
+seconds, from which a client works out the age), the `scope` the approval covers,
 `remember`, which says whether approving grants the scope until lock
 (`true`) or for one signature (`false`), and the `request` that was
 refused:
@@ -540,7 +542,7 @@ refused:
 ```json
 {
   "id": "6f1c0a52-3d8e-4c11-9a4b-0e5d2f7b8a31",
-  "age": 12,
+  "refused_at": 1700000000,
   "scope": {
     "key": {
       "db": "personal", "type": "ssh-ed25519", "fingerprint": "SHA256:…",

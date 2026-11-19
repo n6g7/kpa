@@ -1,7 +1,7 @@
 //! The requests refused for want of an approval that `ssh approve` can still
 //! grant.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 use uuid::Uuid;
 
@@ -24,7 +24,7 @@ struct Entry {
     key: ServedKey,
     request: RequestDetails,
     /// When it was last refused.
-    at: Instant,
+    refused_at: SystemTime,
 }
 
 /// Requests from outside the desktop that were refused for want of an
@@ -43,7 +43,7 @@ impl PendingRequests {
         approval: SignatureApproval,
         key: ServedKey,
         request: RequestDetails,
-        now: Instant,
+        now: SystemTime,
     ) {
         self.0.retain(|entry| !expired(entry, now));
         let id = match self
@@ -62,12 +62,12 @@ impl PendingRequests {
             approval,
             key,
             request,
-            at: now,
+            refused_at: now,
         });
     }
 
     /// The requests still pending at `now`, oldest first.
-    pub fn list(&self, now: Instant) -> impl Iterator<Item = PendingRequest> + '_ {
+    pub fn list(&self, now: SystemTime) -> impl Iterator<Item = PendingRequest> + '_ {
         self.0
             .iter()
             .filter(move |entry| !expired(entry, now))
@@ -76,7 +76,7 @@ impl PendingRequests {
                 approval: entry.approval.clone(),
                 key: entry.key.clone(),
                 request: entry.request.clone(),
-                age: now.saturating_duration_since(entry.at),
+                refused_at: entry.refused_at,
             })
     }
 
@@ -84,7 +84,7 @@ impl PendingRequests {
     /// pending for its scope, and returns the approval it recorded. `None` if
     /// none has that id at `now`: it expired, a lock dropped it, or `id`
     /// never named one.
-    pub fn take(&mut self, id: Uuid, now: Instant) -> Option<SignatureApproval> {
+    pub fn take(&mut self, id: Uuid, now: SystemTime) -> Option<SignatureApproval> {
         self.0.retain(|entry| !expired(entry, now));
         let approval = self.0.iter().find(|entry| entry.id == id)?.approval.clone();
         self.0
@@ -93,8 +93,9 @@ impl PendingRequests {
     }
 }
 
-fn expired(entry: &Entry, now: Instant) -> bool {
-    now.saturating_duration_since(entry.at) >= PENDING_TTL
+fn expired(entry: &Entry, now: SystemTime) -> bool {
+    // A clock set back reads as just refused.
+    now.duration_since(entry.refused_at).unwrap_or_default() >= PENDING_TTL
 }
 
 #[cfg(test)]
@@ -105,7 +106,7 @@ mod tests {
     #[test]
     fn identical_requests_merge_keeping_the_id_and_the_latest_time() {
         let mut pending = PendingRequests::default();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         pending.record(approval(1, None, true), key(), requested("ssh"), t0);
         let id = pending.list(t0).next().expect("pending").id;
         pending.record(
@@ -128,13 +129,13 @@ mod tests {
         assert_eq!(listed[0].request.command.as_deref(), Some("ssh"));
         assert_eq!(listed[0].id, id);
         assert_ne!(listed[1].id, id);
-        assert_eq!(listed[0].age, Duration::from_secs(200));
+        assert_eq!(listed[0].refused_at, t0 + Duration::from_secs(200));
     }
 
     #[test]
     fn a_request_is_kept_for_five_minutes() {
         let mut pending = PendingRequests::default();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         pending.record(approval(1, None, true), key(), requested("ssh"), t0);
         let id = pending.list(t0).next().expect("pending").id;
 
@@ -151,7 +152,7 @@ mod tests {
     #[test]
     fn past_the_cap_the_oldest_goes() {
         let mut pending = PendingRequests::default();
-        let t0 = Instant::now();
+        let t0 = SystemTime::now();
         for command in 0..=MAX_PENDING {
             pending.record(
                 approval(1, None, true),
@@ -176,7 +177,7 @@ mod tests {
     #[test]
     fn taking_an_id_removes_its_scopes_requests_and_returns_the_recorded_ask() {
         let mut pending = PendingRequests::default();
-        let now = Instant::now();
+        let now = SystemTime::now();
         pending.record(approval(1, None, false), key(), requested("ssh"), now);
         pending.record(approval(1, None, false), key(), requested("git"), now);
         pending.record(approval(2, None, true), key(), requested("ssh"), now);

@@ -69,7 +69,7 @@ impl<H: SshHost> Agent<H> {
                     let request = request.requested(requester);
                     slot.ssh
                         .pending
-                        .record(approval.clone(), served, request, slot.now());
+                        .record(approval.clone(), served, request, slot.wall_now());
                 }
                 return Err(lacking.refusal());
             }

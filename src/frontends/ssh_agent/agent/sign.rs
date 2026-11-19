@@ -290,7 +290,7 @@ fn sign_and_touch(slot: &mut SlotView<'_>, request: &Request<'_>) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, mpsc};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use keepass::Database;
     use ssh_key::encoding::Decode;
@@ -1298,6 +1298,7 @@ mod tests {
         let mut backoff = None;
         let slot = SlotView::new(
             Instant::now(),
+            SystemTime::now(),
             open.then_some(&db),
             &mut ssh,
             &mut last_activity,

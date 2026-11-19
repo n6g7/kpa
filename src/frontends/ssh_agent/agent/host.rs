@@ -1,7 +1,7 @@
 //! [`SshHost`], what the agent needs from the daemon that hosts it, and
 //! [`SlotView`], one database's slot as the agent sees it.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use keepass::Database;
 
@@ -40,6 +40,8 @@ pub trait SshHost: Unlock {
 pub struct SlotView<'a> {
     /// The time of this hold, which backoff deadlines are measured from.
     now: Instant,
+    /// The wall-clock time of this hold, which pending requests are dated in.
+    wall: SystemTime,
     /// The open database, `None` while locked.
     pub(super) db: Option<&'a Database>,
     pub(super) ssh: &'a mut SshSlot,
@@ -56,6 +58,7 @@ pub struct SlotView<'a> {
 impl<'a> SlotView<'a> {
     pub fn new(
         now: Instant,
+        wall: SystemTime,
         db: Option<&'a Database>,
         ssh: &'a mut SshSlot,
         last_activity: &'a mut Instant,
@@ -64,6 +67,7 @@ impl<'a> SlotView<'a> {
     ) -> SlotView<'a> {
         SlotView {
             now,
+            wall,
             db,
             ssh,
             last_activity,
@@ -80,6 +84,11 @@ impl<'a> SlotView<'a> {
     /// The time of this hold.
     pub(super) fn now(&self) -> Instant {
         self.now
+    }
+
+    /// The wall-clock time of this hold.
+    pub(super) fn wall_now(&self) -> SystemTime {
+        self.wall
     }
 
     /// Whether prompts are held back.

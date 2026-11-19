@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use keepass::Database;
 use zeroize::Zeroizing;
@@ -80,6 +80,7 @@ pub(super) struct FakeHost {
     /// locks it.
     stale: AtomicBool,
     clock: Mutex<Instant>,
+    wall_clock: Mutex<SystemTime>,
     queue: Arc<PromptQueue>,
     prompt_to_unlock: Prompt<Zeroizing<String>>,
     unlocks: Scripted<Zeroizing<String>>,
@@ -116,6 +117,7 @@ impl FakeHost {
             opened: None,
             stale: AtomicBool::new(false),
             clock: Mutex::new(Instant::now()),
+            wall_clock: Mutex::new(SystemTime::now()),
             prompt_to_unlock: Prompt::new(
                 Arc::clone(&queue),
                 unlocks.clone(),
@@ -169,6 +171,12 @@ impl FakeHost {
     /// Moves the clock on.
     pub(super) fn advance(&self, by: Duration) {
         *self.clock.lock().expect("clock") += by;
+        *self.wall_clock.lock().expect("clock") += by;
+    }
+
+    /// The wall-clock time now.
+    pub(super) fn wall_now(&self) -> SystemTime {
+        *self.wall_clock.lock().expect("clock")
     }
 
     /// How many holds on a slot have run so far.
@@ -224,6 +232,7 @@ impl SshHost for FakeHost {
         }
         Some(f(SlotView::new(
             *self.clock.lock().expect("clock"),
+            *self.wall_clock.lock().expect("clock"),
             slot.db.as_ref(),
             &mut slot.ssh,
             &mut slot.last_activity,

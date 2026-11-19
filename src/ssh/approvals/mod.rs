@@ -4,13 +4,15 @@
 //! drops what it ended.
 //!
 //! Nothing here reads the clock: every call that needs the time takes `now`.
+//! Pending requests are dated in wall-clock time, so a client can tell their
+//! age from it; approvals' windows are measured on the monotonic clock.
 
 mod granted;
 mod pending;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg};
@@ -94,8 +96,8 @@ pub struct PendingRequest {
     /// The key the approval is for, as the open database serves it.
     pub key: ServedKey,
     pub request: RequestDetails,
-    /// Since it was last refused.
-    pub age: Duration,
+    /// When it was last refused.
+    pub refused_at: SystemTime,
 }
 
 /// Approvals and pending requests, per database and per unlock. Its own lock
@@ -179,7 +181,7 @@ impl Approvals {
         approval: SignatureApproval,
         key: ServedKey,
         request: RequestDetails,
-        now: Instant,
+        now: SystemTime,
     ) {
         Self::fresh(&mut self.held(), open)
             .pending
@@ -187,7 +189,7 @@ impl Approvals {
     }
 
     /// This database's pending requests at `now`, oldest first.
-    pub fn pending(&self, open: &Open, now: Instant) -> Vec<PendingRequest> {
+    pub fn pending(&self, open: &Open, now: SystemTime) -> Vec<PendingRequest> {
         Self::current(&mut self.held(), open)
             .map(|state| state.pending.list(now).collect())
             .unwrap_or_default()
@@ -202,11 +204,12 @@ impl Approvals {
         open: &Open,
         id: Uuid,
         now: Instant,
+        wall: SystemTime,
         window: Duration,
     ) -> Option<Fingerprint> {
         let mut held = self.held();
         let state = Self::current(&mut held, open)?;
-        let approval = state.pending.take(id, now)?;
+        let approval = state.pending.take(id, wall)?;
         let key = approval.scope.key();
         state.granted.approve(approval, now, window);
         Some(key)
@@ -272,18 +275,18 @@ mod tests {
     #[test]
     fn a_one_signature_approval_lasts_its_window_and_is_spent_once() {
         let (databases, approvals) = fixture();
-        let (t0, ask) = (Instant::now(), approval(1, None, false));
+        let (t0, wall, ask) = (Instant::now(), SystemTime::now(), approval(1, None, false));
         approvals.record(
             &databases.open("personal").unwrap(),
             ask.clone(),
             key(),
             requested("ssh"),
-            t0,
+            wall,
         );
         let open = databases.open("personal").unwrap();
-        let id = approvals.pending(&open, t0)[0].id;
+        let id = approvals.pending(&open, wall)[0].id;
         assert_eq!(
-            approvals.approve(&open, id, t0, WINDOW),
+            approvals.approve(&open, id, t0, wall, WINDOW),
             Some(ask.scope.key())
         );
 
@@ -296,30 +299,42 @@ mod tests {
     #[test]
     fn approving_a_remembered_request_grants_until_lock_and_answers_its_scope() {
         let (databases, approvals) = fixture();
-        let now = Instant::now();
+        let (now, wall) = (Instant::now(), SystemTime::now());
         let open = databases.open("personal").unwrap();
         let ask = approval(1, None, true);
-        approvals.record(&open, ask.clone(), key(), requested("ssh"), now);
-        approvals.record(&open, ask.clone(), key(), requested("git"), now);
-        approvals.record(&open, approval(2, None, true), key(), requested("ssh"), now);
-        let pending = approvals.pending(&open, now);
+        approvals.record(&open, ask.clone(), key(), requested("ssh"), wall);
+        approvals.record(&open, ask.clone(), key(), requested("git"), wall);
+        approvals.record(
+            &open,
+            approval(2, None, true),
+            key(),
+            requested("ssh"),
+            wall,
+        );
+        let pending = approvals.pending(&open, wall);
         assert_eq!(pending.len(), 3);
 
-        assert_eq!(approvals.approve(&open, Uuid::new_v4(), now, WINDOW), None);
+        assert_eq!(
+            approvals.approve(&open, Uuid::new_v4(), now, wall, WINDOW),
+            None
+        );
         assert!(
             approvals
-                .approve(&open, pending[0].id, now, WINDOW)
+                .approve(&open, pending[0].id, now, wall, WINDOW)
                 .is_some()
         );
         assert!(approvals.covers(&open, &ask.scope, now + WINDOW * 100));
-        assert_eq!(approvals.pending(&open, now).len(), 1);
-        assert_eq!(approvals.approve(&open, pending[1].id, now, WINDOW), None);
+        assert_eq!(approvals.pending(&open, wall).len(), 1);
+        assert_eq!(
+            approvals.approve(&open, pending[1].id, now, wall, WINDOW),
+            None
+        );
     }
 
     #[test]
     fn requests_are_per_database_and_listed_by_asking_each_in_config_order() {
         let (databases, approvals) = fixture();
-        let now = Instant::now();
+        let now = SystemTime::now();
         for (db, command) in [("work", "ssh"), ("personal", "git")] {
             approvals.record(
                 &databases.open(db).unwrap(),
@@ -342,7 +357,7 @@ mod tests {
     #[test]
     fn a_lock_drops_pending_requests_and_approvals_of_that_database_only() {
         let (databases, approvals) = fixture();
-        let now = Instant::now();
+        let now = SystemTime::now();
         for db in ["personal", "work"] {
             let open = databases.open(db).unwrap();
             let titled = ServedKey {
@@ -376,7 +391,7 @@ mod tests {
         let (databases, approvals) = fixture();
         let old = databases.open("personal").unwrap().unlock_token();
         unlock_again(&databases, "personal");
-        let now = Instant::now();
+        let now = SystemTime::now();
         let open = databases.open("personal").unwrap();
         approvals.record(
             &open,
@@ -393,7 +408,7 @@ mod tests {
     #[test]
     fn state_of_another_unlock_reads_as_empty_and_a_write_replaces_it() {
         let (databases, approvals) = fixture();
-        let now = Instant::now();
+        let (now, wall) = (Instant::now(), SystemTime::now());
         let scope = approval(1, None, true).scope;
         approvals.grant(&databases.open("personal").unwrap(), scope.clone());
         // The old unlock's state is still in the map, as if its notice were late.
@@ -404,8 +419,14 @@ mod tests {
         let open = databases.open("personal").unwrap();
         assert!(!approvals.covers(&open, &scope, now));
         approvals.spend(&open, &scope);
-        approvals.record(&open, approval(2, None, true), key(), requested("ssh"), now);
+        approvals.record(
+            &open,
+            approval(2, None, true),
+            key(),
+            requested("ssh"),
+            wall,
+        );
         assert!(!approvals.covers(&open, &scope, now));
-        assert_eq!(approvals.pending(&open, now).len(), 1);
+        assert_eq!(approvals.pending(&open, wall).len(), 1);
     }
 }

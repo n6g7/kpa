@@ -19,7 +19,7 @@ pub fn pending_requests(host: &impl SshHost) -> Vec<PendingRequest> {
         .filter(|cfg| cfg.serve_ssh_keys)
         .flat_map(|cfg| {
             host.with_slot(&cfg.name, |slot| {
-                slot.ssh.pending.list(slot.now()).collect::<Vec<_>>()
+                slot.ssh.pending.list(slot.wall_now()).collect::<Vec<_>>()
             })
             .unwrap_or_default()
         })
@@ -39,7 +39,7 @@ pub fn approve_pending(host: &impl SshHost, id: Uuid, window: Duration) -> bool 
             let approved = host
                 .with_slot(&cfg.name, |slot| {
                     let now = slot.now();
-                    let approval = slot.ssh.pending.take(id, now)?;
+                    let approval = slot.ssh.pending.take(id, slot.wall_now())?;
                     let key = approval.scope.key();
                     slot.ssh.approvals.approve(approval, now, window);
                     Some(key)
@@ -107,7 +107,7 @@ mod tests {
                 .clone();
             slot.ssh
                 .pending
-                .record(approval, served, requested(), slot.now())
+                .record(approval, served, requested(), slot.wall_now())
         });
     }
 
@@ -127,9 +127,10 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_request_is_listed_with_its_age_and_what_it_was() {
+    fn a_pending_request_is_listed_with_when_it_was_refused_and_what_it_was() {
         let key = test_key(1);
         let host = host(&key, SshKeyConfirm::Once);
+        let refused_at = host.wall_now();
         record(&host, &key, true);
         host.advance(Duration::from_secs(5));
 
@@ -146,7 +147,7 @@ mod tests {
         assert_eq!(listed[0].approval.scope.destination(), None);
         assert!(listed[0].approval.remember);
         assert_eq!(listed[0].request, requested());
-        assert_eq!(listed[0].age, Duration::from_secs(5));
+        assert_eq!(listed[0].refused_at, refused_at);
     }
 
     #[test]

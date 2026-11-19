@@ -15,8 +15,9 @@ use super::WireSshKey;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WirePending {
     pub id: Uuid,
-    /// Seconds since it was last refused.
-    pub age: u64,
+    /// When it was last refused, in Unix seconds. A client works out the age
+    /// from it.
+    pub refused_at: u64,
     /// What approving it grants.
     pub scope: WireScope,
     /// Whether the approval is kept until lock (`true`) or covers this one
@@ -72,7 +73,7 @@ mod tests {
     fn pending() -> WirePending {
         WirePending {
             id: Uuid::from_u128(1),
-            age: 12,
+            refused_at: 1_700_000_000,
             scope: WireScope {
                 key: WireSshKey {
                     db: "personal".to_string(),
@@ -104,7 +105,7 @@ mod tests {
             serde_json::to_value(pending()).expect("serializes"),
             json!({
                 "id": "00000000-0000-0000-0000-000000000001",
-                "age": 12,
+                "refused_at": 1_700_000_000,
                 "scope": {
                     "key": {
                         "db": "personal",
