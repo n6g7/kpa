@@ -12,7 +12,7 @@ use super::{Api, authz};
 use crate::authn::Requester;
 use crate::cancel::CancelToken;
 use crate::clipboard::{Clipboard, Offer};
-use crate::databases::{Databases, Entry, Observer, fields};
+use crate::databases::{Databases, Entry, Observer, OpenError, fields};
 use crate::display_session::DisplaySession;
 
 /// The clipboard, and the one offer a `copy` has made that is still live:
@@ -126,9 +126,9 @@ impl Api {
         let db = || name.to_string();
         let (value, entry, unlock) = {
             let open = self.databases.open(name).map_err(|err| match err {
-                crate::databases::OpenError::UnknownDb => CopyError::UnknownDb { db: db() },
-                crate::databases::OpenError::Locked => CopyError::Locked { db: db() },
-                crate::databases::OpenError::Stale => CopyError::Stale { db: db() },
+                OpenError::UnknownDb => CopyError::UnknownDb { db: db() },
+                OpenError::Locked => CopyError::Locked { db: db() },
+                OpenError::Stale => CopyError::Stale { db: db() },
             })?;
             let read = open
                 .entry(request.uuid)

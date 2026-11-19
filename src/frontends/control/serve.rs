@@ -284,7 +284,7 @@ fn handle_connection(api: &Api, mut stream: UnixStream, owner: u32) {
     };
     log::debug(format_args!(
         "connection from {}",
-        if authz::on_desktop(&requester, &api.display_session()) {
+        if authz::on_desktop(&requester, &api.display.get()) {
             "the desktop"
         } else {
             "outside the desktop"

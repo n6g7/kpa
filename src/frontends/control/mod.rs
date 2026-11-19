@@ -24,9 +24,9 @@ use self::proto::{
     WirePending, WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
 };
 use crate::authn::Requester;
-use crate::config::{Config, DatabaseConfig};
-use crate::databases::{Databases, EntrySummary, OpenError, UnknownDb};
-use crate::display_session::{DisplayHandle, DisplaySession};
+use crate::config::Config;
+use crate::databases::{Databases, EntrySummary, Open, OpenError, UnknownDb};
+use crate::display_session::DisplayHandle;
 use crate::log;
 use crate::prompt::{self, PromptQueue};
 use crate::ssh::{approvals::Approvals, keys};
@@ -70,10 +70,6 @@ impl Api {
             clipboard_timeout: config.clipboard_timeout,
             retry_window: config.ssh_agent.retry_window,
         }
-    }
-
-    fn display_session(&self) -> DisplaySession {
-        self.display.get()
     }
 
     /// The response to `request` from `requester`: the only place an op's
@@ -139,101 +135,111 @@ impl Api {
         }
     }
 
-    /// Each database a successful list reads gets its own idle timer reset.
-    /// A request for every database reports a stale one by name and fails,
-    /// rather than skipping it as if it were locked; the stale ones after
-    /// it are locked too.
-    fn list(&self, request: &ListRequest) -> Result<Vec<WireEntry>, ListError> {
-        let read = |name: &str| -> Result<Vec<WireEntry>, OpenError> {
-            let mut open = self.databases.open(name)?;
-            open.touch();
-            Ok(wire_entries(name, &open.entries()))
-        };
-        let db = |name: &str| name.to_string();
-        if let Some(name) = request.db.as_deref() {
-            return read(name).map_err(|err| match err {
-                OpenError::UnknownDb => ListError::UnknownDb { db: db(name) },
-                OpenError::Locked => ListError::Locked { db: db(name) },
-                OpenError::Stale => ListError::Stale { db: db(name) },
-            });
-        }
-        let names = self.names();
-        let mut entries = Vec::new();
+    /// Reads each of `names` in order: `read` gets each one that is
+    /// unlocked, `locked` each that is not. The first stale one fails the
+    /// whole read, naming it, rather than being skipped as if it were
+    /// locked; the stale ones after it are locked too.
+    fn each_open(
+        &self,
+        names: &[&str],
+        mut read: impl FnMut(&str, Open<'_>),
+        mut locked: impl FnMut(&str),
+    ) -> Result<(), String> {
         for (index, name) in names.iter().enumerate() {
-            match read(name) {
-                Ok(read) => entries.extend(read),
+            match self.databases.open(name) {
+                Ok(open) => read(name, open),
                 Err(OpenError::Stale) => {
                     self.databases
                         .drop_stale(names[index + 1..].iter().copied());
-                    return Err(ListError::Stale { db: db(name) });
+                    return Err(name.to_string());
                 }
-                Err(OpenError::Locked | OpenError::UnknownDb) => {}
+                Err(OpenError::Locked) => locked(name),
+                Err(OpenError::UnknownDb) => {}
             }
         }
+        Ok(())
+    }
+
+    /// Each database a successful list reads gets its own idle timer reset.
+    fn list(&self, request: &ListRequest) -> Result<Vec<WireEntry>, ListError> {
+        let mut entries = Vec::new();
+        if let Some(name) = request.db.as_deref() {
+            let db = || name.to_string();
+            let mut open = self.databases.open(name).map_err(|err| match err {
+                OpenError::UnknownDb => ListError::UnknownDb { db: db() },
+                OpenError::Locked => ListError::Locked { db: db() },
+                OpenError::Stale => ListError::Stale { db: db() },
+            })?;
+            open.touch();
+            return Ok(wire_entries(name, &open.entries()));
+        }
+        self.each_open(
+            &self.names(),
+            |name, mut open| {
+                open.touch();
+                entries.extend(wire_entries(name, &open.entries()));
+            },
+            |_| {},
+        )
+        .map_err(|db| ListError::Stale { db })?;
         Ok(entries)
     }
 
-    /// Scans the unlocked databases for SSH keys, as `list` reads them.
+    /// Scans the unlocked databases for SSH keys, as `list` reads them. A
+    /// request for every database lists the locked ones in the report; one
+    /// that names a database fails on it if it is locked.
     fn ssh_keys(&self, request: &SshKeysRequest) -> Result<SshKeysReport, SshKeysError> {
-        let configs: Vec<&DatabaseConfig> = match &request.db {
-            Some(name) => vec![
-                self.databases
-                    .configs()
-                    .iter()
-                    .find(|config| config.name == *name)
-                    .ok_or_else(|| SshKeysError::UnknownDb { db: name.clone() })?,
-            ],
-            None => self.databases.configs().iter().collect(),
+        let names = match &request.db {
+            Some(name) => {
+                if !self.names().contains(&name.as_str()) {
+                    return Err(SshKeysError::UnknownDb { db: name.clone() });
+                }
+                vec![name.as_str()]
+            }
+            None => self.names(),
         };
         let mut report = SshKeysReport::default();
-        for (index, config) in configs.iter().enumerate() {
-            let db = || config.name.clone();
-            let mut open = match self.databases.open(&config.name) {
-                Ok(open) => open,
-                Err(OpenError::Stale) => {
-                    self.databases.drop_stale(
-                        configs[index + 1..]
-                            .iter()
-                            .map(|config| config.name.as_str()),
-                    );
-                    return Err(SshKeysError::Stale { db: db() });
-                }
-                Err(OpenError::Locked) if request.db.is_some() => {
-                    return Err(SshKeysError::Locked { db: db() });
-                }
-                Err(OpenError::Locked) => {
-                    report.locked.push(db());
-                    continue;
-                }
-                Err(OpenError::UnknownDb) => return Err(SshKeysError::UnknownDb { db: db() }),
-            };
-            let scan = keys::scan(&open);
-            open.touch();
-            report
-                .keys
-                .extend(scan.found.into_iter().map(|key| WireSshKey {
-                    db: db(),
-                    key_type: key.public_key.algorithm().to_string(),
-                    fingerprint: key.fingerprint.to_string(),
-                    name: keys::key_name(
-                        &config.name,
-                        key.fingerprint,
-                        config.ssh_key_settings(key.fingerprint).name.as_deref(),
-                        key.entry_title.as_deref(),
-                    ),
-                    entry: key.entry_uuid,
-                    title: key.entry_title,
-                    attachment: key.attachment_name,
+        let mut locked = Vec::new();
+        self.each_open(
+            &names,
+            |name, mut open| {
+                let config = self.databases.configs().iter().find(|c| c.name == name);
+                let scan = keys::scan(&open);
+                open.touch();
+                report.keys.extend(scan.found.into_iter().map(|key| {
+                    WireSshKey {
+                        db: name.to_string(),
+                        key_type: key.public_key.algorithm().to_string(),
+                        fingerprint: key.fingerprint.to_string(),
+                        name: keys::key_name(
+                            name,
+                            key.fingerprint,
+                            config
+                                .and_then(|config| config.ssh_key_settings(key.fingerprint).name)
+                                .as_deref(),
+                            key.entry_title.as_deref(),
+                        ),
+                        entry: key.entry_uuid,
+                        title: key.entry_title,
+                        attachment: key.attachment_name,
+                    }
                 }));
-            report
-                .skipped
-                .extend(scan.skipped.into_iter().map(|skipped| WireSkippedKey {
-                    db: db(),
-                    title: skipped.entry_title,
-                    attachment: skipped.attachment_name,
-                    reason: skipped.reason.to_string(),
-                }));
+                report
+                    .skipped
+                    .extend(scan.skipped.into_iter().map(|skipped| WireSkippedKey {
+                        db: name.to_string(),
+                        title: skipped.entry_title,
+                        attachment: skipped.attachment_name,
+                        reason: skipped.reason.to_string(),
+                    }));
+            },
+            |name| locked.push(name.to_string()),
+        )
+        .map_err(|db| SshKeysError::Stale { db })?;
+        if let (Some(db), [_]) = (&request.db, locked.as_slice()) {
+            return Err(SshKeysError::Locked { db: db.clone() });
         }
+        report.locked = locked;
         Ok(report)
     }
 
