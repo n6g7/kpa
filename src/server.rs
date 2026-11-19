@@ -38,6 +38,7 @@ use crate::clipboard::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
 use crate::databases::vault::{self, Fingerprint, VaultError};
 use crate::display_session::DisplaySession;
+use crate::frontends::auto_lock::logind::{SessionEvent, SleepDelay};
 use crate::frontends::control::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshApprove,
@@ -53,7 +54,6 @@ use crate::prompt::{
     self, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue, SecretProgram,
     SecretTerminal, Terminal,
 };
-use crate::session_watch::{SessionEvent, SleepDelay};
 use crate::socket::{self, Received};
 
 /// Longest request line accepted, and the size of the buffer each one is
@@ -192,7 +192,7 @@ pub struct Server {
     /// outlives the request, same as `clip` above) can clear it too, once
     /// its natural timeout fires with nothing newer having replaced it.
     clip_db: Arc<Mutex<Option<String>>>,
-    /// The display session's state, as `session_watch` last reported it
+    /// The display session's state, as `auto_lock::logind` last reported it
     /// (`SessionEvent::Changed`). `authz` decides against it each time a
     /// request is answered.
     display_session: Mutex<DisplaySession>,
@@ -294,7 +294,7 @@ impl Server {
         locked
     }
 
-    /// Reacts to what `session_watch` reports. Everything it asks for is a
+    /// Reacts to what `auto_lock::logind` reports. Everything it asks for is a
     /// lock of every database, except recording the display session's
     /// state, which comes first (`set_display_session`).
     pub fn on_session_event(&self, event: SessionEvent) {
@@ -404,7 +404,7 @@ impl Server {
         dropped
     }
 
-    /// The display session's state, as `session_watch` last reported it. No
+    /// The display session's state, as `auto_lock::logind` last reported it. No
     /// display session until the logind watch says otherwise.
     pub fn display_session(&self) -> DisplaySession {
         self.display_session

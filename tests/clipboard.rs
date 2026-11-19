@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use common::InProcessDaemon;
 use kpa::display_session::DisplaySession;
-use kpa::session_watch::SessionEvent;
+use kpa::frontends::auto_lock::logind::SessionEvent;
 
 /// Held by each test that drives the live clipboard, for its whole run.
 static LIVE_CLIPBOARD: Mutex<()> = Mutex::new(());
@@ -112,7 +112,7 @@ fn fixture_entry_uuid(daemon: &InProcessDaemon) -> String {
 
 /// `docs/design.md` § Clipboard explicitly plans for a daemon run without
 /// Wayland reachable — logind-less hosts get the analogous treatment in
-/// `session_watch.rs`. `copy` must answer with a clean error, not hang the
+/// `frontends/auto_lock/logind.rs`. `copy` must answer with a clean error, not hang the
 /// connection or take the daemon down, so every other request still gets
 /// answered afterward.
 #[test]

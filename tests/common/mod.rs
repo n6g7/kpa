@@ -201,11 +201,11 @@ impl InProcessDaemon {
         let server = Arc::new(kpa::server::Server::new(
             config,
             paths.clone(),
-            kpa::session_watch::SleepDelay::new().0,
+            kpa::frontends::auto_lock::logind::SleepDelay::new().0,
         ));
         let cgroup = cgroup_on(on_desktop, "test");
         kpa::authn::assume_cgroup(&socket, &cgroup);
-        server.on_session_event(kpa::session_watch::SessionEvent::Changed(
+        server.on_session_event(kpa::frontends::auto_lock::logind::SessionEvent::Changed(
             kpa::display_session::DisplaySession::Unlocked {
                 id: "test".to_string(),
                 active: true,

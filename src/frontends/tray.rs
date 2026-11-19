@@ -368,8 +368,8 @@ fn build_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frontends::auto_lock::logind::SleepDelay;
     use crate::paths::Paths;
-    use crate::session_watch::SleepDelay;
 
     fn locked(name: &str) -> DatabaseStatus {
         DatabaseStatus {

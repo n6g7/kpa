@@ -19,10 +19,10 @@ mod common;
 use kpa::authn::Requester;
 use kpa::config::Config;
 use kpa::display_session::DisplaySession;
+use kpa::frontends::auto_lock::logind::{self, Bus, SessionEvent};
 use kpa::frontends::control::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::paths::Paths;
 use kpa::server::Server;
-use kpa::session_watch::{self, Bus, SessionEvent};
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::zvariant::{self, OwnedObjectPath, Value};
@@ -443,7 +443,7 @@ fn quiet() {
 fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
     let mut bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let (events, delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let (events, delay) = logind::start(Bus::Address(bus.address.clone()));
     let observed = observe(events);
 
     // Wait for the watcher to subscribe: a lock signal sent before that is
@@ -554,7 +554,7 @@ fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
 fn the_display_session_state_follows_logind_over_a_bus() {
     let mut bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let (events, _delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let (events, _delay) = logind::start(Bus::Address(bus.address.clone()));
     let recorder = observe(events);
 
     // 1. Subscribing reads the display session and its hint.
@@ -612,7 +612,7 @@ fn the_display_session_state_follows_logind_over_a_bus() {
 fn the_active_state_follows_logind_and_never_locks() {
     let bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let (events, _delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let (events, _delay) = logind::start(Bus::Address(bus.address.clone()));
     let recorder = observe(events);
 
     // 1. Subscribing reads the session as active.
@@ -684,7 +684,7 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         common::password_db().display().to_string()
     ))
     .unwrap();
-    let (events, delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let (events, delay) = logind::start(Bus::Address(bus.address.clone()));
     let server = Arc::new(Server::new(config, Paths::default(), delay));
     let reacting = server.clone();
     thread::spawn(move || {

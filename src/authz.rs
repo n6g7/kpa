@@ -7,7 +7,7 @@
 //! sockets. `authorize_copy` and `choose_unlock_prompt` are kpa's own
 //! socket's policy, one per request type, built on the checks and returning
 //! what the request may use or the refusal it gets. The SSH agent's
-//! equivalent is `ssh_agent::authz`. `session_watch` is unrelated: it reports
+//! equivalent is `ssh_agent::authz`. `auto_lock::logind` is unrelated: it reports
 //! what the OS says about the display session ([`DisplaySession`]).
 //!
 //! A requester holds facts read from its socket. Whether it runs on the
