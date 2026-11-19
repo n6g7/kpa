@@ -39,8 +39,8 @@ unlocking from a terminal.
 - **No prompt where nobody can see it.** A request from outside the desktop
   (an SSH login, a terminal-server shell), or while the screen is locked,
   never raises a prompt on screen. If it only lacks an approval, kpa
-  refuses it and remembers it, and `kpa ssh approve` in that shell approves
-  it from the terminal. If its database is locked, `kpa unlock` asks for
+  refuses it and remembers it, and `kpa ssh pending` and `kpa ssh approve`
+  in that shell approve it. If its database is locked, `kpa unlock` asks for
   the password on the terminal.
 - **Keys never leave kpa.** Only signatures do. A lock drops the key at
   once, and a crash leaves nothing behind in another process.
@@ -151,7 +151,7 @@ once per key and destination until lock by default.
 | S1  | At the desk: `ssh`, `git push`, an IDE                       | No binding, or an authentication binding from the local `ssh`           | Unlock prompt naming the key and destination, then the confirm prompt for a key that needs one | Sign if the key is approved for that destination. Otherwise a confirm prompt first                          |
 | S2  | Commit or tag signing (`ssh-keygen -Y sign`)                 | `SSHSIG` data, no binding                                               | As S1                                                                    | As S1                                                                                      |
 | S3  | `ssh -A` from here; the remote host uses the key             | First binding has `is_forwarding` (§ 6.2)                               | Unlock prompt naming the forwarding host and destination, then the confirm prompt for the forwarding session | Sign if this forwarding session is approved for the key and destination. Otherwise a confirm prompt first. SSH logins only. A key with `forwarded = false` is neither listed nor used |
-| S4  | Working on this machine from elsewhere, with no agent forwarded: an SSH login, a terminal-server shell | The requester runs outside the desktop (§ 6.8) | Refused, no prompt. `kpa unlock` in that shell asks on the terminal (§ 6.10) | Sign if approved for that destination. Otherwise refused and remembered; `kpa ssh approve` in that shell approves it, and the retry signs (§ 6.8). An `ssh -A` started from that shell works the same way |
+| S4  | Working on this machine from elsewhere, with no agent forwarded: an SSH login, a terminal-server shell | The requester runs outside the desktop (§ 6.8) | Refused, no prompt. `kpa unlock` in that shell asks on the terminal (§ 6.10) | Sign if approved for that destination. Otherwise refused and remembered; `kpa ssh pending` lists it and `kpa ssh approve <id>` approves it, and the retry signs (§ 6.8). An `ssh -A` started from that shell works the same way |
 | S5  | Screen locked or machine suspended                           | logind (existing lock policy)                                           | Everything is already locked. No prompt                                  | Not possible: a screen lock locks every database                                           |
 | S6  | Background jobs: user timers, IDE auto-fetch                 | Indistinguishable from S1. Jobs outside the user manager (cron, system services) fall under S4 | Unlock prompt, with backoff after a cancel (§ 6.6)    | As S1: one confirm prompt per key per destination per unlock, with backoff after a cancel |
 | S7  | Sandboxed app, container                                     | No socket unless granted (T-15)                                         | —                                                                        | —                                                                                          |
@@ -528,12 +528,14 @@ needs an approval is refused, and kpa remembers it as pending:
   and is kept another 5 minutes), each kept for 5 minutes, all dropped on
   lock.
 
-`ssh_pending` lists them, and `ssh_approve` approves one by its id. A
-request nobody approves just expires after 5 minutes; nothing is blocked
-meanwhile. One listed request is its id and age in seconds, the `scope`
-the approval covers, `remember`, which says whether approving grants the
-scope until lock (`true`) or for one signature (`false`), and the
-`request` that was refused:
+`kpa ssh pending` lists them, one line each, with the id, and `kpa ssh
+approve <id>` approves one. Neither needs a terminal: they send
+`ssh_pending` and `ssh_approve`. A request nobody approves just expires
+after 5 minutes; nothing is blocked meanwhile. One request `ssh_pending`
+lists is its id and age in seconds, the `scope` the approval covers,
+`remember`, which says whether approving grants the scope until lock
+(`true`) or for one signature (`false`), and the `request` that was
+refused:
 
 ```json
 {
@@ -586,8 +588,9 @@ T-18), and the window keeps it short.
 
 `ssh_pending` and `ssh_approve` are on the JSON socket, which forwarding
 never reaches, so a forwarded host cannot approve its own requests. Any
-same-uid process can send them, which is the same as approving on screen
-within the uid boundary (NG-1, T-18).
+same-uid process can send them, with or without a terminal, which is the
+same as approving on screen within the uid boundary (NG-1, T-18): that a
+person types at a terminal is not what the approval rests on.
 
 **The hint.** The agent protocol's `FAILURE` carries no text, but `ssh`
 prints the key's comment when the agent refuses: `signing failed for
@@ -883,7 +886,7 @@ programs' settings.
 - **T-18** is extended. While a database is unlocked, ACT-10 can sign with
   any key already approved. It can also get its own local requests
   approved: on screen its request looks like the user's own, and from
-  outside the desktop it can run `kpa ssh approve` itself. This is
+  outside the desktop it can send `ssh_approve` itself. This is
   accepted, on the same terms as `copy`, and is less severe than `copy`
   because the key itself doesn't leave.
 - **T-20 (new) · Forwarded-agent abuse** (S, E) — ACT-11 · TB-8 · A-6 → G-14.
@@ -976,7 +979,7 @@ programs' settings.
   [`headless.md`](./headless.md).
 - The JSON protocol gains three requests: `ssh_keys` (the scan behind
   `kpa ssh keys`), `ssh_pending` and `ssh_approve`. The CLI gains
-  `kpa ssh keys` and `kpa ssh approve`.
+  `kpa ssh keys`, `kpa ssh pending` and `kpa ssh approve`.
 - Each signature request gets one log line: the key by fingerprint, and
   by the `name` its `[[database.ssh_key]]` override gives it if there is
   one; its database; purpose; connection class; destination fingerprint;
@@ -1039,7 +1042,8 @@ once it lands.
    - Enough to switch off a KeePass client's agent on Linux.
 2. **Unlock on demand, and requests from outside the desktop.**
    - `KPA_PROMPT_MESSAGE`, backoff, unlock waiters.
-   - Pending requests, `kpa ssh approve`, the hints in key comments.
+   - Pending requests, `kpa ssh pending`, `kpa ssh approve`, the hints in
+     key comments.
 3. **Forwarding.**
    - `forwarded`, forwarded listing, forwarding-session approvals.
    - `known_hosts` names, the end-to-end `sshd` test.
