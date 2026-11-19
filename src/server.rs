@@ -23,6 +23,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ use crate::clipboard::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
 use crate::databases::vault::{self, Fingerprint, VaultError};
 use crate::display_session::DisplaySession;
-use crate::frontends::auto_lock::logind::{SessionEvent, SleepDelay};
+use crate::frontends::auto_lock::logind::{SessionEvent, SleepSignal};
 use crate::frontends::control::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshApprove,
@@ -173,7 +174,7 @@ pub struct Server {
     dbs: Mutex<HashMap<String, Slot>>,
     /// Told after every change to what is unlocked, so the machine's
     /// suspend is delayed exactly while something is unlocked.
-    sleep_delay: SleepDelay,
+    sleep_delay: Sender<SleepSignal>,
     /// The clipboard `copy` hands secrets to. `Arc` so the thread that
     /// schedules an offer's expiry (spawned by `copy`, below) can outlive
     /// the request that started it.
@@ -205,7 +206,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(config: Config, paths: Paths, sleep_delay: SleepDelay) -> Server {
+    pub fn new(config: Config, paths: Paths, sleep_delay: Sender<SleepSignal>) -> Server {
         Server::with_clipboard(config, paths, sleep_delay, clipboard::WaylandBackend)
     }
 
@@ -215,7 +216,7 @@ impl Server {
     pub fn with_clipboard(
         config: Config,
         paths: Paths,
-        sleep_delay: SleepDelay,
+        sleep_delay: Sender<SleepSignal>,
         backend: impl clipboard::Backend + 'static,
     ) -> Server {
         let unlock_prompt = SecretProgram::new(config.prompt.clone());
@@ -227,7 +228,7 @@ impl Server {
     fn with_backends(
         config: Config,
         paths: Paths,
-        sleep_delay: SleepDelay,
+        sleep_delay: Sender<SleepSignal>,
         clipboard: impl clipboard::Backend + 'static,
         unlock_prompt: impl prompt::Backend<Zeroizing<String>> + 'static,
     ) -> Server {
@@ -368,8 +369,9 @@ impl Server {
     /// path that ends in `after_lock` or `after_lock_all`.
     fn sync_sleep_delay(&self) {
         let dbs = slots(&self.dbs);
-        self.sleep_delay
-            .hold_while(dbs.values().any(|slot| slot.db.is_some()));
+        let _ = self.sleep_delay.send(SleepSignal::Unlocked(
+            dbs.values().any(|slot| slot.db.is_some()),
+        ));
     }
 
     /// Freshness guard (`docs/threat-model.md` T-12) for the databases
@@ -1407,7 +1409,7 @@ mod tests {
         Server::new(
             Config::parse("").expect("an empty config is valid"),
             Paths::default(),
-            SleepDelay::new().0,
+            std::sync::mpsc::channel().0,
         )
     }
 
@@ -1592,7 +1594,7 @@ mod tests {
         Server::new(
             Config::parse(&config).expect("valid config"),
             Paths::default(),
-            SleepDelay::new().0,
+            std::sync::mpsc::channel().0,
         )
     }
 
@@ -1608,7 +1610,7 @@ mod tests {
         let server = Server::with_clipboard(
             Config::parse(&config).expect("valid config"),
             Paths::default(),
-            SleepDelay::new().0,
+            std::sync::mpsc::channel().0,
             backend,
         );
         allow_copy(&server);
@@ -1664,7 +1666,7 @@ mod tests {
             )
             .expect("valid config"),
             Paths::default(),
-            SleepDelay::new().0,
+            std::sync::mpsc::channel().0,
         );
         unlock_directly(&server, "personal");
         {
@@ -1731,7 +1733,7 @@ mod tests {
             Config::parse("[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n")
                 .expect("valid config"),
             Paths::default(),
-            SleepDelay::new().0,
+            std::sync::mpsc::channel().0,
             backend,
         );
         allow_copy(&server);
@@ -1912,7 +1914,7 @@ mod tests {
             )
             .expect("valid config"),
             Paths::default(),
-            SleepDelay::new().0,
+            std::sync::mpsc::channel().0,
             backend,
         );
         allow_copy(&server);
@@ -2057,7 +2059,7 @@ mod tests {
             )
             .expect("valid config"),
             Paths::default(),
-            SleepDelay::new().0,
+            std::sync::mpsc::channel().0,
             backend,
         );
         allow_copy(&server);
@@ -2295,7 +2297,7 @@ mod tests {
             )
             .expect("valid config"),
             Paths::default(),
-            SleepDelay::new().0,
+            std::sync::mpsc::channel().0,
             backend,
             prompts,
         );
@@ -2574,7 +2576,7 @@ mod tests {
             ))
             .expect("valid config"),
             Paths::default(),
-            SleepDelay::new().0,
+            std::sync::mpsc::channel().0,
             clipboard::WaylandBackend,
             prompts.clone(),
         );
@@ -2682,8 +2684,8 @@ mod tests {
 
     /// Two configured databases, both locked, and what the server tells its
     /// sleep delay.
-    fn watched_server() -> (Server, std::sync::mpsc::Receiver<bool>) {
-        let (delay, requests) = SleepDelay::new();
+    fn watched_server() -> (Server, std::sync::mpsc::Receiver<SleepSignal>) {
+        let (delay, requests) = std::sync::mpsc::channel();
         let server = Server::new(
             Config::parse(
                 "[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
@@ -2694,6 +2696,17 @@ mod tests {
             delay,
         );
         (server, requests)
+    }
+
+    /// The answers to "is anything unlocked" sent since the last call.
+    fn told(requests: &std::sync::mpsc::Receiver<SleepSignal>) -> Vec<bool> {
+        requests
+            .try_iter()
+            .map(|signal| match signal {
+                SleepSignal::Unlocked(unlocked) => unlocked,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
     }
 
     /// `unlock_directly`, then what an unlock tells the sleep delay.
@@ -2806,7 +2819,7 @@ mod tests {
         let (server, requests) = watched_server();
         unlock_and_tell(&server, "personal");
         unlock_and_tell(&server, "work");
-        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [true, true]);
+        assert_eq!(told(&requests), [true, true]);
 
         let lock = |db: &str| {
             Lock::lock(
@@ -2818,9 +2831,9 @@ mod tests {
             .expect("lock")
         };
         lock("personal");
-        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [true]);
+        assert_eq!(told(&requests), [true]);
         lock("work");
-        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [false]);
+        assert_eq!(told(&requests), [false]);
     }
 
     #[test]
@@ -2842,7 +2855,7 @@ mod tests {
         );
 
         assert_eq!(
-            requests.try_iter().collect::<Vec<_>>(),
+            told(&requests),
             [true, false, true, false, true, false, true, false]
         );
     }
@@ -2854,7 +2867,7 @@ mod tests {
     fn suspend_locks_before_the_sleep_delay_is_released() {
         let (server, requests) = watched_server();
         unlock_and_tell(&server, "personal");
-        assert_eq!(requests.try_recv(), Ok(true));
+        assert_eq!(requests.try_recv(), Ok(SleepSignal::Unlocked(true)));
 
         thread::scope(|scope| {
             let held = slots(&server.dbs);
@@ -2867,7 +2880,7 @@ mod tests {
         });
 
         assert!(!server.any_unlocked());
-        assert_eq!(requests.try_recv(), Ok(false));
+        assert_eq!(requests.try_recv(), Ok(SleepSignal::Unlocked(false)));
     }
 
     #[test]
@@ -2876,7 +2889,7 @@ mod tests {
 
         server.on_session_event(SessionEvent::Sleeping);
 
-        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [false]);
+        assert_eq!(told(&requests), [false]);
     }
 
     /// Types `line` at `master` once the prompt on it is up, and returns

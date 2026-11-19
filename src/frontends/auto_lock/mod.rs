@@ -15,12 +15,12 @@
 
 pub mod logind;
 
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use self::logind::{Bus, SessionEvent, SleepDelay};
+use self::logind::{Bus, SessionEvent, SleepSignal};
 use crate::cancel::CancelToken;
 use crate::databases::{Databases, Observer};
 use crate::display_session::{DisplaySession, DisplayWriter};
@@ -45,10 +45,10 @@ impl Source {
 /// feeds the inhibitor, to register after the observers that hold secrets,
 /// and the loop that reacts to the triggers.
 pub fn start(source: Source, display: DisplayWriter) -> (SleepHold, AutoLock) {
-    let (events, delay) = logind::start(source.0);
+    let (events, signals) = logind::start(source.0);
     (
         SleepHold {
-            delay,
+            signals,
             order: Mutex::new(()),
         },
         AutoLock { events, display },
@@ -76,8 +76,8 @@ impl AutoLock {
 /// Tells the sleep inhibitor whether anything is unlocked after every
 /// change, in the order the changes happened.
 pub struct SleepHold {
-    delay: SleepDelay,
-    /// Held while reading `any_unlocked` and telling the delay, so the delay
+    signals: Sender<SleepSignal>,
+    /// Held while reading `any_unlocked` and sending it, so the inhibitor
     /// hears the states in the order they were read whichever threads
     /// changed them.
     order: Mutex<()>,
@@ -86,7 +86,9 @@ pub struct SleepHold {
 impl SleepHold {
     fn sync(&self, databases: &Databases) {
         let _turn = self.order.lock().unwrap_or_else(|e| e.into_inner());
-        self.delay.hold_while(databases.any_unlocked());
+        let _ = self
+            .signals
+            .send(SleepSignal::Unlocked(databases.any_unlocked()));
     }
 }
 
@@ -271,14 +273,25 @@ mod tests {
 
     /// A database with a sleep hold registered, and what the hold tells the
     /// inhibitor.
-    fn held() -> (Databases, Receiver<bool>) {
-        let (delay, told) = SleepDelay::new();
+    fn held() -> (Databases, Receiver<SleepSignal>) {
+        let (signals, told) = std::sync::mpsc::channel();
         let mut databases = databases(HOUR);
         databases.observe(Arc::new(SleepHold {
-            delay,
+            signals,
             order: Mutex::new(()),
         }));
         (databases, told)
+    }
+
+    /// The answers to "is anything unlocked" the inhibitor has been sent
+    /// since the last call, in order.
+    fn answers(told: &Receiver<SleepSignal>) -> Vec<bool> {
+        told.try_iter()
+            .map(|signal| match signal {
+                SleepSignal::Unlocked(unlocked) => unlocked,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
     }
 
     #[test]
@@ -288,10 +301,7 @@ mod tests {
         databases.install_for_test("work", Vec::new());
         databases.lock("personal").unwrap();
         databases.lock("work").unwrap();
-        assert_eq!(
-            told.try_iter().collect::<Vec<_>>(),
-            [true, true, true, false]
-        );
+        assert_eq!(answers(&told), [true, true, true, false]);
     }
 
     #[test]
@@ -299,12 +309,12 @@ mod tests {
         let (databases, told) = held();
         unlocked(&databases);
         let (writer, _) = channel();
-        assert_eq!(told.try_iter().collect::<Vec<_>>(), [true, true]);
+        assert_eq!(answers(&told), [true, true]);
         react(&databases, &writer, SessionEvent::Sleeping);
         assert!(!databases.any_unlocked());
         // Nothing released it while something was still unlocked: every
         // answer it got after the lock says nothing is unlocked.
-        let after: Vec<bool> = told.try_iter().collect();
+        let after = answers(&told);
         assert!(!after.is_empty() && after.iter().all(|held| !held));
     }
 
@@ -327,6 +337,9 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
-        assert_eq!(told.try_iter().last(), Some(databases.any_unlocked()));
+        assert_eq!(
+            answers(&told).last().copied(),
+            Some(databases.any_unlocked())
+        );
     }
 }

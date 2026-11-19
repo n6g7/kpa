@@ -4,7 +4,7 @@
 //!
 //! This module only reports; it knows nothing about databases or locking.
 //! [`start`] returns the [`SessionEvent`]s the daemon reacts to
-//! (`Server::on_session_event`) and a [`SleepDelay`] the daemon tells
+//! (`Server::on_session_event`) and a `Sender<SleepSignal>` the daemon tells
 //! whether anything is unlocked. A watcher thread owns a D-Bus connection
 //! to logind and turns its signals and property changes into events: a
 //! `Lock` signal on the user's display session, that session's
@@ -23,8 +23,6 @@
 
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -71,64 +69,31 @@ pub enum SessionEvent {
     WatchLost,
 }
 
-/// Delays suspend while the daemon says something is unlocked, and never
-/// while the machine is going to sleep. [`SleepDelay::hold_while`] only
-/// sends a message; the thread that owns the `Inhibit` call acts on it.
-#[derive(Debug, Clone)]
-pub struct SleepDelay {
-    requests: Sender<bool>,
-    state: Arc<DelayState>,
+/// What the inhibitor thread is told, on one channel so it hears everything
+/// in the order it was sent. [`SleepSignal::Unlocked`] comes from the daemon
+/// after every change to what is unlocked; the other two come from the
+/// watcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepSignal {
+    /// Whether anything is unlocked now.
+    Unlocked(bool),
+    /// `PrepareForSleep(true)`. Nothing is released here: the daemon locks
+    /// first, then says nothing is unlocked, and that releases it.
+    GoingToSleep,
+    /// `PrepareForSleep(false)`.
+    Resumed,
 }
 
-/// What the watcher and the inhibitor thread share with the handles.
+/// What the inhibitor thread knows. It is the only owner, so no lock.
 #[derive(Debug, Default)]
-struct DelayState {
-    /// The last request: whether anything is unlocked.
-    wanted: AtomicBool,
-    /// Between `PrepareForSleep(true)` and `PrepareForSleep(false)`.
-    sleeping: AtomicBool,
+struct SleepState {
+    /// The last [`SleepSignal::Unlocked`].
+    unlocked: bool,
+    /// Between `GoingToSleep` and `Resumed`.
+    sleeping: bool,
 }
 
-impl SleepDelay {
-    /// A delay that sends its requests to the returned receiver, not to
-    /// logind: what [`start`] builds on, and what tests read.
-    pub fn new() -> (SleepDelay, Receiver<bool>) {
-        let (requests, receiver) = mpsc::channel();
-        let delay = SleepDelay {
-            requests,
-            state: Arc::new(DelayState::default()),
-        };
-        (delay, receiver)
-    }
-
-    /// Asks to delay suspend while `anything_unlocked`, and to let it go
-    /// when it isn't. The daemon says so after every change to what is
-    /// unlocked.
-    pub fn hold_while(&self, anything_unlocked: bool) {
-        self.state.wanted.store(anything_unlocked, Ordering::SeqCst);
-        let _ = self.requests.send(anything_unlocked);
-    }
-
-    /// `PrepareForSleep(true)`: requests to hold are ignored from now on.
-    /// Nothing is released here: the daemon locks first, then says nothing
-    /// is unlocked, and that releases it.
-    fn going_to_sleep(&self) {
-        self.state.sleeping.store(true, Ordering::SeqCst);
-    }
-
-    /// `PrepareForSleep(false)`: holds again if something was unlocked
-    /// while the machine slept.
-    fn resumed(&self) {
-        self.state.sleeping.store(false, Ordering::SeqCst);
-        let _ = self.requests.send(self.state.wanted.load(Ordering::SeqCst));
-    }
-
-    fn sleeping(&self) -> bool {
-        self.state.sleeping.load(Ordering::SeqCst)
-    }
-}
-
-/// What the inhibitor thread does about one request.
+/// What the inhibitor thread does about one signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Inhibit {
     Hold,
@@ -136,9 +101,9 @@ enum Inhibit {
     Keep,
 }
 
-/// What to do about a request that anything is `unlocked`, given whether
-/// the machine is `sleeping` and whether the inhibitor is `held`. Pure, so
-/// the gating can be tested without a bus.
+/// What to do when anything is `unlocked`, given whether the machine is
+/// `sleeping` and whether the inhibitor is `held`. Pure, so the gating can
+/// be tested without a bus.
 fn inhibit(unlocked: bool, sleeping: bool, held: bool) -> Inhibit {
     match (unlocked && !sleeping, held) {
         (true, false) => Inhibit::Hold,
@@ -147,10 +112,24 @@ fn inhibit(unlocked: bool, sleeping: bool, held: bool) -> Inhibit {
     }
 }
 
-/// Acts on each request until the [`SleepDelay`] is gone.
-fn inhibit_forever(requests: Receiver<bool>, delay: SleepDelay, mut inhibitor: LogindInhibitor) {
-    for unlocked in requests {
-        match inhibit(unlocked, delay.sleeping(), inhibitor.is_held()) {
+/// Takes `signal` into `state` and says what to do about it. Pure.
+fn step(state: &mut SleepState, signal: SleepSignal, held: bool) -> Inhibit {
+    match signal {
+        SleepSignal::GoingToSleep => {
+            state.sleeping = true;
+            return Inhibit::Keep;
+        }
+        SleepSignal::Unlocked(unlocked) => state.unlocked = unlocked,
+        SleepSignal::Resumed => state.sleeping = false,
+    }
+    inhibit(state.unlocked, state.sleeping, held)
+}
+
+/// Acts on each signal until every sender is gone.
+fn inhibit_forever(signals: Receiver<SleepSignal>, mut inhibitor: LogindInhibitor) {
+    let mut state = SleepState::default();
+    for signal in signals {
+        match step(&mut state, signal, inhibitor.is_held()) {
             Inhibit::Hold => match inhibitor.hold() {
                 Ok(()) => crate::log::debug(format_args!("holding sleep inhibitor")),
                 Err(err) => {
@@ -185,31 +164,31 @@ impl Bus {
 }
 
 /// Start the logind watcher and the inhibitor thread. The events are what
-/// the watcher reports; the delay is what the daemon tells about unlocks.
-pub fn start(bus: Bus) -> (Receiver<SessionEvent>, SleepDelay) {
+/// the watcher reports; the sender is how the daemon tells the inhibitor what
+/// is unlocked.
+pub fn start(bus: Bus) -> (Receiver<SessionEvent>, Sender<SleepSignal>) {
     let (events, session_events) = mpsc::channel();
-    let (delay, requests) = SleepDelay::new();
+    let (signals, receiver) = mpsc::channel();
 
     let inhibitor = LogindInhibitor::new(bus.clone());
-    let inhibiting = delay.clone();
-    thread::spawn(move || inhibit_forever(requests, inhibiting, inhibitor));
+    thread::spawn(move || inhibit_forever(receiver, inhibitor));
 
-    let watching = delay.clone();
+    let watching = signals.clone();
     let uid = crate::authn::process_uid();
     thread::spawn(move || watch_forever(&bus, uid, &events, &watching));
-    (session_events, delay)
+    (session_events, signals)
 }
 
 /// Keep a watch on logind for the life of the process. A subscription that
 /// drops after working locks everything (the lock can't be confirmed to
 /// have been sent) and is re-established with backoff. A first failure is
 /// only logged: nothing can be unlocked before the first subscription.
-fn watch_forever(bus: &Bus, uid: u32, events: &Sender<SessionEvent>, delay: &SleepDelay) {
+fn watch_forever(bus: &Bus, uid: u32, events: &Sender<SessionEvent>, sleep: &Sender<SleepSignal>) {
     let mut last_error: Option<String> = None;
     loop {
         let mut subscribed = false;
         let error = match bus.connect() {
-            Ok(conn) => watch(&conn, uid, events, delay, &mut subscribed),
+            Ok(conn) => watch(&conn, uid, events, sleep, &mut subscribed),
             Err(err) => err.to_string(),
         };
         if subscribed {
@@ -229,7 +208,7 @@ fn watch(
     conn: &Connection,
     uid: u32,
     events: &Sender<SessionEvent>,
-    delay: &SleepDelay,
+    sleep: &Sender<SleepSignal>,
     subscribed: &mut bool,
 ) -> String {
     // Created before the match rules are added, so nothing sent after the
@@ -275,13 +254,15 @@ fn watch(
                 let _ = events.send(SessionEvent::LockRequested);
             }
             Step::Sleeping(true) => {
-                // Marked before it is reported, so nothing taken after the
-                // report holds the machine awake; the delay itself is
-                // released by the server once it has locked.
-                delay.going_to_sleep();
+                // Sent before it is reported, so nothing taken after the
+                // report holds the machine awake; the inhibitor itself is
+                // released once the daemon has locked and says so.
+                let _ = sleep.send(SleepSignal::GoingToSleep);
                 let _ = events.send(SessionEvent::Sleeping);
             }
-            Step::Sleeping(false) => delay.resumed(),
+            Step::Sleeping(false) => {
+                let _ = sleep.send(SleepSignal::Resumed);
+            }
             Step::DisplayChanged(display) => {
                 session = display;
                 current = match display_session(conn, session.as_ref()) {
@@ -547,42 +528,87 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hold_while_sends_what_it_was_asked() {
-        let (delay, requests) = SleepDelay::new();
-
-        delay.hold_while(true);
-        delay.hold_while(false);
-
-        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [true, false]);
+    /// Feeds `signals` to a fresh state, tracking whether the inhibitor
+    /// would be held, and returns what each one did.
+    fn run(signals: &[SleepSignal]) -> Vec<Inhibit> {
+        let mut state = SleepState::default();
+        let mut held = false;
+        signals
+            .iter()
+            .map(|signal| {
+                let action = step(&mut state, *signal, held);
+                match action {
+                    Inhibit::Hold => held = true,
+                    Inhibit::Release => held = false,
+                    Inhibit::Keep => {}
+                }
+                action
+            })
+            .collect()
     }
 
-    /// Going to sleep releases nothing (the daemon locks first, then says
-    /// nothing is unlocked); resuming asks again with the last answer, so
-    /// an unlock that came while the machine slept holds at resume, and
-    /// nothing is held at resume when everything is locked.
     #[test]
-    fn resuming_asks_again_with_the_last_request() {
-        let (delay, requests) = SleepDelay::new();
-        delay.hold_while(true);
-        let _ = requests.try_iter().count();
-
-        delay.going_to_sleep();
-        assert!(delay.sleeping());
-        assert!(
-            requests.try_recv().is_err(),
-            "nothing is released by the report alone"
+    fn the_inhibitor_is_held_exactly_while_something_is_unlocked() {
+        use SleepSignal::Unlocked;
+        assert_eq!(
+            run(&[
+                Unlocked(true),
+                Unlocked(true),
+                Unlocked(false),
+                Unlocked(false)
+            ]),
+            [
+                Inhibit::Hold,
+                Inhibit::Keep,
+                Inhibit::Release,
+                Inhibit::Keep
+            ]
         );
-        delay.hold_while(true);
-        delay.resumed();
+    }
 
-        assert!(!delay.sleeping());
-        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [true, true]);
+    #[test]
+    fn going_to_sleep_releases_nothing() {
+        use SleepSignal::*;
+        assert_eq!(
+            run(&[Unlocked(true), GoingToSleep]),
+            [Inhibit::Hold, Inhibit::Keep]
+        );
+    }
 
-        delay.hold_while(false);
-        delay.going_to_sleep();
-        delay.resumed();
-        assert_eq!(requests.try_iter().collect::<Vec<_>>(), [false, false]);
+    #[test]
+    fn the_inhibitor_is_released_once_everything_is_locked_for_the_suspend() {
+        use SleepSignal::*;
+        assert_eq!(
+            run(&[Unlocked(true), GoingToSleep, Unlocked(false)]),
+            [Inhibit::Hold, Inhibit::Keep, Inhibit::Release]
+        );
+    }
+
+    #[test]
+    fn nothing_is_held_while_the_machine_sleeps() {
+        use SleepSignal::*;
+        assert_eq!(
+            run(&[GoingToSleep, Unlocked(true)]),
+            [Inhibit::Keep, Inhibit::Keep]
+        );
+    }
+
+    #[test]
+    fn resuming_holds_again_only_if_something_is_unlocked() {
+        use SleepSignal::*;
+        assert_eq!(
+            run(&[GoingToSleep, Unlocked(true), Resumed]),
+            [Inhibit::Keep, Inhibit::Keep, Inhibit::Hold]
+        );
+        assert_eq!(
+            run(&[Unlocked(true), GoingToSleep, Unlocked(false), Resumed]),
+            [
+                Inhibit::Hold,
+                Inhibit::Keep,
+                Inhibit::Release,
+                Inhibit::Keep
+            ]
+        );
     }
 
     fn signal<B>(path: &str, interface: &str, member: &str, body: &B) -> Message

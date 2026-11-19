@@ -201,7 +201,7 @@ impl InProcessDaemon {
         let server = Arc::new(kpa::server::Server::new(
             config,
             paths.clone(),
-            kpa::frontends::auto_lock::logind::SleepDelay::new().0,
+            std::sync::mpsc::channel().0,
         ));
         let cgroup = cgroup_on(on_desktop, "test");
         kpa::authn::assume_cgroup(&socket, &cgroup);

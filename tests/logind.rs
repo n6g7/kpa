@@ -20,7 +20,7 @@ use kpa::authn::Requester;
 use kpa::config::Config;
 use kpa::databases::{Begin, Databases};
 use kpa::display_session::{self, DisplaySession};
-use kpa::frontends::auto_lock::logind::{self, Bus, SessionEvent};
+use kpa::frontends::auto_lock::logind::{self, Bus, SessionEvent, SleepSignal};
 use kpa::frontends::auto_lock::{self, Source};
 use kpa::frontends::control::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::paths::Paths;
@@ -445,7 +445,7 @@ fn quiet() {
 fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
     let mut bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let (events, delay) = logind::start(Bus::Address(bus.address.clone()));
+    let (events, sleep) = logind::start(Bus::Address(bus.address.clone()));
     let observed = observe(events);
 
     // Wait for the watcher to subscribe: a lock signal sent before that is
@@ -483,8 +483,8 @@ fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
     assert_eq!(observed.locks(), 1, "LockedHint=false is not a lock");
     observed.clear();
 
-    // 3. Telling the delay that something is unlocked takes the inhibitor.
-    delay.hold_while(true);
+    // 3. Telling the inhibitor that something is unlocked takes the inhibitor.
+    sleep.send(SleepSignal::Unlocked(true)).unwrap();
     eventually("the sleep inhibitor to be taken", || {
         mock.inhibitor_count() == 1
     });
@@ -499,14 +499,14 @@ fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
         !mock.last_inhibitor_released(),
         "held until the server has locked"
     );
-    delay.hold_while(false);
+    sleep.send(SleepSignal::Unlocked(false)).unwrap();
     eventually("the inhibitor to be released", || {
         mock.last_inhibitor_released()
     });
 
     // 5. While the machine sleeps nothing is held, but an unlock that came
     //    in the meantime holds at resume.
-    delay.hold_while(true);
+    sleep.send(SleepSignal::Unlocked(true)).unwrap();
     quiet();
     assert_eq!(mock.inhibitor_count(), 1, "no inhibitor while sleeping");
     mock.prepare_for_sleep(false);
@@ -516,7 +516,7 @@ fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
     assert!(!mock.last_inhibitor_released());
 
     // 6. Resume with nothing unlocked does not take the inhibitor again.
-    delay.hold_while(false);
+    sleep.send(SleepSignal::Unlocked(false)).unwrap();
     eventually("the inhibitor to be released", || {
         mock.last_inhibitor_released()
     });
@@ -556,7 +556,7 @@ fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
 fn the_display_session_state_follows_logind_over_a_bus() {
     let mut bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let (events, _delay) = logind::start(Bus::Address(bus.address.clone()));
+    let (events, _sleep) = logind::start(Bus::Address(bus.address.clone()));
     let recorder = observe(events);
 
     // 1. Subscribing reads the display session and its hint.
@@ -614,7 +614,7 @@ fn the_display_session_state_follows_logind_over_a_bus() {
 fn the_active_state_follows_logind_and_never_locks() {
     let bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let (events, _delay) = logind::start(Bus::Address(bus.address.clone()));
+    let (events, _sleep) = logind::start(Bus::Address(bus.address.clone()));
     let recorder = observe(events);
 
     // 1. Subscribing reads the session as active.
@@ -686,8 +686,8 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         common::password_db().display().to_string()
     ))
     .unwrap();
-    let (events, delay) = logind::start(Bus::Address(bus.address.clone()));
-    let server = Arc::new(Server::new(config, Paths::default(), delay));
+    let (events, sleep) = logind::start(Bus::Address(bus.address.clone()));
+    let server = Arc::new(Server::new(config, Paths::default(), sleep));
     let reacting = server.clone();
     thread::spawn(move || {
         for event in events {
