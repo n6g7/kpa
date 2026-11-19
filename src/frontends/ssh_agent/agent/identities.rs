@@ -18,10 +18,10 @@ use crate::config::DatabaseConfig;
 use crate::frontends::ssh_agent::authz::{authorize_sign, may_list};
 use crate::frontends::ssh_agent::bind::ConnectionClass;
 use crate::frontends::ssh_agent::classify::Purpose;
-use crate::frontends::ssh_agent::keys;
 use crate::frontends::ssh_agent::wire::{self, Identity};
 use crate::log;
 use crate::output;
+use crate::ssh::keys;
 
 /// The longest identity comment sent: a key's name, from an override or
 /// an entry title, escaped and capped (`docs/ssh-agent.md` § 6.4), so a
@@ -143,9 +143,9 @@ mod tests {
 
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
-    use crate::frontends::ssh_agent::approve::Scope;
-    use crate::frontends::ssh_agent::authz::SignatureApproval;
-    use crate::frontends::ssh_agent::testing::{database, key_database, test_key};
+    use crate::ssh::approvals::Scope;
+    use crate::ssh::approvals::SignatureApproval;
+    use crate::ssh::testing::{database, key_database, test_key};
 
     fn cached(seed: u64) -> PublicKey {
         test_key(seed).public_key().clone()

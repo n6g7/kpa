@@ -9,8 +9,8 @@ use ssh_key::known_hosts::{HostPatterns, KnownHosts};
 use ssh_key::public::KeyData;
 
 use crate::frontends::ssh_agent::classify::Purpose;
-use crate::frontends::ssh_agent::keys::ServedKey;
 use crate::output::escape_one_line;
+use crate::ssh::keys::ServedKey;
 
 /// The most bytes (escaped) each piece of a message may take. The message
 /// is one line the prompt caps at 256 bytes, and the destination comes last,
@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     use crate::config::SshKeyConfirm;
     use crate::frontends::ssh_agent::classify::LoginRequest;
-    use crate::frontends::ssh_agent::testing::test_key;
+    use crate::ssh::testing::test_key;
 
     fn served(name: &str) -> ServedKey {
         let key = test_key(1);

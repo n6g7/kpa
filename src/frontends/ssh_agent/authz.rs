@@ -6,21 +6,11 @@
 //! [`may_list`] is the companion question "does this connection even get
 //! to ask".
 
-use super::approve::Scope;
 use super::bind::ConnectionClass;
 use super::classify::Purpose;
-use super::keys::ServedKey;
 use crate::config::SshKeyConfirm;
-
-/// The approval a signature needs: what it covers, and whether the user's
-/// confirmation is kept for the next request of that scope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignatureApproval {
-    pub scope: Scope,
-    /// Keep the approval until lock (`confirm = "once"`), rather than let
-    /// it cover this one signature (`"always"`).
-    pub remember: bool,
-}
+use crate::ssh::approvals::{Scope, SignatureApproval};
+use crate::ssh::keys::ServedKey;
 
 /// Why a request is never signed, whatever the database's state, as a log
 /// line says it.
@@ -93,7 +83,7 @@ mod tests {
 
     use super::*;
     use crate::frontends::ssh_agent::classify::LoginRequest;
-    use crate::frontends::ssh_agent::testing::test_key;
+    use crate::ssh::testing::test_key;
 
     fn key(confirm: SshKeyConfirm) -> ServedKey {
         let public_key = test_key(1).public_key().clone();

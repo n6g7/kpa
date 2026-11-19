@@ -12,9 +12,9 @@
 
 use std::time::Duration;
 
-use kpa::frontends::ssh_agent::approve::PENDING_TTL;
 use kpa::output::Table;
 use kpa::proto::WirePending;
+use kpa::ssh::approvals::PENDING_TTL;
 use serde::Deserialize;
 use uuid::Uuid;
 

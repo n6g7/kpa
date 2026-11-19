@@ -237,9 +237,10 @@ fn dispatch(
 mod tests {
     use std::sync::Mutex;
 
-    use super::super::testing::{signed_bind, test_key};
+    use super::super::testing::signed_bind;
     use super::super::wire::{Identity, SignFlags, SignRequest};
     use super::*;
+    use crate::ssh::testing::test_key;
     use bind::ConnectionClass;
 
     fn requester() -> Requester {

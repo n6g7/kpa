@@ -13,7 +13,6 @@ use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg};
 use uuid::Uuid;
 
-use super::authz::SignatureApproval;
 use super::keys::ServedKey;
 
 /// How long a pending request is kept after it was last refused.
@@ -28,7 +27,7 @@ pub const MAX_PENDING: usize = 16;
 /// OpenSSH's `ssh`, which never bind at all). Approving a key for one
 /// destination never covers another, or covers unbound use, and vice versa
 /// (`docs/ssh-agent.md` § 6.7). Computed once, by
-/// [`authorize_sign`](super::authz::authorize_sign), and carried to the lookup and
+/// `ssh_agent::authz::authorize_sign`, and carried to the lookup and
 /// the grant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Scope {
@@ -52,6 +51,16 @@ impl Scope {
     pub fn destination(&self) -> Option<Fingerprint> {
         self.destination
     }
+}
+
+/// The approval a signature needs: what it covers, and whether the user's
+/// confirmation is kept for the next request of that scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureApproval {
+    pub scope: Scope,
+    /// Keep the approval until lock (`confirm = "once"`), rather than let
+    /// it cover this one signature (`"always"`).
+    pub remember: bool,
 }
 
 /// The scopes approved since the last lock.
@@ -215,8 +224,8 @@ fn expired(entry: &Entry, now: Instant) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontends::ssh_agent::keys;
-    use crate::frontends::ssh_agent::testing::{database, test_key};
+    use crate::ssh::keys;
+    use crate::ssh::testing::{database, test_key};
 
     const WINDOW: Duration = Duration::from_secs(60);
 

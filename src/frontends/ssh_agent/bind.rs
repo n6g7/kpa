@@ -250,9 +250,10 @@ fn key_data_from_bytes(bytes: &[u8]) -> ssh_key::Result<KeyData> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{signed_bind, test_key};
+    use super::super::testing::signed_bind;
     use super::super::wire::AgentRequest;
     use super::*;
+    use crate::ssh::testing::test_key;
 
     fn verified_host(class: &ConnectionClass) -> &KeyData {
         match class {

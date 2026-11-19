@@ -80,7 +80,7 @@ pub fn fields_db() -> PathBuf {
     ensure_fixtures().join("fixture-fields.kdbx")
 }
 
-/// A database for `ssh_agent::keys` (`tests/fixture.sh`): entries `"Ed25519"`,
+/// A database for `ssh::keys` (`tests/fixture.sh`): entries `"Ed25519"`,
 /// `"Ecdsa"` and `"Rsa"` each hold one OpenSSH private-key attachment;
 /// `"Pem"` holds a PEM-format key that must be skipped; `"Historical"`'s
 /// key is reachable only through its history, and `"Recycled"`'s only
@@ -98,7 +98,7 @@ pub fn ssh_fixture_fingerprint(title: &str) -> String {
     let password = zeroize::Zeroizing::new(PASSWORD.to_string());
     let (db, _) =
         kpa::vault::open(&ssh_db(), Some(&password), None).expect("ssh fixture should open");
-    kpa::frontends::ssh_agent::keys::scan(&db)
+    kpa::ssh::keys::scan(&db)
         .found
         .into_iter()
         .find(|key| key.entry_title.as_deref() == Some(title))

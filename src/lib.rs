@@ -18,6 +18,7 @@ pub mod proto;
 pub mod server;
 pub mod session_watch;
 pub mod socket;
+pub mod ssh;
 pub mod vault;
 mod wayland;
 

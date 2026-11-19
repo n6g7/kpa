@@ -15,10 +15,10 @@ use super::sign::{Lacking, Refused, lacking};
 use super::{Agent, SshHost, message};
 use crate::authn::Requester;
 use crate::authz::may_prompt_on_screen;
-use crate::frontends::ssh_agent::authz::SignatureApproval;
-use crate::frontends::ssh_agent::keys::ServedKey;
 use crate::prompt::{CancelToken, Declined};
 use crate::proto::{UnlockError, UnlockRequest};
+use crate::ssh::approvals::SignatureApproval;
+use crate::ssh::keys::ServedKey;
 
 /// What the user confirmed just now: the approval, and the token the
 /// database's next lock cancels, so that a confirmation given for a database

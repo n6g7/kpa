@@ -9,10 +9,10 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::SshHost;
-use crate::frontends::ssh_agent::approve::RequestDetails;
-use crate::frontends::ssh_agent::authz::SignatureApproval;
-use crate::frontends::ssh_agent::keys::ServedKey;
 use crate::log;
+use crate::ssh::approvals::RequestDetails;
+use crate::ssh::approvals::SignatureApproval;
+use crate::ssh::keys::ServedKey;
 
 /// One pending request, as `ssh_pending` lists it.
 #[derive(Debug, Clone)]
@@ -91,9 +91,9 @@ mod tests {
     use super::super::fake::FakeHost;
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
-    use crate::frontends::ssh_agent::approve::{PENDING_TTL, Scope};
-    use crate::frontends::ssh_agent::authz::SignatureApproval;
-    use crate::frontends::ssh_agent::testing::{database, key_database, test_key};
+    use crate::ssh::approvals::SignatureApproval;
+    use crate::ssh::approvals::{PENDING_TTL, Scope};
+    use crate::ssh::testing::{database, key_database, test_key};
 
     const WINDOW: Duration = Duration::from_secs(60);
 

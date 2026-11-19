@@ -845,7 +845,7 @@ impl SshKeys for Server {
             let Some(cfg) = self.config.databases.iter().find(|cfg| cfg.name == name) else {
                 return Err(SshKeysError::UnknownDb { db: db() });
             };
-            let scan = ssh_agent::keys::scan(database);
+            let scan = crate::ssh::keys::scan(database);
             slot.touch();
             report
                 .keys
@@ -853,7 +853,7 @@ impl SshKeys for Server {
                     db: db(),
                     key_type: key.public_key.algorithm().to_string(),
                     fingerprint: key.fingerprint.to_string(),
-                    name: ssh_agent::keys::key_name(
+                    name: crate::ssh::keys::key_name(
                         name,
                         key.fingerprint,
                         cfg.ssh_key_settings(key.fingerprint).name.as_deref(),
@@ -1652,7 +1652,7 @@ mod tests {
     /// so none of it outlives the database.
     #[test]
     fn a_lock_resets_the_ssh_agent_state() {
-        use crate::frontends::ssh_agent::testing::{key_database, test_key};
+        use crate::ssh::testing::{key_database, test_key};
 
         let server = Server::new(
             Config::parse(

@@ -31,13 +31,14 @@ use super::prompts::Confirmed;
 use super::request::{Request, log_sign};
 use super::{Agent, SlotView, SshHost, identities, signer};
 use crate::authn::Requester;
-use crate::frontends::ssh_agent::authz::{Refusal, SignatureApproval, authorize_sign};
+use crate::frontends::ssh_agent::authz::{Refusal, authorize_sign};
 use crate::frontends::ssh_agent::bind::ConnectionClass;
-use crate::frontends::ssh_agent::keys::ServedKey;
 use crate::frontends::ssh_agent::wire::{AgentResponse, SignRequest};
 use crate::output;
 use crate::prompt::Declined;
 use crate::proto::UnlockError;
+use crate::ssh::approvals::SignatureApproval;
+use crate::ssh::keys::ServedKey;
 
 /// The longest key name a log line carries: a `[[database.ssh_key]]`
 /// override's `name`, escaped and capped like an identity comment.
@@ -302,16 +303,16 @@ mod tests {
     use super::super::{approve_pending, pending_requests};
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
-    use crate::frontends::ssh_agent::approve::Scope;
-    use crate::frontends::ssh_agent::keys;
     use crate::frontends::ssh_agent::serve::SshSign;
-    use crate::frontends::ssh_agent::testing::{RSA_3072, database, key_database, test_key};
     use crate::frontends::ssh_agent::wire::SignFlags;
     use crate::paths::Paths;
     use crate::prompt::{
         CancelSource, ConfirmAnswer, Declined, Prompt, PromptOutcome, Scripted, Step,
     };
     use crate::proto::UnlockError;
+    use crate::ssh::approvals::Scope;
+    use crate::ssh::keys;
+    use crate::ssh::testing::{RSA_3072, database, key_database, test_key};
 
     /// One unlocked database, `personal`, serving `key` as `github` with
     /// `confirm`.

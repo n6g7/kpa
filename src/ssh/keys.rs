@@ -266,7 +266,7 @@ pub struct ServedKey {
 /// `[[database.ssh_key]]` settings (`DatabaseConfig::ssh_key_settings`):
 /// drops anything a `serve = false` override names, names the rest with
 /// [`key_name`], and carries each one's `confirm`/`forwarded` policy for
-/// [`super::authz::authorize_sign`].
+/// `ssh_agent::authz::authorize_sign`.
 pub fn resolve(cfg: &DatabaseConfig, found: &[FoundKey]) -> Vec<ServedKey> {
     found
         .iter()
@@ -430,7 +430,7 @@ mod tests {
 
     use super::*;
     use crate::config::SshKeyConfig;
-    use crate::frontends::ssh_agent::testing::RSA_3072;
+    use crate::ssh::testing::RSA_3072;
 
     /// `ssh-key`'s own test vector (`tests/examples/id_ed25519`):
     /// unencrypted Ed25519.

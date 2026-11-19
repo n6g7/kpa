@@ -38,12 +38,12 @@ pub use pending::{approve_pending, pending_requests};
 pub use state::SshSlot;
 
 use super::bind::ConnectionClass;
-use super::keys;
 use super::serve::SshSign;
 use super::wire::{AgentResponse, Identity, SignRequest};
 use crate::authn::Requester;
 use crate::paths::Paths;
 use crate::prompt::{ConfirmAnswer, Prompt};
+use crate::ssh::keys;
 
 /// The SSH agent for one host: what [`serve`](super::serve::serve) runs.
 pub struct Agent<H> {
@@ -114,8 +114,8 @@ mod tests {
 
     use super::fake::{FakeHost, requester};
     use super::*;
-    use crate::frontends::ssh_agent::testing::{database, test_key};
     use crate::prompt::{PromptQueue, Scripted};
+    use crate::ssh::testing::{database, test_key};
 
     /// The agent lists through its host, and finds the cache where `paths`
     /// puts it.

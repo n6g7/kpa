@@ -3,9 +3,10 @@
 //! [`wire`] frames and parses the agent protocol itself, [`classify`] says
 //! what a signature request is actually for, and [`bind`] verifies
 //! `session-bind@openssh.com` and tracks what it means for a connection —
-//! none of the three touches a socket, a vault or a config file. [`keys`]
-//! is where that wiring starts: config, key discovery and the key cache.
-//! [`authz`] decides what a signature request needs, and [`approve`]
+//! none of the three touches a socket, a vault or a config file.
+//! `ssh::keys` is where that wiring starts: config, key discovery and the key
+//! cache.
+//! [`authz`] decides what a signature request needs, and `ssh::approvals`
 //! holds the approvals that cover it. [`serve`] is the
 //! socket: it accepts connections and answers each request through
 //! [`serve::SshSign`], the interface it defines for whatever lists and
@@ -17,11 +18,9 @@
 //! `server`.
 
 mod agent;
-pub mod approve;
 pub mod authz;
 pub mod bind;
 pub mod classify;
-pub mod keys;
 pub mod serve;
 #[cfg(test)]
 pub(crate) mod testing;

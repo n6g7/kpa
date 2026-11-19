@@ -438,7 +438,7 @@ pub struct AttachmentView<'a> {
 /// no history, and nothing in the recycle bin. Entries come in tree order:
 /// a group's own entries in their stored order, then each of its groups in
 /// turn, the same way. Used by the SSH agent's key discovery
-/// (`ssh_agent::keys::scan`), which only ever looks at what a database's
+/// (`ssh::keys::scan`), which only ever looks at what a database's
 /// current entries hold (`docs/ssh-agent.md` § 6.4).
 pub fn for_each_attachment(db: &Database, mut visit: impl FnMut(AttachmentView<'_>)) {
     for_each_current_entry(db, |entry| visit_attachments(entry, &mut visit));
