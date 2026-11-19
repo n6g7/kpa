@@ -163,15 +163,16 @@ impl Databases {
     pub fn lock(&self, name: &str) -> Result<(), UnknownDb>;
     pub fn lock_all(&self);
     /// Locks each unlocked database idle for `idle_timeout` as of `now`.
-    pub fn expire_idle(&self, now: Instant) -> Vec<String>;
+    pub fn expire_idle(&self, now: Instant);
     /// The freshness guard for `names`: locks each whose file changed.
-    pub fn drop_stale<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Vec<String>;
+    pub fn drop_stale<'a>(&self, names: impl IntoIterator<Item = &'a str>);
 }
 
 pub enum OpenError { UnknownDb, Locked, Stale }
 pub enum BeginError { UnknownDb, InProgress }
 pub enum Begin<'a> { AlreadyUnlocked, Started(Unlocking<'a>) }
 pub struct Snapshot { pub name: String, pub entries: Option<usize> }
+impl Snapshot { pub fn is_locked(&self) -> bool; }
 ```
 
 An unlocked database is read through a guard. It carries the reads the front
@@ -191,25 +192,28 @@ impl Open<'_> {
     /// protected field.
     pub fn entries(&self) -> Vec<EntrySummary>;
     pub fn entry_count(&self) -> usize;
-    pub fn entry_exists(&self, uuid: Uuid) -> bool;
-    /// An entry's title for the operation log, unless it is protected.
-    pub fn entry_title(&self, uuid: Uuid) -> Option<String>;
-    /// One field's value, protected or not. `None`: no such entry;
-    /// `Some(None)`: the field is absent or empty.
-    pub fn entry_field(&self, uuid: Uuid, key: &str) -> Option<Option<Zeroizing<String>>>;
+    /// `None`: no such entry.
+    pub fn entry(&self, uuid: Uuid) -> Option<Entry<'_>>;
+    /// Every attachment on every current entry, borrowed for the call.
+    pub fn for_each_attachment(&self, visit: impl FnMut(Attachment<'_>));
+}
+
+/// One entry of an open database.
+impl Entry<'_> {
+    /// For the operation log: `None` if absent, empty or protected.
+    pub fn title(&self) -> Option<String>;
+    /// One field's value, protected or not. `None`: absent or empty.
+    pub fn field(&self, key: &str) -> Option<Zeroizing<String>>;
     /// The entry's current one-time code.
-    pub fn entry_totp(&self, uuid: Uuid) -> Option<Option<Zeroizing<String>>>;
-    /// Every attachment on every current entry, borrowed for the call, or
-    /// those of one entry.
-    pub fn attachments(&self, visit: impl FnMut(AttachmentView<'_>));
-    pub fn entry_attachments(&self, uuid: Uuid, visit: impl FnMut(AttachmentView<'_>));
+    pub fn totp(&self) -> Option<Zeroizing<String>>;
+    pub fn for_each_attachment(&self, visit: impl FnMut(Attachment<'_>));
 }
 ```
 
-`EntrySummary` and `AttachmentView` are `databases`' own types. No `pub`
+`EntrySummary` and `Attachment` are `databases`' own types. No `pub`
 signature of `databases` names a `keepass` type, and no other subsystem
 imports the crate: the audit of what reads vault content is the call sites of
-these methods (§ 7). An attachment is borrowed, never copied, so a private
+these methods and `Entry`'s (§ 7). An attachment is borrowed, never copied, so a private
 key in it is not left behind in a buffer nobody wipes.
 
 What it owns, per database: the `Database` while unlocked; the path and the
@@ -244,11 +248,14 @@ question. It has no OS seam of its own beyond reading and `stat`ing the file
 `vault` names.
 
 **Test support.** Unit tests of other subsystems need unlocked databases
-without a `.kdbx` file. `databases::testing`, compiled for tests only, builds
-a database from plain data (entries with their fields and attachments) and
-installs it as unlocked in a `Databases`, stamping a temporary file so the
-freshness guard passes. It names no `keepass` type, so a test in `ssh` or
-`ssh_agent` doesn't either. `vault::open`'s file reading is covered by the
+without a `.kdbx` file. `databases/testing.rs`, compiled for tests only,
+gives `Databases::for_test` (each database's path is a placeholder file in a
+temporary directory a test-only field keeps alive, so the freshness guard
+passes), `install_for_test(name, Vec<TestEntry>)` (an in-memory database
+installed through the path `finish` uses, built from plain data: a title,
+fields, attachments) and `change_file_for_test(name)` (the guard sees a
+change). It names no `keepass` type, so a test in `ssh` or `ssh_agent`
+doesn't either. `vault::open`'s file reading is covered by the
 integration tests, because the library is built without save support and unit
 tests can't write a `.kdbx`.
 
@@ -293,7 +300,8 @@ The first five are observers; the last is not.
 
 ```rust
 pub trait Observer: Send + Sync {
-    /// `db` was unlocked. May take the core's lock (`databases.open`).
+    /// `db` was unlocked. The core's lock is not held, so it may take it
+    /// (`databases.open`).
     fn unlocked(&self, _databases: &Databases, _db: &str, _unlock: &CancelToken) {}
     /// A lock covered `db`, unlocked or not. `unlock` is the token of the
     /// unlock it ended.
@@ -691,7 +699,7 @@ Which secrets leave the core, and in what form:
 |---|---|---|
 | master password, keyfile path | borrowed into `Unlocking::finish`; the core passes it to `vault::open` and keeps nothing | zeroized by the front end that read it (prompt buffer) |
 | the decrypted database | never leaves `databases`; the front end gets what `Open`'s methods return | `Open`'s methods only |
-| a protected field's value | copied by `Open::entry_field` or `entry_totp` into a `Zeroizing<String>` | the clipboard offer |
+| a protected field's value | copied by `Entry::field` or `Entry::totp` into a `Zeroizing<String>` | the clipboard offer |
 | entry metadata | `Open::entries` into zeroize-on-drop summaries | a response, serialized into a zeroizing buffer |
 | an SSH private key | parsed by `ssh::keys`/`ssh_agent` from an attachment `Open` lends, into a type that zeroizes on drop | `SshState`, until its unlock's token is cancelled |
 
@@ -699,7 +707,7 @@ The core has no output channel: it writes no file and no socket, and its
 log lines carry database names only. So the places a secret can reach disk,
 a log or another process are the front ends and the clipboard, and
 the audit of "nothing persisted" ([`threat-model.md`](./threat-model.md) G-4)
-is a search for the call sites of `Open`'s read methods, and for `keepass::`
+is a search for the call sites of `Open`'s and `Entry`'s read methods, and for `keepass::`
 outside `databases` (there are none).
 
 Where each lock-related goal is enforced, for an audit:
@@ -823,7 +831,7 @@ tests/
 - **One package, not a workspace.** The dependency rules between subsystems
   are `module-structure.md`'s, kept by review rather than by crate boundaries,
   and test fakes (`prompt::Scripted`, `clipboard::RecordingBackend`,
-  `databases::testing`) stay usable from every subsystem's unit tests, which
+  `Databases::for_test`) stay usable from every subsystem's unit tests, which
   separate crates would put behind a feature or a test-support crate.
 
 ## 10. Portability
@@ -871,8 +879,12 @@ the directory changes. Until then no macOS code or stubs are written.
 - **`databases`** is tested alone: the state machine (a lock beats an unlock,
   a token is cancelled when its unlock's lock happens, idle expiry per
   database, the freshness guard, `InProgress`), with in-memory databases
-  installed through `databases::testing` and observers that record what they
+  installed through `install_for_test` and observers that record what they
   are told and call back into the core.
+- **No front-end test uses a mock of `Databases`.** A mock needs a trait in
+  front of the core and a second implementation of its lock and token
+  semantics, which can drift from the real one. The stand-in sits at the
+  lowest seam, the file read: the real core holding an in-memory database.
 - **`ssh::approvals`** is tested against a real `Databases`: an approval's
   scope and life, a one-signature approval spent once, pending requests
   (merged, capped, expired, ordered), and a lock dropping the state of the
@@ -882,9 +894,7 @@ the directory changes. Until then no macOS code or stubs are written.
   (`prompt::Scripted`). The races the sign flow has to survive (a lock while
   its confirm prompt is up, a lock and a fresh unlock after the answer, a
   file that changes between two reads, two concurrent signers, two concurrent
-  retries of a one-signature approval) are tests against it. No fake host
-  stands in for the databases, so there is no second implementation to drift
-  from the real one.
+  retries of a one-signature approval) are tests against it.
 - **`control`** is tested against a real `Databases`, `prompt::Scripted` for
   the unlock prompt, `clipboard::RecordingBackend` for the clipboard and a
   `DisplayHandle` the test sets: the unlock gates, a lock ending a prompt,
