@@ -20,7 +20,8 @@ use rustix::io::Errno;
 use rustix::termios::{LocalModes, OptionalActions, Termios, tcgetattr, tcsetattr};
 use zeroize::Zeroizing;
 
-use super::{Backend, CancelToken, MAX_ANSWER_LEN, PromptOutcome, poll_timeout};
+use super::{Backend, MAX_ANSWER_LEN, PromptOutcome, poll_timeout};
+use crate::cancel::CancelToken;
 
 /// A terminal the peer passed along with its request, and the connection it
 /// came on: the daemon asks on the terminal, and stops asking once the peer
@@ -289,8 +290,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::super::{CancelSource, Prompt, PromptQueue};
+    use super::super::{Prompt, PromptQueue};
     use super::*;
+    use crate::cancel::CancelSource;
     use crate::prompt::testing::{echoing, pty, read_until};
 
     const MESSAGE: &str = "Unlock personal";

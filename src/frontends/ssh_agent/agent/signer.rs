@@ -113,7 +113,7 @@ mod tests {
 
     use super::super::SshSlot;
     use super::*;
-    use crate::prompt::CancelSource;
+    use crate::cancel::CancelSource;
     use crate::ssh::testing::{RSA_3072, database, key_database, test_key};
 
     /// `key`'s fingerprint, and a database serving it, scanned.

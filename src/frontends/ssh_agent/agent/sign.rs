@@ -302,14 +302,13 @@ mod tests {
     use super::super::request::sign_line;
     use super::super::{approve_pending, pending_requests};
     use super::*;
+    use crate::cancel::CancelSource;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
     use crate::frontends::control::proto::UnlockError;
     use crate::frontends::ssh_agent::serve::SshSign;
     use crate::frontends::ssh_agent::wire::SignFlags;
     use crate::paths::Paths;
-    use crate::prompt::{
-        CancelSource, ConfirmAnswer, Declined, Prompt, PromptOutcome, Scripted, Step,
-    };
+    use crate::prompt::{ConfirmAnswer, Declined, Prompt, PromptOutcome, Scripted, Step};
     use crate::ssh::approvals::Scope;
     use crate::ssh::keys;
     use crate::ssh::testing::{RSA_3072, database, key_database, test_key};

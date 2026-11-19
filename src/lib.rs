@@ -6,6 +6,7 @@
 
 pub mod authn;
 pub mod authz;
+mod cancel;
 pub mod clip;
 pub mod config;
 pub mod frontends;

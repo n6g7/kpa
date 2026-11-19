@@ -33,6 +33,7 @@ use zeroize::Zeroizing;
 
 use crate::authn::Requester;
 use crate::authz;
+use crate::cancel::CancelSource;
 use crate::clip::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
 use crate::frontends::control::proto::{
@@ -47,8 +48,8 @@ use crate::io::ByteCounter;
 use crate::log;
 use crate::paths::Paths;
 use crate::prompt::{
-    self, CancelSource, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue,
-    SecretProgram, SecretTerminal, Terminal,
+    self, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue, SecretProgram,
+    SecretTerminal, Terminal,
 };
 use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
 use crate::socket::{self, Received};

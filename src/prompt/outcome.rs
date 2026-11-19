@@ -17,7 +17,7 @@ pub enum PromptOutcome<T = Zeroizing<String>> {
     /// Nothing was entered within the prompt's timeout; the prompt was
     /// killed.
     TimedOut,
-    /// Its [`CancelToken`](super::CancelToken) was cancelled — a lock
+    /// Its [`CancelToken`](crate::cancel::CancelToken) was cancelled — a lock
     /// ended the prompt. It was killed, or, if it was still queued, never
     /// shown at all.
     Interrupted,

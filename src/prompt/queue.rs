@@ -6,7 +6,7 @@ use std::io;
 use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
 
-use super::CancelToken;
+use crate::cancel::CancelToken;
 
 #[derive(Default)]
 struct PromptQueueState {
@@ -148,8 +148,8 @@ fn wait_for_wake(watch: &UnixStream, cancel: &UnixStream) -> io::Result<Wake> {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::super::CancelSource;
     use super::*;
+    use crate::cancel::CancelSource;
 
     /// Waits until `n` prompts are queued behind the one on screen.
     fn wait_queued(queue: &PromptQueue, n: usize) {

@@ -15,8 +15,9 @@ use super::sign::{Lacking, Refused, lacking};
 use super::{Agent, SshHost, message};
 use crate::authn::Requester;
 use crate::authz::may_prompt_on_screen;
+use crate::cancel::CancelToken;
 use crate::frontends::control::proto::{UnlockError, UnlockRequest};
-use crate::prompt::{CancelToken, Declined};
+use crate::prompt::Declined;
 use crate::ssh::approvals::SignatureApproval;
 use crate::ssh::keys::ServedKey;
 
