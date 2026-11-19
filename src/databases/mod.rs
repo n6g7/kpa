@@ -106,7 +106,7 @@ impl Slot {
 }
 
 /// A database a lock covered, and the token of the unlock the lock ended.
-pub(crate) struct Covered {
+struct Covered {
     name: String,
     token: CancelToken,
 }
