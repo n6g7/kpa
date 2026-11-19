@@ -19,6 +19,9 @@ and the rest of the crate sees only the API it exports.
   share what they need through the subsystems below them, such as `ssh/`
   for what `control/` and `ssh_agent/` both know about SSH keys and
   approvals. Only `main` and the daemon's wiring import `frontends::`.
+- **Only front ends drive the core.** Only a front end unlocks or locks a
+  `databases` database. `ssh/` may read it through a guard a front end hands
+  it and hear of a lock, and the daemon's wiring builds it.
 - **A type's behaviour stays in its subsystem.** No `impl` blocks for
   another subsystem's types. No blanket impl whose only real implementor
   is one concrete type from another subsystem; wrap that type in one of

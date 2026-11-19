@@ -403,6 +403,7 @@ fn open_reads_entries_fields_and_attachments() {
     );
     let open = databases.open("work").ok().unwrap();
 
+    assert_eq!(open.name(), "work");
     assert_eq!(open.entry_count(), 2);
     let entries = open.entries();
     let uuid = |title: &str| {

@@ -156,7 +156,11 @@ impl Databases {
         if slots[index].loaded.is_none() {
             return Err(OpenError::Locked);
         }
-        Ok(Open { slots, index })
+        Ok(Open {
+            databases: self,
+            slots,
+            index,
+        })
     }
 
     /// Name and entry count (None = locked) per database, in config order.
@@ -289,6 +293,7 @@ impl Snapshot {
 /// An unlocked database, read while the guard holds the core's lock: don't
 /// call the core while it lives.
 pub struct Open<'a> {
+    databases: &'a Databases,
     slots: MutexGuard<'a, Vec<Slot>>,
     index: usize,
 }
@@ -303,6 +308,11 @@ impl Open<'_> {
             .loaded
             .as_ref()
             .expect("`open` checks the database is unlocked, and the guard keeps the core's lock")
+    }
+
+    /// The configured name of this database.
+    pub fn name(&self) -> &str {
+        &self.databases.configs[self.index].name
     }
 
     /// The token of the unlock this database is in: the lock that ends the
