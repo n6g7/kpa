@@ -18,8 +18,10 @@ mod common;
 
 use kpa::authn::Requester;
 use kpa::config::Config;
-use kpa::display_session::DisplaySession;
+use kpa::databases::{Begin, Databases};
+use kpa::display_session::{self, DisplaySession};
 use kpa::frontends::auto_lock::logind::{self, Bus, SessionEvent};
+use kpa::frontends::auto_lock::{self, Source};
 use kpa::frontends::control::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::paths::Paths;
 use kpa::server::Server;
@@ -746,4 +748,83 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         assert!(locked_at.elapsed() < Duration::from_secs(5));
     });
     assert!(!server.any_unlocked());
+}
+
+/// Unlocks every database in `databases` with the fixture's password.
+fn unlock_all(databases: &Databases) {
+    let password = zeroize::Zeroizing::new(common::PASSWORD.to_string());
+    for config in databases.configs() {
+        match databases.begin_unlock(&config.name) {
+            Ok(Begin::Started(unlocking)) => unlocking.finish(Some(&password)).expect("unlock"),
+            _ => panic!("expected to start an unlock of {}", config.name),
+        }
+    }
+    assert!(databases.any_unlocked());
+}
+
+#[test]
+fn auto_lock_locks_everything_and_follows_the_display_session_over_a_bus() {
+    let mut bus = PrivateBus::start();
+    let mock = MockLogind::start(&bus.address);
+    let config = Config::parse(&format!(
+        "[[database]]\nname = \"personal\"\npath = {:?}\n",
+        common::password_db().display().to_string()
+    ))
+    .unwrap();
+
+    let (writer, display) = display_session::channel();
+    let (hold, auto_lock) = auto_lock::start(Source::at(bus.address.clone()), writer);
+    let mut databases = Databases::new(config.databases.clone(), Duration::from_secs(3600));
+    databases.observe(Arc::new(hold));
+    let databases = Arc::new(databases);
+    let running = databases.clone();
+    thread::spawn(move || auto_lock.run(running, Duration::from_secs(3600)));
+
+    // A Lock signal sent before the watcher subscribes is lost, so keep
+    // sending until one locks.
+    unlock_all(&databases);
+    eventually("a Lock signal to lock everything", || {
+        mock.lock_signal(SESSION_1);
+        thread::sleep(Duration::from_millis(50));
+        !databases.any_unlocked()
+    });
+    assert!(
+        !display.get().is_locked(),
+        "a Lock signal alone doesn't mark the display session"
+    );
+
+    // A locked display session is marked, and locks everything.
+    unlock_all(&databases);
+    mock.set_hint(SESSION_1, true);
+    eventually("LockedHint=true to lock everything", || {
+        !databases.any_unlocked()
+    });
+    assert!(display.get().is_locked());
+    mock.set_hint(SESSION_1, false);
+    eventually("LockedHint=false to be recorded", || {
+        !display.get().is_locked()
+    });
+
+    // The inhibitor is taken by an unlock, and released by the lock on
+    // suspend.
+    unlock_all(&databases);
+    eventually("the sleep inhibitor to be taken", || {
+        mock.inhibitor_count() >= 1 && !mock.last_inhibitor_released()
+    });
+    mock.prepare_for_sleep(true);
+    eventually("the suspend to lock everything", || {
+        !databases.any_unlocked()
+    });
+    eventually("the inhibitor to be released", || {
+        mock.last_inhibitor_released()
+    });
+    mock.prepare_for_sleep(false);
+
+    // A lost watch forgets the display session and locks everything.
+    unlock_all(&databases);
+    bus.kill();
+    eventually("a lost bus to lock everything", || {
+        !databases.any_unlocked()
+    });
+    assert_eq!(display.get(), DisplaySession::None);
 }
