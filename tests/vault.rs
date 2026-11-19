@@ -8,7 +8,7 @@ mod common;
 
 use std::fs;
 
-use kpa::vault::{self, VaultError};
+use kpa::databases::vault::{self, VaultError};
 use zeroize::Zeroizing;
 
 #[test]

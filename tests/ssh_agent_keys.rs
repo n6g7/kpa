@@ -5,8 +5,8 @@
 mod common;
 
 use keepass::Database;
+use kpa::databases::vault;
 use kpa::ssh::keys::{self, SkipReason};
-use kpa::vault;
 use zeroize::Zeroizing;
 
 fn fixture() -> Database {

@@ -12,9 +12,9 @@ use uuid::Uuid;
 
 use super::SlotView;
 use super::sign::Refused;
+use crate::databases::vault;
 use crate::frontends::ssh_agent::wire::SignFlags;
 use crate::ssh::keys;
-use crate::vault;
 
 /// Decodes a raw public-key blob off the wire (`SIGN_REQUEST`'s
 /// `key_blob`), refusing trailing bytes.

@@ -96,8 +96,8 @@ pub fn ssh_db() -> PathBuf {
 /// different keys every run.
 pub fn ssh_fixture_fingerprint(title: &str) -> String {
     let password = zeroize::Zeroizing::new(PASSWORD.to_string());
-    let (db, _) =
-        kpa::vault::open(&ssh_db(), Some(&password), None).expect("ssh fixture should open");
+    let (db, _) = kpa::databases::vault::open(&ssh_db(), Some(&password), None)
+        .expect("ssh fixture should open");
     kpa::ssh::keys::scan(&db)
         .found
         .into_iter()

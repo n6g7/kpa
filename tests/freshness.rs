@@ -8,7 +8,7 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use kpa::vault::{self, Fingerprint, is_unchanged};
+use kpa::databases::vault::{self, Fingerprint, is_unchanged};
 use zeroize::Zeroizing;
 
 mod common;

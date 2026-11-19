@@ -36,6 +36,7 @@ use crate::authz;
 use crate::cancel::CancelSource;
 use crate::clipboard::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
+use crate::databases::vault::{self, Fingerprint, VaultError};
 use crate::frontends::control::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshApprove,
@@ -53,7 +54,6 @@ use crate::prompt::{
 };
 use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
 use crate::socket::{self, Received};
-use crate::vault::{self, Fingerprint, VaultError};
 
 /// Longest request line accepted, and the size of the buffer each one is
 /// read into. A request names a database or an entry, a few hundred bytes at

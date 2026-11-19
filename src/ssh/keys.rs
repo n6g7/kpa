@@ -17,8 +17,8 @@ use ssh_key::{Algorithm, EcdsaCurve, Fingerprint, HashAlg, PrivateKey, PublicKey
 use uuid::Uuid;
 
 use crate::config::{DatabaseConfig, SshKeyConfirm};
+use crate::databases::vault::{self, AttachmentView};
 use crate::paths::Paths;
-use crate::vault::{self, AttachmentView};
 
 /// Marks the one private-key format kpa reads (`docs/ssh-agent.md` § 6.4).
 const OPENSSH_MARKER: &[u8] = b"-----BEGIN OPENSSH PRIVATE KEY-----";
