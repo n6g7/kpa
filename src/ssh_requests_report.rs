@@ -5,7 +5,10 @@
 //!
 //! Pure: the requests in, text out. Cells go through `output::Table`, which
 //! escapes them (`docs/threat-model.md` T-13): key names come from the
-//! vault, and users and command names from the requester.
+//! vault, and users and command names from the requester. The key is shown
+//! by its name, which is its entry's title unless the config names it
+//! otherwise; the entry's title and the attachment's name would say no more
+//! about which key it is.
 
 use std::time::Duration;
 
@@ -49,12 +52,13 @@ pub(super) fn render(answer: &Pending) -> String {
     for request in &answer.pending {
         table.row([
             &request.id.to_string(),
-            &request.name,
-            &request.db,
+            &request.scope.key.name,
+            &request.scope.key.db,
             &what(request),
-            request.command.as_deref().unwrap_or(NONE),
+            request.request.command.as_deref().unwrap_or(NONE),
             &age(Duration::from_secs(request.age)),
             &request
+                .scope
                 .destination
                 .map_or_else(|| NONE.to_string(), |destination| destination.to_string()),
         ]);
@@ -69,6 +73,7 @@ pub(super) fn render(answer: &Pending) -> String {
 
 /// What the requester asked for, unescaped: the table does that.
 fn what(request: &WirePending) -> String {
+    let request = &request.request;
     match (request.purpose.as_str(), &request.user, &request.namespace) {
         ("login", Some(user), _) => format!("login as {user}"),
         ("login", None, _) => "login".to_string(),
@@ -87,6 +92,8 @@ fn age(age: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use kpa::proto::{WireRequestDetails, WireScope, WireSshKey};
+
     use super::*;
 
     /// Real `SHA256:…` fingerprints, `ssh_key`'s own doc example and one
@@ -97,17 +104,35 @@ mod tests {
     fn request() -> WirePending {
         WirePending {
             id: Uuid::from_u128(1),
-            db: "personal".to_string(),
-            key: KEY.parse().expect("a fingerprint"),
-            name: "github".to_string(),
-            purpose: "login".to_string(),
-            user: Some("alice".to_string()),
-            namespace: None,
-            class: "local, bound".to_string(),
-            destination: Some(DESTINATION.parse().expect("a fingerprint")),
-            command: Some("ssh".to_string()),
             age: 75,
+            scope: WireScope {
+                key: WireSshKey {
+                    db: "personal".to_string(),
+                    key_type: "ssh-ed25519".to_string(),
+                    fingerprint: KEY.to_string(),
+                    name: "github".to_string(),
+                    entry: Uuid::from_u128(9),
+                    title: Some("GitHub".to_string()),
+                    attachment: "id_ed25519".to_string(),
+                },
+                destination: Some(DESTINATION.parse().expect("a fingerprint")),
+            },
+            remember: true,
+            request: WireRequestDetails {
+                purpose: "login".to_string(),
+                user: Some("alice".to_string()),
+                namespace: None,
+                class: "local, bound".to_string(),
+                command: Some("ssh".to_string()),
+            },
         }
+    }
+
+    /// `request()`, with its key named `name`.
+    fn named(name: &str) -> WirePending {
+        let mut named = request();
+        named.scope.key.name = name.to_string();
+        named
     }
 
     fn pending(pending: Vec<WirePending>) -> Pending {
@@ -116,16 +141,19 @@ mod tests {
 
     #[test]
     fn requests_are_listed_in_aligned_columns_with_their_ids() {
-        let signing = WirePending {
-            id: Uuid::from_u128(2),
-            name: "deploy-key".to_string(),
-            purpose: "sshsig".to_string(),
-            user: None,
-            namespace: Some("git".to_string()),
-            destination: None,
-            command: None,
-            age: 4,
-            ..request()
+        let signing = {
+            let mut signing = named("deploy-key");
+            signing.id = Uuid::from_u128(2);
+            signing.age = 4;
+            signing.scope.destination = None;
+            signing.request = WireRequestDetails {
+                purpose: "sshsig".to_string(),
+                user: None,
+                namespace: Some("git".to_string()),
+                class: "local".to_string(),
+                command: None,
+            };
+            signing
         };
 
         let text = render(&pending(vec![request(), signing]));
@@ -162,12 +190,9 @@ Approve one with `kpa ssh approve <id>`. A request left alone expires after 5 mi
     /// characters come out escaped.
     #[test]
     fn hostile_text_is_escaped() {
-        let hostile = WirePending {
-            user: Some("evil\u{1b}[2J\n".to_string()),
-            command: Some("a\u{9b}b".to_string()),
-            name: "n\u{7}ame".to_string(),
-            ..request()
-        };
+        let mut hostile = named("n\u{7}ame");
+        hostile.request.user = Some("evil\u{1b}[2J\n".to_string());
+        hostile.request.command = Some("a\u{9b}b".to_string());
 
         let text = render(&pending(vec![hostile]));
 
