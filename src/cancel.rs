@@ -14,6 +14,7 @@
 //! doesn't reach the read end while a prompt program forked at that moment
 //! still holds a copy of the write end.
 
+use std::fmt;
 use std::io;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
@@ -65,6 +66,23 @@ impl CancelSource {
         }
     }
 }
+
+impl fmt::Debug for CancelToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CancelToken")
+            .field("cancelled", &self.is_cancelled())
+            .finish()
+    }
+}
+
+/// Two tokens are equal when the same source handed them out.
+impl PartialEq for CancelToken {
+    fn eq(&self, other: &CancelToken) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+}
+
+impl Eq for CancelToken {}
 
 impl Drop for CancelSource {
     /// Sets the flag before the wake-up, so a prompt the wake-up reaches
@@ -122,6 +140,14 @@ mod tests {
         };
         poll(&mut fds, Some(&now)).expect("poll");
         !fds[0].revents().is_empty()
+    }
+
+    #[test]
+    fn tokens_from_one_source_are_equal_and_from_two_sources_are_not() {
+        let first = CancelSource::new();
+        let second = CancelSource::new();
+        assert_eq!(first.token(), first.token().clone());
+        assert_ne!(first.token(), second.token());
     }
 
     #[test]
