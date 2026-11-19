@@ -14,7 +14,7 @@ mod testing;
 mod unlock;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
 
@@ -246,7 +246,7 @@ impl Api {
     /// Every unlocked database's pending requests, in config order, oldest
     /// first.
     fn ssh_pending(&self) -> Vec<WirePending> {
-        let now = Instant::now();
+        let now = SystemTime::now();
         let mut pending = Vec::new();
         for config in self.databases.configs().iter().filter(|c| c.serve_ssh_keys) {
             if let Ok(open) = self.databases.open(&config.name) {
@@ -257,7 +257,7 @@ impl Api {
             .into_iter()
             .map(|pending| WirePending {
                 id: pending.id,
-                age: pending.age.as_secs(),
+                refused_at: unix_seconds(pending.refused_at),
                 scope: WireScope {
                     key: WireSshKey {
                         db: pending.key.database,
@@ -285,14 +285,14 @@ impl Api {
     /// Approves what the pending request `id` asked for, in whichever
     /// database holds it.
     fn ssh_approve(&self, request: &SshApproveRequest) -> Result<(), SshApproveError> {
-        let now = Instant::now();
+        let (now, wall) = (Instant::now(), SystemTime::now());
         for config in self.databases.configs().iter().filter(|c| c.serve_ssh_keys) {
             let Ok(open) = self.databases.open(&config.name) else {
                 continue;
             };
-            if let Some(key) = self
-                .approvals
-                .approve(&open, request.id, now, self.retry_window)
+            if let Some(key) =
+                self.approvals
+                    .approve(&open, request.id, now, wall, self.retry_window)
             {
                 log::info(format_args!(
                     "ssh approve: key {key} approved in {:?} by request id",
@@ -303,6 +303,11 @@ impl Api {
         }
         Err(SshApproveError::NotPending)
     }
+}
+
+/// `at` in Unix seconds, 0 for a time before the epoch.
+fn unix_seconds(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// `EntrySummary` implements `Drop` (via `ZeroizeOnDrop`), which forbids
@@ -516,7 +521,7 @@ mod tests {
                 approval(1, None, true),
                 key(),
                 requested("ssh"),
-                Instant::now(),
+                SystemTime::now(),
             );
         }
 
@@ -540,7 +545,7 @@ mod tests {
                 approval(2, None, true),
                 key(),
                 requested("scp"),
-                Instant::now(),
+                SystemTime::now(),
             );
         }
         fx.databases.lock_all();
