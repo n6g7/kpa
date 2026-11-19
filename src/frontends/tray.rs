@@ -25,10 +25,10 @@ use ksni::menu::{StandardItem, SubMenu};
 use ksni::{MenuItem, OfflineReason, ToolTip};
 
 use crate::authn::Requester;
-use crate::log;
-use crate::proto::{
+use crate::frontends::control::proto::{
     DatabaseStatus, Lock, LockRequest, Response, Unlock, UnlockError, UnlockRequest,
 };
+use crate::log;
 use crate::server::{self, Server};
 
 /// How often [`run`] re-checks `Server::snapshot`.

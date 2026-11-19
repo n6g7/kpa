@@ -35,6 +35,13 @@ use crate::authn::Requester;
 use crate::authz;
 use crate::clip::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
+use crate::frontends::control::proto::{
+    self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
+    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshApprove,
+    SshApproveError, SshApproveRequest, SshKeys, SshKeysError, SshKeysReport, SshKeysRequest,
+    SshPending, Status, Unlock, UnlockError, UnlockRequest, WireEntry, WirePending,
+    WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
+};
 use crate::frontends::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
 use crate::io::ByteCounter;
 use crate::log;
@@ -42,13 +49,6 @@ use crate::paths::Paths;
 use crate::prompt::{
     self, CancelSource, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue,
     SecretProgram, SecretTerminal, Terminal,
-};
-use crate::proto::{
-    self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
-    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshApprove,
-    SshApproveError, SshApproveRequest, SshKeys, SshKeysError, SshKeysReport, SshKeysRequest,
-    SshPending, Status, Unlock, UnlockError, UnlockRequest, WireEntry, WirePending,
-    WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
 };
 use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
 use crate::socket::{self, Received};

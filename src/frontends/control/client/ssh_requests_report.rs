@@ -12,31 +12,31 @@
 
 use std::time::Duration;
 
-use kpa::output::Table;
-use kpa::proto::WirePending;
-use kpa::ssh::approvals::PENDING_TTL;
+use crate::frontends::control::proto::WirePending;
+use crate::output::Table;
+use crate::ssh::approvals::PENDING_TTL;
 use serde::Deserialize;
 use uuid::Uuid;
 
 /// What `ssh_pending` answers: the requests, oldest first.
 #[derive(Deserialize)]
-pub(super) struct Pending {
+pub struct Pending {
     pending: Vec<WirePending>,
 }
 
 /// What `ssh_approve` answers when it approved: nothing.
 #[derive(Deserialize)]
-pub(super) struct Approved {}
+pub struct Approved {}
 
 /// The line `kpa ssh approve` prints once `id` is approved.
-pub(super) fn approved(id: Uuid, _: &Approved) -> String {
+pub fn approved(id: Uuid, _: &Approved) -> String {
     format!("Approved {id}. Retry the command that was refused.\n")
 }
 
 /// A cell with nothing to say.
 const NONE: &str = "-";
 
-pub(super) fn render(answer: &Pending) -> String {
+pub fn render(answer: &Pending) -> String {
     if answer.pending.is_empty() {
         return "No SSH request is pending.\n".to_string();
     }
@@ -92,7 +92,7 @@ fn age(age: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use kpa::proto::{WireRequestDetails, WireScope, WireSshKey};
+    use crate::frontends::control::proto::{WireRequestDetails, WireScope, WireSshKey};
 
     use super::*;
 

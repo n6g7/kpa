@@ -18,8 +18,8 @@ mod common;
 
 use kpa::authn::Requester;
 use kpa::config::Config;
+use kpa::frontends::control::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::paths::Paths;
-use kpa::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::server::Server;
 use kpa::session_watch::{self, Bus, DisplaySession, SessionEvent};
 use zbus::blocking::Connection;

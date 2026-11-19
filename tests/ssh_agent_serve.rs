@@ -810,7 +810,7 @@ mod pending {
     use std::process::{Command, Output};
 
     use kpa::authn::Requester;
-    use kpa::proto::{Unlock, UnlockRequest};
+    use kpa::frontends::control::proto::{Unlock, UnlockRequest};
     use serde_json::{Value, json};
 
     use super::{InProcessDaemon, SshAgent, config, sign, start_ssh_agent, stdout, write_pubkey};

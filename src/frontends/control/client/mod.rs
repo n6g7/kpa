@@ -15,16 +15,18 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kpa::authn;
-use kpa::output::{print_escaped, report_error};
-use kpa::proto::{self, ErrorCode, Op, PromptOn, Request, UnlockRequest};
-use kpa::socket;
+use crate::authn;
+use crate::frontends::control::proto::{self, ErrorCode, Op, PromptOn, Request, UnlockRequest};
+use crate::output::{print_escaped, report_error};
+use crate::socket;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use super::tty;
+pub mod ssh_keys_report;
+pub mod ssh_requests_report;
+mod tty;
 
-pub(super) fn run_client(socket_path: &Path, op: Op) -> ExitCode {
+pub fn run_client(socket_path: &Path, op: Op) -> ExitCode {
     let request = Request::new(op);
 
     match send_request(socket_path, &request) {
@@ -49,7 +51,7 @@ fn report_client_error(err: ClientError) -> ExitCode {
 
 /// How a command's answer is shown, from `--json`.
 #[derive(Clone, Copy)]
-pub(super) enum Format {
+pub enum Format {
     /// The daemon's response line, as it came.
     Json,
     /// The command's own view, and a failure as a sentence.
@@ -61,7 +63,7 @@ pub(super) enum Format {
 /// answer into the text to print, which goes to the terminal escaped
 /// (`output::print_escaped`) whatever it holds. Either way the exit status
 /// follows the answer's `ok`.
-pub(super) fn run<T: DeserializeOwned>(
+pub fn run<T: DeserializeOwned>(
     socket_path: &Path,
     op: Op,
     format: Format,
@@ -187,8 +189,8 @@ fn print_and_exit(line: &str) -> ExitCode {
 ///
 /// `socket_path` is `--socket`, else the default; `None` when neither
 /// is available.
-pub(super) fn run_version(socket_path: Option<PathBuf>) -> ExitCode {
-    println!("client: {}", kpa::VERSION);
+pub fn run_version(socket_path: Option<PathBuf>) -> ExitCode {
+    println!("client: {}", crate::VERSION);
 
     let Some(socket_path) = socket_path else {
         println!(
@@ -226,7 +228,7 @@ pub(super) fn run_version(socket_path: Option<PathBuf>) -> ExitCode {
 /// rather than `Box<dyn Error>` so `?` stays usable while keeping the
 /// "why" in each variant.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum ClientError {
+enum ClientError {
     #[error("connecting to {0}: {1}")]
     Connect(PathBuf, std::io::Error),
     #[error("encoding request: {0}")]
@@ -268,7 +270,7 @@ fn check_peer_uid(
 /// Sends one request and returns the daemon's raw response line, newline
 /// included. Deliberately not decoded into a typed `Response` — see the
 /// comment in `run_client` on why that type has no generic `Deserialize`.
-pub(super) fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
+fn send_request(socket_path: &Path, request: &Request) -> Result<String, ClientError> {
     exchange(socket_path, request, None)
 }
 
@@ -276,7 +278,7 @@ pub(super) fn send_request(socket_path: &Path, request: &Request) -> Result<Stri
 /// the user something on it before it answers. An interrupt while it waits
 /// ends the asking cleanly rather than the process at once
 /// ([`tty::end_on_interrupt`]).
-pub(super) fn send_request_with_terminal(
+fn send_request_with_terminal(
     socket_path: &Path,
     request: &Request,
     terminal: &File,
@@ -317,7 +319,7 @@ fn exchange(
 /// even where the daemon could ask on screen. A process with no controlling
 /// terminal passes none, and the daemon answers `no_prompt` where it can't
 /// ask on screen either.
-pub(super) fn run_unlock(socket_path: &Path, db: String, tty: bool) -> ExitCode {
+pub fn run_unlock(socket_path: &Path, db: String, tty: bool) -> ExitCode {
     let request = Request {
         preferred_prompt: tty.then_some(PromptOn::Terminal),
         ..Request::new(Op::Unlock(UnlockRequest { db }))
@@ -348,7 +350,7 @@ mod tests {
     #[test]
     fn refuses_a_socket_belonging_to_another_uid() {
         let (_ours, theirs) = std::os::unix::net::UnixStream::pair().expect("socket pair");
-        let other = kpa::authn::process_uid().wrapping_add(1);
+        let other = crate::authn::process_uid().wrapping_add(1);
 
         let err = check_peer_uid(Path::new("/dev/null"), &theirs, other)
             .expect_err("a uid mismatch must be refused");
@@ -358,7 +360,7 @@ mod tests {
     #[test]
     fn accepts_a_socket_belonging_to_our_own_uid() {
         let (_ours, theirs) = std::os::unix::net::UnixStream::pair().expect("socket pair");
-        let our_uid = kpa::authn::process_uid();
+        let our_uid = crate::authn::process_uid();
 
         check_peer_uid(Path::new("/dev/null"), &theirs, our_uid)
             .expect("our own uid must be accepted");

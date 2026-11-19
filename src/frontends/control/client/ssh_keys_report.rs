@@ -9,8 +9,8 @@
 
 use std::fmt::Write as _;
 
-use kpa::output::{Table, escape_one_line};
-use kpa::proto::{SshKeysReport, WireSshKey};
+use crate::frontends::control::proto::{SshKeysReport, WireSshKey};
+use crate::output::{Table, escape_one_line};
 
 /// Longest escaped title, attachment name or database name in a comment.
 const MAX_TEXT_LEN: usize = 128;
@@ -19,7 +19,7 @@ const MAX_TEXT_LEN: usize = 128;
 const UNTITLED: &str = "(untitled)";
 
 /// `toml` shows only the blocks, for a file.
-pub(super) fn render(report: &SshKeysReport, toml: bool) -> String {
+pub fn render(report: &SshKeysReport, toml: bool) -> String {
     if toml {
         return blocks(report);
     }
@@ -107,8 +107,8 @@ fn one_line(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use kpa::config::Config;
-    use kpa::proto::WireSkippedKey;
+    use crate::config::Config;
+    use crate::frontends::control::proto::WireSkippedKey;
 
     use super::*;
 
@@ -225,7 +225,7 @@ mod tests {
     /// the setting's default.
     #[test]
     fn the_commented_settings_are_the_defaults() {
-        use kpa::config::SshKeySettings;
+        use crate::config::SshKeySettings;
 
         let block = block(&key("personal", Some("Deploy")));
         let settings: Vec<&str> = block

@@ -14,7 +14,6 @@ pub mod log;
 pub mod output;
 pub mod paths;
 mod prompt;
-pub mod proto;
 pub mod server;
 pub mod session_watch;
 pub mod socket;

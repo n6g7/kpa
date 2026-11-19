@@ -12,8 +12,8 @@ use super::{SlotView, SshHost, SshSlot};
 use crate::authn::Requester;
 use crate::authz;
 use crate::config::DatabaseConfig;
+use crate::frontends::control::proto::{Unlock, UnlockError, UnlockRequest};
 use crate::prompt::{CancelSource, Prompt, PromptOutcome, PromptQueue, Scripted};
-use crate::proto::{Unlock, UnlockError, UnlockRequest};
 use crate::session_watch::DisplaySession;
 
 /// The display session the fake host starts with.
