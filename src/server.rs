@@ -33,26 +33,27 @@ use zeroize::Zeroizing;
 
 use crate::authn::Requester;
 use crate::authz;
-use crate::clip::{self, Clipboard};
+use crate::cancel::CancelSource;
+use crate::clipboard::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
-use crate::io::ByteCounter;
-use crate::log;
-use crate::paths::Paths;
-use crate::prompt::{
-    self, CancelSource, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue,
-    SecretProgram, SecretTerminal, Terminal,
-};
-use crate::proto::{
+use crate::databases::vault::{self, Fingerprint, VaultError};
+use crate::frontends::control::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshApprove,
     SshApproveError, SshApproveRequest, SshKeys, SshKeysError, SshKeysReport, SshKeysRequest,
     SshPending, Status, Unlock, UnlockError, UnlockRequest, WireEntry, WirePending,
     WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
 };
+use crate::frontends::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
+use crate::io::ByteCounter;
+use crate::log;
+use crate::paths::Paths;
+use crate::prompt::{
+    self, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue, SecretProgram,
+    SecretTerminal, Terminal,
+};
 use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
 use crate::socket::{self, Received};
-use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
-use crate::vault::{self, Fingerprint, VaultError};
 
 /// Longest request line accepted, and the size of the buffer each one is
 /// read into. A request names a database or an entry, a few hundred bytes at
@@ -185,7 +186,7 @@ pub struct Server {
     /// `docs/threat-model.md` G-6 ("lock clears what kpa owns") says the
     /// offer must end too, not just outlive its own `clipboard_timeout`.
     /// `Clipboard` itself stays database-agnostic
-    /// (see `clip.rs`'s doc comment) — this is the one place that
+    /// (see `clipboard/mod.rs`'s doc comment) — this is the one place that
     /// association is tracked. `Arc` so `copy`'s own expiry thread (which
     /// outlives the request, same as `clip` above) can clear it too, once
     /// its natural timeout fires with nothing newer having replaced it.
@@ -204,17 +205,17 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: Config, paths: Paths, sleep_delay: SleepDelay) -> Server {
-        Server::with_clipboard(config, paths, sleep_delay, clip::WaylandBackend)
+        Server::with_clipboard(config, paths, sleep_delay, clipboard::WaylandBackend)
     }
 
     /// Like `new`, but with an injected clipboard backend — real tests use
     /// `new`; unit tests that need to control the clipboard without a
-    /// Wayland connection use this with a fake `clip::Backend`.
+    /// Wayland connection use this with a fake `clipboard::Backend`.
     pub fn with_clipboard(
         config: Config,
         paths: Paths,
         sleep_delay: SleepDelay,
-        backend: impl clip::Backend + 'static,
+        backend: impl clipboard::Backend + 'static,
     ) -> Server {
         let unlock_prompt = SecretProgram::new(config.prompt.clone());
         Server::with_backends(config, paths, sleep_delay, backend, unlock_prompt)
@@ -226,7 +227,7 @@ impl Server {
         config: Config,
         paths: Paths,
         sleep_delay: SleepDelay,
-        clipboard: impl clip::Backend + 'static,
+        clipboard: impl clipboard::Backend + 'static,
         unlock_prompt: impl prompt::Backend<Zeroizing<String>> + 'static,
     ) -> Server {
         let dbs = config
@@ -426,11 +427,11 @@ impl Server {
         slots(&self.dbs).values().any(|slot| slot.db.is_some())
     }
 
-    /// The shape both `status()` and `tray.rs`'s poll report — name, lock
+    /// The shape both `status()` and `frontends/tray.rs`'s poll report — name, lock
     /// state, entry count — built from whatever `dbs` currently holds,
     /// without itself running the freshness guard (`drop_stale`) on any
     /// configured database. `status()` runs that guard first and then
-    /// calls this to build its response from what's left; `tray.rs` calls
+    /// calls this to build its response from what's left; `frontends/tray.rs` calls
     /// this directly, skipping the guard.
     ///
     /// Running the freshness check on every tick, the way `status()`
@@ -845,7 +846,7 @@ impl SshKeys for Server {
             let Some(cfg) = self.config.databases.iter().find(|cfg| cfg.name == name) else {
                 return Err(SshKeysError::UnknownDb { db: db() });
             };
-            let scan = ssh_agent::keys::scan(database);
+            let scan = crate::ssh::keys::scan(database);
             slot.touch();
             report
                 .keys
@@ -853,7 +854,7 @@ impl SshKeys for Server {
                     db: db(),
                     key_type: key.public_key.algorithm().to_string(),
                     fingerprint: key.fingerprint.to_string(),
-                    name: ssh_agent::keys::key_name(
+                    name: crate::ssh::keys::key_name(
                         name,
                         key.fingerprint,
                         cfg.ssh_key_settings(key.fingerprint).name.as_deref(),
@@ -975,7 +976,7 @@ impl CopyEntry for Server {
 /// doesn't name an entry in this database; `Some(None)` means it does but
 /// there is nothing to copy for this field — absent, empty, or a bare
 /// `title` (never copyable). Kept in `server.rs` rather than `proto::copy`
-/// or `vault.rs`, same reasoning as the `field_key` this replaces: it is
+/// or `databases/vault.rs`, same reasoning as the `field_key` this replaces: it is
 /// the one place that bridges the wire vocabulary and the `keepass` field
 /// keys.
 fn resolve_field(
@@ -1149,7 +1150,7 @@ fn watch_idle(server: &Server) {
 /// Failures are logged too, not just successes: a failed `unlock` is the
 /// event most worth having a record of.
 ///
-/// `pub(crate)` rather than private: `tray.rs` calls `Lock`/`Unlock`
+/// `pub(crate)` rather than private: `frontends/tray.rs` calls `Lock`/`Unlock`
 /// directly (not through `dispatch`) for the same reason this function
 /// exists at all — a tray-triggered lock or unlock is exactly as worth
 /// logging as a socket-triggered one, and this is the one place that
@@ -1602,7 +1603,7 @@ mod tests {
             "idle_timeout = \"{timeout}\"\n\
              [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n"
         );
-        let (backend, _offered) = clip::RecordingBackend::new();
+        let (backend, _offered) = clipboard::RecordingBackend::new();
         let server = Server::with_clipboard(
             Config::parse(&config).expect("valid config"),
             Paths::default(),
@@ -1652,7 +1653,7 @@ mod tests {
     /// so none of it outlives the database.
     #[test]
     fn a_lock_resets_the_ssh_agent_state() {
-        use crate::ssh_agent::testing::{key_database, test_key};
+        use crate::ssh::testing::{key_database, test_key};
 
         let server = Server::new(
             Config::parse(
@@ -1724,7 +1725,7 @@ mod tests {
     /// clipboard backend — no real Wayland connection anywhere in this
     /// test module. The returned handle is what the backend recorded.
     fn copy_server() -> (Server, Arc<Mutex<Vec<String>>>) {
-        let (backend, offered) = clip::RecordingBackend::new();
+        let (backend, offered) = clipboard::RecordingBackend::new();
         let server = Server::with_clipboard(
             Config::parse("[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n")
                 .expect("valid config"),
@@ -1891,18 +1892,18 @@ mod tests {
         assert_eq!(*offered.lock().unwrap(), vec!["entrypass1".to_string()]);
     }
 
-    /// What `clip::RecordingBackend::new_tracking` hands back: every offer
+    /// What `clipboard::RecordingBackend::new_tracking` hands back: every offer
     /// made so far, each independently queryable for liveness. Named so
     /// the tracking test fixtures below don't each spell out the nested
     /// generic.
-    type TrackedOffers = Arc<Mutex<Vec<Arc<clip::Offer>>>>;
+    type TrackedOffers = Arc<Mutex<Vec<Arc<clipboard::Offer>>>>;
 
     /// A server with two configured, locked databases and a recording
     /// clipboard backend that tracks per-offer liveness — for the
     /// lock-clears-clipboard tests below, which need to tell whether
     /// `lock` actually ended the offer `copy` started.
     fn copy_server_two_dbs_tracking() -> (Server, TrackedOffers) {
-        let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
+        let (backend, _offered, offers) = clipboard::RecordingBackend::new_tracking();
         let server = Server::with_clipboard(
             Config::parse(
                 "[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
@@ -2047,7 +2048,7 @@ mod tests {
     /// database's clipboard offer too, the same as an explicit `lock`.
     #[test]
     fn idle_lock_ends_the_clipboard_offer_for_that_db() {
-        let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
+        let (backend, _offered, offers) = clipboard::RecordingBackend::new_tracking();
         let server = Server::with_clipboard(
             Config::parse(
                 "idle_timeout = \"1s\"\n\
@@ -2283,7 +2284,7 @@ mod tests {
     /// dismissed — for the freshness-guard tests below, which drive
     /// `unlock` far enough to re-prompt without needing it to succeed.
     fn stale_drop_test_server() -> (Server, TrackedOffers) {
-        let (backend, _offered, offers) = clip::RecordingBackend::new_tracking();
+        let (backend, _offered, offers) = clipboard::RecordingBackend::new_tracking();
         let prompts = Scripted::new();
         prompts.push(Step::new(PromptOutcome::Cancelled));
         let server = Server::with_backends(
@@ -2318,7 +2319,7 @@ mod tests {
     /// `personal` holds a live clipboard offer and has just gone stale on
     /// disk; `work` is untouched. Returns the offer so a test can check
     /// whether the guard it drives ended it.
-    fn stale_copy_setup() -> (Server, TrackedOffers, Arc<clip::Offer>) {
+    fn stale_copy_setup() -> (Server, TrackedOffers, Arc<clipboard::Offer>) {
         let (server, offers) = stale_drop_test_server();
         let uuid = unlock_with_entry(&server, "personal");
         CopyEntry::copy(
@@ -2573,7 +2574,7 @@ mod tests {
             .expect("valid config"),
             Paths::default(),
             SleepDelay::new().0,
-            clip::WaylandBackend,
+            clipboard::WaylandBackend,
             prompts.clone(),
         );
         allow_copy(&server);

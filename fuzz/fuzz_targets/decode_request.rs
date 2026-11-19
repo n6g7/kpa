@@ -16,6 +16,6 @@ use libfuzzer_sys::fuzz_target;
 // chooses to generate.
 fuzz_target!(|data: &[u8]| {
     if let Ok(line) = std::str::from_utf8(data) {
-        let _ = kpa::proto::decode_request(line);
+        let _ = kpa::frontends::control::proto::decode_request(line);
     }
 });

@@ -15,12 +15,11 @@
 //! - [`PromptOutcome`]: how a prompt ended, generic over its answer;
 //!   [`ConfirmAnswer`] is a confirm prompt's, and [`Declined`] says how one
 //!   that didn't allow ended.
-//! - [`CancelSource`] and [`CancelToken`]: how a lock ends the prompts it
-//!   no longer wants answered.
+//! - [`CancelSource`](crate::cancel::CancelSource) and [`CancelToken`]: how a
+//!   lock ends the prompts it no longer wants answered.
 //! - `message`: display sanitization for the untrusted text in a prompt's
 //!   message, applied by [`Prompt::ask`], so callers pass plain text.
 
-mod cancel;
 #[cfg(test)]
 mod fake;
 mod message;
@@ -39,7 +38,8 @@ use std::time::{Duration, Instant};
 use rustix::event::Timespec;
 use serde::{Deserialize, Serialize};
 
-pub use cancel::{CancelSource, CancelToken};
+use crate::cancel::CancelToken;
+
 #[cfg(test)]
 pub(crate) use fake::{Scripted, Step};
 pub use outcome::{ConfirmAnswer, Declined, PromptOutcome};

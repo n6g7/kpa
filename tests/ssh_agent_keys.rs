@@ -1,12 +1,12 @@
 //! Integration tests against `tests/fixture.sh`'s `fixture-ssh.kdbx`:
-//! `ssh_agent::keys::scan` against a real database, and `parse_private_key`
+//! `ssh::keys::scan` against a real database, and `parse_private_key`
 //! against each of its key types.
 
 mod common;
 
 use keepass::Database;
-use kpa::ssh_agent::keys::{self, SkipReason};
-use kpa::vault;
+use kpa::databases::vault;
+use kpa::ssh::keys::{self, SkipReason};
 use zeroize::Zeroizing;
 
 fn fixture() -> Database {

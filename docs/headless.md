@@ -311,13 +311,13 @@ stays refused while it is locked (§ 5).
 | File          | Role                                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------------------- |
 | `authn.rs`   | Peer pidfd or pid → uid, cgroup path and command name, kept in a `Requester`. Plain facts, no rules |
-| `authz.rs`   | Who may do what, as pure functions of a `Requester` and the display session as it is when asked. The checks both sockets share (`may_connect`, `on_desktop`, `may_prompt_on_screen`; the cgroup-path classifier is table-tested), and kpa's own socket's policy, one function per request type (`authorize_copy`: the session whose clipboard may be used, or `no_display`; `choose_unlock_prompt`: a prompt may appear, or `no_display`). The SSH agent's equivalent is `ssh_agent::authz`; `session_watch.rs` holds `DisplaySession` |
+| `authz.rs`   | Who may do what, as pure functions of a `Requester` and the display session as it is when asked. The checks both sockets share (`may_connect`, `on_desktop`, `may_prompt_on_screen`; the cgroup-path classifier is table-tested), and kpa's own socket's policy, one function per request type (`authorize_copy`: the session whose clipboard may be used, or `no_display`; `choose_unlock_prompt`: a prompt may appear, or `no_display`). The SSH agent's equivalent is `frontends::ssh_agent::authz`; `session_watch.rs` holds `DisplaySession` |
 | `session_watch.rs` | The whole logind side: reports the display session's state (no session, locked, unlocked), which `copy` and classification read, a lock request, suspend and a lost watch as `SessionEvent`s, and holds the sleep inhibitor for the `SleepDelay`. Knows nothing about databases |
 | `socket.rs`   | Sends and receives a request line with one descriptor attached (`SCM_RIGHTS`, close-on-exec on receipt) |
-| `proto/`      | `Request` gains `preferred_prompt`, and `no_prompt` joins the error codes. `UnlockRequest` is just `db` |
+| `frontends/control/proto/` | `Request` gains `preferred_prompt`, and `no_prompt` joins the error codes. `UnlockRequest` is just `db` |
 | `prompt/terminal.rs` | The terminal backend: echo off, one line, modes put back, ended by the deadline, a lock, the requester leaving or a hang-up |
 | `server.rs`   | Keeps the passed terminal in the `Requester`; decides where an unlock asks; prompt timeout; locks end prompts; `copy` gated on origin and the display session's state |
-| `main.rs`, `tty.rs` | `kpa unlock` passes `/dev/tty`, waits for the daemon after an interrupt, and has `--tty` |
+| `main.rs`, `frontends/control/client/tty.rs` | `kpa unlock` passes `/dev/tty`, waits for the daemon after an interrupt, and has `--tty` |
 
 **Tests**
 

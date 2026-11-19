@@ -668,7 +668,7 @@ mod raw {
         /// `EXTENSION_FAILURE`, `5` = `FAILURE`).
         pub fn send(&mut self, message: &[u8]) -> u8 {
             self.0
-                .write_all(&kpa::ssh_agent::wire::encode_frame(message))
+                .write_all(&kpa::frontends::ssh_agent::wire::encode_frame(message))
                 .expect("write request");
             let mut len_buf = [0u8; 4];
             self.0
@@ -810,7 +810,7 @@ mod pending {
     use std::process::{Command, Output};
 
     use kpa::authn::Requester;
-    use kpa::proto::{Unlock, UnlockRequest};
+    use kpa::frontends::control::proto::{Unlock, UnlockRequest};
     use serde_json::{Value, json};
 
     use super::{InProcessDaemon, SshAgent, config, sign, start_ssh_agent, stdout, write_pubkey};

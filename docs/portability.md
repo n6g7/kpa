@@ -54,7 +54,7 @@ covers:
   prompt run as an external program, or a native one where the OS has it
   (Touch ID answers allow or deny, with no string and no child process);
 - a test double, such as `clip::Backend` and
-  `ssh_agent::SshHost`.
+  `frontends::ssh_agent::SshHost`.
 
 These traits often sit on an OS boundary already. Keep their method
 signatures OS-neutral, like any other interface.
@@ -75,24 +75,24 @@ interface's shape against, not as a plan.
 | Request origin | `authn.rs`, `authz.rs` | the peer's cgroup and command name (`comm`), from `/proc` | no cgroups or `/proc`; `proc_name` for the command name | `Requester`: the peer's uid, its cgroup text and its command name, read once at connect. `authz::on_desktop(&Requester, &DisplaySession)` is the one place the cgroup is judged, where every failure is outside the desktop. The command name is `None` on failure and only ever shown to the user. |
 | File locations | `paths.rs` (sockets, caches, `known_hosts`), `config.rs` (the config file) | `$XDG_RUNTIME_DIR`, `$XDG_CONFIG_HOME`, `$XDG_CACHE_HOME`, `$HOME` | `~/Library/…`, the per-user `$TMPDIR` | paths resolved in one helper per location, handed to callers as `Path`s. Socket paths stay under 104 bytes, macOS's `sun_path` limit. |
 | Lock triggers | `session_watch.rs` | logind over D-Bus: `Lock`, `LockedHint`, `PrepareForSleep`, a sleep inhibitor | screen-lock and sleep notifications | `session_watch::SessionEvent` and `SleepDelay`: the module reports events and holds the delay, and knows nothing about databases. |
-| Clipboard | `clip.rs`, `wayland/` | kpa's own Wayland client: data-control, serving each paste | `NSPasteboard` | "serve this secret, end it after the timeout, never clear anyone else's". |
-| Tray | `tray.rs` | StatusNotifierItem over D-Bus (`ksni`) | `NSStatusItem` | database states in, menu actions out. |
-| Prompts | `prompt/` | an external program per kind of prompt (`prompt/program.rs`), or the terminal a requester passed (`prompt/terminal.rs`: termios and `poll`, POSIX calls macOS has too), behind `prompt::Backend<T>`, ended through `prompt/cancel.rs`'s socket pair | another `Backend<T>` for a kind: the same program, or a native dialog, or Touch ID for an approval. The terminal backend needs nothing else | `Prompt<T>`, one per kind, sharing one `PromptQueue` that only a backend taking the screen (`Backend::is_queued`) waits in; `PromptOutcome<T>`; no assumption of a child process or a string answer; a `CancelToken` ends one. |
+| Clipboard | `clipboard/mod.rs`, `clipboard/wayland/` | kpa's own Wayland client: data-control, serving each paste | `NSPasteboard` | "serve this secret, end it after the timeout, never clear anyone else's". |
+| Tray | `frontends/tray.rs` | StatusNotifierItem over D-Bus (`ksni`) | `NSStatusItem` | database states in, menu actions out. |
+| Prompts | `prompt/` | an external program per kind of prompt (`prompt/program.rs`), or the terminal a requester passed (`prompt/terminal.rs`: termios and `poll`, POSIX calls macOS has too), behind `prompt::Backend<T>`, ended through `cancel.rs`'s socket pair | another `Backend<T>` for a kind: the same program, or a native dialog, or Touch ID for an approval. The terminal backend needs nothing else | `Prompt<T>`, one per kind, sharing one `PromptQueue` that only a backend taking the screen (`Backend::is_queued`) waits in; `PromptOutcome<T>`; no assumption of a child process or a string answer; a `CancelToken` ends one. |
 | Terminal passed with a request | `socket.rs` (`send_with_fd`, `recv_with_fd`), `authn.rs` (`Terminal`) | `SCM_RIGHTS`, received with `MSG_CMSG_CLOEXEC` | `SCM_RIGHTS`; no `MSG_CMSG_CLOEXEC`, so `FD_CLOEXEC` is set on the descriptor after it arrives | a request's bytes with at most one descriptor, close-on-exec once received; `Requester::terminal`, an `isatty` file descriptor and the connection it came on. |
 | Process hardening | `main.rs` | `prctl(PR_SET_DUMPABLE)` | `setrlimit(RLIMIT_CORE)`, `ptrace(PT_DENY_ATTACH)` | one startup call. |
 | Service manager | `nix/hm-module.nix` | a systemd user unit | a launchd agent | `kpa serve` as a plain foreground process: no socket activation or `sd_notify`. |
 
 D-Bus itself is a Linux seam: macOS has no session or system bus by
 default. Anything reached over it (logind, the tray, the compositor lookup
-in `wayland/compositor.rs`) stays inside its own module.
+in `clipboard/wayland/compositor.rs`) stays inside its own module.
 
 ## Known Linux-shaped interfaces
 
 These cross a module boundary with Linux details today. Fix each one when
 work next changes that code:
 
-- `clip::Backend::start` and `Clipboard::offer` take a logind session id
-  and return `wayland::Offer`, which `clip.rs` re-exports.
+- `clipboard::Backend::start` and `Clipboard::offer` take a logind session id
+  and return `wayland::Offer`, which `clipboard/mod.rs` re-exports.
 - `session_watch::DisplaySession::{Locked, Unlocked}` carry the display session's logind id,
   which the clipboard uses to find the compositor. Callers other than the
   clipboard must treat it as opaque.

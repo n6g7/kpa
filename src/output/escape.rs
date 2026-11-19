@@ -70,7 +70,7 @@ pub fn escape_one_line(text: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::escape_for_terminal;
-    use crate::proto::{Response, WireEntry};
+    use crate::frontends::control::proto::{Response, WireEntry};
 
     /// The characters `escape_for_terminal` must never let through, written
     /// out as ranges independently of the function's own table.

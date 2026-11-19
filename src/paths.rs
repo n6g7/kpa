@@ -12,7 +12,7 @@
 //! These are the per-user base directories, not kpa's own files: each
 //! caller joins its own name under `kpa/` (the main socket in `main.rs`,
 //! the SSH agent's socket in `config::SshAgentConfig::socket_path`, its key
-//! cache in `ssh_agent::keys::cache_dir`).
+//! cache in `ssh::keys::cache_dir`).
 //!
 //! Depends on nothing else in kpa.
 

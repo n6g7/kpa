@@ -9,7 +9,8 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::{Backend, CancelToken, ConfirmAnswer, PromptOutcome};
+use super::{Backend, ConfirmAnswer, PromptOutcome};
+use crate::cancel::CancelToken;
 
 type Hook = Box<dyn FnOnce() + Send>;
 

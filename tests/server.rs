@@ -291,13 +291,13 @@ fn version_mismatch_is_rejected() {
         assert_eq!(response["error"], "version_mismatch");
         // The response always carries the daemon's own version, not the
         // client's claimed one — that's the whole point (docs/design.md).
-        assert_eq!(response["v"], kpa::proto::VERSION);
+        assert_eq!(response["v"], kpa::frontends::control::proto::VERSION);
         // `docs/plan.md` step 2 asks for "a clear error naming both versions".
         let detail = response["detail"]
             .as_str()
             .expect("version mismatch should explain itself");
         assert!(
-            detail.contains(&format!("v{}", kpa::proto::VERSION)),
+            detail.contains(&format!("v{}", kpa::frontends::control::proto::VERSION)),
             "should name the daemon's version: {detail}"
         );
         assert!(

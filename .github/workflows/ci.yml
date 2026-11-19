@@ -48,7 +48,7 @@ jobs:
       - name: cargo fmt --check
         run: nix develop -c cargo fmt -- --check
 
-      # assets/tray/*.png are committed (src/tray.rs embeds them), but
+      # assets/tray/*.png are committed (src/frontends/tray.rs embeds them), but
       # generated from assets/tray/*.svg by assets/tray/render.sh. Re-run
       # it and fail if that changes anything, so a stale PNG (edited by
       # hand, or left behind after an SVG edit) doesn't ship unnoticed.

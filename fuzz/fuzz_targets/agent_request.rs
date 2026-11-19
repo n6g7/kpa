@@ -1,6 +1,6 @@
 #![no_main]
 
-use kpa::ssh_agent::{bind, classify, wire};
+use kpa::frontends::ssh_agent::{bind, classify, wire};
 use libfuzzer_sys::fuzz_target;
 use ssh_key::PublicKey;
 use ssh_key::public::{Ed25519PublicKey, KeyData};

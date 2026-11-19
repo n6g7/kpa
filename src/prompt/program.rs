@@ -14,7 +14,8 @@ use std::time::Instant;
 
 use zeroize::Zeroizing;
 
-use super::{Backend, CancelToken, ConfirmAnswer, MAX_ANSWER_LEN, PromptOutcome, poll_timeout};
+use super::{Backend, ConfirmAnswer, MAX_ANSWER_LEN, PromptOutcome, poll_timeout};
+use crate::cancel::CancelToken;
 
 /// The environment variable a prompt program finds its message in
 /// (`docs/design.md` § Configuration, `docs/ssh-agent.md` § 6.6). A prompt
@@ -257,8 +258,9 @@ mod tests {
 
     use std::sync::Arc;
 
-    use super::super::{CancelSource, Prompt, PromptQueue};
+    use super::super::{Prompt, PromptQueue};
     use super::*;
+    use crate::cancel::CancelSource;
 
     /// Held by every test here: each spawns a prompt, and spawning a child
     /// briefly duplicates every open file descriptor into it until it

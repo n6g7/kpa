@@ -4,29 +4,24 @@
 //! for a command with a text view, that view of it; `unlock` passes its
 //! terminal along for the daemon to ask for the master password on.
 
-mod client;
-mod ssh_keys_report;
-mod ssh_requests_report;
-mod tty;
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use client::Format;
 use kpa::config::Config;
-use kpa::log::{self, Level};
-use kpa::output::report_error;
-use kpa::paths::Paths;
-use kpa::proto::{
+use kpa::frontends::control::client::{self, Format, ssh_keys_report, ssh_requests_report};
+use kpa::frontends::control::proto::{
     CopyRequest, Field, ListRequest, LockRequest, Op, SshApproveRequest, SshKeysReport,
     SshKeysRequest,
 };
+use kpa::frontends::tray;
+use kpa::log::{self, Level};
+use kpa::output::report_error;
+use kpa::paths::Paths;
 use kpa::server::{self, Server};
 use kpa::session_watch::{self, Bus};
 use kpa::socket;
-use kpa::tray;
 use uuid::Uuid;
 
 #[derive(Parser)]

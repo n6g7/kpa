@@ -46,7 +46,7 @@ keepassxc-cli db-create -q --set-key-file "$KEYFILE" "$KEYFILE_DB" </dev/null
 
 # A genuine KDBX4 database (pykeepass writes KDBX4 unconditionally, unlike
 # keepassxc-cli here), with the same shape as the password-only fixture
-# above, so vault.rs is exercised against both formats `keepass` claims to
+# above, so databases/vault.rs is exercised against both formats `keepass` claims to
 # support rather than just the one keepassxc-cli happens to default to.
 python3 - "$KDBX4_DB" <<'PYEOF'
 import sys
@@ -122,7 +122,7 @@ for e in (entry, no_otp, bad_otp):
 kp.save()
 PYEOF
 
-# SSH agent fixtures (`src/ssh_agent/keys.rs`): an Ed25519 key, an ECDSA
+# SSH agent fixtures (`src/ssh/keys.rs`): an Ed25519 key, an ECDSA
 # key, an RSA key, and two keys that must be skipped, a passphrase-protected
 # one and a PEM-format one — one entry each, plus one more Ed25519 key
 # reachable only through history and one only through the recycle bin, to
@@ -179,7 +179,7 @@ PYEOF
 done
 ssh-keygen -q -t ed25519 -N 'correct-horse-battery-staple' -C '' -f "$SSH_KEYS_DIR/encrypted"
 ssh-keygen -q -t rsa -b 3072 -N '' -C '' -f "$SSH_KEYS_DIR/rsa"
-# `-m PEM`: the old PKCS#1 format, not the OpenSSH one `ssh_agent::keys` reads.
+# `-m PEM`: the old PKCS#1 format, not the OpenSSH one `ssh::keys` reads.
 ssh-keygen -q -t rsa -b 2048 -N '' -C '' -m PEM -f "$SSH_KEYS_DIR/pem"
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$SSH_KEYS_DIR/ed25519-history"
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$SSH_KEYS_DIR/ed25519-recycled"
@@ -216,7 +216,7 @@ entry.add_attachment(kp.add_binary(read("pem")), "id_rsa_pem")
 
 # Held only in history: the snapshot below captures the attachment, then
 # it's removed from the live entry, leaving only a historical revision
-# that holds it — `ssh_agent::keys::scan` must not look there.
+# that holds it — `ssh::keys::scan` must not look there.
 entry = kp.add_entry(group, "Historical", "", "")
 entry.add_attachment(kp.add_binary(read("ed25519-history")), "id_ed25519_history")
 entry.save_history()

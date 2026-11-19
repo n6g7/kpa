@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::message::sanitize_message;
-use super::{Backend, CancelToken, PromptOutcome, PromptQueue};
+use super::{Backend, PromptOutcome, PromptQueue};
+use crate::cancel::CancelToken;
 
 /// One kind of question whose answer is a `T`: `unlock`'s password, say.
 /// Each kind has its own [`Backend`] and timeout, and every kind that takes
@@ -58,8 +59,9 @@ impl<T> Prompt<T> {
 mod tests {
     use zeroize::Zeroizing;
 
-    use super::super::{CancelSource, Scripted, Step};
+    use super::super::{Scripted, Step};
     use super::*;
+    use crate::cancel::CancelSource;
 
     fn prompt() -> (Prompt<Zeroizing<String>>, Scripted<Zeroizing<String>>) {
         let prompts = Scripted::new();
