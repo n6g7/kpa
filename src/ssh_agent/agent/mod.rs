@@ -7,12 +7,13 @@
 //!   each slot and locks with it.
 //! - `identities`: which keys a connection sees, and which key a request
 //!   names.
-//! - `sign`: the sign flow, with `message` for what the approval prompt
-//!   says and `signer` for the signature itself.
+//! - `sign`: the sign flow, with `request` for one `SIGN_REQUEST`, `prompts` for
+//!   the unlock and confirm prompts, `message` for what they say and
+//!   `signer` for the signature itself.
 //! - [`Agent`]: all of it behind [`SshSign`], the interface
 //!   [`serve`](super::serve) speaks.
 //!
-//! It reaches the daemon only through [`SshHost`] and the approval prompt
+//! It reaches the daemon only through [`SshHost`] and the confirm prompt
 //! the daemon hands it; nothing here names `server`.
 
 #[cfg(test)]
@@ -20,12 +21,16 @@ mod fake;
 mod host;
 mod identities;
 mod message;
+mod prompts;
+mod request;
 mod sign;
 mod signer;
 mod state;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub use host::{SlotView, SshHost};
 pub use state::SshSlot;
@@ -36,29 +41,46 @@ use super::serve::SshSign;
 use super::wire::{AgentResponse, Identity, SignRequest};
 use crate::authn::Requester;
 use crate::paths::Paths;
-use crate::prompt::{Approval, Prompt};
+use crate::prompt::{ConfirmAnswer, Prompt};
 
 /// The SSH agent for one host: what [`serve`](super::serve::serve) runs.
 pub struct Agent<H> {
     host: Arc<H>,
-    /// The approval prompt. It waits its turn in the daemon's prompt
-    /// queue, so only one prompt is on screen at a time, unlock's
-    /// included.
-    approval: Prompt<Approval>,
+    /// The confirm prompt. It waits its turn in the daemon's prompt
+    /// queue, so only one prompt is on screen at a time, the unlock
+    /// prompt (`Unlock::unlock`) included.
+    confirm_prompt: Prompt<ConfirmAnswer>,
     /// Where the public-key cache lives, `None` without a cache directory.
     cache_dir: Option<PathBuf>,
-    /// OpenSSH's known-hosts file, for naming an approval prompt's
-    /// destination.
+    /// OpenSSH's known-hosts file, for naming a prompt's destination.
     known_hosts: Option<PathBuf>,
+    /// How long a cancelled or timed-out prompt holds this database's
+    /// prompts back (`docs/ssh-agent.md` § 6.6).
+    backoff: Duration,
+    /// One per database, held by the one signature that is asking about it
+    /// (`prompts`). The others wait on it, then look again.
+    turns: HashMap<String, Mutex<()>>,
 }
 
 impl<H: SshHost> Agent<H> {
-    pub fn new(host: Arc<H>, approval: Prompt<Approval>, paths: &Paths) -> Agent<H> {
+    pub fn new(
+        host: Arc<H>,
+        confirm_prompt: Prompt<ConfirmAnswer>,
+        backoff: Duration,
+        paths: &Paths,
+    ) -> Agent<H> {
+        let turns = host
+            .databases()
+            .iter()
+            .map(|cfg| (cfg.name.clone(), Mutex::new(())))
+            .collect();
         Agent {
             host,
-            approval,
+            confirm_prompt,
             cache_dir: keys::cache_dir(paths),
             known_hosts: paths.known_hosts.clone(),
+            backoff,
+            turns,
         }
     }
 }
@@ -101,12 +123,12 @@ mod tests {
         let cache = keys::cache_dir(&paths).expect("cache dir");
         keys::write_cache(&cache, "personal", &[key.public_key().clone()]).expect("write cache");
         let host = Arc::new(FakeHost::locked(vec![database("personal", vec![])]));
-        let approval = Prompt::new(
+        let confirm_prompt = Prompt::new(
             Arc::new(PromptQueue::new()),
             Scripted::new(),
             Duration::from_secs(60),
         );
-        let agent = Agent::new(host, approval, &paths);
+        let agent = Agent::new(host, confirm_prompt, Duration::from_secs(120), &paths);
 
         assert_eq!(
             agent

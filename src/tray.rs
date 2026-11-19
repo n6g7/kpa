@@ -166,6 +166,7 @@ impl TrayItem {
                     password: None,
                 },
                 &Requester::of_this_process(),
+                None,
             );
             server::log_response(&Response::Unlock(result.clone()));
             let Some(handle) = handle else { return };

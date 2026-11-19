@@ -1,5 +1,6 @@
-//! What the approval prompt says (`docs/ssh-agent.md` § 6.7): the key, what
-//! it is for and where the signature goes.
+//! What the unlock and confirm prompts say (`docs/ssh-agent.md` § 6.6,
+//! § 6.7): the key, what it is for and where the signature goes, as one
+//! question.
 
 use std::path::Path;
 
@@ -7,55 +8,107 @@ use ssh_key::HashAlg;
 use ssh_key::known_hosts::{HostPatterns, KnownHosts};
 use ssh_key::public::KeyData;
 
+use crate::output::escape_one_line;
 use crate::ssh_agent::classify::Purpose;
 use crate::ssh_agent::keys::ServedKey;
 
-/// The longest login user or `SSHSIG` namespace an approval prompt's
-/// message carries. Both come from the request, so a long one is cut
-/// rather than allowed to crowd the rest of the message out.
-const MAX_REQUESTED_LEN: usize = 64;
+/// The most bytes (escaped) each piece of a message may take. The message
+/// is one line the prompt caps at 256 bytes, and the destination comes last,
+/// so every variable piece is cut well short of that: the worst message,
+/// an unlock prompt for an `SSHSIG` on a host `known_hosts` doesn't name,
+/// is 237 bytes (`the_worst_message_fits_the_prompt_cap`), and the
+/// destination is always whole.
+const MAX_DATABASE_LEN: usize = 24;
+const MAX_KEY_NAME_LEN: usize = 64;
+/// The login user or `SSHSIG` namespace, from the request.
+const MAX_REQUESTED_LEN: usize = 32;
+/// A host name from `known_hosts`.
+const MAX_HOST_NAME_LEN: usize = 56;
 
-/// The approval prompt's message, plain text (`docs/ssh-agent.md` § 6.7).
-/// The destination comes first, so the prompt's length cap can never hide
-/// where the signature goes: for a connection bound to one, its host-key
-/// fingerprint, with the host name `known_hosts` gives it if it has one.
-/// Then the key's name and purpose, with the remote user for a login.
-pub(super) fn message(
+/// The confirm prompt's message, a question the user answers yes or no to:
+/// "Approve use of key "github" to log in to git@github.com?". The key is
+/// shown by its name, quoted. What follows says what it is for and, for a
+/// connection bound to a destination, where: the host name `known_hosts`
+/// gives its host key if it has one, else the host key's fingerprint. Every
+/// piece that comes from outside kpa's own text is escaped and cut to its
+/// own budget, so none can hide the destination.
+pub(super) fn approval(
     served: &ServedKey,
     purpose: &Purpose,
     destination: Option<&KeyData>,
     known_hosts_name: Option<&str>,
 ) -> String {
-    let what = match purpose {
-        Purpose::Login(login) => format!(
-            "{} for {}",
-            served.name,
-            capped(&login.user, MAX_REQUESTED_LEN)
-        ),
-        Purpose::SshSig { namespace } => format!(
-            "{} to sign ({})",
-            served.name,
-            capped(namespace, MAX_REQUESTED_LEN)
-        ),
-        Purpose::Other => served.name.clone(),
-    };
-    let Some(dest) = destination else {
-        return format!("Approve {what}");
-    };
-    let fingerprint = dest.fingerprint(HashAlg::Sha256);
-    match known_hosts_name {
-        Some(name) => format!("On {name} ({fingerprint}): approve {what}"),
-        None => format!("On {fingerprint}: approve {what}"),
-    }
+    let lead = format!("Approve use of {}", key(served));
+    question(&lead, purpose, destination, known_hosts_name)
 }
 
-/// `text` cut to at most `max_len` bytes, on a character boundary.
-fn capped(text: &str, max_len: usize) -> &str {
-    let mut end = text.len().min(max_len);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
+/// The unlock prompt's message, a question about unlocking that says what
+/// for: "Unlock database personal to use key "github" to log in as git?". It
+/// doesn't ask to approve the key; the confirm prompt does.
+pub(super) fn unlock(
+    served: &ServedKey,
+    purpose: &Purpose,
+    destination: Option<&KeyData>,
+    known_hosts_name: Option<&str>,
+) -> String {
+    let lead = format!(
+        "Unlock database {} to use {}",
+        escape_one_line(&served.database, MAX_DATABASE_LEN),
+        key(served)
+    );
+    question(&lead, purpose, destination, known_hosts_name)
+}
+
+/// `key "github"`, the key's name quoted.
+fn key(served: &ServedKey) -> String {
+    format!("key \"{}\"", quoted(&served.name))
+}
+
+/// `lead`, then what the key is for and where, as a question.
+fn question(
+    lead: &str,
+    purpose: &Purpose,
+    destination: Option<&KeyData>,
+    known_hosts_name: Option<&str>,
+) -> String {
+    let name = known_hosts_name.map(|name| escape_one_line(name, MAX_HOST_NAME_LEN));
+    let host = |dest: &KeyData| match &name {
+        Some(name) => name.clone(),
+        None => format!("host key {}", dest.fingerprint(HashAlg::Sha256)),
+    };
+    let what = match (purpose, destination) {
+        (Purpose::Login(login), Some(dest)) => {
+            let user = escape_one_line(&login.user, MAX_REQUESTED_LEN);
+            match &name {
+                Some(name) => format!(" to log in to {user}@{name}"),
+                None => format!(" to log in as {user} to {}", host(dest)),
+            }
+        }
+        (Purpose::Login(login), None) => {
+            format!(
+                " to log in as {}",
+                escape_one_line(&login.user, MAX_REQUESTED_LEN)
+            )
+        }
+        (Purpose::SshSig { namespace }, destination) => format!(
+            " to sign for namespace {}{}",
+            escape_one_line(namespace, MAX_REQUESTED_LEN),
+            on(destination.map(host))
+        ),
+        (Purpose::Other, destination) => on(destination.map(host)),
+    };
+    format!("{lead}{what}?")
+}
+
+/// " on <host>" for a destination, nothing without one.
+fn on(host: Option<String>) -> String {
+    host.map(|host| format!(" on {host}")).unwrap_or_default()
+}
+
+/// A key's name for the message: escaped, cut, and with its quotes
+/// escaped, so it can't end its own quotation and continue the sentence.
+fn quoted(name: &str) -> String {
+    escape_one_line(&name.replace('"', "\\\""), MAX_KEY_NAME_LEN)
 }
 
 /// The first plain host name a `known_hosts` entry for `dest` gives. A
@@ -107,59 +160,137 @@ mod tests {
         })
     }
 
+    fn sshsig(namespace: &str) -> Purpose {
+        Purpose::SshSig {
+            namespace: namespace.to_string(),
+        }
+    }
+
+    fn dest() -> KeyData {
+        test_key(2).public_key().key_data().clone()
+    }
+
+    fn fingerprint() -> String {
+        dest().fingerprint(HashAlg::Sha256).to_string()
+    }
+
+    fn approved(purpose: &Purpose, dest: Option<&KeyData>, name: Option<&str>) -> String {
+        approval(&served("github"), purpose, dest, name)
+    }
+
+    fn unlocked(purpose: &Purpose, dest: Option<&KeyData>, name: Option<&str>) -> String {
+        unlock(&served("github"), purpose, dest, name)
+    }
+
+    /// Every purpose and destination, as an approval question.
     #[test]
-    fn the_message_names_the_key_purpose_and_destination() {
-        let dest = test_key(2).public_key().key_data().clone();
-        let fingerprint = dest.fingerprint(HashAlg::Sha256);
+    fn an_approval_asks_about_the_key_its_purpose_and_destination() {
+        let (dest, fingerprint) = (dest(), fingerprint());
 
         assert_eq!(
-            message(&served("github"), &login("git"), None, None),
-            "Approve github for git"
+            approved(&login("git"), None, None),
+            "Approve use of key \"github\" to log in as git?"
         );
         assert_eq!(
-            message(
-                &served("github"),
-                &Purpose::SshSig {
-                    namespace: "git".to_string()
-                },
-                None,
-                None
-            ),
-            "Approve github to sign (git)"
+            approved(&login("git"), Some(&dest), Some("github.com")),
+            "Approve use of key \"github\" to log in to git@github.com?"
         );
         assert_eq!(
-            message(&served("github"), &Purpose::Other, Some(&dest), None),
-            format!("On {fingerprint}: approve github")
+            approved(&login("git"), Some(&dest), None),
+            format!("Approve use of key \"github\" to log in as git to host key {fingerprint}?")
         );
         assert_eq!(
-            message(
-                &served("github"),
-                &login("git"),
-                Some(&dest),
-                Some("github.com")
-            ),
-            format!("On github.com ({fingerprint}): approve github for git")
+            approved(&sshsig("git"), None, None),
+            "Approve use of key \"github\" to sign for namespace git?"
+        );
+        assert_eq!(
+            approved(&sshsig("git"), Some(&dest), Some("github.com")),
+            "Approve use of key \"github\" to sign for namespace git on github.com?"
+        );
+        assert_eq!(
+            approved(&Purpose::Other, None, None),
+            "Approve use of key \"github\"?"
+        );
+        assert_eq!(
+            approved(&Purpose::Other, Some(&dest), None),
+            format!("Approve use of key \"github\" on host key {fingerprint}?")
         );
     }
 
-    /// A long login user can't push the destination out of the prompt's
-    /// capped message: the destination comes first, and the user is cut.
+    /// The unlock question says what the key is for as the approval question
+    /// does, led by the database it unlocks.
     #[test]
-    fn a_long_login_user_comes_after_the_destination_and_is_cut() {
-        let dest = test_key(2).public_key().key_data().clone();
-        let fingerprint = dest.fingerprint(HashAlg::Sha256).to_string();
-        let user = "u".repeat(1000);
+    fn an_unlock_asks_the_same_question_led_by_its_database() {
+        let (dest, fingerprint) = (dest(), fingerprint());
 
-        let message = message(&served("github"), &login(&user), Some(&dest), None);
-        assert!(
-            message.starts_with(&format!("On {fingerprint}: ")),
-            "{message}"
+        assert_eq!(
+            unlocked(&login("git"), None, None),
+            "Unlock database personal to use key \"github\" to log in as git?"
         );
-        assert!(
-            message.ends_with(&"u".repeat(MAX_REQUESTED_LEN)),
-            "{message}"
+        assert_eq!(
+            unlocked(&login("git"), Some(&dest), Some("github.com")),
+            "Unlock database personal to use key \"github\" to log in to git@github.com?"
         );
-        assert!(!message.contains(&"u".repeat(MAX_REQUESTED_LEN + 1)));
+        assert_eq!(
+            unlocked(&login("git"), Some(&dest), None),
+            format!(
+                "Unlock database personal to use key \"github\" \
+                 to log in as git to host key {fingerprint}?"
+            )
+        );
+        assert_eq!(
+            unlocked(&sshsig("git"), None, None),
+            "Unlock database personal to use key \"github\" to sign for namespace git?"
+        );
+        assert_eq!(
+            unlocked(&Purpose::Other, Some(&dest), None),
+            format!("Unlock database personal to use key \"github\" on host key {fingerprint}?")
+        );
+    }
+
+    /// Whatever the key, user, namespace, database and host name are, the
+    /// whole message, destination included, fits the prompt's cap, and the
+    /// destination is its end: each piece is cut on its own.
+    #[test]
+    fn the_worst_message_fits_the_prompt_cap() {
+        let (dest, fingerprint) = (dest(), fingerprint());
+        let long = "w".repeat(1000);
+        let mut key = served(&long);
+        key.database = long.clone();
+        let purposes = [login(&long), sshsig(&long), Purpose::Other];
+        let mut longest = 0;
+
+        for message in [approval, unlock] {
+            for purpose in &purposes {
+                for name in [None, Some(long.as_str())] {
+                    let text = message(&key, purpose, Some(&dest), name);
+                    assert!(text.len() <= 256, "{} bytes: {text}", text.len());
+                    longest = longest.max(text.len());
+                    let end = match name {
+                        Some(_) => format!("{}?", "w".repeat(MAX_HOST_NAME_LEN)),
+                        None => format!("host key {fingerprint}?"),
+                    };
+                    assert!(text.ends_with(&end), "{text}");
+                }
+            }
+        }
+        assert_eq!(longest, 237);
+    }
+
+    /// A key name can't close its quotes and carry on the sentence, nor
+    /// hold a newline or a bidi override.
+    #[test]
+    fn a_hostile_key_name_stays_inside_its_quotes() {
+        let message = approval(
+            &served("x\" to log in to root@bank.example\n\u{202e}"),
+            &Purpose::Other,
+            None,
+            None,
+        );
+        assert_eq!(
+            message,
+            "Approve use of key \"x\\\" to log in to root@bank.example\\u000a\\u202e\"?"
+        );
     }
 
     /// Only a plain host name on a plain entry names a destination: not a

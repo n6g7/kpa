@@ -11,9 +11,10 @@ use super::SshHost;
 use crate::config::DatabaseConfig;
 use crate::log;
 use crate::output;
+use crate::ssh_agent::authz::may_list;
 use crate::ssh_agent::bind::ConnectionClass;
+use crate::ssh_agent::keys;
 use crate::ssh_agent::wire::{self, Identity};
-use crate::ssh_agent::{keys, policy};
 
 /// The longest identity comment sent: a key's name, from an override or
 /// an entry title, escaped and capped (`docs/ssh-agent.md` § 6.4), so a
@@ -38,7 +39,7 @@ pub(super) fn identities(
         .collect();
     let listed = keys::dedupe_by_config_order(per_database)
         .into_iter()
-        .filter(|key| policy::listable(class, key.forwarded))
+        .filter(|key| may_list(class, key.forwarded))
         .filter_map(|key| {
             let key_blob = key.public_key.to_bytes().ok()?;
             Some(Identity {
@@ -57,24 +58,25 @@ pub(super) fn identities(
     listed
 }
 
-/// The database that serves `fingerprint`: the first opted-in database in
-/// config order that lists it (§ 6.4's dedupe rule), from its slot or its
-/// cache. The sign flow looks the key up again in that database's slot,
-/// under the hold that signs.
+/// The key `fingerprint` names, as the first opted-in database in config
+/// order that lists it serves it (§ 6.4's dedupe rule), from its slot or
+/// its cache: its `database` says which. For a locked database that is the
+/// cache's key under the config's settings, which is all an unlock prompt
+/// and the decision need. The sign flow looks the key up again in that
+/// database's slot, under the hold that signs.
 pub(super) fn find_key(
     host: &impl SshHost,
     cache_dir: Option<&Path>,
     fingerprint: Fingerprint,
-) -> Option<String> {
+) -> Option<keys::ServedKey> {
     host.databases()
         .iter()
         .filter(|cfg| cfg.serve_ssh_keys)
-        .find(|cfg| {
+        .find_map(|cfg| {
             served_keys(host, cache_dir, cfg)
-                .iter()
-                .any(|key| key.fingerprint == fingerprint)
+                .into_iter()
+                .find(|key| key.fingerprint == fingerprint)
         })
-        .map(|cfg| cfg.name.clone())
 }
 
 /// `cfg`'s served keys right now: its last scan's if its database is

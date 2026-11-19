@@ -12,7 +12,7 @@ use common::InProcessDaemon;
 
 /// A config with one database, `personal`, pointed at `db_path`, serving
 /// SSH keys. `prompt` always answers with `common::PASSWORD` — these tests
-/// aren't about the unlock prompt itself — and the approval prompt always
+/// aren't about the unlock prompt itself — and the confirm prompt always
 /// answers `Allow`.
 fn config(db_path: &Path) -> String {
     format!(
@@ -172,7 +172,7 @@ fn sign_and_verify(agent: &SshAgent, dir: &Path, listed: &str, title: &str, coun
     let signed = sign(agent, &pubkey_path, &data_path);
     assert!(
         signed.status.success(),
-        "{title}: signing should succeed after the approval prompt answers Allow: {}",
+        "{title}: signing should succeed after the confirm prompt answers Allow: {}",
         String::from_utf8_lossy(&signed.stderr)
     );
     assert_eq!(count_lines(counter), prompts + 1, "{title}: one prompt");
@@ -224,28 +224,115 @@ fn signing_and_verifying_works_after_unlock_and_approval() {
     }
 }
 
+/// A config whose unlock prompt answers with the password until `flag`
+/// exists and appends a line to `unlocks` and fails from then on, and whose
+/// confirm prompt appends a line to `approvals` and allows.
+fn config_with_cancelling_unlock(
+    db_path: &Path,
+    flag: &Path,
+    unlocks: &Path,
+    approvals: &Path,
+) -> String {
+    format!(
+        "prompt = [\"/bin/sh\", \"-c\", \"if [ -e '{flag}' ]; then echo x >> '{unlocks}'; exit 1; fi; printf {password}\"]\n\n\
+         [ssh_agent]\n\
+         confirm_prompt = [\"/bin/sh\", \"-c\", \"echo x >> '{approvals}'; head -n1\"]\n\n\
+         [[database]]\n\
+         name = \"personal\"\n\
+         path = \"{path}\"\n\
+         serve_ssh_keys = true\n",
+        flag = flag.display(),
+        unlocks = unlocks.display(),
+        approvals = approvals.display(),
+        password = common::PASSWORD,
+        path = db_path.display(),
+    )
+}
+
+/// A signature for a locked database unlocks it, and the key's approval
+/// prompt follows: answering the unlock approves nothing (`docs/ssh-agent.md`
+/// § 6.6, § 6.7).
 #[test]
-fn locking_makes_signing_fail_again() {
-    let daemon = InProcessDaemon::start(&config(&common::ssh_db()));
+fn a_signature_for_a_locked_database_unlocks_it_and_then_asks_for_the_approval() {
+    let counters = tempfile::tempdir().expect("tempdir");
+    let (unlocks, approvals) = (
+        counters.path().join("unlocks"),
+        counters.path().join("approvals"),
+    );
+    let daemon = InProcessDaemon::start(&config_with_cancelling_unlock(
+        &common::ssh_db(),
+        &counters.path().join("never-created"),
+        &unlocks,
+        &approvals,
+    ));
     let agent = start_ssh_agent(&daemon);
     let dir = tempfile::tempdir().expect("tempdir");
 
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let listed = stdout(&ssh_add(&agent, ["-L"]));
-    let pubkey_line = public_key_line(&listed, "Ed25519");
-    let pubkey_path = write_pubkey(dir.path(), "key.pub", &pubkey_line);
+    let pubkey_path = write_pubkey(dir.path(), "key.pub", &public_key_line(&listed, "Ed25519"));
     let data_path = dir.path().join("data");
-    std::fs::write(&data_path, b"hello again").expect("write data");
-
+    std::fs::write(&data_path, b"hello").expect("write data");
     assert_eq!(daemon.run(&["lock", "personal"])["ok"], true);
 
+    let signed = sign(&agent, &pubkey_path, &data_path);
     assert!(
-        !sign(&agent, &pubkey_path, &data_path).status.success(),
-        "signing with a locked database must fail"
+        signed.status.success(),
+        "a signature for a locked database should unlock it: {}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    assert_eq!(daemon.run(&["status"])["databases"][0]["locked"], false);
+    assert_eq!(
+        count_lines(&approvals),
+        1,
+        "the approval followed the unlock"
     );
 }
 
-/// A config whose approval prompt appends a line to `counter` on every
+/// A cancelled unlock prompt fails the signature, and the next one fails at
+/// once, without a prompt, until the backoff has passed or the database is
+/// unlocked. Locking doesn't end it.
+#[test]
+fn a_cancelled_unlock_prompt_holds_back_the_next_one() {
+    let counters = tempfile::tempdir().expect("tempdir");
+    let (flag, unlocks, approvals) = (
+        counters.path().join("cancel-from-now-on"),
+        counters.path().join("unlocks"),
+        counters.path().join("approvals"),
+    );
+    let daemon = InProcessDaemon::start(&config_with_cancelling_unlock(
+        &common::ssh_db(),
+        &flag,
+        &unlocks,
+        &approvals,
+    ));
+    let agent = start_ssh_agent(&daemon);
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let listed = stdout(&ssh_add(&agent, ["-L"]));
+    let pubkey_path = write_pubkey(dir.path(), "key.pub", &public_key_line(&listed, "Ed25519"));
+    let data_path = dir.path().join("data");
+    std::fs::write(&data_path, b"hello").expect("write data");
+    assert_eq!(daemon.run(&["lock", "personal"])["ok"], true);
+    std::fs::write(&flag, b"").expect("create flag");
+
+    assert!(!sign(&agent, &pubkey_path, &data_path).status.success());
+    assert_eq!(
+        count_lines(&unlocks),
+        1,
+        "the prompt was shown and cancelled"
+    );
+    assert!(!sign(&agent, &pubkey_path, &data_path).status.success());
+    assert_eq!(
+        count_lines(&unlocks),
+        1,
+        "no second prompt during the backoff"
+    );
+    assert_eq!(count_lines(&approvals), 0);
+}
+
+/// A config whose confirm prompt appends a line to `counter` on every
 /// invocation (always answering `Allow`), with `[[database.ssh_key]]`
 /// overriding `fingerprint`'s `confirm` setting.
 fn config_with_override(
@@ -315,7 +402,7 @@ fn confirm_always_prompts_every_signature() {
     );
 }
 
-/// `confirm = "never"` never asks for local use — the approval prompt here
+/// `confirm = "never"` never asks for local use — the confirm prompt here
 /// would fail the test outright if it were ever invoked, so a successful
 /// signature already proves it wasn't.
 #[test]
@@ -356,7 +443,7 @@ fn confirm_never_never_prompts() {
     );
     assert!(
         !marker.exists(),
-        "confirm = never must never run the approval prompt"
+        "confirm = never must never run the confirm prompt"
     );
 }
 
@@ -405,7 +492,7 @@ fn locking_clears_approvals() {
     );
 }
 
-/// A lock in flight kills an SSH approval prompt exactly like it kills
+/// A lock in flight kills an SSH confirm prompt exactly like it kills
 /// `unlock`'s own: once the prompt is up (it touches a marker first),
 /// `ssh-keygen -Y sign` fails quickly rather than waiting out the whole
 /// (deliberately long) prompt.
@@ -451,7 +538,7 @@ fn locking_kills_an_open_approval_prompt() {
     while !marker.exists() {
         assert!(
             std::time::Instant::now() < deadline,
-            "the approval prompt never came up"
+            "the confirm prompt never came up"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -461,11 +548,11 @@ fn locking_kills_an_open_approval_prompt() {
     let sign = sign_thread.join().expect("sign thread panicked");
     assert!(
         !sign.status.success(),
-        "a signature whose approval prompt got killed by a lock must not succeed"
+        "a signature whose confirm prompt got killed by a lock must not succeed"
     );
     assert!(
         started.elapsed() < std::time::Duration::from_secs(10),
-        "the approval prompt should have been killed by the lock, not run its full 30s"
+        "the confirm prompt should have been killed by the lock, not run its full 30s"
     );
 }
 
@@ -595,7 +682,7 @@ mod raw {
     }
 }
 
-/// A config whose approval prompt counts its invocations, with no
+/// A config whose confirm prompt counts its invocations, with no
 /// per-key overrides — every served key keeps the default `confirm =
 /// "once"`.
 fn config_counting_prompts(db_path: &Path, counter: &Path) -> String {

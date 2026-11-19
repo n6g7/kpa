@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use zeroize::Zeroizing;
 
-use super::{Approval, Backend, CancelToken, PromptOutcome};
+use super::{Backend, CancelToken, ConfirmAnswer, PromptOutcome};
 use crate::proto::MAX_PASSWORD_LEN;
 
 /// The longest answer read; one more byte is an error. An answer can be a
@@ -31,7 +31,7 @@ const MAX_ANSWER_LEN: usize = MAX_PASSWORD_LEN;
 /// rewrites it.
 const PROMPT_MESSAGE_ENV: &str = "KPA_PROMPT_MESSAGE";
 
-/// What an approval prompt is offered, one choice per line.
+/// What a confirm prompt is offered, one choice per line.
 const APPROVAL_CHOICES: &[u8] = b"Allow\nDeny\n";
 
 /// Asks for a secret by running a dmenu-style program (`docs/design.md`
@@ -71,9 +71,9 @@ impl Backend<Zeroizing<String>> for SecretProgram {
 }
 
 /// Asks for an approval by running a dmenu-style program, such as the SSH
-/// agent's approval prompt (`ssh_agent.confirm_prompt`): `Allow` and
+/// agent's confirm prompt (`ssh_agent.confirm_prompt`): `Allow` and
 /// `Deny` go to its stdin one per line, and exactly `Allow` on stdout is
-/// [`Approval::Allow`]; anything else it prints is [`Approval::Deny`].
+/// [`ConfirmAnswer::Allow`]; anything else it prints is [`ConfirmAnswer::Deny`].
 /// Otherwise run as [`SecretProgram`] runs its own.
 pub struct ConfirmProgram {
     argv: Vec<String>,
@@ -85,13 +85,13 @@ impl ConfirmProgram {
     }
 }
 
-impl Backend<Approval> for ConfirmProgram {
+impl Backend<ConfirmAnswer> for ConfirmProgram {
     fn show(
         &self,
         message: &str,
         deadline: Option<Instant>,
         cancel: &CancelToken,
-    ) -> std::io::Result<PromptOutcome<Approval>> {
+    ) -> std::io::Result<PromptOutcome<ConfirmAnswer>> {
         let outcome = run(
             &self.argv,
             message,
@@ -101,9 +101,9 @@ impl Backend<Approval> for ConfirmProgram {
         )?;
         Ok(outcome.map(|answer| {
             if answer.as_str() == "Allow" {
-                Approval::Allow
+                ConfirmAnswer::Allow
             } else {
-                Approval::Deny
+                ConfirmAnswer::Deny
             }
         }))
     }
@@ -312,8 +312,8 @@ mod tests {
         shown(script, "test message", Duration::from_secs(60))
     }
 
-    /// Runs `script` as the approval prompt.
-    fn approval(script: &str) -> std::io::Result<PromptOutcome<Approval>> {
+    /// Runs `script` as the confirm prompt.
+    fn approval(script: &str) -> std::io::Result<PromptOutcome<ConfirmAnswer>> {
         let source = CancelSource::new();
         ConfirmProgram::new(sh(script)).show("test message", None, &source.token())
     }
@@ -322,10 +322,10 @@ mod tests {
     fn an_approval_prompt_allows_only_an_exact_allow() {
         let _spawning = spawn_lock();
         for (script, expected) in [
-            ("sed -n 1p", Approval::Allow),
-            ("sed -n 2p", Approval::Deny),
-            ("echo allow", Approval::Deny),
-            ("echo 'Allow now'", Approval::Deny),
+            ("sed -n 1p", ConfirmAnswer::Allow),
+            ("sed -n 2p", ConfirmAnswer::Deny),
+            ("echo allow", ConfirmAnswer::Deny),
+            ("echo 'Allow now'", ConfirmAnswer::Deny),
         ] {
             assert!(
                 matches!(approval(script), Ok(PromptOutcome::Answer(a)) if a == expected),

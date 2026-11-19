@@ -69,7 +69,7 @@ where
             databases: handler.status(),
             version: handler.daemon_version(),
         },
-        Op::Unlock(request) => Response::Unlock(handler.unlock(request, requester)),
+        Op::Unlock(unlock) => Response::Unlock(handler.unlock(unlock, requester, None)),
         Op::Lock(request) => Response::Lock(handler.lock(request)),
         Op::List(request) => Response::List(handler.list(request)),
         Op::Copy(request) => Response::Copy(handler.copy(request, requester)),

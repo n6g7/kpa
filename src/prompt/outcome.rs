@@ -1,6 +1,6 @@
 //! What a prompt comes back with: [`PromptOutcome`], generic over the
-//! answer; [`Approval`], the answer an approval prompt gives; and
-//! [`Declined`], how an approval prompt ended when it didn't allow.
+//! answer; [`ConfirmAnswer`], the answer a confirm prompt gives; and
+//! [`Declined`], how a confirm prompt ended when it didn't allow.
 
 use zeroize::Zeroizing;
 
@@ -47,14 +47,14 @@ impl<T> std::fmt::Debug for PromptOutcome<T> {
     }
 }
 
-/// The answer to an approval prompt.
+/// The answer to a confirm prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Approval {
+pub enum ConfirmAnswer {
     Allow,
     Deny,
 }
 
-/// How an approval prompt ended without allowing, as a log line says it.
+/// How a confirm prompt ended without allowing, as a log line says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Declined {
     #[error("denied")]
@@ -67,12 +67,12 @@ pub enum Declined {
     Interrupted,
 }
 
-impl PromptOutcome<Approval> {
+impl PromptOutcome<ConfirmAnswer> {
     /// `Ok` for an `Allow`, and how the prompt declined otherwise.
     pub fn allowed(self) -> Result<(), Declined> {
         match self {
-            PromptOutcome::Answer(Approval::Allow) => Ok(()),
-            PromptOutcome::Answer(Approval::Deny) => Err(Declined::Denied),
+            PromptOutcome::Answer(ConfirmAnswer::Allow) => Ok(()),
+            PromptOutcome::Answer(ConfirmAnswer::Deny) => Err(Declined::Denied),
             PromptOutcome::Cancelled => Err(Declined::Cancelled),
             PromptOutcome::TimedOut => Err(Declined::TimedOut),
             PromptOutcome::Interrupted => Err(Declined::Interrupted),
@@ -104,9 +104,12 @@ mod tests {
 
     #[test]
     fn only_an_allow_is_allowed() {
-        assert_eq!(PromptOutcome::Answer(Approval::Allow).allowed(), Ok(()));
+        assert_eq!(
+            PromptOutcome::Answer(ConfirmAnswer::Allow).allowed(),
+            Ok(())
+        );
         for (outcome, declined) in [
-            (PromptOutcome::Answer(Approval::Deny), Declined::Denied),
+            (PromptOutcome::Answer(ConfirmAnswer::Deny), Declined::Denied),
             (PromptOutcome::Cancelled, Declined::Cancelled),
             (PromptOutcome::TimedOut, Declined::TimedOut),
             (PromptOutcome::Interrupted, Declined::Interrupted),

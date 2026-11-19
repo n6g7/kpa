@@ -82,12 +82,18 @@ struct Slot {
     /// only stores what it opened if its token is still live afterwards,
     /// so a lock issued mid-unlock can't be undone by the unlock finishing.
     /// The SSH agent takes one the same way for each signature
-    /// (`SlotView::cancel_token`), for its approval prompt and its signing
+    /// (`SlotView::cancel_token`), for its confirm prompt and its signing
     /// hold.
     lock_signal: CancelSource,
     /// An unlock is prompting or deriving the key right now. A second one
     /// is refused rather than opening a second prompt.
     unlocking: bool,
+    /// Until when the SSH agent raises no prompt for this database's
+    /// signatures, after a prompt it raised was cancelled or timed out
+    /// (`docs/ssh-agent.md` § 6.6). Not part of `ssh`, which a lock drops
+    /// whole: a lock leaves it be, and only an unlock (`install`) ends it
+    /// early.
+    backoff: Option<Instant>,
     /// The SSH agent's state for this database (`docs/ssh-agent.md`
     /// § 6.4): the keys its last scan found, the private keys read since
     /// and the approvals granted. Empty while locked, or for a database
@@ -109,10 +115,12 @@ impl Slot {
     }
 
     /// Installs a freshly opened database, with the fingerprint it was opened
-    /// from, and starts its idle timer.
+    /// from, starts its idle timer and ends any SSH agent backoff: the user
+    /// has just unlocked it.
     fn install(&mut self, db: Database, stamp: Fingerprint) {
         self.db = Some(db);
         self.stamp = Some(stamp);
+        self.backoff = None;
         self.touch();
     }
 
@@ -136,6 +144,7 @@ impl Default for Slot {
             last_activity: Instant::now(),
             lock_signal: CancelSource::new(),
             unlocking: false,
+            backoff: None,
             ssh: SshSlot::default(),
         }
     }
@@ -182,7 +191,7 @@ pub struct Server {
     display_session: Mutex<DisplaySession>,
     /// The daemon's one prompt queue, so only one prompt is ever on screen
     /// (`docs/ssh-agent.md` § 6.7): the unlock prompt's, and the SSH
-    /// agent's approval prompts, which `serve_ssh_agent` builds on it.
+    /// agent's confirm prompts, which `serve_ssh_agent` builds on it.
     prompt_queue: Arc<PromptQueue>,
     /// The unlock prompt (`Config::prompt`), in `prompt_queue`.
     unlock_prompt: Prompt<Zeroizing<String>>,
@@ -510,10 +519,14 @@ impl Drop for UnlockingFlag<'_> {
 }
 
 impl Unlock for Server {
+    /// The unlock `kpa unlock`, the tray's menu and the SSH agent run, for
+    /// `requester`. Whether a prompt may appear for the requester is
+    /// decided under the mutex (`authz::choose_unlock_prompt`).
     fn unlock(
         &self,
         request: &UnlockRequest,
         requester: &Requester,
+        message: Option<&str>,
     ) -> Result<String, UnlockError> {
         let name = request.db.as_str();
         let db = || name.to_string();
@@ -540,7 +553,7 @@ impl Unlock for Server {
             // its file had changed, so finding it still installed here
             // means the file is unchanged — succeed without re-prompting.
             if slot.db.is_some() {
-                return Ok(db());
+                return Ok(name.to_string());
             }
             // Which prompt may ask for the password, if any: none where
             // nobody can answer it (from outside the desktop, or behind a
@@ -577,10 +590,8 @@ impl Unlock for Server {
             Some(PromptOn::Screen) => {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
-                prompted = match self
-                    .unlock_prompt
-                    .ask(&format!("Unlock {name}"), &cancel_token)
-                {
+                let message = message.map_or_else(|| format!("Unlock {name}"), str::to_string);
+                prompted = match self.unlock_prompt.ask(&message, &cancel_token) {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
                     }
@@ -645,7 +656,7 @@ impl Unlock for Server {
         // Logged here rather than in `log_response`: only this path knows
         // the database was actually opened, as opposed to already unlocked.
         log::info(format_args!("unlocked {name:?}"));
-        Ok(db())
+        Ok(name.to_string())
     }
 }
 
@@ -662,10 +673,12 @@ impl SshHost for Server {
             let slot = dbs.get_mut(db)?;
             let stale = drop_if_stale(slot);
             let view = SlotView::new(
+                Instant::now(),
                 slot.db.as_ref(),
                 &mut slot.ssh,
                 &mut slot.last_activity,
                 &slot.lock_signal,
+                &mut slot.backoff,
             );
             (f(view), stale)
         };
@@ -1004,16 +1017,21 @@ impl Drop for ConnectionSlot {
 
 /// Serves the SSH agent (`docs/ssh-agent.md`) for `server` on `listener`
 /// forever, each connection on its own thread, as `serve` does the JSON
-/// socket. Its approval prompt runs `ssh_agent.confirm_prompt`, with
+/// socket. Its confirm prompt runs `ssh_agent.confirm_prompt`, with
 /// `Config::confirm_prompt_timeout`, and waits its turn in `unlock`'s
 /// queue, so only one prompt is ever on screen.
 pub fn serve_ssh_agent(server: Arc<Server>, listener: UnixListener) {
-    let approval = Prompt::new(
+    let confirm_prompt = Prompt::new(
         Arc::clone(&server.prompt_queue),
         ConfirmProgram::new(server.config.ssh_agent.confirm_prompt.clone()),
         server.config.confirm_prompt_timeout(),
     );
-    let agent = Agent::new(Arc::clone(&server), approval, &server.paths);
+    let agent = Agent::new(
+        Arc::clone(&server),
+        confirm_prompt,
+        server.config.ssh_agent.backoff,
+        &server.paths,
+    );
     ssh_agent::serve::serve(Arc::new(agent), listener);
 }
 
@@ -2230,6 +2248,7 @@ mod tests {
                 password: None,
             },
             &desktop(),
+            None,
         );
 
         assert!(
@@ -2294,6 +2313,7 @@ mod tests {
                 password: None,
             },
             &desktop(),
+            None,
         );
 
         assert_eq!(
@@ -2410,19 +2430,19 @@ mod tests {
         unlock_from(server, name, &desktop())
     }
 
+    fn request(db: &str) -> UnlockRequest {
+        UnlockRequest {
+            db: db.to_string(),
+            password: None,
+        }
+    }
+
     fn unlock_from(
         server: &Server,
         name: &str,
         requester: &Requester,
     ) -> Result<String, UnlockError> {
-        Unlock::unlock(
-            server,
-            &UnlockRequest {
-                db: name.to_string(),
-                password: None,
-            },
-            requester,
-        )
+        Unlock::unlock(server, &request(name), requester, None)
     }
 
     /// A prompt that types a password, unless something ends it first.
@@ -2514,6 +2534,7 @@ mod tests {
                     ))),
                 },
                 &outside(),
+                None,
             );
             assert_eq!(
                 result,
@@ -2784,5 +2805,66 @@ mod tests {
                 db: "personal".to_string()
             })
         );
+    }
+
+    /// The agent's unlock is `kpa unlock`'s, with its own message: the
+    /// same prompt, which the user can cancel.
+    #[test]
+    fn the_ssh_agents_unlock_runs_the_unlock_prompt_with_its_message() {
+        let (server, prompts) = prompt_server();
+        prompts.push(Step::new(PromptOutcome::Cancelled));
+        server.set_display_session(DisplaySession::Unlocked {
+            id: SESSION.to_string(),
+            active: true,
+        });
+
+        assert_eq!(
+            Unlock::unlock(
+                &*server,
+                &request("personal"),
+                &desktop(),
+                Some("Unlock personal: key deploy"),
+            ),
+            Err(UnlockError::PromptCancelled {
+                db: "personal".to_string()
+            })
+        );
+        assert_eq!(prompts.shown(), ["Unlock personal: key deploy"]);
+    }
+
+    /// A database that is open already is not prompted for, and the agent
+    /// is told so: nothing it prompted for opened it.
+    #[test]
+    fn the_ssh_agents_unlock_of_an_open_database_prompts_for_nothing() {
+        let (server, prompts) = prompt_server();
+        unlock_directly(&server, "personal");
+
+        assert_eq!(
+            Unlock::unlock(
+                &*server,
+                &request("personal"),
+                &desktop(),
+                Some("Unlock personal")
+            ),
+            Ok("personal".to_string())
+        );
+        assert!(prompts.shown().is_empty());
+    }
+
+    /// The SSH agent's backoff outlives a lock, and an unlock ends it.
+    #[test]
+    fn a_backoff_survives_a_lock_and_ends_at_an_unlock() {
+        let mut slot = Slot {
+            backoff: Some(Instant::now() + Duration::from_secs(60)),
+            ..Slot::default()
+        };
+
+        slot.lock();
+        assert!(slot.backoff.is_some());
+
+        let stamp =
+            vault::Fingerprint::from_file(std::path::Path::new("Cargo.toml")).expect("stat");
+        slot.install(Database::new(), stamp);
+        assert!(slot.backoff.is_none());
     }
 }

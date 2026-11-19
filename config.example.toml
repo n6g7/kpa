@@ -53,11 +53,14 @@ prompt_timeout = "60s"
 # `serve_ssh_keys = true`. Its approval prompt is a dmenu-style program
 # like `prompt`, offered `Allow` and `Deny` on stdin; it is required once a
 # database serves keys. It times out after `prompt_timeout` unless
-# `confirm_prompt_timeout` gives it a timeout of its own.
+# `confirm_prompt_timeout` gives it a timeout of its own. A cancelled or
+# timed-out prompt raised by a signature holds that database's prompts back
+# for `backoff`.
 #
 # [ssh_agent]
 # confirm_prompt = ["sh", "-c", "exec fuzzel --dmenu --prompt \"$KPA_PROMPT_MESSAGE\""]
 # confirm_prompt_timeout = "30s"
+# backoff = "2m"
 
 # Both entries deliberately point at the same fixture: two names is what
 # makes the multi-database behaviour testable — `status` listing two rows,

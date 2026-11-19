@@ -237,11 +237,16 @@ impl UnlockError {
 /// it; otherwise the implementor owns credential acquisition, and nothing
 /// about *how* it asks for one appears in this signature.
 pub trait Unlock {
-    /// `Ok` names the database that is now unlocked. `requester` says where
-    /// the request came from, which decides whether a prompt may be raised
-    /// on screen.
-    fn unlock(&self, request: &UnlockRequest, requester: &Requester)
-    -> Result<String, UnlockError>;
+    /// `Ok` names the database that is now unlocked. `requester` says where the
+    /// request came from, which decides whether a prompt may be raised on
+    /// screen. `message` is what the prompt says; `None` is the plain
+    /// "Unlock <db>".
+    fn unlock(
+        &self,
+        request: &UnlockRequest,
+        requester: &Requester,
+        message: Option<&str>,
+    ) -> Result<String, UnlockError>;
 }
 
 #[cfg(test)]
