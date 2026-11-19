@@ -526,6 +526,9 @@ means. It is a directory: `mod.rs` is OS-neutral and names no D-Bus type, and
 - **`mod.rs`** reacts and holds the databases:
 
 ```rust
+/// What `auto_lock` reacts to: one channel, one reader. logind's watcher sends
+/// all but `Unlocked`, which `SleepHold` sends.
+pub enum Event { DisplayChanged(DisplaySession), LockRequested, Sleeping, Resumed, WatchLost, Unlocked(bool) }
 /// Where the lock triggers come from. Opaque; it wraps logind's own `Bus`.
 pub struct Source { /* logind::Bus */ }
 impl Source {
@@ -535,29 +538,31 @@ impl Source {
 /// Starts the logind watcher and the inhibitor thread; returns the sleep hold
 /// to register (after the secret holders) and the loop to run.
 pub fn start(source: Source, display: DisplayWriter) -> (SleepHold, AutoLock);
-pub struct AutoLock { /* Receiver<SessionEvent>, DisplayWriter */ }
+pub struct AutoLock { /* Receiver<Event>, DisplayWriter, logind::Inhibitor, SleepState */ }
 impl AutoLock {
-    /// Spawns the idle tick, then blocks reacting to events. `daemon` spawns it.
+    /// Spawns the idle tick, then blocks reacting to events:
+    /// `react` first, then the inhibitor decision. `daemon` spawns it.
     pub fn run(self, databases: Arc<Databases>, idle_timeout: Duration);
 }
-pub struct SleepHold { /* Sender<SleepSignal>, a mutex that orders its answers */ }
+pub struct SleepHold { /* Sender<Event>, a mutex that orders its answers */ }
 impl Observer for SleepHold { /* send(Unlocked(databases.any_unlocked())) after every change */ }
 
-fn react(databases: &Databases, display: &DisplayWriter, event: SessionEvent); // private
+fn react(databases: &Databases, display: &DisplayWriter, event: Event); // private
 fn watch_idle(databases: &Databases, idle_timeout: Duration);                  // private: expire_idle(now) on a tick
 ```
 
-`SessionEvent` and `SleepSignal` belong to `logind.rs`; `daemon` sees neither.
-The inhibitor thread owns the inhibitor and its state; it is told
-`SleepSignal::{Unlocked(bool), GoingToSleep, Resumed}` on one channel, the
-watcher sending the last two.
+`logind.rs` only watches and executes: it sends `Event`s and hands back an
+`Inhibitor` with `hold(bool)`, which applies the requested state idempotently
+on a thread of its own, so a slow D-Bus call never delays a lock. `AutoLock`
+keeps a pure `SleepState` (is anything unlocked, is the machine sleeping) and
+says to hold exactly while something is unlocked and the machine is awake.
 
 `react` locks everything for a lock request, a locked display session, a
 suspend and a lost watch. `SleepHold` reads `any_unlocked()` inside its own
-mutex, so the delay hears the states in the order they happened whichever
-threads changed them. On suspend, `react` locks everything, and the delay is
-released when `SleepHold` is told, after the observers registered before it
-have run (§ 4).
+mutex, so the loop hears the states in the order they happened whichever
+threads changed them. On suspend, `react` locks everything, and the
+inhibitor is released after it, because the loop decides the inhibitor second
+(§ 4).
 
 **The display session** is `auto_lock`'s to write and everyone else's to
 read. `display_session.rs` holds only the `DisplaySession` type and the pair
@@ -936,7 +941,7 @@ the directory changes. Until then no macOS code or stubs are written.
   `DisplayWriter` the test sets: the unlock gates, a lock ending a prompt,
   and "a lock of the database a copy came from ends the offer; another doesn't".
 - **`auto_lock`** is tested by unit tests of `react`, `watch_idle` and
-  `SleepHold` on a `Databases` with a `SleepSignal` channel whose receiver the
+  `SleepHold` on a `Databases` with an `Event` channel whose receiver the
   test reads; the logind watcher and `auto_lock::start` by `tests/logind.rs`
   against a private bus.
 - **Integration tests** build the daemon with `daemon` and put the real CLI
