@@ -10,24 +10,7 @@ use uuid::Uuid;
 
 use super::SshHost;
 use crate::log;
-use crate::ssh::approvals::RequestDetails;
-use crate::ssh::approvals::SignatureApproval;
-use crate::ssh::keys::ServedKey;
-
-/// One pending request, as `ssh_pending` lists it.
-#[derive(Debug, Clone)]
-pub struct PendingRequest {
-    /// What names it to [`approve_pending`].
-    pub id: Uuid,
-    /// What approving it grants.
-    pub approval: SignatureApproval,
-    /// The key the approval is for, as its database serves it.
-    pub key: ServedKey,
-    /// What was refused.
-    pub request: RequestDetails,
-    /// Since it was last refused.
-    pub age: Duration,
-}
+use crate::ssh::approvals::PendingRequest;
 
 /// Every pending request: each database's in config order, oldest first.
 pub fn pending_requests(host: &impl SshHost) -> Vec<PendingRequest> {
@@ -36,17 +19,7 @@ pub fn pending_requests(host: &impl SshHost) -> Vec<PendingRequest> {
         .filter(|cfg| cfg.serve_ssh_keys)
         .flat_map(|cfg| {
             host.with_slot(&cfg.name, |slot| {
-                slot.ssh
-                    .pending
-                    .list(slot.now())
-                    .map(|listed| PendingRequest {
-                        id: listed.id,
-                        approval: listed.approval.clone(),
-                        key: listed.key.clone(),
-                        request: listed.request.clone(),
-                        age: listed.age,
-                    })
-                    .collect::<Vec<_>>()
+                slot.ssh.pending.list(slot.now()).collect::<Vec<_>>()
             })
             .unwrap_or_default()
         })
@@ -91,8 +64,8 @@ mod tests {
     use super::super::fake::FakeHost;
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
-    use crate::ssh::approvals::SignatureApproval;
     use crate::ssh::approvals::{PENDING_TTL, Scope};
+    use crate::ssh::approvals::{RequestDetails, SignatureApproval};
     use crate::ssh::testing::{database, key_database, test_key};
 
     const WINDOW: Duration = Duration::from_secs(60);

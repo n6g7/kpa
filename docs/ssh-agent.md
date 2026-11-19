@@ -956,7 +956,7 @@ programs' settings.
 | `classify.rs` | Data to be signed → `Purpose::{Login, SshSig, Other}`. Pure, fuzzed                                                                             |
 | `authz.rs`    | (key settings, connection class, purpose, login session) → what the request needs (nothing, or an approval for a scope, kept until lock or not) or why it is refused. Pure and stateless: whether an approval already covers the scope, and whether a prompt may appear, are the sign flow's questions |
 | `ssh/keys.rs` | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                   |
-| `ssh/approvals.rs` | Approvals and pending requests: their scopes, limits and expiry                                                                                 |
+| `ssh/approvals/` | Approvals and pending requests: their scopes, limits and expiry, per database and unlock                                                                              |
 | `serve.rs`    | Listener, per-connection thread, connection cap, and the `SshSign` trait it answers each request through                                         |
 | `agent/`      | The agent's own logic, crate-private: per-database key state and the scan at unlock (`state.rs`), identities (`identities.rs`), the sign flow (`sign.rs`), one `SIGN_REQUEST` (`request.rs`), prompting the user (`prompts.rs`), what its prompts say (`message.rs`) and signing (`signer.rs`). `Agent` implements `SshSign` over `SshHost`, the database access the daemon implements |
 
