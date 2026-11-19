@@ -489,9 +489,9 @@ Prompts are bounded too:
 `session_watch.rs` is the OS side of these triggers, and only reports: it
 knows nothing about databases or locking. Its events are the display
 session's state, a lock request (the `Lock` signal), suspend and a lost
-watch, and the server reacts to them in one place,
-`Server::on_session_event`. They come on one channel of `Event`s with one
-reader, which also hears from the server, after every change, whether
+watch, and the daemon reacts to them in one place,
+`AutoLock::run`. They come on one channel of `Event`s with one
+reader, which also hears from the databases, after every change, whether
 anything is unlocked. The reader reacts to each event first, then tells an
 `Inhibitor` whether to hold the sleep inhibitor: held exactly while
 something is unlocked and never while the machine sleeps. A thread of
