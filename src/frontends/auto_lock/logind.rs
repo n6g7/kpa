@@ -166,6 +166,12 @@ fn inhibit_forever(requests: Receiver<bool>, delay: SleepDelay, mut inhibitor: L
     }
 }
 
+/// The [`DisplaySession`] for logind's display session `id` (`docs/headless.md`
+/// § 3 and § 5), the id being logind's session id: its scope is
+/// `session-<id>.scope`. `User.Display` being `/` is
+/// [`DisplaySession::None`]. Only `LockedHint` makes it locked: a locker that
+/// only sends the `Lock` signal never reports the unlock (ASM-7), so its
+/// session stays unlocked. `active` is the session's `Active` property.
 fn from_state(id: &str, locked: bool, active: bool) -> DisplaySession {
     let id = id.to_string();
     if locked {

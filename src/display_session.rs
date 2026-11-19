@@ -5,27 +5,34 @@
 
 use std::sync::{Arc, Mutex};
 
-/// The user's display session, as the logind watch last saw it
-/// (`docs/headless.md` § 3 and § 5).
+/// The user's display session: the graphical session whose screen the user
+/// sits at (`docs/headless.md` § 3 and § 5).
 ///
-/// Only `LockedHint` makes the display session locked. A locker that only sends the
-/// `Lock` signal never reports the unlock (ASM-7), so its display session stays
-/// [`DisplaySession::Unlocked`]. `active` is a separate fact, carried alongside
-/// `LockedHint` for `authz::authorize_copy` alone: counting an
-/// inactive session (one a VT switch moved away from) as locked would make
-/// kpa lock the vault just for that, so `active` never touches
-/// [`is_locked`](DisplaySession::is_locked) or `authz::may_prompt_on_screen`.
+/// - [`None`](DisplaySession::None): there is none, or kpa can't tell.
+/// - [`Locked`](DisplaySession::Locked) and
+///   [`Unlocked`](DisplaySession::Unlocked): there is one, and its screen is
+///   locked or not. Only a screen reported locked makes it
+///   [`Locked`](DisplaySession::Locked); a locker that never reports its
+///   unlock leaves it unlocked.
+/// - `active` says whether it is the session in front, which a VT switch
+///   moves away from. It matters to `authz::authorize_copy` alone: counting
+///   an inactive session as locked would make kpa lock its databases just
+///   for that, so `active` never touches [`is_locked`](DisplaySession::is_locked)
+///   or `authz::may_prompt_on_screen`.
+/// - `id` names the session. It is opaque to everything but the clipboard and
+///   `authz`, which use it to find the desktop's processes and its
+///   compositor.
+///
+/// How the logind watcher builds the value is in
+/// `frontends/auto_lock/logind.rs`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DisplaySession {
-    /// No display session (`User.Display` is `/`), or no working logind
-    /// watch to say otherwise.
+    /// No display session, or no working watch to say otherwise.
     #[default]
     None,
-    /// The display session `session` (its logind id), with `LockedHint`
-    /// true. `active` is the session's `Active` property.
+    /// A display session whose screen is locked.
     Locked { id: String, active: bool },
-    /// The display session `session`, with `LockedHint` false. `active` is
-    /// the session's `Active` property.
+    /// A display session whose screen is not locked.
     Unlocked { id: String, active: bool },
 }
 
@@ -34,8 +41,7 @@ impl DisplaySession {
         matches!(self, DisplaySession::Locked { .. })
     }
 
-    /// The display session's logind id, if there is one. Its scope is
-    /// `session-<id>.scope`.
+    /// The display session's id, if there is one.
     pub fn id(&self) -> Option<&str> {
         match self {
             DisplaySession::None => None,
