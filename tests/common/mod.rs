@@ -205,7 +205,7 @@ impl InProcessDaemon {
         ));
         let cgroup = cgroup_on(on_desktop, "test");
         kpa::authn::assume_cgroup(&socket, &cgroup);
-        server.on_session_event(kpa::frontends::auto_lock::logind::SessionEvent::Changed(
+        server.on_session_event(kpa::frontends::auto_lock::Event::DisplayChanged(
             kpa::display_session::DisplaySession::Unlocked {
                 id: "test".to_string(),
                 active: true,

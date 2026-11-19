@@ -2,15 +2,14 @@
 //! display session and about suspend, and the inhibitor that delays suspend
 //! (`docs/threat-model.md` T-8 and ASM-7, `docs/design.md` § Lock policy).
 //!
-//! This module only reports; it knows nothing about databases or locking.
-//! [`start`] returns the [`SessionEvent`]s the daemon reacts to
-//! (`Server::on_session_event`) and a `Sender<SleepSignal>` the daemon tells
-//! whether anything is unlocked. A watcher thread owns a D-Bus connection
-//! to logind and turns its signals and property changes into events: a
-//! `Lock` signal on the user's display session, that session's
-//! `LockedHint` and `Active`, `PrepareForSleep`, and a lost subscription.
-//! A second thread owns the `Inhibit` call and its file descriptor, so no
-//! request ever waits on D-Bus.
+//! This module only watches and executes; it knows nothing about databases
+//! or locking. [`start`] sends the watcher's [`Event`]s on the channel it is
+//! given and returns an [`Inhibitor`] that `auto_lock` tells whether to hold.
+//! A watcher thread owns a D-Bus connection to logind and turns its signals
+//! and property changes into events: a `Lock` signal on the user's display
+//! session, that session's `LockedHint` and `Active`, `PrepareForSleep`, and
+//! a lost subscription. A second thread owns the `Inhibit` call and its file
+//! descriptor, so no request ever waits on D-Bus.
 //!
 //! This module needs systemd-logind reachable on the bus it's given
 //! (`Bus::System` in production), which means a systemd Linux host. It
@@ -31,6 +30,7 @@ use zbus::blocking::{Connection, MessageIterator};
 use zbus::message::Message;
 use zbus::zvariant::{self, OwnedObjectPath, OwnedValue};
 
+use super::Event;
 use crate::display_session::DisplaySession;
 
 const LOGIND: &str = "org.freedesktop.login1";
@@ -51,96 +51,38 @@ const MATCH_RULES: [&str; 3] = [
 
 const RETRY_DELAY: Duration = Duration::from_secs(5);
 
-/// What the OS reports.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionEvent {
-    /// The display session is new, or its locked or active state changed.
-    /// Read on subscribing, whenever the display session changes, and on
-    /// each change of its `LockedHint` or `Active`.
-    Changed(DisplaySession),
-    /// The display session's `Lock` signal. A locker that only sends this
-    /// never reports the unlock (ASM-7), so it doesn't change the display
-    /// session's state.
-    LockRequested,
-    /// The machine is about to suspend.
-    Sleeping,
-    /// A subscription that had been working has dropped: the display
-    /// session's state is unknown until it is back.
-    WatchLost,
+/// Delays suspend while it is told to hold. [`Inhibitor::hold`] only sends a
+/// message; the thread that owns the `Inhibit` call acts on it.
+#[derive(Debug, Clone)]
+pub struct Inhibitor {
+    requests: Sender<bool>,
 }
 
-/// What the inhibitor thread is told, on one channel so it hears everything
-/// in the order it was sent. [`SleepSignal::Unlocked`] comes from the daemon
-/// after every change to what is unlocked; the other two come from the
-/// watcher.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SleepSignal {
-    /// Whether anything is unlocked now.
-    Unlocked(bool),
-    /// `PrepareForSleep(true)`. Nothing is released here: the daemon locks
-    /// first, then says nothing is unlocked, and that releases it.
-    GoingToSleep,
-    /// `PrepareForSleep(false)`.
-    Resumed,
-}
-
-/// What the inhibitor thread knows. It is the only owner, so no lock.
-#[derive(Debug, Default)]
-struct SleepState {
-    /// The last [`SleepSignal::Unlocked`].
-    unlocked: bool,
-    /// Between `GoingToSleep` and `Resumed`.
-    sleeping: bool,
-}
-
-/// What the inhibitor thread does about one signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Inhibit {
-    Hold,
-    Release,
-    Keep,
-}
-
-/// What to do when anything is `unlocked`, given whether the machine is
-/// `sleeping` and whether the inhibitor is `held`. Pure, so the gating can
-/// be tested without a bus.
-fn inhibit(unlocked: bool, sleeping: bool, held: bool) -> Inhibit {
-    match (unlocked && !sleeping, held) {
-        (true, false) => Inhibit::Hold,
-        (false, true) => Inhibit::Release,
-        _ => Inhibit::Keep,
+impl Inhibitor {
+    /// Asks to hold the delay (`true`) or to let it go. Applying a state
+    /// already in effect does nothing, and a hold that failed is tried again
+    /// by the next request.
+    pub fn hold(&self, held: bool) {
+        let _ = self.requests.send(held);
     }
 }
 
-/// Takes `signal` into `state` and says what to do about it. Pure.
-fn step(state: &mut SleepState, signal: SleepSignal, held: bool) -> Inhibit {
-    match signal {
-        SleepSignal::GoingToSleep => {
-            state.sleeping = true;
-            return Inhibit::Keep;
-        }
-        SleepSignal::Unlocked(unlocked) => state.unlocked = unlocked,
-        SleepSignal::Resumed => state.sleeping = false,
-    }
-    inhibit(state.unlocked, state.sleeping, held)
-}
-
-/// Acts on each signal until every sender is gone.
-fn inhibit_forever(signals: Receiver<SleepSignal>, mut inhibitor: LogindInhibitor) {
-    let mut state = SleepState::default();
-    for signal in signals {
-        match step(&mut state, signal, inhibitor.is_held()) {
-            Inhibit::Hold => match inhibitor.hold() {
+/// Applies each request until the [`Inhibitor`] is gone.
+fn inhibit_forever(requests: Receiver<bool>, mut inhibitor: LogindInhibitor) {
+    for held in requests {
+        if held {
+            if inhibitor.is_held() {
+                continue;
+            }
+            match inhibitor.hold() {
                 Ok(()) => crate::log::debug(format_args!("holding sleep inhibitor")),
                 Err(err) => {
                     crate::log::warn(format_args!("could not hold a sleep inhibitor: {err}"))
                 }
-            },
-            Inhibit::Release => {
-                inhibitor.release();
-                crate::log::debug(format_args!("released sleep inhibitor"));
             }
-            Inhibit::Keep => {}
+        } else if inhibitor.is_held() {
+            inhibitor.release();
+            crate::log::debug(format_args!("released sleep inhibitor"));
         }
     }
 }
@@ -163,36 +105,33 @@ impl Bus {
     }
 }
 
-/// Start the logind watcher and the inhibitor thread. The events are what
-/// the watcher reports; the sender is how the daemon tells the inhibitor what
-/// is unlocked.
-pub fn start(bus: Bus) -> (Receiver<SessionEvent>, Sender<SleepSignal>) {
-    let (events, session_events) = mpsc::channel();
-    let (signals, receiver) = mpsc::channel();
-
+/// Start the logind watcher and the inhibitor thread. The watcher sends its
+/// events on `events`; the returned [`Inhibitor`] is how `auto_lock` says
+/// whether to delay suspend.
+pub fn start(bus: Bus, events: Sender<Event>) -> Inhibitor {
+    let (requests, receiver) = mpsc::channel();
     let inhibitor = LogindInhibitor::new(bus.clone());
     thread::spawn(move || inhibit_forever(receiver, inhibitor));
 
-    let watching = signals.clone();
     let uid = crate::authn::process_uid();
-    thread::spawn(move || watch_forever(&bus, uid, &events, &watching));
-    (session_events, signals)
+    thread::spawn(move || watch_forever(&bus, uid, &events));
+    Inhibitor { requests }
 }
 
 /// Keep a watch on logind for the life of the process. A subscription that
 /// drops after working locks everything (the lock can't be confirmed to
 /// have been sent) and is re-established with backoff. A first failure is
 /// only logged: nothing can be unlocked before the first subscription.
-fn watch_forever(bus: &Bus, uid: u32, events: &Sender<SessionEvent>, sleep: &Sender<SleepSignal>) {
+fn watch_forever(bus: &Bus, uid: u32, events: &Sender<Event>) {
     let mut last_error: Option<String> = None;
     loop {
         let mut subscribed = false;
         let error = match bus.connect() {
-            Ok(conn) => watch(&conn, uid, events, sleep, &mut subscribed),
+            Ok(conn) => watch(&conn, uid, events, &mut subscribed),
             Err(err) => err.to_string(),
         };
         if subscribed {
-            let _ = events.send(SessionEvent::WatchLost);
+            let _ = events.send(Event::WatchLost);
         }
         if last_error.as_deref() != Some(error.as_str()) {
             crate::log::warn(format_args!("logind watch: {error}; retrying"));
@@ -204,13 +143,7 @@ fn watch_forever(bus: &Bus, uid: u32, events: &Sender<SessionEvent>, sleep: &Sen
 
 /// Subscribe and forward events until the connection fails. Always returns
 /// an error: a watch doesn't end on purpose.
-fn watch(
-    conn: &Connection,
-    uid: u32,
-    events: &Sender<SessionEvent>,
-    sleep: &Sender<SleepSignal>,
-    subscribed: &mut bool,
-) -> String {
+fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut bool) -> String {
     // Created before the match rules are added, so nothing sent after the
     // subscription is missed.
     let messages = MessageIterator::from(conn);
@@ -242,7 +175,7 @@ fn watch(
         Ok(display_session) => display_session,
         Err(err) => return err,
     };
-    let _ = events.send(SessionEvent::Changed(current.clone()));
+    let _ = events.send(Event::DisplayChanged(current.clone()));
 
     for message in messages {
         let message = match message {
@@ -251,17 +184,13 @@ fn watch(
         };
         match interpret(&message, user.as_str(), session.as_ref()) {
             Step::LockRequested => {
-                let _ = events.send(SessionEvent::LockRequested);
+                let _ = events.send(Event::LockRequested);
             }
             Step::Sleeping(true) => {
-                // Sent before it is reported, so nothing taken after the
-                // report holds the machine awake; the inhibitor itself is
-                // released once the daemon has locked and says so.
-                let _ = sleep.send(SleepSignal::GoingToSleep);
-                let _ = events.send(SessionEvent::Sleeping);
+                let _ = events.send(Event::Sleeping);
             }
             Step::Sleeping(false) => {
-                let _ = sleep.send(SleepSignal::Resumed);
+                let _ = events.send(Event::Resumed);
             }
             Step::DisplayChanged(display) => {
                 session = display;
@@ -269,15 +198,15 @@ fn watch(
                     Ok(display_session) => display_session,
                     Err(err) => return err,
                 };
-                let _ = events.send(SessionEvent::Changed(current.clone()));
+                let _ = events.send(Event::DisplayChanged(current.clone()));
             }
             Step::Property(Property::Locked(locked)) => {
                 current = current.with_locked(locked);
-                let _ = events.send(SessionEvent::Changed(current.clone()));
+                let _ = events.send(Event::DisplayChanged(current.clone()));
             }
             Step::Property(Property::Active(active)) => {
                 current = current.with_active(active);
-                let _ = events.send(SessionEvent::Changed(current.clone()));
+                let _ = events.send(Event::DisplayChanged(current.clone()));
             }
             Step::Ignore => {}
         }
@@ -507,110 +436,6 @@ impl LogindInhibitor {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_request_to_hold_holds_while_the_machine_is_awake_and_never_while_it_sleeps() {
-        // (something unlocked, sleeping, held) and what happens.
-        for (unlocked, sleeping, held, expected) in [
-            (true, false, false, Inhibit::Hold),
-            (true, false, true, Inhibit::Keep),
-            (false, false, true, Inhibit::Release),
-            (false, false, false, Inhibit::Keep),
-            (true, true, false, Inhibit::Keep),
-            (true, true, true, Inhibit::Release),
-            (false, true, true, Inhibit::Release),
-            (false, true, false, Inhibit::Keep),
-        ] {
-            assert_eq!(
-                inhibit(unlocked, sleeping, held),
-                expected,
-                "unlocked: {unlocked}, sleeping: {sleeping}, held: {held}"
-            );
-        }
-    }
-
-    /// Feeds `signals` to a fresh state, tracking whether the inhibitor
-    /// would be held, and returns what each one did.
-    fn run(signals: &[SleepSignal]) -> Vec<Inhibit> {
-        let mut state = SleepState::default();
-        let mut held = false;
-        signals
-            .iter()
-            .map(|signal| {
-                let action = step(&mut state, *signal, held);
-                match action {
-                    Inhibit::Hold => held = true,
-                    Inhibit::Release => held = false,
-                    Inhibit::Keep => {}
-                }
-                action
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_inhibitor_is_held_exactly_while_something_is_unlocked() {
-        use SleepSignal::Unlocked;
-        assert_eq!(
-            run(&[
-                Unlocked(true),
-                Unlocked(true),
-                Unlocked(false),
-                Unlocked(false)
-            ]),
-            [
-                Inhibit::Hold,
-                Inhibit::Keep,
-                Inhibit::Release,
-                Inhibit::Keep
-            ]
-        );
-    }
-
-    #[test]
-    fn going_to_sleep_releases_nothing() {
-        use SleepSignal::*;
-        assert_eq!(
-            run(&[Unlocked(true), GoingToSleep]),
-            [Inhibit::Hold, Inhibit::Keep]
-        );
-    }
-
-    #[test]
-    fn the_inhibitor_is_released_once_everything_is_locked_for_the_suspend() {
-        use SleepSignal::*;
-        assert_eq!(
-            run(&[Unlocked(true), GoingToSleep, Unlocked(false)]),
-            [Inhibit::Hold, Inhibit::Keep, Inhibit::Release]
-        );
-    }
-
-    #[test]
-    fn nothing_is_held_while_the_machine_sleeps() {
-        use SleepSignal::*;
-        assert_eq!(
-            run(&[GoingToSleep, Unlocked(true)]),
-            [Inhibit::Keep, Inhibit::Keep]
-        );
-    }
-
-    #[test]
-    fn resuming_holds_again_only_if_something_is_unlocked() {
-        use SleepSignal::*;
-        assert_eq!(
-            run(&[GoingToSleep, Unlocked(true), Resumed]),
-            [Inhibit::Keep, Inhibit::Keep, Inhibit::Hold]
-        );
-        assert_eq!(
-            run(&[Unlocked(true), GoingToSleep, Unlocked(false), Resumed]),
-            [
-                Inhibit::Hold,
-                Inhibit::Keep,
-                Inhibit::Release,
-                Inhibit::Keep
-            ]
-        );
-    }
-
     fn signal<B>(path: &str, interface: &str, member: &str, body: &B) -> Message
     where
         B: serde::Serialize + zbus::zvariant::DynamicType,
@@ -690,7 +515,7 @@ mod tests {
     }
 
     /// `Active` is watched the same way as `LockedHint`, and reported as
-    /// its own `Property` — never folded into a `SessionEvent::Changed` by
+    /// its own `Property` — never folded into a `Event::DisplayChanged` by
     /// `interpret` itself, since that needs the other property's current
     /// value, which only `watch`'s own state has.
     #[test]

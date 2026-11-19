@@ -2,11 +2,11 @@
 //! machine suspends, the watch on the display session is lost, or a
 //! database sits idle (`docs/design.md` § Lock policy).
 //!
-//! This file is OS-neutral and names no D-Bus type: [`logind`] reports the
-//! triggers as [`SessionEvent`](logind::SessionEvent)s and holds the sleep
-//! inhibitor, and [`AutoLock`] says what each one means for the databases.
-//! [`SleepHold`] is the observer that tells the inhibitor whether anything
-//! is unlocked.
+//! This file is OS-neutral and names no D-Bus type. [`logind`] watches the OS
+//! and sends what it sees as [`Event`]s; [`SleepHold`] sends the other one,
+//! whether anything is unlocked; and [`AutoLock`], the one reader of that
+//! channel, says what each event means for the databases and whether the
+//! sleep inhibitor is held.
 //!
 //! The display session is this front end's to write ([`DisplayWriter`]) and
 //! everyone else's to read ([`DisplayHandle`](crate::display_session::DisplayHandle)).
@@ -15,12 +15,12 @@
 
 pub mod logind;
 
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use self::logind::{Bus, SessionEvent, SleepSignal};
+use self::logind::{Bus, Inhibitor};
 use crate::cancel::CancelToken;
 use crate::databases::{Databases, Observer};
 use crate::display_session::{DisplaySession, DisplayWriter};
@@ -41,54 +41,111 @@ impl Source {
     }
 }
 
+/// What `auto_lock` reacts to, on one channel with one reader. The OS side
+/// sends all but [`Event::Unlocked`], which [`SleepHold`] sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// The display session is new, or its locked or active state changed.
+    /// Read on subscribing, whenever the display session changes, and on
+    /// each change of its locked state or whether it is in front.
+    DisplayChanged(DisplaySession),
+    /// The display session's lock request. A locker that only sends this
+    /// never reports the unlock (ASM-7), so it doesn't change the display
+    /// session's state.
+    LockRequested,
+    /// The machine is about to suspend.
+    Sleeping,
+    /// The machine has resumed.
+    Resumed,
+    /// A subscription that had been working has dropped: the display
+    /// session's state is unknown until it is back.
+    WatchLost,
+    /// Whether anything is unlocked now.
+    Unlocked(bool),
+}
+
 /// Starts the watcher and the inhibitor thread. Returns the observer that
-/// feeds the inhibitor, to register after the observers that hold secrets,
-/// and the loop that reacts to the triggers.
+/// reports what is unlocked, to register after the observers that hold
+/// secrets, and the loop that reacts to everything.
 pub fn start(source: Source, display: DisplayWriter) -> (SleepHold, AutoLock) {
-    let (events, signals) = logind::start(source.0);
+    let (events, incoming) = mpsc::channel();
+    let inhibitor = logind::start(source.0, events.clone());
     (
         SleepHold {
-            signals,
+            events,
             order: Mutex::new(()),
         },
-        AutoLock { events, display },
+        AutoLock {
+            incoming,
+            display,
+            inhibitor,
+            sleep: SleepState::default(),
+        },
     )
 }
 
-/// The loop that reacts to the lock triggers.
+/// The loop that reacts to the events: the one reader of the channel.
 pub struct AutoLock {
-    events: Receiver<SessionEvent>,
+    incoming: Receiver<Event>,
     display: DisplayWriter,
+    inhibitor: Inhibitor,
+    sleep: SleepState,
 }
 
 impl AutoLock {
     /// Spawns the idle tick, then blocks reacting to events for as long as
-    /// the watcher lives.
-    pub fn run(self, databases: Arc<Databases>, idle_timeout: Duration) {
+    /// the watcher lives. Each event is reacted to first and the inhibitor
+    /// decided second, so a suspend's release comes after everything is
+    /// locked.
+    pub fn run(mut self, databases: Arc<Databases>, idle_timeout: Duration) {
         let ticking = databases.clone();
         thread::spawn(move || watch_idle(&ticking, idle_timeout));
-        for event in self.events {
+        for event in self.incoming {
+            let hold = self.sleep.hold_after(&event);
             react(&databases, &self.display, event);
+            self.inhibitor.hold(hold);
         }
     }
 }
 
-/// Tells the sleep inhibitor whether anything is unlocked after every
-/// change, in the order the changes happened.
+/// What the inhibitor decision knows.
+#[derive(Debug, Default)]
+pub struct SleepState {
+    /// The last [`Event::Unlocked`].
+    unlocked: bool,
+    /// Between [`Event::Sleeping`] and [`Event::Resumed`].
+    sleeping: bool,
+}
+
+impl SleepState {
+    /// Takes `event` in and says whether the inhibitor is held now: exactly
+    /// while something is unlocked, and never while the machine sleeps.
+    /// Pure.
+    pub fn hold_after(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Unlocked(unlocked) => self.unlocked = *unlocked,
+            Event::Sleeping => self.sleeping = true,
+            Event::Resumed => self.sleeping = false,
+            Event::DisplayChanged(_) | Event::LockRequested | Event::WatchLost => {}
+        }
+        self.unlocked && !self.sleeping
+    }
+}
+
+/// Tells the loop whether anything is unlocked after every change, in the
+/// order the changes happened.
 pub struct SleepHold {
-    signals: Sender<SleepSignal>,
-    /// Held while reading `any_unlocked` and sending it, so the inhibitor
-    /// hears the states in the order they were read whichever threads
-    /// changed them.
+    events: Sender<Event>,
+    /// Held while reading `any_unlocked` and sending it, so the loop hears
+    /// the states in the order they were read whichever threads changed
+    /// them.
     order: Mutex<()>,
 }
 
 impl SleepHold {
     fn sync(&self, databases: &Databases) {
         let _turn = self.order.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = self
-            .signals
-            .send(SleepSignal::Unlocked(databases.any_unlocked()));
+        let _ = self.events.send(Event::Unlocked(databases.any_unlocked()));
     }
 }
 
@@ -105,11 +162,10 @@ impl Observer for SleepHold {
 /// What one trigger means. A locked display session is written before
 /// anything is locked; a lock request alone doesn't mark it; a lost watch
 /// forgets it, since its state is unknown until the watch is back. On
-/// suspend everything is locked, and the inhibitor is released when
-/// [`SleepHold`] is told.
-fn react(databases: &Databases, display: &DisplayWriter, event: SessionEvent) {
+/// suspend everything is locked.
+fn react(databases: &Databases, display: &DisplayWriter, event: Event) {
     match event {
-        SessionEvent::Changed(session) => {
+        Event::DisplayChanged(session) => {
             let locked = session.is_locked();
             display.set(session);
             if locked {
@@ -117,15 +173,16 @@ fn react(databases: &Databases, display: &DisplayWriter, event: SessionEvent) {
                 log::info(format_args!("locked all databases (screen lock)"));
             }
         }
-        SessionEvent::LockRequested => {
+        Event::LockRequested => {
             databases.lock_all();
             log::info(format_args!("locked all databases (screen lock)"));
         }
-        SessionEvent::Sleeping => {
+        Event::Sleeping => {
             databases.lock_all();
             log::info(format_args!("locked all databases (suspending)"));
         }
-        SessionEvent::WatchLost => {
+        Event::Resumed | Event::Unlocked(_) => {}
+        Event::WatchLost => {
             display.set(DisplaySession::None);
             databases.lock_all();
             log::warn(format_args!(
@@ -185,7 +242,7 @@ mod tests {
         }
     }
 
-    fn reacting(event: SessionEvent) -> (Databases, DisplayHandle) {
+    fn reacting(event: Event) -> (Databases, DisplayHandle) {
         let databases = databases(HOUR);
         unlocked(&databases);
         let (writer, display) = channel();
@@ -196,10 +253,10 @@ mod tests {
     #[test]
     fn a_lock_request_a_locked_screen_a_suspend_and_a_lost_watch_each_lock_everything() {
         for event in [
-            SessionEvent::LockRequested,
-            SessionEvent::Changed(session(true)),
-            SessionEvent::Sleeping,
-            SessionEvent::WatchLost,
+            Event::LockRequested,
+            Event::DisplayChanged(session(true)),
+            Event::Sleeping,
+            Event::WatchLost,
         ] {
             let (databases, _) = reacting(event.clone());
             assert!(!databases.any_unlocked(), "{event:?} should lock");
@@ -208,7 +265,7 @@ mod tests {
 
     #[test]
     fn a_display_session_that_is_not_locked_is_recorded_and_locks_nothing() {
-        let (databases, display) = reacting(SessionEvent::Changed(session(false)));
+        let (databases, display) = reacting(Event::DisplayChanged(session(false)));
         assert!(databases.any_unlocked());
         assert_eq!(display.get(), session(false));
     }
@@ -219,7 +276,7 @@ mod tests {
         unlocked(&databases);
         let (writer, display) = channel();
         writer.set(session(false));
-        react(&databases, &writer, SessionEvent::LockRequested);
+        react(&databases, &writer, Event::LockRequested);
         assert_eq!(display.get(), session(false));
     }
 
@@ -228,7 +285,7 @@ mod tests {
         let databases = databases(HOUR);
         let (writer, display) = channel();
         writer.set(session(false));
-        react(&databases, &writer, SessionEvent::WatchLost);
+        react(&databases, &writer, Event::WatchLost);
         assert_eq!(display.get(), DisplaySession::None);
     }
 
@@ -254,7 +311,7 @@ mod tests {
         let mut databases = databases(HOUR);
         databases.observe(seen.clone());
         unlocked(&databases);
-        react(&databases, &writer, SessionEvent::Changed(session(true)));
+        react(&databases, &writer, Event::DisplayChanged(session(true)));
         assert_eq!(*seen.seen.lock().unwrap(), [session(true), session(true)]);
     }
 
@@ -273,11 +330,11 @@ mod tests {
 
     /// A database with a sleep hold registered, and what the hold tells the
     /// inhibitor.
-    fn held() -> (Databases, Receiver<SleepSignal>) {
-        let (signals, told) = std::sync::mpsc::channel();
+    fn held() -> (Databases, Receiver<Event>) {
+        let (events, told) = std::sync::mpsc::channel();
         let mut databases = databases(HOUR);
         databases.observe(Arc::new(SleepHold {
-            signals,
+            events,
             order: Mutex::new(()),
         }));
         (databases, told)
@@ -285,10 +342,10 @@ mod tests {
 
     /// The answers to "is anything unlocked" the inhibitor has been sent
     /// since the last call, in order.
-    fn answers(told: &Receiver<SleepSignal>) -> Vec<bool> {
+    fn answers(told: &Receiver<Event>) -> Vec<bool> {
         told.try_iter()
             .map(|signal| match signal {
-                SleepSignal::Unlocked(unlocked) => unlocked,
+                Event::Unlocked(unlocked) => unlocked,
                 other => panic!("unexpected {other:?}"),
             })
             .collect()
@@ -304,13 +361,76 @@ mod tests {
         assert_eq!(answers(&told), [true, true, true, false]);
     }
 
+    /// What `hold_after` says after each event, from a fresh state.
+    fn holds(events: &[Event]) -> Vec<bool> {
+        let mut sleep = SleepState::default();
+        events.iter().map(|event| sleep.hold_after(event)).collect()
+    }
+
+    #[test]
+    fn the_inhibitor_is_held_exactly_while_something_is_unlocked() {
+        use Event::Unlocked;
+        assert_eq!(
+            holds(&[Unlocked(true), Unlocked(true), Unlocked(false)]),
+            [true, true, false]
+        );
+    }
+
+    #[test]
+    fn nothing_is_held_while_the_machine_sleeps() {
+        use Event::*;
+        assert_eq!(
+            holds(&[Unlocked(true), Sleeping, Unlocked(true), Unlocked(false)]),
+            [true, false, false, false]
+        );
+    }
+
+    #[test]
+    fn a_suspend_releases_the_inhibitor_on_its_own_event() {
+        use Event::*;
+        // The loop reacts to `Sleeping` (locking everything) before it acts
+        // on this answer, so the release comes after the lock.
+        assert_eq!(holds(&[Unlocked(true), Sleeping]), [true, false]);
+    }
+
+    #[test]
+    fn resuming_holds_again_only_if_something_is_unlocked() {
+        use Event::*;
+        assert_eq!(
+            holds(&[Unlocked(true), Sleeping, Resumed]),
+            [true, false, true]
+        );
+        assert_eq!(
+            holds(&[Unlocked(true), Sleeping, Unlocked(false), Resumed]),
+            [true, false, false, false]
+        );
+        assert_eq!(
+            holds(&[Sleeping, Unlocked(true), Resumed]),
+            [false, false, true]
+        );
+    }
+
+    #[test]
+    fn other_events_leave_the_decision_as_it_was() {
+        use Event::*;
+        assert_eq!(
+            holds(&[
+                Unlocked(true),
+                LockRequested,
+                WatchLost,
+                DisplayChanged(session(true))
+            ]),
+            [true; 4]
+        );
+    }
+
     #[test]
     fn on_suspend_the_inhibitor_is_released_only_after_everything_is_locked() {
         let (databases, told) = held();
         unlocked(&databases);
         let (writer, _) = channel();
         assert_eq!(answers(&told), [true, true]);
-        react(&databases, &writer, SessionEvent::Sleeping);
+        react(&databases, &writer, Event::Sleeping);
         assert!(!databases.any_unlocked());
         // Nothing released it while something was still unlocked: every
         // answer it got after the lock says nothing is unlocked.
