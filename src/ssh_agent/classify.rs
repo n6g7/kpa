@@ -45,6 +45,17 @@ pub enum Purpose {
     Other,
 }
 
+impl Purpose {
+    /// The purpose's kind in a word, for a log line or a listing.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Purpose::Login(_) => "login",
+            Purpose::SshSig { .. } => "sshsig",
+            Purpose::Other => "other",
+        }
+    }
+}
+
 /// [`Purpose::Login`]'s fields: everything a login signing request carries
 /// that policy or a prompt might need.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -249,6 +249,12 @@ pub struct ServedKey {
     pub fingerprint: Fingerprint,
     pub name: String,
     pub entry_uuid: Uuid,
+    /// The entry's title, vault content that is never logged (G-4). `None`
+    /// for a key listed from the cache, which holds no titles.
+    pub title: Option<String>,
+    /// The attachment's file name on the entry. `None` for a key listed
+    /// from the cache, which holds no entries.
+    pub attachment: Option<String>,
     /// Local approval policy (`docs/ssh-agent.md` § 6.7), from the
     /// key's settings.
     pub confirm: SshKeyConfirm,
@@ -270,6 +276,7 @@ pub fn resolve(cfg: &DatabaseConfig, found: &[FoundKey]) -> Vec<ServedKey> {
                 key.public_key.clone(),
                 key.entry_uuid,
                 key.entry_title.as_deref(),
+                Some(&key.attachment_name),
             )
         })
         .collect()
@@ -278,11 +285,11 @@ pub fn resolve(cfg: &DatabaseConfig, found: &[FoundKey]) -> Vec<ServedKey> {
 /// [`resolve`] for the keys a locked database's cache lists
 /// ([`read_cache`]). The cache holds no titles and no entries, so a key
 /// without a `name` override is named `<database> <fingerprint>`, and its
-/// `entry_uuid` is nil.
+/// `entry_uuid` is nil. It has no title and no attachment name either.
 pub fn resolve_cached(cfg: &DatabaseConfig, cached: Vec<PublicKey>) -> Vec<ServedKey> {
     cached
         .into_iter()
-        .filter_map(|public_key| served(cfg, public_key, Uuid::nil(), None))
+        .filter_map(|public_key| served(cfg, public_key, Uuid::nil(), None, None))
         .collect()
 }
 
@@ -294,6 +301,7 @@ fn served(
     public_key: PublicKey,
     entry_uuid: Uuid,
     entry_title: Option<&str>,
+    attachment: Option<&str>,
 ) -> Option<ServedKey> {
     let fingerprint = public_key.fingerprint(HashAlg::Sha256);
     let settings = cfg.ssh_key_settings(fingerprint);
@@ -311,6 +319,8 @@ fn served(
             entry_title,
         ),
         entry_uuid,
+        title: entry_title.map(str::to_string),
+        attachment: attachment.map(str::to_string),
         confirm: settings.confirm,
         forwarded: settings.forwarded,
     })
@@ -776,6 +786,8 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
             fingerprint,
             name: database.to_string(),
             entry_uuid: Uuid::new_v4(),
+            title: None,
+            attachment: None,
             confirm: SshKeyConfirm::Once,
             forwarded: true,
         };

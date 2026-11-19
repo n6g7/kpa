@@ -42,21 +42,34 @@ impl Refused {
 }
 
 impl<H: SshHost> Agent<H> {
-    /// What the request lacks in `db` right now, if the user may be asked
-    /// for it: `None` where it lacks nothing. A request that lacks something is
-    /// refused where no prompt may appear for the requester, and while the
-    /// database's prompts are held back after a cancel.
+    /// What the request lacks in `key`'s database right now, if the user may
+    /// be asked for it: `None` where it lacks nothing. A request that lacks
+    /// something is refused where no prompt may appear for the requester, and
+    /// while the database's prompts are held back after a cancel. One that
+    /// lacks an approval where no prompt may appear is also recorded as
+    /// pending, for the approval to be granted later (`docs/ssh-agent.md`
+    /// § 6.8).
     pub(super) fn check_may_prompt(
         &self,
-        db: &str,
+        key: &ServedKey,
+        request: &Request<'_>,
         requester: &Requester,
         needed: Option<&SignatureApproval>,
     ) -> Result<Option<Lacking>, Refused> {
-        self.hold(db, |slot| {
+        self.hold(&key.database, |slot| {
             let Some(lacking) = lacking(&slot, needed) else {
                 return Ok(None);
             };
             if !may_prompt_on_screen(requester, &self.host.display_session()) {
+                if let Lacking::Approval(approval) = &lacking
+                    && let Ok(served) = slot.served(request.fingerprint)
+                {
+                    let served = served.clone();
+                    let request = request.requested(requester);
+                    slot.ssh
+                        .pending
+                        .record(approval.clone(), served, request, slot.now());
+                }
                 return Err(lacking.refusal());
             }
             if slot.backing_off() {
@@ -85,11 +98,10 @@ impl<H: SshHost> Agent<H> {
         requester: &Requester,
         needed: Option<&SignatureApproval>,
     ) -> Result<Option<Confirmed>, Refused> {
-        let db = key.database.as_str();
-        let mut lacking = self.check_may_prompt(db, requester, needed)?;
+        let mut lacking = self.check_may_prompt(key, request, requester, needed)?;
         if matches!(lacking, Some(Lacking::Unlock)) {
             self.prompt_to_unlock(key, request, requester)?;
-            lacking = self.check_may_prompt(db, requester, needed)?;
+            lacking = self.check_may_prompt(key, request, requester, needed)?;
         }
         let Some(Lacking::Approval(approval)) = lacking else {
             return Ok(None);

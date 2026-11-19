@@ -6,10 +6,16 @@ use ssh_key::{Fingerprint, HashAlg, PublicKey};
 
 use super::sign::Refused;
 use super::signer;
+use crate::authn::Requester;
 use crate::log;
+use crate::ssh_agent::approve::RequestDetails;
 use crate::ssh_agent::bind::ConnectionClass;
 use crate::ssh_agent::classify::{self, Purpose};
 use crate::ssh_agent::wire::SignRequest;
+
+/// The longest login user, `SSHSIG` namespace or command name a pending
+/// request keeps: all come from the request.
+const MAX_PENDING_TEXT_LEN: usize = 64;
 
 /// One `SIGN_REQUEST`, as the flow and its log line see it.
 pub(super) struct Request<'a> {
@@ -46,6 +52,33 @@ impl<'a> Request<'a> {
             _ => None,
         }
     }
+
+    /// What this request is, for the user who is asked to approve it while
+    /// it is pending (`docs/ssh-agent.md` § 6.8). Its own text is cut.
+    pub(super) fn requested(&self, requester: &Requester) -> RequestDetails {
+        let capped = |text: &str| capped(text, MAX_PENDING_TEXT_LEN).to_string();
+        let (user, namespace) = match &self.purpose {
+            Purpose::Login(login) => (Some(capped(&login.user)), None),
+            Purpose::SshSig { namespace } => (None, Some(capped(namespace))),
+            Purpose::Other => (None, None),
+        };
+        RequestDetails {
+            purpose: self.purpose.label(),
+            user,
+            namespace,
+            class: self.class.label(),
+            command: requester.command.as_deref().map(capped),
+        }
+    }
+}
+
+/// `text` cut to at most `max_len` bytes, on a character boundary.
+fn capped(text: &str, max_len: usize) -> &str {
+    let mut end = text.len().min(max_len);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// One line per `SIGN_REQUEST` for a served key (`docs/ssh-agent.md`
@@ -83,16 +116,7 @@ pub(super) fn sign_line(
     let name = name
         .map(|name| format!(" named \"{name}\""))
         .unwrap_or_default();
-    let purpose = match request.purpose {
-        Purpose::Login(_) => "login",
-        Purpose::SshSig { .. } => "sshsig",
-        Purpose::Other => "other",
-    };
-    let class = match request.class {
-        ConnectionClass::LocalUnbound => "local",
-        ConnectionClass::LocalBound { .. } => "local, bound",
-        ConnectionClass::Forwarded { .. } => "forwarded",
-    };
+    let (purpose, class) = (request.purpose.label(), request.class.label());
     let destination = request
         .destination()
         .map(|dest| format!(", dest {}", dest.fingerprint(HashAlg::Sha256)))

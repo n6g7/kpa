@@ -120,6 +120,12 @@ pub struct SshAgentConfig {
     /// back prompts for its database (`docs/ssh-agent.md` § 6.6).
     #[serde(with = "humantime_serde", default = "default_ssh_agent_backoff")]
     pub backoff: Duration,
+
+    /// How long the retry has after an `ssh_approve` approves a request for
+    /// a `confirm = "always"` key (`docs/ssh-agent.md` § 6.8): the approval
+    /// covers one signature, and only until this has passed.
+    #[serde(with = "humantime_serde", default = "default_ssh_agent_retry_window")]
+    pub retry_window: Duration,
 }
 
 impl Default for SshAgentConfig {
@@ -129,6 +135,7 @@ impl Default for SshAgentConfig {
             confirm_prompt: Vec::new(),
             confirm_prompt_timeout: None,
             backoff: default_ssh_agent_backoff(),
+            retry_window: default_ssh_agent_retry_window(),
         }
     }
 }
@@ -292,6 +299,10 @@ fn default_prompt() -> Vec<String> {
 
 fn default_ssh_agent_backoff() -> Duration {
     Duration::from_secs(2 * 60)
+}
+
+fn default_ssh_agent_retry_window() -> Duration {
+    Duration::from_secs(60)
 }
 
 impl Config {
@@ -619,6 +630,14 @@ mod tests {
         assert_eq!(config.ssh_agent.socket, None);
         assert!(config.ssh_agent.confirm_prompt.is_empty());
         assert_eq!(config.ssh_agent.backoff, Duration::from_secs(2 * 60));
+        assert_eq!(config.ssh_agent.retry_window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn the_retry_window_parses_as_a_duration() {
+        let config = Config::parse("[ssh_agent]\nretry_window = \"30s\"\n").expect("valid config");
+        assert_eq!(config.ssh_agent.retry_window, Duration::from_secs(30));
+        assert!(Config::parse("[ssh_agent]\nretry_window = \"soon\"\n").is_err());
     }
 
     #[test]

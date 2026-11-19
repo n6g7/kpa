@@ -44,9 +44,10 @@ use crate::prompt::{
 };
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
-    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshKeys,
-    SshKeysError, SshKeysReport, SshKeysRequest, Status, Unlock, UnlockError, UnlockRequest,
-    WireEntry, WireSkippedKey, WireSshKey,
+    ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshApprove,
+    SshApproveError, SshApproveRequest, SshKeys, SshKeysError, SshKeysReport, SshKeysRequest,
+    SshPending, Status, Unlock, UnlockError, UnlockRequest, WireEntry, WirePending,
+    WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
 };
 use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
 use crate::socket::{self, Received};
@@ -764,6 +765,50 @@ impl List for Server {
     }
 }
 
+impl SshPending for Server {
+    fn ssh_pending(&self) -> Vec<WirePending> {
+        ssh_agent::pending_requests(self)
+            .into_iter()
+            .map(|pending| WirePending {
+                id: pending.id,
+                age: pending.age.as_secs(),
+                scope: WireScope {
+                    key: WireSshKey {
+                        db: pending.key.database,
+                        key_type: pending.key.public_key.algorithm().to_string(),
+                        fingerprint: pending.key.fingerprint.to_string(),
+                        name: pending.key.name,
+                        entry: pending.key.entry_uuid,
+                        title: pending.key.title,
+                        attachment: pending.key.attachment.unwrap_or_default(),
+                    },
+                    destination: pending.approval.scope.destination(),
+                },
+                remember: pending.approval.remember,
+                request: WireRequestDetails {
+                    purpose: pending.request.purpose.to_string(),
+                    user: pending.request.user,
+                    namespace: pending.request.namespace,
+                    class: pending.request.class.to_string(),
+                    command: pending.request.command,
+                },
+            })
+            .collect()
+    }
+}
+
+impl SshApprove for Server {
+    fn ssh_approve(&self, request: &SshApproveRequest) -> Result<(), SshApproveError> {
+        let approved =
+            ssh_agent::approve_pending(self, request.id, self.config.ssh_agent.retry_window);
+        if approved {
+            Ok(())
+        } else {
+            Err(SshApproveError::NotPending)
+        }
+    }
+}
+
 impl SshKeys for Server {
     /// Scans the unlocked databases again, under the mutex: a database
     /// can't leave it, and the scan parses only the few key attachments a
@@ -797,6 +842,9 @@ impl SshKeys for Server {
                 report.locked.push(db());
                 continue;
             };
+            let Some(cfg) = self.config.databases.iter().find(|cfg| cfg.name == name) else {
+                return Err(SshKeysError::UnknownDb { db: db() });
+            };
             let scan = ssh_agent::keys::scan(database);
             slot.touch();
             report
@@ -805,6 +853,13 @@ impl SshKeys for Server {
                     db: db(),
                     key_type: key.public_key.algorithm().to_string(),
                     fingerprint: key.fingerprint.to_string(),
+                    name: ssh_agent::keys::key_name(
+                        name,
+                        key.fingerprint,
+                        cfg.ssh_key_settings(key.fingerprint).name.as_deref(),
+                        key.entry_title.as_deref(),
+                    ),
+                    entry: key.entry_uuid,
                     title: key.entry_title,
                     attachment: key.attachment_name,
                 }));
@@ -1123,11 +1178,18 @@ pub(crate) fn log_response(response: &Response) {
         )),
         Response::Copy(Err(err)) => log::warn(format_args!("copy failed: {err:?}")),
 
+        // Success is logged by `ssh_agent::approve_pending`.
+        Response::SshApprove(Ok(())) => {}
+        Response::SshApprove(Err(err)) => log::warn(format_args!("ssh approve failed: {err:?}")),
+
         // Listed above rather than caught by a `_` arm on purpose: adding
         // an op should be a decision about whether it belongs in the log,
         // not something a wildcard answers silently. `ssh_keys` carries
         // entry titles, which stay out of the log like `list`'s.
-        Response::Status { .. } | Response::List(_) | Response::SshKeys(_) => {}
+        Response::Status { .. }
+        | Response::List(_)
+        | Response::SshKeys(_)
+        | Response::SshPending(_) => {}
     }
 }
 

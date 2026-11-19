@@ -103,6 +103,17 @@ pub enum ConnectionClass {
     },
 }
 
+impl ConnectionClass {
+    /// The class in a few words, for a log line or a listing.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ConnectionClass::LocalUnbound => "local",
+            ConnectionClass::LocalBound { .. } => "local, bound",
+            ConnectionClass::Forwarded { .. } => "forwarded",
+        }
+    }
+}
+
 impl SessionBindState {
     pub fn new() -> Self {
         Self {

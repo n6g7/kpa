@@ -4,6 +4,7 @@
 //! for.
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::error::{ErrorCode, ErrorFields};
 
@@ -32,7 +33,8 @@ pub struct SshKeysReport {
     pub locked: Vec<String>,
 }
 
-/// One key found in an attachment.
+/// One SSH key in a database: what `ssh_keys` reports for each key found,
+/// and what a pending request names its key by.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WireSshKey {
     /// The database it was found in. A key held by two databases is
@@ -43,6 +45,11 @@ pub struct WireSshKey {
     pub key_type: String,
     /// `SHA256:…`, the form a `[[database.ssh_key]]` names a key by.
     pub fingerprint: String,
+    /// The key's name: its `[[database.ssh_key]]` override's, else its
+    /// entry's title, else `<database> <fingerprint>`.
+    pub name: String,
+    /// The entry's uuid.
+    pub entry: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// The attachment's file name on the entry.

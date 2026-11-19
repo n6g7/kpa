@@ -103,6 +103,8 @@ mod tests {
             public_key,
             name: "github".to_string(),
             entry_uuid: uuid::Uuid::nil(),
+            title: None,
+            attachment: None,
             confirm,
             forwarded: true,
         }

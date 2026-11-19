@@ -15,7 +15,7 @@ thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 rustix = { version = "1", features = ["event", "fs", "net", "process", "termios"] }
-uuid = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 zeroize = { version = "1", features = ["derive"] }
 base64 = "0.22"
 sha2 = "0.11"
@@ -26,7 +26,7 @@ wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 png = "0.17"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-ssh-key = { version = "=0.7.0-rc.12", default-features = false, features = ["ed25519", "p256", "p384", "rsa", "alloc", "std"] }
+ssh-key = { version = "=0.7.0-rc.12", default-features = false, features = ["ed25519", "p256", "p384", "rsa", "alloc", "std", "serde"] }
 signature = { version = "3", default-features = false }
 
 [dev-dependencies]

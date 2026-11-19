@@ -12,6 +12,7 @@ use super::copy::CopyRequest;
 use super::error::{ErrorCode, ErrorFields};
 use super::list::ListRequest;
 use super::lock::LockRequest;
+use super::ssh_approve::SshApproveRequest;
 use super::ssh_keys::SshKeysRequest;
 use super::unlock::UnlockRequest;
 use crate::prompt::PromptOn;
@@ -60,6 +61,8 @@ pub enum Op {
     List(ListRequest),
     Copy(CopyRequest),
     SshKeys(SshKeysRequest),
+    SshPending,
+    SshApprove(SshApproveRequest),
 }
 
 /// Why `decode_request` gave up. Deliberately one bucket for every JSON/shape

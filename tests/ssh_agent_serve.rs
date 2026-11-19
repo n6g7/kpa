@@ -800,3 +800,150 @@ fn forwarded_signatures_are_refused() {
         "a forwarded signature must be refused (FAILURE), not signed"
     );
 }
+
+/// Pending requests and their approval (`docs/ssh-agent.md` § 6.8): a
+/// request from outside the desktop is refused and pending, `ssh_approve`
+/// approves it by its id, and the retry signs.
+mod pending {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    use kpa::authn::Requester;
+    use kpa::proto::{Unlock, UnlockRequest};
+    use serde_json::{Value, json};
+
+    use super::{InProcessDaemon, SshAgent, config, sign, start_ssh_agent, stdout, write_pubkey};
+    use crate::common;
+
+    /// A daemon whose every connection comes from outside the desktop, with
+    /// `personal` unlocked at the desk, as the tray's menu does: a request
+    /// from outside the desktop can't unlock it on screen.
+    fn outside_daemon() -> InProcessDaemon {
+        let config = kpa::config::Config::parse(&config(&common::ssh_db())).expect("valid config");
+        let daemon = InProcessDaemon::with_requester_on(config, false);
+        let at_the_desk = Requester {
+            uid: kpa::authn::process_uid(),
+            cgroup: Some(common::cgroup_on(true, "test")),
+            command: Some("kpa".to_string()),
+            terminal: None,
+            preferred: None,
+        };
+        daemon
+            .server
+            .unlock(
+                &UnlockRequest {
+                    db: "personal".to_string(),
+                },
+                &at_the_desk,
+                None,
+            )
+            .expect("unlock at the desk");
+        daemon
+    }
+
+    fn request(daemon: &InProcessDaemon, request: &Value) -> Value {
+        let mut stream = UnixStream::connect(&daemon.socket).expect("connect");
+        writeln!(stream, "{request}").expect("write");
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).expect("read");
+        serde_json::from_str(&reply).expect("a JSON reply")
+    }
+
+    fn ed25519_pubkey(agent: &SshAgent, dir: &std::path::Path) -> std::path::PathBuf {
+        let listed = stdout(&super::ssh_add(agent, ["-L"]));
+        let line = listed
+            .lines()
+            .find(|line| line.contains("Ed25519"))
+            .unwrap_or_else(|| panic!("no Ed25519 identity in {listed:?}"));
+        let key_only = line
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        write_pubkey(dir, "key.pub", &key_only)
+    }
+
+    fn pending(daemon: &InProcessDaemon) -> Vec<Value> {
+        let listed = request(daemon, &json!({"v": 2, "op": "ssh_pending"}));
+        assert_eq!(listed["ok"], true, "{listed}");
+        listed["pending"].as_array().expect("a list").clone()
+    }
+
+    #[test]
+    fn a_refused_request_is_listed_approved_by_its_id_and_the_retry_signs() {
+        let daemon = outside_daemon();
+        let agent = start_ssh_agent(&daemon);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pubkey = ed25519_pubkey(&agent, dir.path());
+        let data = dir.path().join("data");
+        std::fs::write(&data, b"approve me").expect("write data");
+
+        assert!(!sign(&agent, &pubkey, &data).status.success());
+        let listed = pending(&daemon);
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        let key = &listed[0]["scope"]["key"];
+        assert_eq!(key["db"], "personal");
+        assert_eq!(key["name"], "Ed25519");
+        assert_eq!(listed[0]["remember"], true);
+        assert_eq!(listed[0]["request"]["purpose"], "sshsig");
+        assert_eq!(listed[0]["request"]["namespace"], "test");
+        assert!(listed[0]["request"]["command"].is_string(), "{listed:?}");
+        // The key is the object `ssh_keys` reports for it.
+        let reported = request(&daemon, &json!({"v": 2, "op": "ssh_keys"}));
+        let reported = reported["keys"]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .find(|reported| reported["fingerprint"] == key["fingerprint"])
+            .expect("the key is reported");
+        assert_eq!(reported, key);
+
+        let id = listed[0]["id"].clone();
+        let approved = request(&daemon, &json!({"v": 2, "op": "ssh_approve", "id": id}));
+        assert_eq!(approved["ok"], true, "{approved}");
+        assert!(pending(&daemon).is_empty());
+
+        let signed = sign(&agent, &pubkey, &data);
+        assert!(
+            signed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&signed.stderr)
+        );
+    }
+
+    /// Without an approval the retry is still refused, and the repeated
+    /// request is the one pending request, with the same id.
+    #[test]
+    fn an_unapproved_request_stays_pending_and_refused() {
+        let daemon = outside_daemon();
+        let agent = start_ssh_agent(&daemon);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pubkey = ed25519_pubkey(&agent, dir.path());
+        let data = dir.path().join("data");
+        std::fs::write(&data, b"leave me").expect("write data");
+
+        assert!(!sign(&agent, &pubkey, &data).status.success());
+        let first = pending(&daemon);
+        assert!(!sign(&agent, &pubkey, &data).status.success());
+        let second = pending(&daemon);
+
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert_eq!(first[0]["id"], second[0]["id"]);
+    }
+
+    #[test]
+    fn approving_what_is_not_pending_is_an_error() {
+        let daemon = outside_daemon();
+
+        let none = request(
+            &daemon,
+            &json!({"v": 2, "op": "ssh_approve", "id": "00000000-0000-4000-8000-000000000000"}),
+        );
+        assert_eq!(none["error"], "not_pending");
+        let malformed = request(
+            &daemon,
+            &json!({"v": 2, "op": "ssh_approve", "id": "not an id"}),
+        );
+        assert_eq!(malformed["error"], "malformed_request");
+    }
+}

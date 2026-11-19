@@ -3,8 +3,8 @@
 //!
 //! One module per op, since an op's payload type and its error type belong
 //! together and nothing outside that op needs either: [`status`],
-//! [`unlock`], [`lock`], [`list`], [`copy`], [`ssh_keys`]. [`request`] holds the request
-//! half plus the failures that precede dispatch, and [`error`] the wire
+//! [`unlock`], [`lock`], [`list`], [`copy`], [`ssh_keys`], [`ssh_pending`],
+//! [`ssh_approve`]. [`request`] holds the request half plus the failures that precede dispatch, and [`error`] the wire
 //! vocabulary all of them share.
 //!
 //! [`Response`] itself stays here rather than being split up: it's the one
@@ -16,7 +16,9 @@ mod error;
 mod list;
 mod lock;
 mod request;
+mod ssh_approve;
 mod ssh_keys;
+mod ssh_pending;
 mod status;
 mod unlock;
 
@@ -25,9 +27,11 @@ pub use error::ErrorCode;
 pub use list::{List, ListError, ListRequest, WireEntry};
 pub use lock::{Lock, LockError, LockRequest};
 pub use request::{DecodeError, Op, ProtocolError, Request, decode_request, encode_request};
+pub use ssh_approve::{SshApprove, SshApproveError, SshApproveRequest};
 pub use ssh_keys::{
     SshKeys, SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey,
 };
+pub use ssh_pending::{SshPending, WirePending, WireRequestDetails, WireScope};
 pub use status::{DatabaseStatus, Status};
 pub use unlock::{Unlock, UnlockError, UnlockRequest};
 
@@ -53,9 +57,15 @@ pub const VERSION: u32 = 2;
 ///
 /// The blanket impl means implementing the op traits is all it takes —
 /// there is nothing extra to write.
-pub trait Handler: Status + Unlock + Lock + List + CopyEntry + SshKeys {}
+pub trait Handler:
+    Status + Unlock + Lock + List + CopyEntry + SshKeys + SshPending + SshApprove
+{
+}
 
-impl<T: Status + Unlock + Lock + List + CopyEntry + SshKeys> Handler for T {}
+impl<T: Status + Unlock + Lock + List + CopyEntry + SshKeys + SshPending + SshApprove> Handler
+    for T
+{
+}
 
 /// Turn one decoded request into the response for it.
 ///
@@ -84,6 +94,8 @@ where
         Op::List(request) => Response::List(handler.list(request)),
         Op::Copy(request) => Response::Copy(handler.copy(request, requester)),
         Op::SshKeys(request) => Response::SshKeys(handler.ssh_keys(request)),
+        Op::SshPending => Response::SshPending(handler.ssh_pending()),
+        Op::SshApprove(request) => Response::SshApprove(handler.ssh_approve(request)),
     }
 }
 
@@ -129,6 +141,10 @@ pub enum Response {
     Copy(Result<CopyOutcome, CopyError>),
     /// `Ok` carries what the scan of the database found.
     SshKeys(Result<SshKeysReport, SshKeysError>),
+    /// The SSH requests refused for want of an approval. Like `Status` it
+    /// carries no `Result`.
+    SshPending(Vec<WirePending>),
+    SshApprove(Result<(), SshApproveError>),
     /// Rejected before the daemon knew which op was even being asked for,
     /// so it belongs to no op's `Result`.
     Protocol(ProtocolError),
@@ -181,6 +197,12 @@ impl Serialize for Response {
                 }
             }
             Response::SshKeys(Err(err)) => serialize_error(&mut map, &err.fields())?,
+            Response::SshPending(pending) => {
+                map.serialize_entry("ok", &true)?;
+                map.serialize_entry("pending", pending)?;
+            }
+            Response::SshApprove(Ok(())) => map.serialize_entry("ok", &true)?,
+            Response::SshApprove(Err(err)) => serialize_error(&mut map, &err.fields())?,
             Response::Protocol(err) => serialize_error(&mut map, &err.fields())?,
         }
         map.end()
@@ -190,6 +212,7 @@ impl Serialize for Response {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use uuid::Uuid;
 
     use super::*;
 
@@ -277,6 +300,8 @@ mod tests {
                     db: "personal".to_string(),
                     key_type: "ssh-ed25519".to_string(),
                     fingerprint: "SHA256:abc".to_string(),
+                    name: "Deploy".to_string(),
+                    entry: Uuid::from_u128(1),
                     title: Some("Deploy".to_string()),
                     attachment: "id_ed25519".to_string(),
                 },
@@ -284,6 +309,8 @@ mod tests {
                     db: "work".to_string(),
                     key_type: "ssh-rsa".to_string(),
                     fingerprint: "SHA256:def".to_string(),
+                    name: "work SHA256:def".to_string(),
+                    entry: Uuid::from_u128(2),
                     title: None,
                     attachment: "id_rsa".to_string(),
                 },
@@ -306,6 +333,8 @@ mod tests {
                         "db": "personal",
                         "type": "ssh-ed25519",
                         "fingerprint": "SHA256:abc",
+                        "name": "Deploy",
+                        "entry": "00000000-0000-0000-0000-000000000001",
                         "title": "Deploy",
                         "attachment": "id_ed25519",
                     },
@@ -313,6 +342,8 @@ mod tests {
                         "db": "work",
                         "type": "ssh-rsa",
                         "fingerprint": "SHA256:def",
+                        "name": "work SHA256:def",
+                        "entry": "00000000-0000-0000-0000-000000000002",
                         "attachment": "id_rsa",
                     },
                 ],
@@ -402,7 +433,7 @@ mod tests {
         let owned = || db.to_string();
 
         // (response, expected code, expected `db`, expected `detail`)
-        let cases: [(Response, &str, Option<&str>, Option<&str>); 26] = [
+        let cases: [(Response, &str, Option<&str>, Option<&str>); 27] = [
             (
                 Response::Unlock(Err(UnlockError::InProgress { db: owned() })),
                 "unlock_in_progress",
@@ -521,6 +552,12 @@ mod tests {
                 "stale",
                 Some(db),
                 Some("database changed on disk"),
+            ),
+            (
+                Response::SshApprove(Err(SshApproveError::NotPending)),
+                "not_pending",
+                None,
+                Some("no such request is pending; it may have expired or the database locked"),
             ),
             (
                 Response::Copy(Err(CopyError::UnknownDb { db: owned() })),

@@ -21,6 +21,7 @@ mod fake;
 mod host;
 mod identities;
 mod message;
+mod pending;
 mod prompts;
 mod request;
 mod sign;
@@ -33,6 +34,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use host::{SlotView, SshHost};
+pub use pending::{approve_pending, pending_requests};
 pub use state::SshSlot;
 
 use super::bind::ConnectionClass;
