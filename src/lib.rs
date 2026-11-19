@@ -10,6 +10,7 @@ mod cancel;
 pub mod clipboard;
 pub mod config;
 pub mod databases;
+pub mod display_session;
 pub mod frontends;
 mod io;
 pub mod log;

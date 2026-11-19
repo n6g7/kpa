@@ -37,7 +37,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use common::InProcessDaemon;
-use kpa::session_watch::{DisplaySession, SessionEvent};
+use kpa::display_session::DisplaySession;
+use kpa::session_watch::SessionEvent;
 
 /// Held by each test that drives the live clipboard, for its whole run.
 static LIVE_CLIPBOARD: Mutex<()> = Mutex::new(());

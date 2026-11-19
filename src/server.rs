@@ -37,6 +37,7 @@ use crate::cancel::CancelSource;
 use crate::clipboard::{self, Clipboard};
 use crate::config::{Config, DatabaseConfig};
 use crate::databases::vault::{self, Fingerprint, VaultError};
+use crate::display_session::DisplaySession;
 use crate::frontends::control::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshApprove,
@@ -52,7 +53,7 @@ use crate::prompt::{
     self, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue, SecretProgram,
     SecretTerminal, Terminal,
 };
-use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
+use crate::session_watch::{SessionEvent, SleepDelay};
 use crate::socket::{self, Received};
 
 /// Longest request line accepted, and the size of the buffer each one is

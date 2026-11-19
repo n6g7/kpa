@@ -18,10 +18,11 @@ mod common;
 
 use kpa::authn::Requester;
 use kpa::config::Config;
+use kpa::display_session::DisplaySession;
 use kpa::frontends::control::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::paths::Paths;
 use kpa::server::Server;
-use kpa::session_watch::{self, Bus, DisplaySession, SessionEvent};
+use kpa::session_watch::{self, Bus, SessionEvent};
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::zvariant::{self, OwnedObjectPath, Value};

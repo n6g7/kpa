@@ -13,9 +13,9 @@ use crate::authn::Requester;
 use crate::authz;
 use crate::cancel::CancelSource;
 use crate::config::DatabaseConfig;
+use crate::display_session::DisplaySession;
 use crate::frontends::control::proto::{Unlock, UnlockError, UnlockRequest};
 use crate::prompt::{Prompt, PromptOutcome, PromptQueue, Scripted};
-use crate::session_watch::DisplaySession;
 
 /// The display session the fake host starts with.
 const SESSION: &str = "3";

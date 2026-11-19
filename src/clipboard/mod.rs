@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use zeroize::Zeroizing;
 
-use crate::session_watch::DisplaySession;
+use crate::display_session::DisplaySession;
 
 pub use wayland::Offer;
 
@@ -235,7 +235,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{Backend, Clipboard, ClipboardError, Offer};
-    use crate::session_watch::DisplaySession;
+    use crate::display_session::DisplaySession;
 
     /// A backend whose offers have no Wayland connection at all.
     struct FakeBackend {
