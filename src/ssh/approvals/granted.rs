@@ -52,8 +52,8 @@ impl GrantedApprovals {
 
 #[cfg(test)]
 mod tests {
-    use super::super::fixtures::{approval, fingerprint, host_key};
     use super::*;
+    use crate::ssh::testing::{approval, fingerprint, host_key};
 
     const WINDOW: Duration = Duration::from_secs(60);
 

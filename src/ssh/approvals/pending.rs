@@ -99,8 +99,8 @@ fn expired(entry: &Entry, now: Instant) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::fixtures::{approval, key, requested};
     use super::*;
+    use crate::ssh::testing::{approval, key, requested};
 
     #[test]
     fn identical_requests_merge_keeping_the_id_and_the_latest_time() {

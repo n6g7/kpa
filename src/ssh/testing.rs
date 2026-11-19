@@ -2,9 +2,12 @@
 //! ends that use it: throwaway keys, and databases and configs that serve
 //! keys.
 
-use ssh_key::{Algorithm, LineEnding, PrivateKey};
+use ssh_key::public::KeyData;
+use ssh_key::{Algorithm, Fingerprint, LineEnding, PrivateKey};
 
 use crate::config::{DatabaseConfig, SshKeyConfig};
+use crate::ssh::approvals::{RequestDetails, Scope, SignatureApproval};
+use crate::ssh::keys::{self, ServedKey};
 
 /// A deterministic, non-cryptographic stand-in for `OsRng`: these tests
 /// only need *a* valid keypair, the same one for the same seed.
@@ -118,3 +121,36 @@ iGYuBTxUVNJpDeKmPMVV4aAQ4toK4wfRwR+FKpx1aOAvk9SbKo+Se3mUOykgytMhqiCEEJ
 4JBdEVdmfK8eMAAAAQdXNlckBleGFtcGxlLmNvbQECAw==
 -----END OPENSSH PRIVATE KEY-----
 ";
+
+pub(crate) fn fingerprint(seed: u64) -> Fingerprint {
+    test_key(seed)
+        .public_key()
+        .fingerprint(ssh_key::HashAlg::Sha256)
+}
+
+pub(crate) fn host_key(seed: u64) -> KeyData {
+    test_key(seed).public_key().key_data().clone()
+}
+
+pub(crate) fn approval(key: u64, destination: Option<u64>, remember: bool) -> SignatureApproval {
+    SignatureApproval {
+        scope: Scope::new(fingerprint(key), destination.map(host_key).as_ref()),
+        remember,
+    }
+}
+
+/// The key `approval(1, ..)` is for, as an open database serves it.
+pub(crate) fn key() -> ServedKey {
+    let cfg = database("personal", vec![]);
+    keys::resolve_cached(&cfg, vec![test_key(1).public_key().clone()]).remove(0)
+}
+
+pub(crate) fn requested(command: &str) -> RequestDetails {
+    RequestDetails {
+        purpose: "login",
+        user: Some("alice".to_string()),
+        namespace: None,
+        class: "local",
+        command: Some(command.to_string()),
+    }
+}

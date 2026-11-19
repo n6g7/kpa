@@ -8,9 +8,6 @@
 mod granted;
 mod pending;
 
-#[cfg(test)]
-mod fixtures;
-
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -231,10 +228,9 @@ impl Observer for Approvals {
 mod tests {
     use std::sync::Arc;
 
-    use super::fixtures::{approval, key, requested};
     use super::*;
     use crate::databases::testing::TestEntry;
-    use crate::ssh::testing::database;
+    use crate::ssh::testing::{approval, database, key, requested};
 
     const WINDOW: Duration = Duration::from_secs(60);
     const IDLE: Duration = Duration::from_secs(3600);
