@@ -166,49 +166,6 @@ fn inhibit_forever(requests: Receiver<bool>, delay: SleepDelay, mut inhibitor: L
     }
 }
 
-/// The [`DisplaySession`] for logind's display session `id` (`docs/headless.md`
-/// § 3 and § 5), the id being logind's session id: its scope is
-/// `session-<id>.scope`. `User.Display` being `/` is
-/// [`DisplaySession::None`]. Only `LockedHint` makes it locked: a locker that
-/// only sends the `Lock` signal never reports the unlock (ASM-7), so its
-/// session stays unlocked. `active` is the session's `Active` property.
-fn from_state(id: &str, locked: bool, active: bool) -> DisplaySession {
-    let id = id.to_string();
-    if locked {
-        DisplaySession::Locked { id, active }
-    } else {
-        DisplaySession::Unlocked { id, active }
-    }
-}
-
-/// Same session and `LockedHint`, with `locked` in place of the
-/// current one. A no-op on [`DisplaySession::None`]: there is no session to
-/// carry a hint for.
-fn with_locked(session: &DisplaySession, locked: bool) -> DisplaySession {
-    match session {
-        DisplaySession::None => DisplaySession::None,
-        DisplaySession::Locked { id, active } | DisplaySession::Unlocked { id, active } => {
-            from_state(id, locked, *active)
-        }
-    }
-}
-
-/// Same session and `LockedHint`, with `active` in place of the
-/// current one. A no-op on [`DisplaySession::None`].
-fn with_active(session: &DisplaySession, active: bool) -> DisplaySession {
-    match session {
-        DisplaySession::None => DisplaySession::None,
-        DisplaySession::Locked { id, .. } => DisplaySession::Locked {
-            id: id.clone(),
-            active,
-        },
-        DisplaySession::Unlocked { id, .. } => DisplaySession::Unlocked {
-            id: id.clone(),
-            active,
-        },
-    }
-}
-
 /// Where logind is: the system bus in production, a private bus in tests.
 #[derive(Debug, Clone)]
 pub enum Bus {
@@ -334,11 +291,11 @@ fn watch(
                 let _ = events.send(SessionEvent::Changed(current.clone()));
             }
             Step::Property(Property::Locked(locked)) => {
-                current = with_locked(&current, locked);
+                current = current.with_locked(locked);
                 let _ = events.send(SessionEvent::Changed(current.clone()));
             }
             Step::Property(Property::Active(active)) => {
-                current = with_active(&current, active);
+                current = current.with_active(active);
                 let _ = events.send(SessionEvent::Changed(current.clone()));
             }
             Step::Ignore => {}
@@ -460,8 +417,12 @@ fn logind_session(conn: &Connection, user: &str) -> Result<Option<LogindSession>
     parse_display(&value).ok_or_else(|| "unexpected User.Display value".to_string())
 }
 
-/// The state of the user's display session: which one it is, its `LockedHint`,
-/// and its `Active`.
+/// The state of the user's display session (`docs/headless.md` § 3 and § 5):
+/// which one it is, its `LockedHint` and its `Active`. The id is logind's
+/// session id: its scope is `session-<id>.scope`. `User.Display` being `/` is
+/// [`DisplaySession::None`]. Only `LockedHint` makes it locked: a locker that
+/// only sends the `Lock` signal never reports the unlock (ASM-7), so its
+/// session stays unlocked.
 fn display_session(
     conn: &Connection,
     session: Option<&LogindSession>,
@@ -470,7 +431,7 @@ fn display_session(
         Some(session) => {
             let locked = locked_hint(conn, session.path.as_str())?;
             let active = active_hint(conn, session.path.as_str())?;
-            Ok(from_state(&session.id, locked, active))
+            Ok(DisplaySession::new(&session.id, locked, active))
         }
         None => Ok(DisplaySession::None),
     }
@@ -564,62 +525,6 @@ impl LogindInhibitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A locked display session, active unless `active` says otherwise.
-    fn locked_display_session() -> DisplaySession {
-        DisplaySession::Locked {
-            id: "31".to_string(),
-            active: true,
-        }
-    }
-
-    /// An unlocked display session, active unless `active` says otherwise.
-    fn unlocked_display_session() -> DisplaySession {
-        DisplaySession::Unlocked {
-            id: "31".to_string(),
-            active: true,
-        }
-    }
-
-    /// An unlocked display session that isn't the active one — a VT
-    /// switch, say.
-    fn inactive_unlocked_display_session() -> DisplaySession {
-        DisplaySession::Unlocked {
-            id: "31".to_string(),
-            active: false,
-        }
-    }
-
-    /// `with_locked` and `with_active` carry the session across and only
-    /// change the one property asked for; both are a no-op on
-    /// `DisplaySession::None` (there is nothing to carry).
-    #[test]
-    fn with_locked_and_with_active_change_one_property_at_a_time() {
-        assert_eq!(
-            with_locked(&unlocked_display_session(), true),
-            locked_display_session()
-        );
-        assert_eq!(
-            with_locked(&locked_display_session(), false),
-            unlocked_display_session()
-        );
-        assert_eq!(
-            with_active(&unlocked_display_session(), false),
-            inactive_unlocked_display_session()
-        );
-        assert_eq!(
-            with_active(&inactive_unlocked_display_session(), true),
-            unlocked_display_session()
-        );
-        assert_eq!(
-            with_locked(&DisplaySession::None, true),
-            DisplaySession::None
-        );
-        assert_eq!(
-            with_active(&DisplaySession::None, false),
-            DisplaySession::None
-        );
-    }
 
     #[test]
     fn a_request_to_hold_holds_while_the_machine_is_awake_and_never_while_it_sleeps() {

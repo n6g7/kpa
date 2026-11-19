@@ -37,6 +37,37 @@ pub enum DisplaySession {
 }
 
 impl DisplaySession {
+    /// The session `id`, locked or not, in front (`active`) or not.
+    pub fn new(id: &str, locked: bool, active: bool) -> DisplaySession {
+        let id = id.to_string();
+        if locked {
+            DisplaySession::Locked { id, active }
+        } else {
+            DisplaySession::Unlocked { id, active }
+        }
+    }
+
+    /// The same session, locked or not as `locked` says. A no-op on
+    /// [`DisplaySession::None`]: there is no session to lock.
+    pub fn with_locked(&self, locked: bool) -> DisplaySession {
+        match self {
+            DisplaySession::None => DisplaySession::None,
+            DisplaySession::Locked { id, active } | DisplaySession::Unlocked { id, active } => {
+                DisplaySession::new(id, locked, *active)
+            }
+        }
+    }
+
+    /// The same session, in front or not as `active` says. A no-op on
+    /// [`DisplaySession::None`].
+    pub fn with_active(&self, active: bool) -> DisplaySession {
+        match self {
+            DisplaySession::None => DisplaySession::None,
+            DisplaySession::Locked { id, .. } => DisplaySession::new(id, true, active),
+            DisplaySession::Unlocked { id, .. } => DisplaySession::new(id, false, active),
+        }
+    }
+
     pub fn is_locked(&self) -> bool {
         matches!(self, DisplaySession::Locked { .. })
     }
@@ -116,6 +147,57 @@ mod tests {
         assert!(locked_display_session().is_locked());
         assert_eq!(unlocked_display_session().id(), Some("31"));
         assert!(!unlocked_display_session().is_locked());
+    }
+
+    fn inactive_unlocked_display_session() -> DisplaySession {
+        DisplaySession::Unlocked {
+            id: "31".to_string(),
+            active: false,
+        }
+    }
+
+    #[test]
+    fn new_is_locked_or_unlocked_as_asked() {
+        assert_eq!(
+            DisplaySession::new("31", true, true),
+            locked_display_session()
+        );
+        assert_eq!(
+            DisplaySession::new("31", false, true),
+            unlocked_display_session()
+        );
+        assert_eq!(
+            DisplaySession::new("31", false, false),
+            inactive_unlocked_display_session()
+        );
+    }
+
+    /// `with_locked` and `with_active` carry the session across and only
+    /// change the one property asked for; both are a no-op on
+    /// `DisplaySession::None` (there is nothing to carry).
+    #[test]
+    fn with_locked_and_with_active_change_one_property_at_a_time() {
+        assert_eq!(
+            unlocked_display_session().with_locked(true),
+            locked_display_session()
+        );
+        assert_eq!(
+            locked_display_session().with_locked(false),
+            unlocked_display_session()
+        );
+        assert_eq!(
+            unlocked_display_session().with_active(false),
+            inactive_unlocked_display_session()
+        );
+        assert_eq!(
+            inactive_unlocked_display_session().with_active(true),
+            unlocked_display_session()
+        );
+        assert_eq!(DisplaySession::None.with_locked(true), DisplaySession::None);
+        assert_eq!(
+            DisplaySession::None.with_active(false),
+            DisplaySession::None
+        );
     }
 
     #[test]
