@@ -540,14 +540,17 @@ impl AutoLock {
     /// Spawns the idle tick, then blocks reacting to events. `daemon` spawns it.
     pub fn run(self, databases: Arc<Databases>, idle_timeout: Duration);
 }
-pub struct SleepHold { /* SleepDelay, a mutex that orders its answers */ }
-impl Observer for SleepHold { /* hold_while(databases.any_unlocked()) after every change */ }
+pub struct SleepHold { /* Sender<SleepSignal>, a mutex that orders its answers */ }
+impl Observer for SleepHold { /* send(Unlocked(databases.any_unlocked())) after every change */ }
 
 fn react(databases: &Databases, display: &DisplayWriter, event: SessionEvent); // private
 fn watch_idle(databases: &Databases, idle_timeout: Duration);                  // private: expire_idle(now) on a tick
 ```
 
-`SessionEvent` and `SleepDelay` belong to `logind.rs`; `daemon` sees neither.
+`SessionEvent` and `SleepSignal` belong to `logind.rs`; `daemon` sees neither.
+The inhibitor thread owns the inhibitor and its state; it is told
+`SleepSignal::{Unlocked(bool), GoingToSleep, Resumed}` on one channel, the
+watcher sending the last two.
 
 `react` locks everything for a lock request, a locked display session, a
 suspend and a lost watch. `SleepHold` reads `any_unlocked()` inside its own
@@ -933,8 +936,8 @@ the directory changes. Until then no macOS code or stubs are written.
   `DisplayWriter` the test sets: the unlock gates, a lock ending a prompt,
   and "a lock of the database a copy came from ends the offer; another doesn't".
 - **`auto_lock`** is tested by unit tests of `react`, `watch_idle` and
-  `SleepHold` on a `Databases` with a `SleepDelay` whose receiver the test
-  reads; the logind watcher and `auto_lock::start` by `tests/logind.rs`
+  `SleepHold` on a `Databases` with a `SleepSignal` channel whose receiver the
+  test reads; the logind watcher and `auto_lock::start` by `tests/logind.rs`
   against a private bus.
 - **Integration tests** build the daemon with `daemon` and put the real CLI
   and the OpenSSH tools in front of it.
