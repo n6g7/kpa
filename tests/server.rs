@@ -27,6 +27,17 @@ use std::time::{Duration, Instant};
 use common::{InProcessDaemon, config_toml};
 use serde_json::Value;
 
+/// Waits until `socket` accepts a connection. Binding creates the socket
+/// file before `listen`, so the file existing is not enough: a connect in
+/// between is refused.
+fn wait_until_listening(socket: &Path, timeout_message: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(socket).is_err() {
+        assert!(Instant::now() < deadline, "{timeout_message}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 struct Daemon {
     child: Child,
     socket: PathBuf,
@@ -70,14 +81,7 @@ impl Daemon {
             .spawn()
             .expect("failed to spawn kpa serve");
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !socket.exists() {
-            assert!(
-                Instant::now() < deadline,
-                "kpa serve did not create its socket in time"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_until_listening(&socket, "kpa serve did not create its socket in time");
 
         Daemon {
             child,
@@ -583,14 +587,10 @@ fn kpa_serve_runs_the_ssh_agent_when_a_database_serves_keys() {
         &[("XDG_CACHE_HOME", &cache)],
     );
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !agent_socket.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "kpa serve did not create the ssh agent socket in time"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until_listening(
+        &agent_socket,
+        "kpa serve did not create the ssh agent socket in time",
+    );
     let listed = Command::new("ssh-add")
         .arg("-l")
         .env("SSH_AUTH_SOCK", &agent_socket)
