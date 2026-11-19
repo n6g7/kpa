@@ -345,10 +345,14 @@ mod tests {
         let now = Instant::now();
         for db in ["personal", "work"] {
             let open = databases.open(db).unwrap();
+            let titled = ServedKey {
+                title: Some("a secret title".to_string()),
+                ..key()
+            };
             approvals.record(
                 &open,
                 approval(1, None, false),
-                key(),
+                titled,
                 requested("ssh"),
                 now,
             );
@@ -362,12 +366,9 @@ mod tests {
                 .pending(&databases.open("personal").unwrap(), now)
                 .is_empty()
         );
-        assert_eq!(
-            approvals
-                .pending(&databases.open("work").unwrap(), now)
-                .len(),
-            1
-        );
+        let work = approvals.pending(&databases.open("work").unwrap(), now);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].key.title.as_deref(), Some("a secret title"));
     }
 
     #[test]
