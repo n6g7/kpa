@@ -1,8 +1,8 @@
 //! CLI entry point: parses arguments and dispatches. `serve` runs the
 //! daemon here directly; every other subcommand goes to [`client`] — one
 //! request, and the daemon's raw JSON response line printed verbatim or,
-//! for a command with a text view, that view of it; `unlock` can send a
-//! second once the terminal read it needs is done.
+//! for a command with a text view, that view of it; `unlock` passes its
+//! terminal along for the daemon to ask for the master password on.
 
 mod client;
 mod ssh_keys_report;
@@ -59,14 +59,14 @@ enum Command {
     },
     /// Aggregate lock state of every configured database.
     Status,
-    /// Unlock one database. The daemon prompts on screen when the request
-    /// comes from the desktop; otherwise this reads the master password
-    /// from this terminal and sends it instead (`docs/headless.md` § 4).
+    /// Unlock one database. The daemon asks for the master password on
+    /// screen when the request comes from the desktop; otherwise it asks on
+    /// this terminal (`docs/headless.md` § 4).
     Unlock {
         db: String,
-        /// Read the password from this terminal right away, rather than
-        /// trying a plain request first. What a desktop terminal uses to
-        /// ask for the terminal read instead of the graphical prompt.
+        /// Have the daemon ask on this terminal even where it could ask on
+        /// screen. What a desktop terminal uses to type the password
+        /// instead of using the graphical prompt.
         #[arg(long)]
         tty: bool,
     },
@@ -115,11 +115,10 @@ fn main() -> ExitCode {
 }
 
 /// Everything `main` does once arguments are parsed. Marks this process
-/// non-dumpable first, before any subcommand's dispatch — including
-/// `Unlock`'s terminal read, which holds the master password — can begin.
-/// If that fails, this returns without dispatching to anything: a
-/// subcommand that holds a secret must never run dumpable, and the ones
-/// that don't lose nothing by also refusing.
+/// non-dumpable first, before any subcommand's dispatch can begin. If that
+/// fails, this returns without dispatching to anything: `serve` holds
+/// secrets and must never run dumpable, and the clients lose nothing by
+/// also refusing.
 fn dispatch(cli: Cli) -> ExitCode {
     if let Err(err) = forbid_core_dumps() {
         report_error(format_args!("marking this process non-dumpable: {err}"));
@@ -303,13 +302,12 @@ mod tests {
         );
     }
 
-    /// `kpa unlock` holds the master password from the terminal read
-    /// onward, so it must be non-dumpable too, not just the daemon. This
-    /// drives `dispatch` down the `Unlock` arm and checks the process is
-    /// already non-dumpable by the time it gets there. The socket points
-    /// nowhere, so `send_request` fails at connect and this never reaches
-    /// the terminal read — no pty needed, and nothing to hang on if one is
-    /// attached.
+    /// `dispatch` marks a client non-dumpable too, not just the daemon, and
+    /// does it before the subcommand runs. This drives it down the `Unlock`
+    /// arm and checks the process is already non-dumpable by the time it
+    /// gets there. The socket points nowhere, so `send_request` fails at
+    /// connect and this never passes a terminal along — nothing to hang on
+    /// if one is attached.
     #[test]
     fn the_unlock_path_marks_itself_non_dumpable_before_dispatch() {
         let _turn = DUMPABLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());

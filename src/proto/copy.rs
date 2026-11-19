@@ -153,7 +153,7 @@ impl std::str::FromStr for Field {
 /// Everything `copy` can fail with. Every variant but `NoDisplay` names the
 /// database the copy was for. `NoDisplay` is about where the request came
 /// from, not about any database, so it names none — same shape as
-/// `UnlockError::NoDisplay`.
+/// `UnlockError::NoPrompt`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyError {
     UnknownDb {

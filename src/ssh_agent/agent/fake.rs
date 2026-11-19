@@ -29,6 +29,7 @@ pub(super) fn requester() -> Requester {
         )),
         command: None,
         terminal: None,
+        preferred: None,
     }
 }
 
@@ -252,7 +253,7 @@ impl Unlock for FakeHost {
                 return Ok(named());
             }
             if !authz::may_prompt_on_screen(requester, &self.display_session) {
-                return Err(UnlockError::NoDisplay);
+                return Err(UnlockError::NoPrompt);
             }
             slot.lock_signal.token()
         };

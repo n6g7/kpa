@@ -53,9 +53,10 @@ use crate::socket::{self, Received};
 use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
 use crate::vault::{self, Fingerprint, VaultError};
 
-/// Longest request line accepted, and the size of the zeroizing buffer
-/// each one is read into. The largest legitimate request is an `unlock`
-/// carrying a `MAX_PASSWORD_LEN` password, about 5.5 KiB of base64.
+/// Longest request line accepted, and the size of the buffer each one is
+/// read into. A request names a database or an entry, a few hundred bytes at
+/// most, so this is far more than any needs: it bounds what a client can
+/// make the daemon hold.
 const MAX_REQUEST_LEN: usize = 64 * 1024;
 
 /// How long a client gets to send its request, and to take its response.
@@ -553,16 +554,11 @@ impl Unlock for Server {
             if slot.db.is_some() {
                 return Ok(name.to_string());
             }
-            // On screen where a prompt may appear, otherwise on the
-            // requester's terminal, and nowhere else: no prompt where
-            // nobody can answer it. Read under the mutex:
+            // No prompt where nobody can answer it. Read under the mutex:
             // `on_session_event` marks the display session before its
             // `lock_all` takes it, so either this sees the mark and refuses,
-            // or that lock cancels the token taken below and ends the
-            // prompt. A request that carries its password needs no prompt,
-            // so it goes ahead from anywhere.
-            let prompt_on =
-                authz::choose_unlock_prompt(request, requester, &self.display_session())?;
+            // or that lock cancels the token taken below and ends the prompt.
+            let prompt_on = authz::choose_unlock_prompt(requester, &self.display_session())?;
             if slot.unlocking {
                 return Err(UnlockError::InProgress { db: db() });
             }
@@ -576,56 +572,45 @@ impl Unlock for Server {
             name,
         };
 
-        let prompted;
-        let password = match prompt_on {
-            // A request that carries a password never prompts. A wrong one
-            // fails like a wrong one typed at the prompt, with no backoff:
-            // any same-uid process can read the `.kdbx` and guess offline.
-            None => request
-                .password
-                .as_ref()
-                .map(|password| password.as_zeroizing()),
-            Some(prompt_on) => {
-                log::debug(format_args!("prompting for {name:?}"));
-                let timeout = self.config.prompt_timeout;
-                let message = message.map_or_else(|| format!("Unlock {name}"), str::to_string);
-                let backend: Arc<dyn prompt::Backend<Zeroizing<String>>> = match prompt_on {
-                    PromptOn::Screen => Arc::clone(&self.screen_unlock),
-                    PromptOn::Terminal => Arc::new(SecretTerminal::new(
-                        requester.terminal.clone().ok_or(UnlockError::NoDisplay)?,
-                    )),
-                };
-                let outcome = Prompt::new(Arc::clone(&self.prompt_queue), backend, timeout)
-                    .ask(&message, &cancel_token);
-                prompted = match outcome {
-                    Ok(PromptOutcome::Cancelled) => {
-                        return Err(UnlockError::PromptCancelled { db: db() });
-                    }
-                    Ok(PromptOutcome::TimedOut) => {
-                        log::info(format_args!(
-                            "prompt for {name:?} unanswered after {timeout:?}"
-                        ));
-                        return Err(UnlockError::PromptCancelled { db: db() });
-                    }
-                    // A lock ended the prompt, and has already told its own
-                    // client the database is locked.
-                    Ok(PromptOutcome::Interrupted) => {
-                        return Err(UnlockError::LockedDuringUnlock { db: db() });
-                    }
-                    Ok(PromptOutcome::Answer(password)) => password,
-                    Err(err) => {
-                        return Err(UnlockError::PromptFailed {
-                            db: db(),
-                            detail: err.to_string(),
-                        });
-                    }
-                };
-                Some(&prompted)
+        log::debug(format_args!("prompting for {name:?}"));
+        let timeout = self.config.prompt_timeout;
+        let message = message.map_or_else(|| format!("Unlock {name}"), str::to_string);
+        let backend: Arc<dyn prompt::Backend<Zeroizing<String>>> = match prompt_on {
+            PromptOn::Screen => Arc::clone(&self.screen_unlock),
+            PromptOn::Terminal => Arc::new(SecretTerminal::new(
+                requester.terminal.clone().ok_or(UnlockError::NoPrompt)?,
+            )),
+        };
+        let outcome = Prompt::new(Arc::clone(&self.prompt_queue), backend, timeout)
+            .ask(&message, &cancel_token);
+        let password = match outcome {
+            Ok(PromptOutcome::Cancelled) => {
+                return Err(UnlockError::PromptCancelled { db: db() });
+            }
+            Ok(PromptOutcome::TimedOut) => {
+                log::info(format_args!(
+                    "prompt for {name:?} unanswered after {timeout:?}"
+                ));
+                return Err(UnlockError::PromptCancelled { db: db() });
+            }
+            // A lock ended the prompt, and has already told its own client
+            // the database is locked.
+            Ok(PromptOutcome::Interrupted) => {
+                return Err(UnlockError::LockedDuringUnlock { db: db() });
+            }
+            Ok(PromptOutcome::Answer(password)) => password,
+            Err(err) => {
+                return Err(UnlockError::PromptFailed {
+                    db: db(),
+                    detail: err.to_string(),
+                });
             }
         };
         // Empty means "no password" — the only way to reach a keyfile-only
-        // database from a prompt that always asks.
-        let password = password.filter(|password| !password.is_empty());
+        // database from a prompt that always asks. A wrong one fails with no
+        // backoff: any same-uid process can read the `.kdbx` and guess
+        // offline.
+        let password = Some(&password).filter(|password| !password.is_empty());
 
         // Note: a file with pathological KDF parameters can make this hang
         // indefinitely or abort the process — upstream in `keepass`, which
@@ -1149,9 +1134,8 @@ pub(crate) fn log_response(response: &Response) {
 /// Serialize `response` and send it, newline-terminated.
 ///
 /// Serialized twice on purpose: once to measure (into the shared
-/// [`ByteCounter`], also used by `proto::encode_request` for the CLI's
-/// outbound requests), once into a zeroizing buffer allocated at exactly
-/// that size. A `list` response holds every entry's title, username and
+/// [`ByteCounter`]), once into a zeroizing buffer allocated at exactly that
+/// size. A `list` response holds every entry's title, username and
 /// URL, and a buffer that grows while being filled frees an unwiped copy
 /// at each reallocation — which is what survived a lock before
 /// (`docs/review-2026-09-secrets.md` finding 5).
@@ -1186,11 +1170,10 @@ enum RequestLine {
 /// Read one request line into `buf`, which never grows, and the file
 /// descriptor sent with it if there is one.
 ///
-/// Read straight from the socket rather than through a `BufReader`: an
-/// `unlock` line can carry the master password, and a `BufReader`'s own
-/// buffer (like a `Vec` grown as the line arrives) would be freed without
-/// being wiped. Whatever is read past the newline lands in `buf` too, and
-/// is ignored: a connection carries one request.
+/// Read straight from the socket rather than through a `BufReader`, which
+/// can't receive the descriptor that comes with the line. Whatever is read
+/// past the newline lands in `buf` too, and is ignored: a connection carries
+/// one request.
 fn read_request(stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<RequestLine> {
     let mut len = 0;
     let mut fd = None;
@@ -1274,10 +1257,8 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
         }
     ));
 
-    // The request, and the buffer it was read into, are dropped (and so
-    // wiped) at the end of this block, before the response goes anywhere.
     let response = {
-        let mut buf = Zeroizing::new(vec![0u8; MAX_REQUEST_LEN]);
+        let mut buf = vec![0u8; MAX_REQUEST_LEN];
         match read_request(&stream, &mut buf) {
             Ok(RequestLine::Closed) | Err(_) => return,
             Ok(RequestLine::TooLong | RequestLine::TooManyFds) => {
@@ -1346,6 +1327,7 @@ mod tests {
             cgroup: Some(cgroup),
             command: None,
             terminal: None,
+            preferred: None,
         }
     }
 
@@ -1403,7 +1385,7 @@ mod tests {
         assert!(reply.contains("malformed_request"), "got {reply:?}");
     }
 
-    const STATUS: &[u8] = b"{\"v\":1,\"op\":\"status\"}\n";
+    const STATUS: &[u8] = b"{\"v\":2,\"op\":\"status\"}\n";
 
     #[test]
     fn a_request_may_come_with_a_terminal() {
@@ -1466,11 +1448,11 @@ mod tests {
 
     #[test]
     fn read_request_stops_at_the_first_newline() {
-        let (read, buf) = read_written(&[b"{\"v\":1,", b"\"op\":\"status\"}\nrest\n"], 64);
+        let (read, buf) = read_written(&[b"{\"v\":2,", b"\"op\":\"status\"}\nrest\n"], 64);
         let Ok(RequestLine::Line { len, .. }) = read else {
             panic!("expected a line");
         };
-        assert_eq!(&buf[..len], b"{\"v\":1,\"op\":\"status\"}");
+        assert_eq!(&buf[..len], b"{\"v\":2,\"op\":\"status\"}");
     }
 
     #[test]
@@ -1491,11 +1473,11 @@ mod tests {
 
     #[test]
     fn a_valid_request_is_still_answered() {
-        let reply = exchange(b"{\"v\":1,\"op\":\"status\"}\n");
+        let reply = exchange(b"{\"v\":2,\"op\":\"status\"}\n");
         assert_eq!(
             reply,
             format!(
-                "{{\"v\":1,\"ok\":true,\"databases\":[],\"version\":{:?}}}\n",
+                "{{\"v\":2,\"ok\":true,\"databases\":[],\"version\":{:?}}}\n",
                 crate::VERSION
             )
         );
@@ -1505,7 +1487,7 @@ mod tests {
     fn handle_connection_drops_a_peer_of_another_uid() {
         let server = empty_server();
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
-        ours.write_all(b"{\"v\":1,\"op\":\"status\"}\n")
+        ours.write_all(b"{\"v\":2,\"op\":\"status\"}\n")
             .expect("write");
         // Any uid other than ours stands in for a peer we must refuse.
         let other = crate::authn::process_uid().wrapping_add(1);
@@ -1524,7 +1506,7 @@ mod tests {
     fn handle_connection_answers_a_peer_of_our_uid() {
         let server = empty_server();
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
-        ours.write_all(b"{\"v\":1,\"op\":\"status\"}\n")
+        ours.write_all(b"{\"v\":2,\"op\":\"status\"}\n")
             .expect("write");
         let owner = crate::authn::process_uid();
 
@@ -2351,7 +2333,6 @@ mod tests {
             &server,
             &UnlockRequest {
                 db: "personal".to_string(),
-                password: None,
             },
             &desktop(),
             None,
@@ -2416,7 +2397,6 @@ mod tests {
             &server,
             &UnlockRequest {
                 db: "personal".to_string(),
-                password: None,
             },
             &desktop(),
             None,
@@ -2543,10 +2523,7 @@ mod tests {
     }
 
     fn request(db: &str) -> UnlockRequest {
-        UnlockRequest {
-            db: db.to_string(),
-            password: None,
-        }
+        UnlockRequest { db: db.to_string() }
     }
 
     fn unlock_from(
@@ -2588,7 +2565,7 @@ mod tests {
             id: SESSION.to_string(),
             active: true,
         });
-        assert_eq!(unlock(&server, "personal"), Err(UnlockError::NoDisplay));
+        assert_eq!(unlock(&server, "personal"), Err(UnlockError::NoPrompt));
         assert!(prompts.shown().is_empty(), "a prompt ran behind the locker");
 
         server.set_display_session(DisplaySession::Unlocked {
@@ -2619,7 +2596,7 @@ mod tests {
 
         assert_eq!(
             unlock_from(&server, "personal", &outside()),
-            Err(UnlockError::NoDisplay)
+            Err(UnlockError::NoPrompt)
         );
         assert!(
             prompts.shown().is_empty(),
@@ -2636,45 +2613,6 @@ mod tests {
             prompts.shown(),
             ["Unlock personal"],
             "the prompt runs for the desktop"
-        );
-    }
-
-    /// A request that carries its password needs no prompt, so neither
-    /// gate applies: it goes ahead from outside the desktop, and behind a
-    /// locker. Here it reaches the vault, whose file doesn't exist.
-    #[test]
-    fn a_request_carrying_its_password_goes_ahead_from_anywhere() {
-        let (server, prompts) = prompt_server();
-
-        for display_session in [
-            DisplaySession::None,
-            DisplaySession::Locked {
-                id: SESSION.to_string(),
-                active: true,
-            },
-        ] {
-            server.set_display_session(display_session);
-            let result = Unlock::unlock(
-                &*server,
-                &UnlockRequest {
-                    db: "personal".to_string(),
-                    password: Some(crate::proto::Password::new(Zeroizing::new(
-                        "hunter2".to_string(),
-                    ))),
-                },
-                &outside(),
-                None,
-            );
-            assert_eq!(
-                result,
-                Err(UnlockError::NotFound {
-                    db: "personal".to_string()
-                })
-            );
-        }
-        assert!(
-            prompts.shown().is_empty(),
-            "a request with a password prompted"
         );
     }
 
@@ -2882,11 +2820,21 @@ mod tests {
     fn answer_on_terminal(
         server: &Arc<Server>,
         requester: &Requester,
+        preferred: Option<PromptOn>,
         master: &mut File,
         line: &str,
     ) -> Result<String, UnlockError> {
         thread::scope(|scope| {
-            let unlocking = scope.spawn(|| unlock_from(server, "personal", requester));
+            let unlocking = scope.spawn(|| {
+                unlock_from(
+                    server,
+                    "personal",
+                    &Requester {
+                        preferred,
+                        ..requester.clone()
+                    },
+                )
+            });
             read_until(master, "Unlock personal: ");
             assert!(!echoing(master), "echo is off while the prompt is up");
             master.write_all(line.as_bytes()).expect("type");
@@ -2901,7 +2849,7 @@ mod tests {
 
         // The vault is where the typed password is tried, and it isn't there.
         assert_eq!(
-            answer_on_terminal(&server, &requester, &mut master, "hunter2\n"),
+            answer_on_terminal(&server, &requester, None, &mut master, "hunter2\n"),
             Err(UnlockError::NotFound {
                 db: "personal".to_string()
             })
@@ -2930,6 +2878,72 @@ mod tests {
         assert!(echoing(&master));
     }
 
+    /// A requester that prefers the terminal is asked there even where a
+    /// prompt may appear on screen.
+    #[test]
+    fn a_request_preferring_the_terminal_is_asked_there_on_the_desktop_too() {
+        let (server, prompts) = prompt_server();
+        let (requester, mut master, _client) = passing_a_terminal(true);
+
+        assert_eq!(
+            answer_on_terminal(
+                &server,
+                &requester,
+                Some(PromptOn::Terminal),
+                &mut master,
+                "hunter2\n"
+            ),
+            Err(UnlockError::NotFound {
+                db: "personal".to_string()
+            })
+        );
+        assert!(prompts.shown().is_empty(), "the screen prompt ran");
+    }
+
+    /// Preferring the terminal without passing one asks nowhere, even where
+    /// a prompt may appear on screen.
+    #[test]
+    fn a_request_preferring_a_terminal_it_did_not_pass_is_no_prompt() {
+        let (server, prompts) = prompt_server();
+
+        assert_eq!(
+            unlock_from(
+                &server,
+                "personal",
+                &Requester {
+                    preferred: Some(PromptOn::Terminal),
+                    ..desktop()
+                },
+            ),
+            Err(UnlockError::NoPrompt)
+        );
+        assert!(prompts.shown().is_empty(), "the screen prompt ran");
+        assert!(!unlocking(&server));
+    }
+
+    /// Preferring the screen is asked there or nowhere: the terminal the
+    /// request passed is not a fallback, and is left alone.
+    #[test]
+    fn a_request_preferring_the_screen_is_never_asked_on_the_terminal() {
+        let (server, prompts) = prompt_server();
+        let (requester, master, _client) = passing_a_terminal(false);
+
+        assert_eq!(
+            unlock_from(
+                &server,
+                "personal",
+                &Requester {
+                    preferred: Some(PromptOn::Screen),
+                    ..requester.clone()
+                },
+            ),
+            Err(UnlockError::NoPrompt)
+        );
+        assert!(prompts.shown().is_empty());
+        assert!(!shows_anything(&master), "something was written to it");
+        assert!(echoing(&master));
+    }
+
     /// A requester on the desktop behind a locker has no screen to answer
     /// on, but its terminal still is one.
     #[test]
@@ -2942,7 +2956,7 @@ mod tests {
         let (requester, mut master, _client) = passing_a_terminal(true);
 
         assert_eq!(
-            answer_on_terminal(&server, &requester, &mut master, "hunter2\n"),
+            answer_on_terminal(&server, &requester, None, &mut master, "hunter2\n"),
             Err(UnlockError::NotFound {
                 db: "personal".to_string()
             })

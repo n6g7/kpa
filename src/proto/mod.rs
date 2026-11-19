@@ -29,7 +29,10 @@ pub use ssh_keys::{
     SshKeys, SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey,
 };
 pub use status::{DatabaseStatus, Status};
-pub use unlock::{MAX_PASSWORD_LEN, Password, PasswordError, Unlock, UnlockError, UnlockRequest};
+pub use unlock::{Unlock, UnlockError, UnlockRequest};
+
+/// Where a prompt asks, which a request may name (`Request::preferred_prompt`).
+pub use crate::prompt::PromptOn;
 
 use serde::Serialize;
 
@@ -41,7 +44,7 @@ use error::serialize_error;
 /// regardless of what the request asked for or which version it claimed —
 /// see `decode_request` and `docs/design.md`'s "skew impossible to ignore"
 /// rationale.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Everything a kpa daemon has to be able to do, as one bound. Each op's
 /// trait is defined next to that op's types; this just gathers them, so
@@ -60,10 +63,17 @@ impl<T: Status + Unlock + Lock + List + CopyEntry + SshKeys> Handler for T {}
 /// the pairing — `Op::Lock` to `Response::Lock` to `LockError` — is stated
 /// once, here, rather than being a convention each handler has to remember
 /// to follow.
+///
+/// The request's own say about where to be asked (`preferred_prompt`) joins
+/// the facts about its requester, so every handler reads them in one place.
 pub fn dispatch<H>(handler: &H, request: &Request, requester: &Requester) -> Response
 where
     H: Handler + ?Sized,
 {
+    let requester = &Requester {
+        preferred: request.preferred_prompt,
+        ..requester.clone()
+    };
     match &request.op {
         Op::Status => Response::Status {
             databases: handler.status(),
@@ -206,7 +216,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&status).expect("status should serialize"),
             json!({
-                "v": 1,
+                "v": 2,
                 "ok": true,
                 "databases": [
                     {"name": "personal", "locked": false, "entries": 341},
@@ -228,7 +238,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&list).expect("list should serialize"),
             json!({
-                "v": 1,
+                "v": 2,
                 "ok": true,
                 "entries": [{
                     "db": "personal",
@@ -244,7 +254,7 @@ mod tests {
         // Locking everything names no database.
         assert_eq!(
             serde_json::to_value(Response::Lock(Ok(None))).expect("lock should serialize"),
-            json!({"v": 1, "ok": true})
+            json!({"v": 2, "ok": true})
         );
 
         // `copy`'s success carries no secret and no `db` — just which field,
@@ -257,7 +267,7 @@ mod tests {
         }));
         assert_eq!(
             serde_json::to_value(&copy).expect("copy should serialize"),
-            json!({"v": 1, "ok": true, "copied": "password", "expires_in": 30})
+            json!({"v": 2, "ok": true, "copied": "password", "expires_in": 30})
         );
 
         // A key without a title leaves the field out, like `list`'s.
@@ -289,7 +299,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&ssh_keys).expect("ssh_keys should serialize"),
             json!({
-                "v": 1,
+                "v": 2,
                 "ok": true,
                 "keys": [
                     {
@@ -331,7 +341,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&unlocked).expect("unlock should serialize"),
-            json!({"v": 1, "ok": true, "db": "personal"})
+            json!({"v": 2, "ok": true, "db": "personal"})
         );
     }
 
@@ -341,7 +351,7 @@ mod tests {
     fn an_empty_listing_still_carries_an_array() {
         assert_eq!(
             serde_json::to_value(Response::List(Ok(Vec::new()))).expect("should serialize"),
-            json!({"v": 1, "ok": true, "entries": []})
+            json!({"v": 2, "ok": true, "entries": []})
         );
     }
 
@@ -400,10 +410,10 @@ mod tests {
                 None,
             ),
             (
-                Response::Unlock(Err(UnlockError::NoDisplay)),
-                "no_display",
+                Response::Unlock(Err(UnlockError::NoPrompt)),
+                "no_prompt",
                 None,
-                Some("no display to prompt on"),
+                Some("no screen or terminal to prompt on"),
             ),
             (
                 Response::Unlock(Err(UnlockError::Stale { db: owned() })),
@@ -588,7 +598,7 @@ mod tests {
         }));
         assert_eq!(
             serde_json::to_value(&response).expect("should serialize"),
-            json!({"v": 1, "ok": false, "error": "corrupt", "db": "personal"})
+            json!({"v": 2, "ok": false, "error": "corrupt", "db": "personal"})
         );
     }
 
@@ -604,6 +614,6 @@ mod tests {
         assert_eq!(value["error"], json!("version_mismatch"));
         let detail = value["detail"].as_str().expect("detail should be a string");
         assert!(detail.contains("99"), "should name the client's: {detail}");
-        assert!(detail.contains("v1"), "should name the daemon's: {detail}");
+        assert!(detail.contains("v2"), "should name the daemon's: {detail}");
     }
 }

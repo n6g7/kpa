@@ -37,6 +37,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustix::event::Timespec;
+use serde::{Deserialize, Serialize};
 
 pub use cancel::{CancelSource, CancelToken};
 #[cfg(test)]
@@ -51,8 +52,10 @@ pub use terminal::{SecretTerminal, Terminal};
 /// can be a secret, so this is the secrets' length cap.
 pub(crate) const MAX_ANSWER_LEN: usize = 4096;
 
-/// Where a prompt asks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Where a prompt asks, and what a request names when it prefers one
+/// (`Request::preferred_prompt`), as `"screen"` or `"terminal"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PromptOn {
     /// On screen, through a prompt program.
     Screen,

@@ -20,13 +20,14 @@ kpa is a long-lived daemon (`kpa serve`) that holds one or more `.kdbx`
 files decrypted in memory, plus short-lived clients (`kpa <subcommand>`,
 or anything speaking the socket protocol). Clients can ask for status,
 unlock, lock, an entry index (`list`), and to copy one field of one entry
-to the clipboard (`copy`). An `unlock` can carry the master password from
-the client, instead of the daemon prompting for it. There is no operation
-that returns a secret to the caller, and none that writes a database.
+to the clipboard (`copy`). A request can pass a terminal along with it, for
+the daemon to ask for the master password on, instead of prompting on
+screen. There is no operation that returns a secret to the caller, and none
+that writes a database.
 
 ```mermaid
 graph LR
-    client["client<br/>(CLI, your launcher)"] -->|"TB-1 unix socket"| serve["kpa serve"]
+    client["client<br/>(CLI, your launcher)"] -->|"TB-1 unix socket,<br/>a terminal fd"| serve["kpa serve"]
     file[".kdbx / keyfile"] -->|"TB-2 read once per unlock"| serve
     prompt["prompt program"] -->|"TB-5 stdout pipe"| serve
     serve -->|"TB-4 data-control"| clip["clipboard"]
@@ -71,7 +72,7 @@ The keyfile is plaintext at rest: its protection is the filesystem's
 
 | ID   | Boundary                                                                                       | Untrusted side |
 | ---- | ---------------------------------------------------------------------------------------------- | -------------- |
-| TB-1 | The Unix socket under `$XDG_RUNTIME_DIR`: uid separation via filesystem permissions. Inbound A-1 crosses it: the master password in an `unlock` from a same-uid client | Request bytes (ACT-1, ACT-6 must not reach it; ACT-5 clients may be buggy); for a client, whoever answers at the path (ACT-1 must not) |
+| TB-1 | The Unix socket under `$XDG_RUNTIME_DIR`: uid separation via filesystem permissions. It accepts one inbound file descriptor with a request, a terminal, which the daemon writes a prompt to and reads A-1 from | Request bytes and the descriptor (ACT-1, ACT-6 must not reach it; ACT-5 clients may be buggy, and a same-uid client can pass any terminal it can open); for a client, whoever answers at the path (ACT-1 must not) |
 | TB-2 | Reading `.kdbx` and keyfile: header and KDF parameters before authentication, payload after     | File bytes (ACT-3) |
 | TB-3 | Decrypted entry content flowing out to clients, terminals, launchers, the tray                 | Entry content (ACT-4) |
 | TB-4 | The clipboard (Wayland data-control): visible to every client of the compositor                | Readers (ACT-5) |
@@ -137,13 +138,12 @@ failing for an in-scope actor.
   peer can issue requests, read responses, receive a client's requests in
   kpa's place, or obtain A-1–A-3 from kpa by any channel.
 - **G-3 Secrets leave only by explicit `copy`, only to the clipboard.** A-1
-  never leaves the process. It can also enter it over the socket, in an
-  `unlock` that carries the master password: the daemon holds the request
-  line and the decoded password in zeroizing buffers, for that one request
-  only. On the CLI side, `kpa unlock` holds A-1 the same way, for one
-  request: read from the terminal into a zeroizing buffer, carried in a
-  `Password` the request is serialized around, and dropped once that
-  request's response comes back. A-2 is never in a socket response, stdout,
+  never leaves the process, and only the user's own typing enters it: on
+  screen, into the prompt program, or on a terminal the daemon itself reads
+  from. It is never in a request, never in a response, and never passes
+  through a client: `kpa unlock` passes its terminal and sees no more than
+  the answer. The daemon holds A-1 in a zeroizing buffer for that one
+  unlock. A-2 is never in a socket response, stdout,
   stderr, a log, an error string, the tray, a child's argv or environment —
   only in the clipboard offer, after a `copy` naming that exact field.
   `copy` itself offers only for a requester on the desktop, while the
@@ -167,8 +167,9 @@ failing for an in-scope actor.
   deserialize `@ProtectInMemory` into `Value::protected`. Until then, a
   `list` that returns such a field violates G-3 and T-4 as written.
 - **G-4 Nothing persisted.** kpa itself — the daemon and every CLI process
-  that holds A-1 — never writes A-1–A-3 to disk or to its own
-  stdout/stderr, and prevents its own core dumps. Memory holding A-1 and
+  — never writes A-1–A-3 to disk or to its own stdout/stderr, and prevents
+  its own core dumps. A-1 typed on a terminal is not echoed: the daemon
+  turns echo off for the read and puts it back. Memory holding A-1 and
   A-2 is locked against swap, best effort: if the locked-memory limit is
   too small (a KDF's working memory can exceed it), kpa says so and
   carries on.
@@ -179,8 +180,10 @@ failing for an in-scope actor.
   another unlocked), on explicit request, and when its file changes.
   `status`, `lock`, and refused or malformed requests are not activity. Locked means kpa has dropped that database and serves
   nothing from it. A lock that races an unlock wins. A lock ends any
-  prompt in flight. A prompt ends after `prompt_timeout`. A copied secret
-  expires after `clipboard_timeout`.
+  prompt in flight, on screen or on a terminal. A prompt ends after
+  `prompt_timeout`, and a terminal prompt ends when its requester leaves or
+  the terminal hangs up. A copied secret expires after
+  `clipboard_timeout`.
 - **G-6 Lock clears what kpa owns.** On lock, every copy of A-1/A-2 that kpa
   itself made or controls is zeroized. (Copies inside dependencies: NG-4.)
 - **G-7 Clipboard hygiene.** Every copy carries the
@@ -200,9 +203,10 @@ failing for an in-scope actor.
   are refused without crashing the daemon or starving other clients.
 - **G-12 No prompt where nobody can see it.** A request from outside the
   desktop, or one that arrives while the screen is known to be locked,
-  never raises the graphical prompt. `unlock` answers such a request with
-  `no_display` instead, which `kpa unlock` turns into reading the master
-  password from its own terminal.
+  never raises the graphical prompt. `unlock` asks such a request on the
+  terminal it passed instead, and answers `no_prompt` if it passed none.
+  A request that asks for the terminal gets only the terminal, however the
+  screen stands.
 
 ## 7. Threats
 
@@ -237,17 +241,16 @@ change, or long-held fd.
 **T-4 · Secret leaks through an output channel** (I) — ACT-5 · TB-1, TB-5, TB-7 · A-1, A-2 → G-3  
 Response: no `get` op; `list` is an index with protected fields and Notes
 omitted; errors carry codes, not vault content; the prompt gets its own
-stderr, never the daemon's; requests are never logged, decode errors carry
-no request content, and a request's password has a redacting `Debug`. On
-the CLI: the terminal-read password never reaches argv, an environment
-variable, stdout, stderr, or a log; `kpa unlock` reads it with the
-terminal's echo off, into a zeroizing buffer capped at `MAX_PASSWORD_LEN`
-that never grows, and zeroizes it once the second request's response
-comes back. In scope: a protected field in any response, error message,
+stderr, never the daemon's; requests are never logged, and decode errors
+carry no request content. No request or response carries the master
+password, and the CLI never holds it: the daemon reads it from the terminal
+with echo off, into a zeroizing buffer capped at `MAX_ANSWER_LEN` that never
+grows. In scope: a protected field in any response, error message,
 `Debug`/`Display` output, panic message, log line, tray tooltip, or a
 child process's argv/env; the prompt's stdout, stderr, or exit status
 reaching a response, an error string, or kpa's own stdout/stderr/log; the
-same for a password carried in a request, on either end of the socket.
+master password echoed to the terminal it is typed on, or reaching a
+client in any form.
 
 **T-5 · Secret persisted to disk** (I) — ACT-5, ACT-7 · TB-7 · A-1, A-2 → G-4  
 Response: `PR_SET_DUMPABLE=0` before config or unlock, in the daemon and in
@@ -377,15 +380,22 @@ user, or leave something behind in kpa that outlives it.
 
 **T-19 · Misrouted prompt** (S) — ACT-5, ACT-10 · TB-1 · A-1 → G-12  
 A prompt raised where nobody can answer it, or answer it unnoticed: on an
-unattended desk screen, or a terminal read happening somewhere other than
-where the user expects it. Response: classification errs toward the
-terminal rather than the screen (`docs/headless.md` § 3) — the worst a
-misclassification does is ask on a terminal instead of on screen, never
-the other way; an unanswered prompt times out (G-5); a lock kills any
-prompt still open. Residual: a multiplexer attached over SSH runs in the
-desktop's cgroup, so an unlock from it still raises the graphical prompt
-on the desk's screen, which the remote user can't see — bounded by the
-timeout (`docs/headless.md` § 3).
+unattended desk screen, or on a terminal somewhere other than where the user
+expects it. Response: classification errs toward the terminal rather than
+the screen (`docs/headless.md` § 3) — the worst a misclassification does is
+ask on a terminal instead of on screen, never the other way; an unanswered
+prompt times out (G-5); a lock ends any prompt still open; a terminal prompt
+ends when its requester leaves or the terminal hangs up, and `kpa unlock`
+waits for the daemon after `^C`, so the terminal is back before the shell has
+it. Residual: a multiplexer attached over SSH runs in the desktop's cgroup,
+so an unlock from it still raises the graphical prompt on the desk's screen,
+which the remote user can't see — bounded by the timeout
+(`docs/headless.md` § 3). And a same-uid client can aim a prompt at any
+terminal it can open, including one the user is typing in: the daemon
+switches its echo off, takes one line and puts it back. The client learns
+only whether that line unlocked the database, never what it was. That is no
+more than a same-uid process can already do to a terminal it can open
+(NG-1), and the prompts it can raise are NG-7's.
 
 ## 8. Non-goals
 

@@ -695,7 +695,6 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         server.unlock(
             &UnlockRequest {
                 db: "personal".to_string(),
-                password: None,
             },
             &Requester {
                 uid: kpa::authn::process_uid(),
@@ -703,11 +702,12 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
                 cgroup: Some(common::cgroup_on(true, "31")),
                 command: None,
                 terminal: None,
+                preferred: None,
             },
             None,
         )
     };
-    let refused = Err(UnlockError::NoDisplay);
+    let refused = Err(UnlockError::NoPrompt);
 
     // 1. While the display session is known locked, no prompt runs. Until kpa has
     //    subscribed it doesn't know, so the marker is cleared before each

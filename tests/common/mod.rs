@@ -232,7 +232,7 @@ impl InProcessDaemon {
     }
 }
 
-/// A pseudo-terminal, for driving `kpa unlock`'s terminal read
+/// A pseudo-terminal, for driving `kpa unlock`'s terminal prompt
 /// (`docs/headless.md` § 4) the way a real shell would: a spawned process
 /// attaches the slave as its controlling terminal (`attach`), and the test
 /// types into and reads from the master (`type_text`, `read_until`),

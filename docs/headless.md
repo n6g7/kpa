@@ -17,12 +17,13 @@ and remote use needs the terminal unlock in § 4.
   or from outside it. kpa reads the requester's cgroup (§ 3).
 - **Unlocking from outside the desktop happens on the terminal.** The
   daemon never raises a graphical prompt for such a request. `kpa unlock`
-  reads the password on its own terminal and sends it over the socket
-  (§ 4).
+  passes its terminal along with the request, and the daemon asks for the
+  password on it (§ 4). The password never crosses the socket or passes
+  through the CLI.
 - **Copying needs a requester on the desktop, and the desktop unlocked**
   (§ 5). A `copy` from outside the desktop is refused, since the secret
   would land on a clipboard the requester can't paste from.
-- **Prompts get a timeout, and a lock kills an open prompt** (§ 6).
+- **Prompts get a timeout, and a lock ends an open prompt** (§ 6).
 - **`status`, `lock` and `list` work anywhere**, as they do today.
 
 The daemon itself already runs without a desktop:
@@ -42,11 +43,14 @@ logind session, or lingering can be enabled.
 | Requester                                      | `unlock`                                    | `copy`                                                 | `status`, `lock`, `list` |
 | ---------------------------------------------- | ------------------------------------------- | ------------------------------------------------------ | ------------------------ |
 | Desktop, screen unlocked                       | Graphical prompt, as today                  | Clipboard, as today                                    | As today                 |
-| Desktop, screen locked                         | Refused, `no_display`. No prompt behind the locker | Refused, `no_display`                           | As today                 |
-| Outside the desktop, desk screen unlocked      | Terminal prompt (§ 4)                       | Refused, `no_display`                                  | As today                 |
+| Desktop, screen locked                         | Terminal prompt (§ 4). No prompt behind the locker | Refused, `no_display`                           | As today                 |
+| Outside the desktop, desk screen unlocked      | Terminal prompt                             | Refused, `no_display`                                  | As today                 |
 | Outside the desktop, desk screen locked        | Terminal prompt                             | Refused, `no_display`                                  | As today                 |
 | No display session at all                      | Terminal prompt                             | Refused, `no_display`                                  | As today                 |
-| Outside the desktop, no terminal (a cron job)  | Refused, `no_display`                       | Refused, `no_display`                                  | As today                 |
+| Outside the desktop, no terminal (a cron job)  | Refused, `no_prompt`                        | Refused, `no_display`                                  | As today                 |
+
+"Terminal prompt" means the terminal the request passed. Without one, the
+rows that ask on the terminal answer `no_prompt` too.
 
 Both operations ask where the user is, from the requester's
 classification. A prompt must appear where someone can answer it, and a
@@ -98,52 +102,82 @@ screen (NG-7), or a terminal prompt it has to answer itself.
 
 ## 4. Unlocking from a terminal
 
-The daemon answers an `unlock` from outside the desktop with a new error,
-`no_display`, without prompting. `kpa unlock <db>` handles it when it has a
-controlling terminal:
+The daemon asks for the password, on screen or on the requester's terminal,
+and the password never crosses the socket or passes through the CLI.
 
-1. It opens `/dev/tty` and reads the password with echo off, as `ssh` and
-   `sudo` do. Redirecting stdin doesn't change where it reads.
-2. It sends the request again with the password in it, base64-encoded:
-   `{"op":"unlock","db":"personal","password":"<base64>"}`. That is one
-   line, like every other request.
-3. The daemon decodes the field into the same fixed, zeroizing buffer as
-   the prompt's output (`MAX_PASSWORD_LEN`), then unlocks as usual. The
-   keyfile still comes from config.
-4. The CLI marks itself non-dumpable and zeroizes its copy.
+**The terminal comes with the request.** Any request may pass one terminal
+file descriptor, as `SCM_RIGHTS` ancillary data on the same `sendmsg` that
+sends its JSON line. The JSON declares nothing. The daemon keeps the
+descriptor in the request's `Requester` and uses it only if it has to ask. It
+refuses a request that comes with more than one descriptor, or with one that
+isn't a terminal (`isatty`), as `malformed_request`, and receives it
+close-on-exec so a prompt program never inherits it. `kpa unlock <db>`
+passes its controlling terminal, `/dev/tty`, when it has one, as `ssh` and
+`sudo` find theirs, so redirecting stdin doesn't change which terminal it is.
+No other command passes one.
 
-The first request is a plain `unlock`, and only `no_display` makes the CLI
-read the terminal. So a terminal on the desktop still gets the graphical
-prompt. `--tty` skips that first round trip, and is how a desktop terminal
-asks for the terminal read. Without a controlling terminal, `kpa unlock`
-reports `no_display` and exits non-zero. A request that carries a password
-never raises a prompt, wherever it comes from.
+**Where the daemon asks.**
 
-**Why base64 rather than a JSON string.** A JSON string can contain escapes
-(`\"`, `\\`, `\u…`), and `serde_json` unescapes them into an internal
-scratch buffer that kpa can't zeroize. Base64 never needs escaping, so
-`serde_json` hands the field over as a slice of the request buffer
-(`visit_borrowed_str`), and kpa decodes it straight into its own buffer. A
-`password` that would need unescaping is refused as malformed. `base64` is
-already a dependency.
+- On screen when the requester is on the desktop and the display session
+  isn't known to be locked (§ 3). The terminal is ignored.
+- Otherwise on the passed terminal.
+- `"preferred_prompt":"terminal"`, which `kpa unlock --tty` sends, skips the
+  screen: a desktop terminal asks to be asked on itself. The field sits
+  beside `v` and `op` and has two values. `"screen"` is screen only, never
+  the terminal.
+- With nowhere to ask, `no_prompt`: no screen the requester may be asked on,
+  and no terminal passed. `no_display` remains `copy`'s answer (§ 5).
 
-**The request line gets the same care.** The daemon reads it into a fixed,
-zeroizing buffer of `MAX_REQUEST_LEN`, with no `BufReader` and no growing
-`Vec`, so no unwiped copy of the line survives the request. Decode errors
-carry no request content, and requests are never logged (T-4).
+**What the daemon does on the terminal.** It writes the prompt's message (the
+one a screen prompt shows, such as `Unlock personal`, escaped the same way)
+with echo off, reads one line, and puts the terminal's modes back. It
+behaves like a screen prompt:
 
-**Wrong passwords** fail with `wrong_credentials`, as from the prompt. kpa
-adds no backoff: any same-uid process can already read the `.kdbx` and
+- any lock ends it (§ 6), and `prompt_timeout` applies;
+- the requester closing its connection ends it too, as `prompt_cancelled`,
+  and so does the terminal hanging up;
+- it doesn't wait in the prompt queue, since it doesn't take the screen,
+  but each database still allows one unlock at a time
+  (`unlock_in_progress`);
+- an empty line is an empty password, the one way to reach a keyfile-only
+  database from here, same as from the graphical prompt;
+- the line goes into a fixed, zeroizing buffer of `MAX_ANSWER_LEN` bytes
+  that never grows, and a longer one is refused.
+
+The daemon never blocks on a terminal it doesn't own: it writes without
+blocking, and every wait ends at the deadline, on a lock, when the
+connection closes and when the terminal hangs up, with the modes put back on
+each of those paths.
+
+**Interrupts.** While the daemon reads, `^C`, `^Z` and a terminal hang-up
+reach the CLI, not the daemon. The CLI doesn't exit at once. It shuts the
+write side of its connection and waits for the daemon to close it, which the
+daemon does once the terminal is back as it was, then exits. Without that
+wait the shell takes the terminal over while the daemon still reads from
+it, and the daemon restores modes the shell has changed since. If the daemon
+hasn't closed within 2 seconds (an estimate), the CLI exits anyway. A daemon
+asking on screen takes no notice of the interrupt, so the CLI lingers that
+long after `^C` there.
+
+**Wrong passwords** fail with `wrong_credentials`, as from a screen prompt.
+kpa adds no backoff: any same-uid process can already read the `.kdbx` and
 guess offline (NG-6), so the socket is no better an oracle.
+
+**Any same-uid requester can aim a prompt at any terminal it can open**,
+including one the user is typing in. Nothing the user types there reaches the
+requester, only whether it unlocked, so this is no more than what a same-uid
+process can already do (NG-1, NG-7, T-19).
 
 **Rejected alternatives**
 
-- **Passing the terminal's fd with `SCM_RIGHTS`**, for the daemon to read
-  from. If the client dies, the daemon races the shell for keystrokes and
-  terminal modes.
+- **The CLI reads the password and sends it in the request.** The master
+  password would cross the socket and sit in the CLI's memory. Keeping it
+  out of serde's unwipeable scratch buffers needs a base64 field, a
+  hand-written deserializer and a pre-pass that refuses escapes. A daemon
+  that reads it from the terminal itself needs none of that.
 - **Running a terminal pinentry on the client's tty**, as `gpg-agent` does
-  with `GPG_TTY`. It has the same race, and the daemon's sandbox would have
-  to allow opening arbitrary terminals.
+  with `GPG_TTY`. The daemon's sandbox would have to allow opening
+  arbitrary terminals. A passed descriptor needs no such permission.
 
 ## 5. Copying
 
@@ -206,14 +240,22 @@ the same synced vault. kpa adds no channel for it.
 
 These matter once some prompts are raised where nobody may be looking.
 
+These hold for a prompt on a terminal as for one on screen (§ 4).
+
 - **Timeout.** A prompt left unanswered for `prompt_timeout` (default 60 s)
-  is killed, and the unlock fails with `prompt_cancelled`.
-- **A lock kills an open prompt.** Any lock (screen lock, suspend, explicit)
-  kills a prompt still open for that database. Today a prompt raised just
-  before a screen lock waits behind the locker until the user returns.
-- **No prompt while the screen is known to be locked.** A locker that only
-  sends the `Lock` signal never reports the unlock (ASM-7). Then kpa doesn't
-  know the screen is locked, and the timeout bounds the cost.
+  is ended, and the unlock fails with `prompt_cancelled`. A screen prompt is
+  killed; a terminal prompt stops reading and puts the terminal back.
+- **A lock ends an open prompt.** Any lock (screen lock, suspend, explicit)
+  ends a prompt still open for that database, on screen or on a terminal.
+  A prompt raised just before a screen lock would otherwise wait behind the
+  locker until the user returns.
+- **The requester leaving ends a terminal prompt.** A requester that closes
+  its connection, or whose terminal hangs up, can't answer, so the prompt
+  ends as `prompt_cancelled` and the terminal is put back.
+- **No prompt on screen while the screen is known to be locked.** A locker
+  that only sends the `Lock` signal never reports the unlock (ASM-7). Then
+  kpa doesn't know the screen is locked, and the timeout bounds the cost.
+  A terminal prompt isn't behind the locker, so it is still allowed.
 
 ## 7. Lock policy without a desktop
 
@@ -236,16 +278,15 @@ stays refused while it is locked (§ 5).
 
 - **`design.md`**
   - Settled decision 9 and § Protocol: `unlock` prompts on screen from the
-    desktop, and reads the password from the client's terminal otherwise.
+    desktop, and on the terminal passed with the request otherwise.
   - § Clipboard: `copy` needs an active, unlocked display session.
-  - § Lock policy: a lock kills open prompts; prompts time out.
+  - § Lock policy: a lock ends open prompts; prompts time out.
   - § Configuration: `prompt_timeout`.
 - **`threat-model.md`**
-  - § 1 System: `unlock` can carry a password from the client.
-  - **TB-1** gains inbound A-1: the master password, from a same-uid
-    client, for an unlock from outside the desktop.
-  - **G-3**: "A-1 never leaves the process" holds. A-1 now also enters it
-    from the CLI, which holds it for one request and zeroizes it.
+  - **TB-1**: the socket accepts one inbound terminal descriptor with a
+    request.
+  - **G-3**: A-1 never leaves the process, and never enters it over the
+    socket or the CLI either: the daemon reads it from the terminal.
     `copy` offers only for a requester on the desktop, while the display
     session is active and unlocked.
   - **G-5** gains: "A lock ends any prompt in flight. A prompt ends after
@@ -253,12 +294,13 @@ stays refused while it is locked (§ 5).
   - **New goal: no prompt where nobody can see it.** A request from outside
     the desktop, or while the screen is locked, never raises a prompt on
     screen.
-  - **T-4** extends to the CLI: the terminal-read password never reaches
-    its argv, environment, stdout, stderr or a log, and the CLI zeroizes it.
+  - **T-4**: the master password never reaches the CLI, so none of its
+    argv, environment, stdout, stderr or logs can carry it.
   - **New threat: misrouted prompt** (S) — ACT-5, ACT-10. A prompt raised
-    on an unattended screen, or a terminal read in the wrong place.
-    Response: classification errs toward the terminal, timeouts, locks
-    kill prompts. Residual: a multiplexer attached over SSH (§ 3).
+    on an unattended screen, or a terminal prompt in the wrong place.
+    Response: classification errs toward the terminal, timeouts, locks end
+    prompts. Residual: a multiplexer attached over SSH (§ 3), and a
+    requester that aims a prompt at a terminal it can open.
 - **`config.example.toml`**: `prompt_timeout`.
 - **`TODO.md`**: this proposal is the "Support headless use" entry.
 
@@ -271,26 +313,32 @@ stays refused while it is locked (§ 5).
 | `authn.rs`   | Peer pidfd or pid → uid, cgroup path and command name, kept in a `Requester`. Plain facts, no rules |
 | `authz.rs`   | Who may do what, as pure functions of a `Requester` and the display session as it is when asked. The checks both sockets share (`may_connect`, `on_desktop`, `may_prompt_on_screen`; the cgroup-path classifier is table-tested), and kpa's own socket's policy, one function per request type (`authorize_copy`: the session whose clipboard may be used, or `no_display`; `choose_unlock_prompt`: a prompt may appear, or `no_display`). The SSH agent's equivalent is `ssh_agent::authz`; `session_watch.rs` holds `DisplaySession` |
 | `session_watch.rs` | The whole logind side: reports the display session's state (no session, locked, unlocked), which `copy` and classification read, a lock request, suspend and a lost watch as `SessionEvent`s, and holds the sleep inhibitor for the `SleepDelay`. Knows nothing about databases |
-| `proto/unlock.rs` | `UnlockRequest` gains `password: Option<Password>`: a zeroizing newtype, decoded from base64 by a borrowing visitor, with a redacting `Debug`. `no_display` joins the error codes |
-| `server.rs`   | Reads request lines into a fixed zeroizing buffer; prompt timeout; lock kills prompts; `copy` gated on origin and the display session's state |
-| `main.rs`     | `kpa unlock` handles `no_display` with a `/dev/tty` read, and gains `--tty`                              |
+| `socket.rs`   | Sends and receives a request line with one descriptor attached (`SCM_RIGHTS`, close-on-exec on receipt) |
+| `proto/`      | `Request` gains `preferred_prompt`, and `no_prompt` joins the error codes. `UnlockRequest` is just `db` |
+| `prompt/terminal.rs` | The terminal backend: echo off, one line, modes put back, ended by the deadline, a lock, the requester leaving or a hang-up |
+| `server.rs`   | Keeps the passed terminal in the `Requester`; decides where an unlock asks; prompt timeout; locks end prompts; `copy` gated on origin and the display session's state |
+| `main.rs`, `tty.rs` | `kpa unlock` passes `/dev/tty`, waits for the daemon after an interrupt, and has `--tty` |
 
 **Tests**
 
 - Classifier: cgroup paths for a compositor child, a session scope, an SSH
   scope, a system service, and malformed input.
-- `tests/`: unlock with a password in the request, against the fixture
-  database; a wrong password; an oversized one, invalid base64, and an
-  escaped `password` string all refused; `copy` refused from outside the
-  desktop, and while the fake display session state is locked or absent.
-- The terminal read: a pty-driven test of `kpa unlock --tty`, echo off,
-  password delivered.
-- Fuzzing: the request decoder's target gains the `password` field.
+- `tests/`: `copy` refused from outside the desktop, and while the fake
+  display session state is locked or absent.
+- The terminal prompt, on a pty: echo off while the daemon reads and back
+  afterwards, the answer unlocks the fixture database, and a deadline, a
+  lock, the requester leaving and a hang-up each end it with echo back.
+- The terminal descriptor: more than one, or one that isn't a terminal, is
+  refused; `"preferred_prompt":"terminal"` without one is `no_prompt`; on the
+  desktop the screen prompt is used and the descriptor ignored.
+- `kpa unlock` over a pty, `--tty` and not, and `^C` while the daemon reads.
+- Version skew: a request of the previous protocol version gets
+  `version_mismatch`.
 
 **Phases**, each leaving a usable state:
 
-1. Prompt timeout and lock kills prompts. These help the desktop today.
-2. Classification, `no_display`, terminal unlock.
+1. Prompt timeout and locks end prompts. These help the desktop today.
+2. Classification, `no_prompt`, terminal unlock.
 3. `copy` gated on origin and the display session's state.
 
 ## 10. Open questions
