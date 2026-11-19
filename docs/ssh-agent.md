@@ -947,7 +947,7 @@ programs' settings.
 
 ## 11. Implementation
 
-**Modules** (new `src/ssh_agent/`):
+**Modules** (new `src/frontends/ssh_agent/`, plus `src/ssh/` for `keys.rs` and `approvals.rs`, which the daemon's own socket shares):
 
 | File          | Role                                                                                                                                            |
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -955,8 +955,8 @@ programs' settings.
 | `bind.rs`     | session-bind verification and per-connection binding state                                                                                      |
 | `classify.rs` | Data to be signed → `Purpose::{Login, SshSig, Other}`. Pure, fuzzed                                                                             |
 | `authz.rs`    | (key settings, connection class, purpose, login session) → what the request needs (nothing, or an approval for a scope, kept until lock or not) or why it is refused. Pure and stateless: whether an approval already covers the scope, and whether a prompt may appear, are the sign flow's questions |
-| `keys.rs`     | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                   |
-| `approve.rs`  | Approvals and pending requests: their scopes, limits and expiry                                                                                 |
+| `ssh/keys.rs` | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                   |
+| `ssh/approvals.rs` | Approvals and pending requests: their scopes, limits and expiry                                                                                 |
 | `serve.rs`    | Listener, per-connection thread, connection cap, and the `SshSign` trait it answers each request through                                         |
 | `agent/`      | The agent's own logic, crate-private: per-database key state and the scan at unlock (`state.rs`), identities (`identities.rs`), the sign flow (`sign.rs`), one `SIGN_REQUEST` (`request.rs`), prompting the user (`prompts.rs`), what its prompts say (`message.rs`) and signing (`signer.rs`). `Agent` implements `SshSign` over `SshHost`, the database access the daemon implements |
 

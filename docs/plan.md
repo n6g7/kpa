@@ -14,7 +14,7 @@ ever need the fixtures.
 
 ## Step 1 — core, no IPC
 
-Cargo skeleton, `config.rs`, `vault.rs`, and a temporary `kpa probe <db>` that
+Cargo skeleton, `config.rs`, `databases/vault.rs`, and a temporary `kpa probe <db>` that
 prompts, opens, and prints titles to stdout. Ships `tests/fixture.sh`.
 
 - **License:** MIT OR Apache-2.0, decided at repo creation — no copyleft
@@ -31,7 +31,7 @@ prompts, opens, and prints titles to stdout. Ships `tests/fixture.sh`.
 
 ## Step 2 — daemon and socket
 
-`src/proto/`, `server.rs`, `main.rs` dispatch. Ops: `status`, `unlock`, `lock`,
+`src/frontends/control/proto/`, `server.rs`, `main.rs` dispatch. Ops: `status`, `unlock`, `lock`,
 `list`. Socket at `$XDG_RUNTIME_DIR/kpa/sock`, mode `0600`, `v` field enforced
 with a clear error naming both versions. `probe` deleted.
 
@@ -43,7 +43,7 @@ with a clear error naming both versions. `probe` deleted.
 
 ## Step 3 — copy and clipboard
 
-`clip.rs` on kpa's own data-control client, the `copy` op, timeout-based
+`clipboard/` on kpa's own data-control client, the `copy` op, timeout-based
 expiry.
 
 - **Test:** `kpa copy …`, then `wl-paste` returns it and
@@ -57,7 +57,7 @@ expiry.
 
 ## Step 4 — tray
 
-`tray.rs` on `ksni` — icon state (all locked / some unlocked / error),
+`frontends/tray.rs` on `ksni` — icon state (all locked / some unlocked / error),
 tooltip, menu (Unlock…, Lock all, a per-database submenu, Quit). Menu
 actions call `Server` directly (`Server::snapshot`, `Unlock::unlock`,
 `Lock::lock`), the same calls the socket's `unlock`/`lock` ops make — no

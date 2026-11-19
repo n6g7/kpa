@@ -46,7 +46,7 @@ keepassxc-cli db-create -q --set-key-file "$KEYFILE" "$KEYFILE_DB" </dev/null
 
 # A genuine KDBX4 database (pykeepass writes KDBX4 unconditionally, unlike
 # keepassxc-cli here), with the same shape as the password-only fixture
-# above, so vault.rs is exercised against both formats `keepass` claims to
+# above, so databases/vault.rs is exercised against both formats `keepass` claims to
 # support rather than just the one keepassxc-cli happens to default to.
 python3 - "$KDBX4_DB" <<'PYEOF'
 import sys
@@ -122,7 +122,7 @@ for e in (entry, no_otp, bad_otp):
 kp.save()
 PYEOF
 
-# SSH agent fixtures (`src/ssh_agent/keys.rs`): an Ed25519 key, an ECDSA
+# SSH agent fixtures (`src/ssh/keys.rs`): an Ed25519 key, an ECDSA
 # key, an RSA key, and two keys that must be skipped, a passphrase-protected
 # one and a PEM-format one — one entry each, plus one more Ed25519 key
 # reachable only through history and one only through the recycle bin, to

@@ -427,11 +427,11 @@ impl Server {
         slots(&self.dbs).values().any(|slot| slot.db.is_some())
     }
 
-    /// The shape both `status()` and `tray.rs`'s poll report — name, lock
+    /// The shape both `status()` and `frontends/tray.rs`'s poll report — name, lock
     /// state, entry count — built from whatever `dbs` currently holds,
     /// without itself running the freshness guard (`drop_stale`) on any
     /// configured database. `status()` runs that guard first and then
-    /// calls this to build its response from what's left; `tray.rs` calls
+    /// calls this to build its response from what's left; `frontends/tray.rs` calls
     /// this directly, skipping the guard.
     ///
     /// Running the freshness check on every tick, the way `status()`
@@ -976,7 +976,7 @@ impl CopyEntry for Server {
 /// doesn't name an entry in this database; `Some(None)` means it does but
 /// there is nothing to copy for this field — absent, empty, or a bare
 /// `title` (never copyable). Kept in `server.rs` rather than `proto::copy`
-/// or `vault.rs`, same reasoning as the `field_key` this replaces: it is
+/// or `databases/vault.rs`, same reasoning as the `field_key` this replaces: it is
 /// the one place that bridges the wire vocabulary and the `keepass` field
 /// keys.
 fn resolve_field(
@@ -1150,7 +1150,7 @@ fn watch_idle(server: &Server) {
 /// Failures are logged too, not just successes: a failed `unlock` is the
 /// event most worth having a record of.
 ///
-/// `pub(crate)` rather than private: `tray.rs` calls `Lock`/`Unlock`
+/// `pub(crate)` rather than private: `frontends/tray.rs` calls `Lock`/`Unlock`
 /// directly (not through `dispatch`) for the same reason this function
 /// exists at all — a tray-triggered lock or unlock is exactly as worth
 /// logging as a socket-triggered one, and this is the one place that

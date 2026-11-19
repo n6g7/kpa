@@ -19,13 +19,16 @@ process hardening and the service manager.
 ## Keep subsystem dependencies a DAG
 
 A subsystem is a top-level module (declared in `src/lib.rs`) with
-everything below it. Subsystems depend on each other in one direction only,
-even though Rust compiles cycles. Read
+everything below it; each module under `src/frontends/` is one too.
+Subsystems depend on each other in one direction only, even though Rust
+compiles cycles. Read
 [`docs/module-structure.md`](docs/module-structure.md) before adding a
 subsystem or a dependency between two.
 
 - No cycles between subsystems. Inside one, files and their `mod.rs` use
   each other freely.
+- Front ends (`src/frontends/*`) don't use each other: what two of them
+  share lives in a subsystem below them (`src/ssh/`).
 - No `impl` blocks for another subsystem's types, and no blanket impl whose
   only real implementor is one of them.
 - Export a small API. `pub(crate)` added to reach into another

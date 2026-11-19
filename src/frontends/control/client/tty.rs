@@ -1,7 +1,7 @@
 //! The CLI's terminal: the controlling terminal `kpa unlock` passes to the
 //! daemon to ask for the master password on, and what an interrupt does
 //! while the daemon is asking (`docs/headless.md` § 4). The CLI never reads
-//! the password itself. No socket or protocol code — `client.rs` calls these
+//! the password itself. No socket or protocol code — `client/mod.rs` calls these
 //! and handles the request.
 
 use std::fs::{File, OpenOptions};

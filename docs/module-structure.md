@@ -2,11 +2,12 @@
 
 kpa is one library crate and a CLI binary, divided into **subsystems**.
 Rust has no term for this, so this doc defines it: a subsystem is a
-top-level module (one declared in `src/lib.rs`, or in `src/main.rs` for
-the CLI's own `client` and `tty`) together with everything below it, such
-as `ssh_agent/`, `proto/`, `wayland/`, `server` or `vault`. A subsystem is
-kpa's unit of encapsulation, much like a Go package: its files work
-together freely, and the rest of the crate sees only the API it exports.
+top-level module (one declared in `src/lib.rs`) together with everything
+below it, such as `ssh/`, `clipboard/`, `databases/`, `server` or `prompt/`.
+Each module under `src/frontends/` (`control/`, `ssh_agent/`, `tray`) is a
+subsystem too: a front end is one way in to kpa. A subsystem is kpa's unit
+of encapsulation, much like a Go package: its files work together freely,
+and the rest of the crate sees only the API it exports.
 
 ## Between subsystems
 
@@ -14,6 +15,10 @@ together freely, and the rest of the crate sees only the API it exports.
   subsystem that, directly or through others, uses it. Cargo forbids
   cycles only between crates, so within kpa's single crate only review
   enforces this.
+- **Front ends don't use each other.** `control/`, `ssh_agent/` and `tray`
+  share what they need through the subsystems below them, such as `ssh/`
+  for what `control/` and `ssh_agent/` both know about SSH keys and
+  approvals. Only `main` and the daemon's wiring import `frontends::`.
 - **A type's behaviour stays in its subsystem.** No `impl` blocks for
   another subsystem's types. No blanket impl whose only real implementor
   is one concrete type from another subsystem; wrap that type in one of
@@ -26,10 +31,10 @@ together freely, and the rest of the crate sees only the API it exports.
 - **Keep decisions pure; use a trait only for a real callback.** When a
   lower subsystem needs something from a higher one, first try to make it
   pure: data in, a decision out, and the caller does the I/O, as
-  `ssh_agent::authz::authorize_sign` and `clip::Clipboard` do.
+  `frontends::ssh_agent::authz::authorize_sign` and `clipboard::Clipboard` do.
   When a callback can't be avoided, or a test needs a fake, the lower
   subsystem defines a trait for exactly what it needs, and the higher one
-  implements it (`ssh_agent::agent::SshHost`). Don't add a trait with one implementation
+  implements it (`frontends::ssh_agent::agent::SshHost`). Don't add a trait with one implementation
   and no test using a second.
 
 ## Within a subsystem

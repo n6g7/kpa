@@ -80,7 +80,7 @@ clipboard logic:
 nix develop -c cargo test --test clipboard -- --ignored
 ```
 
-[`fuzz/`](./fuzz) fuzzes request decoding (`src/proto/`) with `cargo-fuzz`,
+[`fuzz/`](./fuzz) fuzzes request decoding (`src/frontends/control/proto/`) with `cargo-fuzz`,
 in its own Cargo workspace so it's not part of the commands above.
 `cargo-fuzz` needs a nightly rustc, which lives in its own `fuzz` dev shell
 (`devShells.fuzz` in `flake.nix`) rather than the default one, so it never

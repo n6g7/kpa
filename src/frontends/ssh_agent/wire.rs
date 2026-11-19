@@ -149,7 +149,7 @@ impl SignFlags {
 }
 
 /// `SSH_AGENTC_SIGN_REQUEST`'s body. `key_blob` and `data` are carried
-/// unparsed: matching `key_blob` against a served key is `keys.rs`'s job,
+/// unparsed: matching `key_blob` against a served key is `ssh/keys.rs`'s job,
 /// and [`classify`](super::classify) says what `data` means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignRequest {

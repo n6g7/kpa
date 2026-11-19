@@ -54,7 +54,7 @@
             openssh
             # wl-copy/wl-paste, for driving docs/plan.md step 3's manual
             # clipboard test by hand — kpa itself doesn't use them (its own
-            # client is src/wayland/).
+            # client is src/clipboard/wayland/).
             wl-clipboard
             # A StatusNotifierItem host, for driving docs/plan.md step 4's
             # tray test by hand — not a Rust dependency (that's ksni, in
@@ -62,7 +62,7 @@
             # org.kde.StatusNotifierWatcher on the session bus works; this
             # is just a small, scriptable one to run for that.
             waybar
-            # Rasterizes assets/tray/*.svg to the PNGs src/tray.rs embeds —
+            # Rasterizes assets/tray/*.svg to the PNGs src/frontends/tray.rs embeds —
             # see assets/tray/render.sh. Not a Rust dependency, and not
             # needed for a normal build: the PNGs it produces are committed.
             resvg
