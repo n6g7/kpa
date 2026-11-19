@@ -31,7 +31,7 @@ pub use ssh_approve::{SshApprove, SshApproveError, SshApproveRequest};
 pub use ssh_keys::{
     SshKeys, SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey,
 };
-pub use ssh_pending::{SshPending, WirePending};
+pub use ssh_pending::{SshPending, WirePending, WireRequestDetails, WireScope};
 pub use status::{DatabaseStatus, Status};
 pub use unlock::{Unlock, UnlockError, UnlockRequest};
 
@@ -212,6 +212,7 @@ impl Serialize for Response {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use uuid::Uuid;
 
     use super::*;
 
@@ -299,6 +300,8 @@ mod tests {
                     db: "personal".to_string(),
                     key_type: "ssh-ed25519".to_string(),
                     fingerprint: "SHA256:abc".to_string(),
+                    name: "Deploy".to_string(),
+                    entry: Uuid::from_u128(1),
                     title: Some("Deploy".to_string()),
                     attachment: "id_ed25519".to_string(),
                 },
@@ -306,6 +309,8 @@ mod tests {
                     db: "work".to_string(),
                     key_type: "ssh-rsa".to_string(),
                     fingerprint: "SHA256:def".to_string(),
+                    name: "work SHA256:def".to_string(),
+                    entry: Uuid::from_u128(2),
                     title: None,
                     attachment: "id_rsa".to_string(),
                 },
@@ -328,6 +333,8 @@ mod tests {
                         "db": "personal",
                         "type": "ssh-ed25519",
                         "fingerprint": "SHA256:abc",
+                        "name": "Deploy",
+                        "entry": "00000000-0000-0000-0000-000000000001",
                         "title": "Deploy",
                         "attachment": "id_ed25519",
                     },
@@ -335,6 +342,8 @@ mod tests {
                         "db": "work",
                         "type": "ssh-rsa",
                         "fingerprint": "SHA256:def",
+                        "name": "work SHA256:def",
+                        "entry": "00000000-0000-0000-0000-000000000002",
                         "attachment": "id_rsa",
                     },
                 ],

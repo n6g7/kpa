@@ -927,7 +927,7 @@ mod tests {
         let fingerprint = key.public_key().fingerprint(HashAlg::Sha256);
         pending_requests(host)
             .iter()
-            .find(|pending| pending.key == fingerprint)
+            .find(|pending| pending.key.fingerprint == fingerprint)
             .is_some_and(|pending| approve_pending(host, pending.id, WINDOW))
     }
 
@@ -942,10 +942,11 @@ mod tests {
         assert!(!signed(&sign_from_outside(&agent, &key)));
         let pending = pending_requests(host.as_ref());
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].requested.key_name, "github");
-        assert_eq!(pending[0].requested.purpose, "other");
-        assert_eq!(pending[0].requested.class, "local");
-        assert_eq!(pending[0].requested.command.as_deref(), Some("ssh"));
+        assert_eq!(pending[0].key.name, "github");
+        assert!(pending[0].approval.remember);
+        assert_eq!(pending[0].request.purpose, "other");
+        assert_eq!(pending[0].request.class, "local");
+        assert_eq!(pending[0].request.command.as_deref(), Some("ssh"));
 
         assert!(approve_from_terminal(&host, &key));
         assert!(pending_requests(host.as_ref()).is_empty());

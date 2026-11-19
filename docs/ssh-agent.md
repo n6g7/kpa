@@ -520,16 +520,44 @@ Two points are specific to the agent:
 **Approving a refused request.** A request from outside the desktop that
 needs an approval is refused, and kpa remembers it as pending:
 
-- a random id, the key, the purpose, the connection class, the forwarding
-  host and destination, the remote user, the requester's command name, and
-  the time;
+- a random id, the approval it asks for (the key, the destination of a
+  bound connection, and whether it is kept until lock), what the request
+  was (the purpose, the connection class, the remote user or the
+  namespace, the requester's command name), and the time;
 - at most 16 pending requests, identical ones merged (a repeat keeps its id
   and is kept another 5 minutes), each kept for 5 minutes, all dropped on
   lock.
 
 `ssh_pending` lists them, and `ssh_approve` approves one by its id. A
 request nobody approves just expires after 5 minutes; nothing is blocked
-meanwhile.
+meanwhile. One listed request is its id and age in seconds, the `scope`
+the approval covers, `remember`, which says whether approving grants the
+scope until lock (`true`) or for one signature (`false`), and the
+`request` that was refused:
+
+```json
+{
+  "id": "6f1c0a52-3d8e-4c11-9a4b-0e5d2f7b8a31",
+  "age": 12,
+  "scope": {
+    "key": {
+      "db": "personal", "type": "ssh-ed25519", "fingerprint": "SHA256:…",
+      "name": "github", "entry": "3f2a9c1e-5b7d-4e08-8a62-1d4c9b0e7f35",
+      "title": "GitHub", "attachment": "id_ed25519"
+    },
+    "destination": "SHA256:…"
+  },
+  "remember": true,
+  "request": { "purpose": "login", "user": "git", "class": "local, bound", "command": "ssh" }
+}
+```
+
+`scope.key` is the object `ssh_keys` reports for a key, with the key's
+`name` (its override's, else its entry's title) and its entry's `entry`
+uuid. `destination` is there for a bound connection only, `request.user`
+for a login and `request.namespace` for an `SSHSIG`. Titles, names, users
+and command names reach the caller of this request, and never the
+daemon's log.
 
 A request is named by its id, which is random: it never comes back after a
 lock, so an id from before one can't approve some other request, and it

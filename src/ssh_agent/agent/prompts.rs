@@ -61,11 +61,14 @@ impl<H: SshHost> Agent<H> {
                 return Ok(None);
             };
             if !may_prompt_on_screen(requester, &self.host.display_session()) {
-                if let Lacking::Approval(approval) = &lacking {
-                    let requested = request.requested(key, requester);
+                if let Lacking::Approval(approval) = &lacking
+                    && let Ok(served) = slot.served(request.fingerprint)
+                {
+                    let served = served.clone();
+                    let request = request.requested(requester);
                     slot.ssh
                         .pending
-                        .record(approval.clone(), requested, slot.now());
+                        .record(approval.clone(), served, request, slot.now());
                 }
                 return Err(lacking.refusal());
             }

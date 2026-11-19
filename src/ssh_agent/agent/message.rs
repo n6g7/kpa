@@ -147,6 +147,8 @@ mod tests {
             public_key,
             name: name.to_string(),
             entry_uuid: uuid::Uuid::nil(),
+            title: None,
+            attachment: None,
             confirm: SshKeyConfirm::Once,
             forwarded: true,
         }

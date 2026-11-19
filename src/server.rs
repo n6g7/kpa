@@ -46,8 +46,8 @@ use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
     ListError, ListRequest, Lock, LockError, LockRequest, ProtocolError, Response, SshApprove,
     SshApproveError, SshApproveRequest, SshKeys, SshKeysError, SshKeysReport, SshKeysRequest,
-    SshPending, Status, Unlock, UnlockError, UnlockRequest, WireEntry, WirePending, WireSkippedKey,
-    WireSshKey,
+    SshPending, Status, Unlock, UnlockError, UnlockRequest, WireEntry, WirePending,
+    WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
 };
 use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
 use crate::socket::{self, Received};
@@ -771,16 +771,27 @@ impl SshPending for Server {
             .into_iter()
             .map(|pending| WirePending {
                 id: pending.id,
-                db: pending.db,
-                key: pending.key,
-                name: pending.requested.key_name,
-                purpose: pending.requested.purpose.to_string(),
-                user: pending.requested.user,
-                namespace: pending.requested.namespace,
-                class: pending.requested.class.to_string(),
-                destination: pending.destination,
-                command: pending.requested.command,
                 age: pending.age.as_secs(),
+                scope: WireScope {
+                    key: WireSshKey {
+                        db: pending.key.database,
+                        key_type: pending.key.public_key.algorithm().to_string(),
+                        fingerprint: pending.key.fingerprint.to_string(),
+                        name: pending.key.name,
+                        entry: pending.key.entry_uuid,
+                        title: pending.key.title,
+                        attachment: pending.key.attachment.unwrap_or_default(),
+                    },
+                    destination: pending.approval.scope.destination(),
+                },
+                remember: pending.approval.remember,
+                request: WireRequestDetails {
+                    purpose: pending.request.purpose.to_string(),
+                    user: pending.request.user,
+                    namespace: pending.request.namespace,
+                    class: pending.request.class.to_string(),
+                    command: pending.request.command,
+                },
             })
             .collect()
     }
@@ -831,6 +842,9 @@ impl SshKeys for Server {
                 report.locked.push(db());
                 continue;
             };
+            let Some(cfg) = self.config.databases.iter().find(|cfg| cfg.name == name) else {
+                return Err(SshKeysError::UnknownDb { db: db() });
+            };
             let scan = ssh_agent::keys::scan(database);
             slot.touch();
             report
@@ -839,6 +853,13 @@ impl SshKeys for Server {
                     db: db(),
                     key_type: key.public_key.algorithm().to_string(),
                     fingerprint: key.fingerprint.to_string(),
+                    name: ssh_agent::keys::key_name(
+                        name,
+                        key.fingerprint,
+                        cfg.ssh_key_settings(key.fingerprint).name.as_deref(),
+                        key.entry_title.as_deref(),
+                    ),
+                    entry: key.entry_uuid,
                     title: key.entry_title,
                     attachment: key.attachment_name,
                 }));

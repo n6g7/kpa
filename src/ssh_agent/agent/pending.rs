@@ -6,23 +6,25 @@
 
 use std::time::Duration;
 
-use ssh_key::Fingerprint;
 use uuid::Uuid;
 
 use super::SshHost;
 use crate::log;
 use crate::ssh_agent::approve::RequestDetails;
+use crate::ssh_agent::authz::SignatureApproval;
+use crate::ssh_agent::keys::ServedKey;
 
 /// One pending request, as `ssh_pending` lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PendingRequest {
     /// What names it to [`approve_pending`].
     pub id: Uuid,
-    pub db: String,
-    pub key: Fingerprint,
-    /// The destination's host key, for a bound connection.
-    pub destination: Option<Fingerprint>,
-    pub requested: RequestDetails,
+    /// What approving it grants.
+    pub approval: SignatureApproval,
+    /// The key the approval is for, as its database serves it.
+    pub key: ServedKey,
+    /// What was refused.
+    pub request: RequestDetails,
     /// Since it was last refused.
     pub age: Duration,
 }
@@ -39,10 +41,9 @@ pub fn pending_requests(host: &impl SshHost) -> Vec<PendingRequest> {
                     .list(slot.now())
                     .map(|listed| PendingRequest {
                         id: listed.id,
-                        db: cfg.name.clone(),
-                        key: listed.approval.scope.key(),
-                        destination: listed.approval.scope.destination(),
-                        requested: listed.requested.clone(),
+                        approval: listed.approval.clone(),
+                        key: listed.key.clone(),
+                        request: listed.request.clone(),
                         age: listed.age,
                     })
                     .collect::<Vec<_>>()
@@ -112,7 +113,6 @@ mod tests {
 
     fn requested() -> RequestDetails {
         RequestDetails {
-            key_name: "github".to_string(),
             purpose: "other",
             user: None,
             namespace: None,
@@ -128,7 +128,13 @@ mod tests {
             remember,
         };
         host.with_slot("personal", |slot| {
-            slot.ssh.pending.record(approval, requested(), slot.now())
+            let served = slot
+                .served(key.public_key().fingerprint(HashAlg::Sha256))
+                .expect("served")
+                .clone();
+            slot.ssh
+                .pending
+                .record(approval, served, requested(), slot.now())
         });
     }
 
@@ -156,10 +162,17 @@ mod tests {
 
         let listed = pending_requests(host.as_ref());
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].db, "personal");
-        assert_eq!(listed[0].key, key.public_key().fingerprint(HashAlg::Sha256));
-        assert_eq!(listed[0].destination, None);
-        assert_eq!(listed[0].requested, requested());
+        assert_eq!(listed[0].key.database, "personal");
+        assert_eq!(
+            listed[0].key.fingerprint,
+            key.public_key().fingerprint(HashAlg::Sha256)
+        );
+        assert_eq!(listed[0].key.name, "github");
+        assert_eq!(listed[0].key.title.as_deref(), Some("github"));
+        assert!(listed[0].key.attachment.is_some());
+        assert_eq!(listed[0].approval.scope.destination(), None);
+        assert!(listed[0].approval.remember);
+        assert_eq!(listed[0].request, requested());
         assert_eq!(listed[0].age, Duration::from_secs(5));
     }
 

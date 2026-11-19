@@ -120,6 +120,8 @@ mod tests {
             db: db.to_string(),
             key_type: "ssh-ed25519".to_string(),
             fingerprint: FINGERPRINT.to_string(),
+            name: title.unwrap_or("personal SHA256:…").to_string(),
+            entry: uuid::Uuid::from_u128(1),
             title: title.map(str::to_string),
             attachment: "id_ed25519".to_string(),
         }

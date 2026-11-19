@@ -14,6 +14,7 @@ use ssh_key::{Fingerprint, HashAlg};
 use uuid::Uuid;
 
 use super::authz::SignatureApproval;
+use super::keys::ServedKey;
 
 /// How long a pending request is kept after it was last refused.
 pub const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
@@ -105,8 +106,6 @@ impl GrantedApprovals {
 /// and escaped by whoever shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestDetails {
-    /// The key's name, from its override or its entry's title.
-    pub key_name: String,
     /// `Purpose::label`.
     pub purpose: &'static str,
     /// The remote user of a login.
@@ -125,7 +124,9 @@ struct Entry {
     /// never means another request, and says nothing about the scope.
     id: Uuid,
     approval: SignatureApproval,
-    requested: RequestDetails,
+    /// The key the approval is for, as the open database serves it.
+    key: ServedKey,
+    request: RequestDetails,
     /// When it was last refused.
     at: Instant,
 }
@@ -135,7 +136,8 @@ struct Entry {
 pub struct Listed<'a> {
     pub id: Uuid,
     pub approval: &'a SignatureApproval,
-    pub requested: &'a RequestDetails,
+    pub key: &'a ServedKey,
+    pub request: &'a RequestDetails,
     /// Since it was last refused.
     pub age: Duration,
 }
@@ -147,16 +149,22 @@ pub struct Listed<'a> {
 pub struct PendingRequests(Vec<Entry>);
 
 impl PendingRequests {
-    /// Records that `requested` was refused for want of `approval`'s approval. A
-    /// request identical to a pending one is merged into it, which keeps it
-    /// and its id another [`PENDING_TTL`]. Past [`MAX_PENDING`] the oldest
-    /// goes.
-    pub fn record(&mut self, approval: SignatureApproval, requested: RequestDetails, now: Instant) {
+    /// Records that `request` was refused for want of `approval`, which is for
+    /// `key`. A request identical to a pending one is merged into it, which
+    /// keeps it and its id another [`PENDING_TTL`]. Past [`MAX_PENDING`] the
+    /// oldest goes.
+    pub fn record(
+        &mut self,
+        approval: SignatureApproval,
+        key: ServedKey,
+        request: RequestDetails,
+        now: Instant,
+    ) {
         self.0.retain(|entry| !expired(entry, now));
         let id = match self
             .0
             .iter()
-            .position(|entry| entry.approval == approval && entry.requested == requested)
+            .position(|entry| entry.approval == approval && entry.request == request)
         {
             Some(merged) => self.0.remove(merged).id,
             None => Uuid::new_v4(),
@@ -167,7 +175,8 @@ impl PendingRequests {
         self.0.push(Entry {
             id,
             approval,
-            requested,
+            key,
+            request,
             at: now,
         });
     }
@@ -180,7 +189,8 @@ impl PendingRequests {
             .map(move |entry| Listed {
                 id: entry.id,
                 approval: &entry.approval,
-                requested: &entry.requested,
+                key: &entry.key,
+                request: &entry.request,
                 age: now.saturating_duration_since(entry.at),
             })
     }
@@ -205,7 +215,8 @@ fn expired(entry: &Entry, now: Instant) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssh_agent::testing::test_key;
+    use crate::ssh_agent::keys;
+    use crate::ssh_agent::testing::{database, test_key};
 
     const WINDOW: Duration = Duration::from_secs(60);
 
@@ -226,9 +237,14 @@ mod tests {
         }
     }
 
+    /// The key `approval(1, ..)` is for, as an open database serves it.
+    fn key() -> ServedKey {
+        let cfg = database("personal", vec![]);
+        keys::resolve_cached(&cfg, vec![test_key(1).public_key().clone()]).remove(0)
+    }
+
     fn requested(command: &str) -> RequestDetails {
         RequestDetails {
-            key_name: "github".to_string(),
             purpose: "login",
             user: Some("alice".to_string()),
             namespace: None,
@@ -297,15 +313,17 @@ mod tests {
     fn identical_requests_merge_keeping_the_id_and_the_latest_time() {
         let mut pending = PendingRequests::default();
         let t0 = Instant::now();
-        pending.record(approval(1, None, true), requested("ssh"), t0);
+        pending.record(approval(1, None, true), key(), requested("ssh"), t0);
         let id = pending.list(t0).next().expect("pending").id;
         pending.record(
             approval(1, None, true),
+            key(),
             requested("ssh"),
             t0 + Duration::from_secs(200),
         );
         pending.record(
             approval(1, None, true),
+            key(),
             requested("git"),
             t0 + Duration::from_secs(200),
         );
@@ -314,7 +332,7 @@ mod tests {
         let at = t0 + Duration::from_secs(400);
         let listed: Vec<_> = pending.list(at).collect();
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].requested.command.as_deref(), Some("ssh"));
+        assert_eq!(listed[0].request.command.as_deref(), Some("ssh"));
         assert_eq!(listed[0].id, id);
         assert_ne!(listed[1].id, id);
         assert_eq!(listed[0].age, Duration::from_secs(200));
@@ -324,7 +342,7 @@ mod tests {
     fn a_request_is_kept_for_five_minutes() {
         let mut pending = PendingRequests::default();
         let t0 = Instant::now();
-        pending.record(approval(1, None, true), requested("ssh"), t0);
+        pending.record(approval(1, None, true), key(), requested("ssh"), t0);
         let id = pending.list(t0).next().expect("pending").id;
 
         assert_eq!(
@@ -342,12 +360,17 @@ mod tests {
         let mut pending = PendingRequests::default();
         let t0 = Instant::now();
         for command in 0..=MAX_PENDING {
-            pending.record(approval(1, None, true), requested(&command.to_string()), t0);
+            pending.record(
+                approval(1, None, true),
+                key(),
+                requested(&command.to_string()),
+                t0,
+            );
         }
 
         let commands: Vec<_> = pending
             .list(t0)
-            .map(|listed| listed.requested.command.clone().expect("command"))
+            .map(|listed| listed.request.command.clone().expect("command"))
             .collect();
         assert_eq!(commands.len(), MAX_PENDING);
         assert_eq!(commands[0], "1");
@@ -361,9 +384,9 @@ mod tests {
     fn taking_an_id_removes_its_scopes_requests_and_returns_the_recorded_ask() {
         let mut pending = PendingRequests::default();
         let now = Instant::now();
-        pending.record(approval(1, None, false), requested("ssh"), now);
-        pending.record(approval(1, None, false), requested("git"), now);
-        pending.record(approval(2, None, true), requested("ssh"), now);
+        pending.record(approval(1, None, false), key(), requested("ssh"), now);
+        pending.record(approval(1, None, false), key(), requested("git"), now);
+        pending.record(approval(2, None, true), key(), requested("ssh"), now);
         let ids: Vec<_> = pending.list(now).map(|listed| listed.id).collect();
 
         assert_eq!(pending.take(Uuid::new_v4(), now), None);

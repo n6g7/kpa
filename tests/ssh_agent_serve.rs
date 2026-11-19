@@ -881,11 +881,22 @@ mod pending {
         assert!(!sign(&agent, &pubkey, &data).status.success());
         let listed = pending(&daemon);
         assert_eq!(listed.len(), 1, "{listed:?}");
-        assert_eq!(listed[0]["db"], "personal");
-        assert_eq!(listed[0]["name"], "Ed25519");
-        assert_eq!(listed[0]["purpose"], "sshsig");
-        assert_eq!(listed[0]["namespace"], "test");
-        assert!(listed[0]["command"].is_string(), "{listed:?}");
+        let key = &listed[0]["scope"]["key"];
+        assert_eq!(key["db"], "personal");
+        assert_eq!(key["name"], "Ed25519");
+        assert_eq!(listed[0]["remember"], true);
+        assert_eq!(listed[0]["request"]["purpose"], "sshsig");
+        assert_eq!(listed[0]["request"]["namespace"], "test");
+        assert!(listed[0]["request"]["command"].is_string(), "{listed:?}");
+        // The key is the object `ssh_keys` reports for it.
+        let reported = request(&daemon, &json!({"v": 2, "op": "ssh_keys"}));
+        let reported = reported["keys"]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .find(|reported| reported["fingerprint"] == key["fingerprint"])
+            .expect("the key is reported");
+        assert_eq!(reported, key);
 
         let id = listed[0]["id"].clone();
         let approved = request(&daemon, &json!({"v": 2, "op": "ssh_approve", "id": id}));

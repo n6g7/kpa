@@ -11,7 +11,6 @@ use crate::log;
 use crate::ssh_agent::approve::RequestDetails;
 use crate::ssh_agent::bind::ConnectionClass;
 use crate::ssh_agent::classify::{self, Purpose};
-use crate::ssh_agent::keys::ServedKey;
 use crate::ssh_agent::wire::SignRequest;
 
 /// The longest login user, `SSHSIG` namespace or command name a pending
@@ -56,7 +55,7 @@ impl<'a> Request<'a> {
 
     /// What this request is, for the user who is asked to approve it while
     /// it is pending (`docs/ssh-agent.md` § 6.8). Its own text is cut.
-    pub(super) fn requested(&self, key: &ServedKey, requester: &Requester) -> RequestDetails {
+    pub(super) fn requested(&self, requester: &Requester) -> RequestDetails {
         let capped = |text: &str| capped(text, MAX_PENDING_TEXT_LEN).to_string();
         let (user, namespace) = match &self.purpose {
             Purpose::Login(login) => (Some(capped(&login.user)), None),
@@ -64,7 +63,6 @@ impl<'a> Request<'a> {
             Purpose::Other => (None, None),
         };
         RequestDetails {
-            key_name: key.name.clone(),
             purpose: self.purpose.label(),
             user,
             namespace,
