@@ -660,8 +660,9 @@ every database" (`auto_lock::react` does both, in that order). An unlock that
 takes its token and then reads the display session meets that in one of three
 ways:
 
-- the lock came before the token: the read sees the mark, and the unlock
-  refuses with `no_display`;
+- the lock came before the token: the read sees the mark, so no prompt
+  is raised on the screen: the unlock asks on the terminal the requester
+  passed, or is refused with `no_prompt` if it passed none;
 - the lock fell between the token and the read: the read sees the mark too
   (the mark precedes the lock), and the token is already cancelled;
 - the lock comes after the read: it cancels the token the unlock holds, which
@@ -686,9 +687,9 @@ core prompted it would depend on `prompt` and the display session, and authz
 would be split between the core and the front end. The core never holds the
 password: it is borrowed for the call into `vault`.
 
-**The refusal order.** An unlock request from outside the desktop, for a
-database whose unlock is already in progress, is answered `unlock_in_progress`,
-not `no_display`: the in-progress claim is taken by `begin_unlock`, before
+**The refusal order.** An unlock request from a requester outside the
+desktop that passed no terminal, for a database whose unlock is already in
+progress, is answered `unlock_in_progress`, not `no_prompt`: the in-progress claim is taken by `begin_unlock`, before
 authorization.
 
 ## 7. Secrets
