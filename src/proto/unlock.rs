@@ -16,7 +16,7 @@ use crate::authn::Requester;
 /// Longest password accepted, in bytes, whether it comes from the prompt's
 /// stdout or from a request. Either way it is decoded into a buffer of
 /// exactly this size, which never grows.
-pub const MAX_PASSWORD_LEN: usize = 4096;
+pub const MAX_PASSWORD_LEN: usize = crate::prompt::MAX_ANSWER_LEN;
 
 /// What `{"op":"unlock", ...}` carries; `Op::Unlock` wraps it. `db` is
 /// required — there is no "unlock everything".

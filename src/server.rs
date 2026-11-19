@@ -18,7 +18,8 @@
 //! take it down. See `docs/review-2026-09-robustness.md` findings 1–4, 7, 9.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,7 +39,8 @@ use crate::io::ByteCounter;
 use crate::log;
 use crate::paths::Paths;
 use crate::prompt::{
-    self, CancelSource, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue, SecretProgram,
+    self, CancelSource, ConfirmProgram, Prompt, PromptOn, PromptOutcome, PromptQueue,
+    SecretProgram, SecretTerminal, Terminal,
 };
 use crate::proto::{
     self, CopyEntry, CopyError, CopyOutcome, CopyRequest, DatabaseStatus, DecodeError, Field, List,
@@ -47,6 +49,7 @@ use crate::proto::{
     WireEntry, WireSkippedKey, WireSshKey,
 };
 use crate::session_watch::{DisplaySession, SessionEvent, SleepDelay};
+use crate::socket::{self, Received};
 use crate::ssh_agent::{self, Agent, SlotView, SshHost, SshSlot};
 use crate::vault::{self, Fingerprint, VaultError};
 
@@ -193,8 +196,8 @@ pub struct Server {
     /// (`docs/ssh-agent.md` § 6.7): the unlock prompt's, and the SSH
     /// agent's confirm prompts, which `serve_ssh_agent` builds on it.
     prompt_queue: Arc<PromptQueue>,
-    /// The unlock prompt (`Config::prompt`), in `prompt_queue`.
-    unlock_prompt: Prompt<Zeroizing<String>>,
+    /// How the unlock prompt asks on screen (`Config::prompt`).
+    screen_unlock: Arc<dyn prompt::Backend<Zeroizing<String>>>,
 }
 
 impl Server {
@@ -236,11 +239,6 @@ impl Server {
             })
             .collect();
         let prompt_queue = Arc::new(PromptQueue::new());
-        let unlock_prompt = Prompt::new(
-            Arc::clone(&prompt_queue),
-            unlock_prompt,
-            config.prompt_timeout,
-        );
         Server {
             config,
             paths,
@@ -250,7 +248,7 @@ impl Server {
             clip_db: Arc::new(Mutex::new(None)),
             display_session: Mutex::new(DisplaySession::None),
             prompt_queue,
-            unlock_prompt,
+            screen_unlock: Arc::new(unlock_prompt),
         }
     }
 
@@ -543,7 +541,7 @@ impl Unlock for Server {
 
         // How a lock ends this unlock: the token is cancelled by the next
         // `Slot::lock`, which kills the prompt and keeps what this opens
-        // from being installed.
+        // from being installed. And where the prompt asks, if anywhere.
         let (cancel_token, prompt_on) = {
             let mut dbs = slots(&self.dbs);
             let Some(slot) = dbs.get_mut(name) else {
@@ -555,14 +553,14 @@ impl Unlock for Server {
             if slot.db.is_some() {
                 return Ok(name.to_string());
             }
-            // Which prompt may ask for the password, if any: none where
-            // nobody can answer it (from outside the desktop, or behind a
-            // locker). Read under the mutex: `on_session_event` marks the
-            // display session before its `lock_all` takes it, so either
-            // this sees the mark and refuses, or that lock cancels the token
-            // taken below and ends the prompt. A request that carries its
-            // password needs no prompt, so it goes ahead from anywhere: that
-            // is how an unlock from outside the desktop is answered.
+            // On screen where a prompt may appear, otherwise on the
+            // requester's terminal, and nowhere else: no prompt where
+            // nobody can answer it. Read under the mutex:
+            // `on_session_event` marks the display session before its
+            // `lock_all` takes it, so either this sees the mark and refuses,
+            // or that lock cancels the token taken below and ends the
+            // prompt. A request that carries its password needs no prompt,
+            // so it goes ahead from anywhere.
             let prompt_on =
                 authz::choose_unlock_prompt(request, requester, &self.display_session())?;
             if slot.unlocking {
@@ -587,11 +585,19 @@ impl Unlock for Server {
                 .password
                 .as_ref()
                 .map(|password| password.as_zeroizing()),
-            Some(PromptOn::Screen) => {
+            Some(prompt_on) => {
                 log::debug(format_args!("prompting for {name:?}"));
                 let timeout = self.config.prompt_timeout;
                 let message = message.map_or_else(|| format!("Unlock {name}"), str::to_string);
-                prompted = match self.unlock_prompt.ask(&message, &cancel_token) {
+                let backend: Arc<dyn prompt::Backend<Zeroizing<String>>> = match prompt_on {
+                    PromptOn::Screen => Arc::clone(&self.screen_unlock),
+                    PromptOn::Terminal => Arc::new(SecretTerminal::new(
+                        requester.terminal.clone().ok_or(UnlockError::NoDisplay)?,
+                    )),
+                };
+                let outcome = Prompt::new(Arc::clone(&self.prompt_queue), backend, timeout)
+                    .ask(&message, &cancel_token);
+                prompted = match outcome {
                     Ok(PromptOutcome::Cancelled) => {
                         return Err(UnlockError::PromptCancelled { db: db() });
                     }
@@ -1168,33 +1174,58 @@ enum RequestLine {
     Closed,
     /// `MAX_REQUEST_LEN` bytes with no newline among them.
     TooLong,
-    /// The line's length, newline excluded. A client that closes its end
-    /// without a newline has still sent a line.
-    Line(usize),
+    /// The line's length, newline excluded, and the file descriptor that
+    /// came with it, if one did. A client that closes its end without a
+    /// newline has still sent a line.
+    Line { len: usize, fd: Option<OwnedFd> },
+    /// More than one file descriptor came with the request. A request
+    /// carries at most one, the terminal.
+    TooManyFds,
 }
 
-/// Read one request line into `buf`, which never grows.
+/// Read one request line into `buf`, which never grows, and the file
+/// descriptor sent with it if there is one.
 ///
 /// Read straight from the socket rather than through a `BufReader`: an
 /// `unlock` line can carry the master password, and a `BufReader`'s own
 /// buffer (like a `Vec` grown as the line arrives) would be freed without
 /// being wiped. Whatever is read past the newline lands in `buf` too, and
 /// is ignored: a connection carries one request.
-fn read_request(mut stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<RequestLine> {
+fn read_request(stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<RequestLine> {
     let mut len = 0;
+    let mut fd = None;
     loop {
         if len == buf.len() {
             return Ok(RequestLine::TooLong);
         }
-        let n = match stream.read(&mut buf[len..]) {
-            Ok(0) if len == 0 => return Ok(RequestLine::Closed),
-            Ok(0) => return Ok(RequestLine::Line(len)),
-            Ok(n) => n,
+        let received = match socket::recv_with_fd(stream, &mut buf[len..]) {
+            Ok(received) => received,
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => return Err(err),
         };
+        let Received::Data {
+            len: n,
+            fd: arrived,
+        } = received
+        else {
+            return Ok(RequestLine::TooManyFds);
+        };
+        if fd.is_some() && arrived.is_some() {
+            return Ok(RequestLine::TooManyFds);
+        }
+        fd = fd.or(arrived);
+        if n == 0 {
+            return Ok(if len == 0 {
+                RequestLine::Closed
+            } else {
+                RequestLine::Line { len, fd }
+            });
+        }
         if let Some(newline) = buf[len..len + n].iter().position(|&byte| byte == b'\n') {
-            return Ok(RequestLine::Line(len + newline));
+            return Ok(RequestLine::Line {
+                len: len + newline,
+                fd,
+            });
         }
         len += n;
     }
@@ -1205,7 +1236,9 @@ fn read_request(mut stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<Requ
 /// by design, not a limitation).
 ///
 /// A request that doesn't fit — longer than `MAX_REQUEST_LEN` without a
-/// newline, or not UTF-8 — gets `malformed_request`. A socket error, or a
+/// newline, or not UTF-8 — gets `malformed_request`, and so does one that
+/// comes with more than one file descriptor, or with one that isn't a
+/// terminal. A socket error, or a
 /// client that sends nothing within `IO_TIMEOUT`, just drops the
 /// connection; there's no one left to tell. The reply is written before
 /// the event is logged, so a slow or broken stdout can't cost the client
@@ -1216,7 +1249,7 @@ fn read_request(mut stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<Requ
 /// already keeps other users out; this check covers a mode that ever
 /// came out wrong.
 fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
-    let requester = match Requester::of(&stream) {
+    let mut requester = match Requester::of(&stream) {
         Ok(requester) if authz::may_connect(&requester, owner) => requester,
         Ok(requester) => {
             log::warn(format_args!(
@@ -1247,14 +1280,17 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
         let mut buf = Zeroizing::new(vec![0u8; MAX_REQUEST_LEN]);
         match read_request(&stream, &mut buf) {
             Ok(RequestLine::Closed) | Err(_) => return,
-            Ok(RequestLine::TooLong) => Response::Protocol(ProtocolError::MalformedRequest),
-            Ok(RequestLine::Line(len)) => {
-                match std::str::from_utf8(&buf[..len]).map(proto::decode_request) {
-                    Ok(Ok(request)) => proto::dispatch(server, &request, &requester),
-                    Ok(Err(DecodeError::VersionMismatch(client_v))) => {
-                        Response::Protocol(ProtocolError::VersionMismatch { client_v })
+            Ok(RequestLine::TooLong | RequestLine::TooManyFds) => {
+                Response::Protocol(ProtocolError::MalformedRequest)
+            }
+            Ok(RequestLine::Line { len, fd }) => {
+                match fd.map(|fd| Terminal::new(fd, &stream)).transpose() {
+                    Ok(terminal) => {
+                        requester.terminal = terminal;
+                        respond(server, &buf[..len], &requester)
                     }
-                    Ok(Err(DecodeError::MalformedRequest)) | Err(_) => {
+                    Err(err) => {
+                        log::debug(format_args!("the descriptor sent with a request: {err}"));
                         Response::Protocol(ProtocolError::MalformedRequest)
                     }
                 }
@@ -1269,9 +1305,27 @@ fn handle_connection(server: &Server, mut stream: UnixStream, owner: u32) {
     write_response(&mut stream, &response);
 }
 
+/// The response to the request on `line`, from `requester`.
+fn respond(server: &Server, line: &[u8], requester: &Requester) -> Response {
+    match std::str::from_utf8(line).map(proto::decode_request) {
+        Ok(Ok(request)) => proto::dispatch(server, &request, requester),
+        Ok(Err(DecodeError::VersionMismatch(client_v))) => {
+            Response::Protocol(ProtocolError::VersionMismatch { client_v })
+        }
+        Ok(Err(DecodeError::MalformedRequest)) | Err(_) => {
+            Response::Protocol(ProtocolError::MalformedRequest)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+    use std::io::Read;
+    use std::os::fd::AsFd;
+
     use super::*;
+    use crate::prompt::testing::{echoing, pty, read_until, shows_anything};
     use crate::prompt::{Scripted, Step};
 
     /// The display session the tests' display sessions name, and so the one a
@@ -1291,6 +1345,7 @@ mod tests {
             uid,
             cgroup: Some(cgroup),
             command: None,
+            terminal: None,
         }
     }
 
@@ -1313,18 +1368,25 @@ mod tests {
     /// Send `request` bytes to `handle_connection` over a socket pair and
     /// return whatever it replies.
     fn exchange(request: &[u8]) -> String {
+        // The handler may stop reading early (at the size cap) and reply; a
+        // write error from that is expected, not a failure.
+        exchange_with(|mut ours| {
+            let _ = ours.write_all(request);
+        })
+    }
+
+    /// Like `exchange`, with `send` putting whatever it likes on the
+    /// requester's end of the connection.
+    fn exchange_with(send: impl FnOnce(&UnixStream)) -> String {
         let server = empty_server();
         let owner = crate::authn::process_uid();
         let (ours, theirs) = UnixStream::pair().expect("socket pair");
         thread::scope(|scope| {
             scope.spawn(|| handle_connection(&server, theirs, owner));
-            let mut ours = ours;
-            // The handler may stop reading early (at the size cap) and
-            // reply; a write error from that is expected, not a failure.
-            let _ = ours.write_all(request);
+            send(&ours);
             let _ = ours.shutdown(std::net::Shutdown::Write);
             let mut reply = String::new();
-            let _ = ours.read_to_string(&mut reply);
+            let _ = (&ours).read_to_string(&mut reply);
             reply
         })
     }
@@ -1339,6 +1401,50 @@ mod tests {
     fn a_non_utf8_request_gets_an_answer() {
         let reply = exchange(b"\xff\xfe\n");
         assert!(reply.contains("malformed_request"), "got {reply:?}");
+    }
+
+    const STATUS: &[u8] = b"{\"v\":1,\"op\":\"status\"}\n";
+
+    #[test]
+    fn a_request_may_come_with_a_terminal() {
+        let (_master, slave) = pty();
+
+        let reply = exchange_with(|ours| {
+            socket::send_with_fd(ours, STATUS, Some(slave.as_fd())).expect("send");
+        });
+
+        assert!(reply.contains("\"ok\":true"), "got {reply:?}");
+    }
+
+    #[test]
+    fn a_request_with_a_descriptor_that_is_not_a_terminal_is_refused() {
+        let (not_a_terminal, _other) = UnixStream::pair().expect("socket pair");
+
+        let reply = exchange_with(|ours| {
+            socket::send_with_fd(ours, STATUS, Some(not_a_terminal.as_fd())).expect("send");
+        });
+
+        assert!(reply.contains("malformed_request"), "got {reply:?}");
+    }
+
+    #[test]
+    fn a_request_with_more_than_one_descriptor_is_refused() {
+        let (_first_master, first) = pty();
+        let (_second_master, second) = pty();
+
+        // In one message, and in two.
+        let together = exchange_with(|ours| {
+            socket::send_with_fds(ours, STATUS, &[first.as_fd(), second.as_fd()]);
+        });
+        let apart = exchange_with(|ours| {
+            let (start, end) = STATUS.split_at(8);
+            socket::send_with_fd(ours, start, Some(first.as_fd())).expect("send");
+            socket::send_with_fd(ours, end, Some(second.as_fd())).expect("send");
+        });
+
+        for reply in [together, apart] {
+            assert!(reply.contains("malformed_request"), "got {reply:?}");
+        }
     }
 
     /// Runs `read_request` on a socket pair whose other end writes
@@ -1361,7 +1467,7 @@ mod tests {
     #[test]
     fn read_request_stops_at_the_first_newline() {
         let (read, buf) = read_written(&[b"{\"v\":1,", b"\"op\":\"status\"}\nrest\n"], 64);
-        let Ok(RequestLine::Line(len)) = read else {
+        let Ok(RequestLine::Line { len, .. }) = read else {
             panic!("expected a line");
         };
         assert_eq!(&buf[..len], b"{\"v\":1,\"op\":\"status\"}");
@@ -1370,7 +1476,7 @@ mod tests {
     #[test]
     fn read_request_accepts_a_newline_in_the_last_byte_and_no_further() {
         let (read, _) = read_written(&[b"abc\n"], 4);
-        assert!(matches!(read, Ok(RequestLine::Line(3))));
+        assert!(matches!(read, Ok(RequestLine::Line { len: 3, .. })));
         let (read, _) = read_written(&[b"abcd\n"], 4);
         assert!(matches!(read, Ok(RequestLine::TooLong)));
     }
@@ -1378,7 +1484,7 @@ mod tests {
     #[test]
     fn read_request_takes_an_unterminated_line_at_eof() {
         let (read, _) = read_written(&[b"abc"], 64);
-        assert!(matches!(read, Ok(RequestLine::Line(3))));
+        assert!(matches!(read, Ok(RequestLine::Line { len: 3, .. })));
         let (read, _) = read_written(&[], 64);
         assert!(matches!(read, Ok(RequestLine::Closed)));
     }
@@ -2410,12 +2516,18 @@ mod tests {
     /// returned script says. `Arc`, so a step can lock the server while its
     /// prompt is up.
     fn prompt_server() -> (Arc<Server>, Scripted<Zeroizing<String>>) {
+        prompt_server_timing_out_after("60s")
+    }
+
+    /// `prompt_server`, whose prompts time out after `timeout`.
+    fn prompt_server_timing_out_after(timeout: &str) -> (Arc<Server>, Scripted<Zeroizing<String>>) {
         let prompts = Scripted::new();
         let server = Server::with_backends(
-            Config::parse(
-                "[[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
-                 [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n",
-            )
+            Config::parse(&format!(
+                "prompt_timeout = \"{timeout}\"\n\
+                 [[database]]\nname = \"personal\"\npath = \"personal.kdbx\"\n\
+                 [[database]]\nname = \"work\"\npath = \"work.kdbx\"\n"
+            ))
             .expect("valid config"),
             Paths::default(),
             SleepDelay::new().0,
@@ -2443,6 +2555,23 @@ mod tests {
         requester: &Requester,
     ) -> Result<String, UnlockError> {
         Unlock::unlock(server, &request(name), requester, None)
+    }
+
+    /// A requester that passed a terminal with its request, as one at
+    /// on the desktop or not: the requester, the user's end of the terminal, and the
+    /// requester's end of its connection.
+    fn passing_a_terminal(on_desktop: bool) -> (Requester, File, UnixStream) {
+        let (master, slave) = pty();
+        let (client, connection) = UnixStream::pair().expect("connection");
+        let requester = Requester {
+            terminal: Some(Terminal::new(slave, &connection).expect("a terminal")),
+            ..requester_in(on_desktop)
+        };
+        (requester, master, client)
+    }
+
+    fn unlocking(server: &Server) -> bool {
+        slots(&server.dbs)["personal"].unlocking
     }
 
     /// A prompt that types a password, unless something ends it first.
@@ -2746,6 +2875,167 @@ mod tests {
         server.on_session_event(SessionEvent::Sleeping);
 
         assert_eq!(requests.try_iter().collect::<Vec<_>>(), [false]);
+    }
+
+    /// Types `line` at `master` once the prompt on it is up, and returns
+    /// what the unlock answers, which here is that the vault isn't there.
+    fn answer_on_terminal(
+        server: &Arc<Server>,
+        requester: &Requester,
+        master: &mut File,
+        line: &str,
+    ) -> Result<String, UnlockError> {
+        thread::scope(|scope| {
+            let unlocking = scope.spawn(|| unlock_from(server, "personal", requester));
+            read_until(master, "Unlock personal: ");
+            assert!(!echoing(master), "echo is off while the prompt is up");
+            master.write_all(line.as_bytes()).expect("type");
+            unlocking.join().expect("unlock thread")
+        })
+    }
+
+    #[test]
+    fn an_unlock_from_outside_the_desktop_asks_on_the_terminal_the_requester_passed() {
+        let (server, prompts) = prompt_server();
+        let (requester, mut master, _client) = passing_a_terminal(false);
+
+        // The vault is where the typed password is tried, and it isn't there.
+        assert_eq!(
+            answer_on_terminal(&server, &requester, &mut master, "hunter2\n"),
+            Err(UnlockError::NotFound {
+                db: "personal".to_string()
+            })
+        );
+        assert!(prompts.shown().is_empty(), "the screen prompt ran");
+        assert!(echoing(&master), "echo is back");
+        assert!(!unlocking(&server));
+    }
+
+    /// Where a prompt may appear on screen it does, and the terminal the
+    /// requester passed is left alone.
+    #[test]
+    fn the_terminal_is_ignored_where_a_prompt_may_appear_on_screen() {
+        let (server, prompts) = prompt_server();
+        prompts.push(typed());
+        let (requester, master, _client) = passing_a_terminal(true);
+
+        assert_eq!(
+            unlock_from(&server, "personal", &requester),
+            Err(UnlockError::NotFound {
+                db: "personal".to_string()
+            })
+        );
+        assert_eq!(prompts.shown(), ["Unlock personal"]);
+        assert!(!shows_anything(&master), "something was written to it");
+        assert!(echoing(&master));
+    }
+
+    /// A requester on the desktop behind a locker has no screen to answer
+    /// on, but its terminal still is one.
+    #[test]
+    fn a_requester_on_the_desktop_behind_a_locker_is_asked_on_its_terminal() {
+        let (server, prompts) = prompt_server();
+        server.set_display_session(DisplaySession::Locked {
+            id: SESSION.to_string(),
+            active: true,
+        });
+        let (requester, mut master, _client) = passing_a_terminal(true);
+
+        assert_eq!(
+            answer_on_terminal(&server, &requester, &mut master, "hunter2\n"),
+            Err(UnlockError::NotFound {
+                db: "personal".to_string()
+            })
+        );
+        assert!(prompts.shown().is_empty());
+    }
+
+    #[test]
+    fn a_lock_ends_a_prompt_on_the_terminal() {
+        let (server, _prompts) = prompt_server();
+        let (requester, mut master, _client) = passing_a_terminal(false);
+
+        let outcome = thread::scope(|scope| {
+            let unlocking = scope.spawn(|| unlock_from(&server, "personal", &requester));
+            read_until(&mut master, "Unlock personal: ");
+            server.lock_all();
+            unlocking.join().expect("unlock thread")
+        });
+
+        assert_eq!(
+            outcome,
+            Err(UnlockError::LockedDuringUnlock {
+                db: "personal".to_string()
+            })
+        );
+        assert!(echoing(&master));
+        assert!(!unlocking(&server));
+    }
+
+    #[test]
+    fn a_prompt_on_the_terminal_times_out() {
+        let (server, _prompts) = prompt_server_timing_out_after("300ms");
+        let (requester, mut master, _client) = passing_a_terminal(false);
+
+        let outcome = thread::scope(|scope| {
+            let unlocking = scope.spawn(|| unlock_from(&server, "personal", &requester));
+            read_until(&mut master, "Unlock personal: ");
+            unlocking.join().expect("unlock thread")
+        });
+
+        assert_eq!(
+            outcome,
+            Err(UnlockError::PromptCancelled {
+                db: "personal".to_string()
+            })
+        );
+        assert!(echoing(&master));
+        assert!(!unlocking(&server));
+    }
+
+    #[test]
+    fn the_requester_leaving_ends_a_prompt_on_the_terminal() {
+        let (server, _prompts) = prompt_server();
+        let (requester, mut master, client) = passing_a_terminal(false);
+
+        let outcome = thread::scope(|scope| {
+            let unlocking = scope.spawn(|| unlock_from(&server, "personal", &requester));
+            read_until(&mut master, "Unlock personal: ");
+            client.shutdown(std::net::Shutdown::Write).expect("leave");
+            unlocking.join().expect("unlock thread")
+        });
+
+        assert_eq!(
+            outcome,
+            Err(UnlockError::PromptCancelled {
+                db: "personal".to_string()
+            })
+        );
+        assert!(echoing(&master));
+        assert!(!unlocking(&server));
+    }
+
+    /// A prompt on a terminal is still the database's one unlock: a second
+    /// request for it is refused, not given a second prompt.
+    #[test]
+    fn a_second_unlock_is_refused_while_the_terminal_prompt_is_up() {
+        let (server, _prompts) = prompt_server();
+        let (requester, mut master, client) = passing_a_terminal(false);
+
+        thread::scope(|scope| {
+            let unlocking = scope.spawn(|| unlock_from(&server, "personal", &requester));
+            read_until(&mut master, "Unlock personal: ");
+
+            assert_eq!(
+                unlock(&server, "personal"),
+                Err(UnlockError::InProgress {
+                    db: "personal".to_string()
+                })
+            );
+
+            client.shutdown(std::net::Shutdown::Write).expect("leave");
+            let _ = unlocking.join().expect("unlock thread");
+        });
     }
 
     #[test]

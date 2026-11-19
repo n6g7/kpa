@@ -263,6 +263,19 @@ impl Pty {
         }
     }
 
+    /// The slave end, opened as a client's `/dev/tty` would be, for passing
+    /// to the daemon on a socket.
+    pub fn open_slave(&self) -> std::os::fd::OwnedFd {
+        use rustix::fs::{Mode, OFlags, open};
+
+        open(
+            self.slave_path.as_c_str(),
+            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open the pty's slave")
+    }
+
     /// Makes the slave `cmd`'s controlling terminal and its stdin, stdout
     /// and stderr, so `/dev/tty` inside it resolves to this pty.
     ///
@@ -307,6 +320,20 @@ impl Pty {
             .expect("tcgetattr on the pty master")
             .local_modes
             .contains(rustix::termios::LocalModes::ECHO)
+    }
+
+    /// Whether the screen has anything on it to read now.
+    pub fn shows_anything(&self) -> bool {
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+        let mut fds = [PollFd::new(&self.master, PollFlags::IN)];
+        let now = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        poll(&mut fds, Some(&now)).expect("poll on pty master");
+        // Not just any event: the master hangs up once every slave is closed.
+        fds[0].revents().contains(PollFlags::IN)
     }
 
     /// Types `text` into whatever's attached to the slave.

@@ -99,6 +99,10 @@ impl<T> Scripted<T> {
 }
 
 impl<T: Send> Backend<T> for Scripted<T> {
+    fn is_queued(&self) -> bool {
+        true
+    }
+
     fn show(
         &self,
         message: &str,

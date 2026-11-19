@@ -65,11 +65,12 @@ pub fn authorize_copy<'s>(
     }
 }
 
-/// The prompt, if any, that may ask for the password of an unlock: `None`
-/// for a request that carries its password, which needs no prompt and so
-/// goes ahead from anywhere (that is how an unlock from outside the desktop
-/// is answered). One that needs a prompt gets the screen where a prompt may
-/// appear ([`may_prompt_on_screen`]), else it is `no_display`.
+/// Where an `unlock` asks for the password: on screen where a prompt may
+/// appear ([`may_prompt_on_screen`]), otherwise on the terminal the
+/// requester passed, and `no_display` where there is neither, since nobody
+/// could answer. `None` for a request that carries its password: it needs
+/// no prompt, so it goes ahead from anywhere (that is how an unlock from
+/// outside the desktop is answered).
 pub fn choose_unlock_prompt(
     request: &UnlockRequest,
     requester: &Requester,
@@ -79,6 +80,8 @@ pub fn choose_unlock_prompt(
         Ok(None)
     } else if may_prompt_on_screen(requester, display_session) {
         Ok(Some(PromptOn::Screen))
+    } else if requester.terminal.is_some() {
+        Ok(Some(PromptOn::Terminal))
     } else {
         Err(UnlockError::NoDisplay)
     }
@@ -114,7 +117,9 @@ fn in_desktop_cgroup(requester: &Requester, session: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompt::Terminal;
     use crate::proto::Password;
+    use std::os::unix::net::UnixStream;
     use zeroize::Zeroizing;
 
     const UID: u32 = 1000;
@@ -127,6 +132,7 @@ mod tests {
             uid: UID,
             cgroup: Some(cgroup.to_string()),
             command: None,
+            terminal: None,
         }
     }
 
@@ -135,6 +141,7 @@ mod tests {
             uid: UID,
             cgroup: None,
             command: None,
+            terminal: None,
         }
     }
 
@@ -291,6 +298,13 @@ mod tests {
         assert!(!may_connect(&requester, UID + 1));
     }
 
+    /// A terminal a requester passed: the slave end of a pseudo-terminal.
+    fn passed_terminal() -> Terminal {
+        let (_master, slave) = crate::prompt::testing::pty();
+        let (_client, connection) = UnixStream::pair().expect("connection");
+        Terminal::new(slave, &connection).expect("a terminal")
+    }
+
     fn unlock_request(password: Option<&str>) -> UnlockRequest {
         UnlockRequest {
             db: "personal".to_string(),
@@ -323,30 +337,54 @@ mod tests {
         }
     }
 
+    /// Where a prompt is asked: on screen where one may appear, otherwise
+    /// on the terminal the requester passed, and nowhere else.
     #[test]
-    fn an_unlock_that_needs_a_prompt_needs_a_requester_on_the_desktop_and_no_locker() {
-        let (desktop, outside) = (requester(DESKTOP), requester(CRON));
+    fn a_prompt_is_asked_on_screen_where_one_may_appear_and_otherwise_on_the_terminal() {
         let asking = unlock_request(None);
+        for (on_desktop, locked_screen, has_terminal, expected) in [
+            (true, false, true, Ok(Some(PromptOn::Screen))),
+            (true, false, false, Ok(Some(PromptOn::Screen))),
+            (true, true, true, Ok(Some(PromptOn::Terminal))),
+            (false, false, true, Ok(Some(PromptOn::Terminal))),
+            (true, true, false, Err(UnlockError::NoDisplay)),
+            (false, false, false, Err(UnlockError::NoDisplay)),
+        ] {
+            let mut requester = requester(if on_desktop { DESKTOP } else { CRON });
+            requester.terminal = has_terminal.then(passed_terminal);
+            let display_session = if locked_screen {
+                locked("3")
+            } else {
+                unlocked("3", true)
+            };
+            assert_eq!(
+                choose_unlock_prompt(&asking, &requester, &display_session),
+                expected,
+                "on the desktop: {on_desktop}, locked: {locked_screen}, terminal passed: {has_terminal}"
+            );
+        }
         assert_eq!(
-            choose_unlock_prompt(&asking, &desktop, &unlocked("3", true)),
-            Ok(Some(PromptOn::Screen))
-        );
-        assert_eq!(
-            choose_unlock_prompt(&asking, &desktop, &locked("3")),
-            Err(UnlockError::NoDisplay)
-        );
-        assert_eq!(
-            choose_unlock_prompt(&asking, &outside, &unlocked("3", true)),
-            Err(UnlockError::NoDisplay)
-        );
-        assert_eq!(
-            choose_unlock_prompt(&asking, &desktop, &DisplaySession::None),
+            choose_unlock_prompt(&asking, &requester(DESKTOP), &DisplaySession::None),
             Err(UnlockError::NoDisplay)
         );
     }
 
+    /// A prompt behind an inactive display session (a VT switch) still
+    /// shows, so `active` is not read.
     #[test]
-    fn an_unlock_that_carries_its_password_goes_ahead_from_anywhere() {
+    fn an_unlock_prompt_ignores_whether_the_display_session_is_active() {
+        assert_eq!(
+            choose_unlock_prompt(
+                &unlock_request(None),
+                &requester(DESKTOP),
+                &unlocked("3", false)
+            ),
+            Ok(Some(PromptOn::Screen))
+        );
+    }
+
+    #[test]
+    fn an_unlock_that_carries_its_password_needs_no_prompt_and_goes_ahead_from_anywhere() {
         let carrying = unlock_request(Some("hunter2"));
         let outside = requester(CRON);
         assert_eq!(

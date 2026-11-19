@@ -28,6 +28,7 @@ pub(super) fn requester() -> Requester {
             "0::/user.slice/user-0.slice/session-{SESSION}.scope\n"
         )),
         command: None,
+        terminal: None,
     }
 }
 

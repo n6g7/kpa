@@ -14,12 +14,7 @@ use std::time::Instant;
 
 use zeroize::Zeroizing;
 
-use super::{Backend, CancelToken, ConfirmAnswer, PromptOutcome};
-use crate::proto::MAX_PASSWORD_LEN;
-
-/// The longest answer read; one more byte is an error. An answer can be a
-/// secret, so this is the secrets' length cap.
-const MAX_ANSWER_LEN: usize = MAX_PASSWORD_LEN;
+use super::{Backend, CancelToken, ConfirmAnswer, MAX_ANSWER_LEN, PromptOutcome, poll_timeout};
 
 /// The environment variable a prompt program finds its message in
 /// (`docs/design.md` § Configuration, `docs/ssh-agent.md` § 6.6). A prompt
@@ -49,6 +44,10 @@ impl SecretProgram {
 }
 
 impl Backend<Zeroizing<String>> for SecretProgram {
+    fn is_queued(&self) -> bool {
+        true
+    }
+
     /// Returns what the program printed, with its trailing `\n`/`\r`
     /// stripped, since dmenu-style prompts newline-terminate their output.
     ///
@@ -86,6 +85,10 @@ impl ConfirmProgram {
 }
 
 impl Backend<ConfirmAnswer> for ConfirmProgram {
+    fn is_queued(&self) -> bool {
+        true
+    }
+
     fn show(
         &self,
         message: &str,
@@ -168,17 +171,7 @@ fn run(
         return Ok(PromptOutcome::Cancelled);
     }
 
-    let mut end = len;
-    while end > 0 && matches!(buf[end - 1], b'\n' | b'\r') {
-        end -= 1;
-    }
-    let text = std::str::from_utf8(&buf[..end])
-        .map_err(|_| Error::new(ErrorKind::InvalidData, "prompt output is not valid UTF-8"))?;
-
-    // Sized exactly, so `push_str` doesn't reallocate either.
-    let mut answer = Zeroizing::new(String::with_capacity(text.len()));
-    answer.push_str(text);
-    Ok(PromptOutcome::Answer(answer))
+    PromptOutcome::from_output(&buf[..len])
 }
 
 /// Read the child's stdout into `buf` until EOF, returning how much was
@@ -192,7 +185,7 @@ fn read_prompt(
     deadline: Option<Instant>,
     cancel: &UnixStream,
 ) -> std::io::Result<Result<usize, PromptOutcome>> {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    use rustix::event::{PollFd, PollFlags, poll};
 
     let mut stdout = child
         .stdout
@@ -212,10 +205,7 @@ fn read_prompt(
                 if left.is_zero() {
                     return Ok(Err(PromptOutcome::TimedOut));
                 }
-                Some(Timespec {
-                    tv_sec: left.as_secs().try_into().unwrap_or(i64::MAX),
-                    tv_nsec: left.subsec_nanos().into(),
-                })
+                Some(poll_timeout(left))
             }
             None => None,
         };

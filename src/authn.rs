@@ -9,6 +9,9 @@
 //! runs under the user's service manager or the display session's scope.
 //! Which session is the display session is not the peer's to say, so a
 //! [`Requester`] only keeps the cgroup.
+//!
+//! A peer can also pass a terminal along with its request, for the daemon to
+//! ask on when it can't ask on screen ([`Terminal`](crate::prompt::Terminal)).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -17,6 +20,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
+
+use crate::prompt::Terminal;
 
 /// Longest `/proc/<pid>/` file accepted. A unified hierarchy's `cgroup` has
 /// one line; a hybrid one adds a line per v1 controller, still well under
@@ -84,6 +89,9 @@ pub struct Requester {
     /// what it asked for (`docs/ssh-agent.md` § 6.8). `None` where it can't
     /// be read.
     pub command: Option<String>,
+    /// A terminal the peer passed with its request. The daemon uses it only
+    /// if it has to ask the user something and can't ask on screen.
+    pub terminal: Option<Terminal>,
 }
 
 impl Requester {
@@ -102,6 +110,7 @@ impl Requester {
             uid,
             cgroup,
             command: peer_command(stream),
+            terminal: None,
         })
     }
 
@@ -118,6 +127,7 @@ impl Requester {
             uid: process_uid(),
             cgroup,
             command: Some("kpa".to_string()),
+            terminal: None,
         }
     }
 }

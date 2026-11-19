@@ -247,6 +247,7 @@ mod tests {
             uid: 0,
             cgroup: None,
             command: Some("ssh".to_string()),
+            terminal: None,
         }
     }
 
