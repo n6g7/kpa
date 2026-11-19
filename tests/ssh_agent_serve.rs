@@ -1050,4 +1050,32 @@ mod pending {
                 .success()
         );
     }
+
+    /// A requester outside the desktop is told what to run in the key's
+    /// comment, until the key is approved.
+    #[test]
+    fn the_key_comment_names_the_remedy_until_the_key_is_approved() {
+        let daemon = outside_daemon();
+        let agent = start_ssh_agent(&daemon);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pubkey = ed25519_pubkey(&agent, dir.path());
+        let data = dir.path().join("data");
+        std::fs::write(&data, b"approve me").expect("write data");
+        let comment = |agent: &SshAgent| {
+            let listed = stdout(&super::ssh_add(agent, ["-L"]));
+            listed
+                .lines()
+                .find(|line| line.contains("Ed25519"))
+                .unwrap_or_else(|| panic!("no Ed25519 identity in {listed:?}"))
+                .split_once("Ed25519")
+                .map(|(_, comment)| format!("Ed25519{comment}"))
+                .expect("the comment")
+        };
+
+        assert_eq!(comment(&agent), "Ed25519 (needs approval: kpa ssh pending)");
+        assert!(!sign(&agent, &pubkey, &data).status.success());
+        let id = first_id(&stdout(&kpa(&daemon, &["ssh", "pending"])));
+        assert!(kpa(&daemon, &["ssh", "approve", &id]).status.success());
+        assert_eq!(comment(&agent), "Ed25519");
+    }
 }

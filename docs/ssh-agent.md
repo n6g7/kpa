@@ -598,9 +598,15 @@ ED25519 "github" from agent: agent refused operation`. So when the
 requester runs outside the desktop, kpa puts the remedy in the comment it
 lists:
 
-- an unapproved key: `github (needs approval: kpa ssh approve)`;
+- an unapproved key: `github (needs approval: kpa ssh pending)`;
 - a key from a locked database: `personal SHA256:3fQ… (locked: kpa unlock
   personal)`.
+
+Each is the refusal the sign flow itself would give the key there. A key
+that needs neither gets no hint, and neither does a key listed to a
+forwarded connection, whose requester can't run either command. The hint
+follows the key's name, which is escaped and capped, so a hostile name
+can't hide it or drive the terminal.
 
 kpa also logs each refusal.
 
@@ -809,7 +815,7 @@ programs' settings.
 | `ssh -A` to a headless host, then `git pull` there         | The login is local use. The pull is forwarded, and the desktop asks once, naming the host, the destination, the key and the remote user. The approval covers the rest of that SSH session |
 | IDE remote session to a headless host, then a fetch        | The same: one approval per destination per connection                                                                                                |
 | From a laptop: `ssh -A` into the desktop, then `git pull`  | The laptop's forwarded agent answers. kpa on the desktop is not involved                                                                             |
-| From elsewhere, a terminal-server shell on the desktop: `git pull` | No agent is forwarded, so kpa answers. If the vault is locked, the request is refused and `ssh`'s error names `kpa unlock personal`. If the key isn't approved yet, the error names `kpa ssh approve`; run it, then retry |
+| From elsewhere, a terminal-server shell on the desktop: `git pull` | No agent is forwarded, so kpa answers. If the vault is locked, the request is refused and `ssh`'s error names `kpa unlock personal`. If the key isn't approved yet, the error names `kpa ssh pending`; run it, approve the request it lists with `kpa ssh approve <id>`, then retry |
 | Screen locks                                               | kpa has locked everything. Nothing signs until the next unlock                                                                                       |
 
 **Notes**
