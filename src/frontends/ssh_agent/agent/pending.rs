@@ -19,7 +19,11 @@ pub fn pending_requests(host: &impl SshHost) -> Vec<PendingRequest> {
         .filter(|cfg| cfg.serve_ssh_keys)
         .flat_map(|cfg| {
             host.with_slot(&cfg.name, |slot| {
-                slot.ssh.pending.list(slot.wall_now()).collect::<Vec<_>>()
+                slot.ssh
+                    .pending
+                    .list(slot.wall_now())
+                    .cloned()
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default()
         })

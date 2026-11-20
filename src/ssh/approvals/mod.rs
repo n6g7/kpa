@@ -86,7 +86,8 @@ pub struct RequestDetails {
     pub command: Option<String>,
 }
 
-/// One pending request, as [`Approvals::pending`] lists it.
+/// One request refused for want of an approval, as [`PendingRequests`] keeps
+/// it and [`Approvals::pending`] lists it.
 #[derive(Debug, Clone)]
 pub struct PendingRequest {
     /// What names it to [`Approvals::approve`]. Random, so it never means
@@ -191,7 +192,7 @@ impl Approvals {
     /// This database's pending requests at `now`, oldest first.
     pub fn pending(&self, open: &Open, now: SystemTime) -> Vec<PendingRequest> {
         Self::current(&mut self.held(), open)
-            .map(|state| state.pending.list(now).collect())
+            .map(|state| state.pending.list(now).cloned().collect())
             .unwrap_or_default()
     }
 

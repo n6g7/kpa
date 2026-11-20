@@ -14,24 +14,11 @@ pub const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
 /// At most this many requests are pending at once.
 const MAX_PENDING: usize = 16;
 
-#[derive(Debug)]
-struct Entry {
-    /// What a client names the request by, to approve it. Random, so it
-    /// never means another request, and says nothing about the scope.
-    id: Uuid,
-    approval: SignatureApproval,
-    /// The key the approval is for, as the open database serves it.
-    key: ServedKey,
-    request: RequestDetails,
-    /// When it was last refused.
-    refused_at: SystemTime,
-}
-
 /// Requests from outside the desktop that were refused for want of an
 /// approval no prompt could ask for (`docs/ssh-agent.md` § 6.8), oldest
 /// first.
 #[derive(Debug, Default)]
-pub struct PendingRequests(Vec<Entry>);
+pub struct PendingRequests(Vec<PendingRequest>);
 
 impl PendingRequests {
     /// Records that `request` was refused for want of `approval`, which is for
@@ -45,11 +32,11 @@ impl PendingRequests {
         request: RequestDetails,
         now: SystemTime,
     ) {
-        self.0.retain(|entry| !expired(entry, now));
+        self.0.retain(|pending| !expired(pending, now));
         let id = match self
             .0
             .iter()
-            .position(|entry| entry.approval == approval && entry.request == request)
+            .position(|pending| pending.approval == approval && pending.request == request)
         {
             Some(merged) => self.0.remove(merged).id,
             None => Uuid::new_v4(),
@@ -57,7 +44,7 @@ impl PendingRequests {
         if self.0.len() >= MAX_PENDING {
             self.0.remove(0);
         }
-        self.0.push(Entry {
+        self.0.push(PendingRequest {
             id,
             approval,
             key,
@@ -67,17 +54,8 @@ impl PendingRequests {
     }
 
     /// The requests still pending at `now`, oldest first.
-    pub fn list(&self, now: SystemTime) -> impl Iterator<Item = PendingRequest> + '_ {
-        self.0
-            .iter()
-            .filter(move |entry| !expired(entry, now))
-            .map(move |entry| PendingRequest {
-                id: entry.id,
-                approval: entry.approval.clone(),
-                key: entry.key.clone(),
-                request: entry.request.clone(),
-                refused_at: entry.refused_at,
-            })
+    pub fn list(&self, now: SystemTime) -> impl Iterator<Item = &PendingRequest> {
+        self.0.iter().filter(move |pending| !expired(pending, now))
     }
 
     /// Answers the request `id` names: removes it, and every other request
@@ -85,17 +63,22 @@ impl PendingRequests {
     /// none has that id at `now`: it expired, a lock dropped it, or `id`
     /// never named one.
     pub fn take(&mut self, id: Uuid, now: SystemTime) -> Option<SignatureApproval> {
-        self.0.retain(|entry| !expired(entry, now));
-        let approval = self.0.iter().find(|entry| entry.id == id)?.approval.clone();
+        self.0.retain(|pending| !expired(pending, now));
+        let approval = self
+            .0
+            .iter()
+            .find(|pending| pending.id == id)?
+            .approval
+            .clone();
         self.0
-            .retain(|entry| entry.approval.scope != approval.scope);
+            .retain(|pending| pending.approval.scope != approval.scope);
         Some(approval)
     }
 }
 
-fn expired(entry: &Entry, now: SystemTime) -> bool {
+fn expired(pending: &PendingRequest, now: SystemTime) -> bool {
     // A clock set back reads as just refused.
-    now.duration_since(entry.refused_at).unwrap_or_default() >= PENDING_TTL
+    now.duration_since(pending.refused_at).unwrap_or_default() >= PENDING_TTL
 }
 
 #[cfg(test)]
