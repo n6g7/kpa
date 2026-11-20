@@ -313,9 +313,15 @@ into an unprotected type, and kpa's own use of `keepass` types whose
 inside `keepass` (NG-4).
 
 **T-10 · Spoofed D-Bus input** (S, D) — ACT-6 · TB-6 · A-2, A-3 → G-5  
-Response: signals only ever lock (fail-safe). In scope: anything on either
-bus that can *unlock*, read entry data, or suppress a lock. Out of scope:
-a spoofed or bus-reachable lock (NG-7).
+Response: logind's signals are accepted only from the unique name that owns
+`org.freedesktop.login1`, resolved when the watch subscribes and
+re-resolved on `NameOwnerChanged` (a change is a lost watch, which locks
+every database). A signal from any other peer is ignored, so a peer can't
+unmark a locked screen, move the watch to another session or stop a later
+unlock taking the sleep inhibitor. In scope: anything on either bus that
+can *unlock*, read entry data, or suppress a lock, including a signal sent
+directly to kpa's connection by another peer (match rules don't filter
+those). Out of scope: a spoofed or bus-reachable lock (NG-7).
 
 **T-11 · Crafted `.kdbx` or keyfile** (T, D, E) — ACT-3 · TB-2 · all → G-9  
 Response: memory-safe language; parsing in the `keepass` crate; ceilings

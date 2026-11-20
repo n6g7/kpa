@@ -8,8 +8,10 @@
 //! A watcher thread owns a D-Bus connection to logind and turns its signals
 //! and property changes into events: a `Lock` signal on the user's display
 //! session, that session's `LockedHint` and `Active`, `PrepareForSleep`, and
-//! a lost subscription. A second thread owns the `Inhibit` call and its file
-//! descriptor, so no request ever waits on D-Bus.
+//! a lost subscription (the bus connection ends, or logind's name changes
+//! owner). A second thread owns the `Inhibit` call and its file descriptor,
+//! so no request ever waits on D-Bus. The watcher acts only on messages sent
+//! by the connection that owns logind's name.
 //!
 //! This module needs systemd-logind reachable on the bus it's given
 //! (`Bus::System` in production), which means a systemd Linux host. It
@@ -41,12 +43,17 @@ const USER_IFACE: &str = "org.freedesktop.login1.User";
 const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 const DBUS: &str = "org.freedesktop.DBus";
 
-/// The signals and properties kpa subscribes to. `sender` is pinned to
-/// logind's well-known name, so a same-bus peer can't inject them.
-const MATCH_RULES: [&str; 3] = [
+/// The signals and properties kpa subscribes to, and the bus's report that
+/// logind's name changed owner. A match rule only selects which broadcast
+/// signals the bus forwards to kpa: a peer can still send a signal straight
+/// to kpa's connection, and it arrives whatever the rules say. So the
+/// rules don't authenticate anything; [`interpret`] accepts a message only
+/// from the connection that owns logind's name.
+const MATCH_RULES: [&str; 4] = [
     "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'",
     "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Session',member='Lock'",
     "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'",
+    "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.freedesktop.login1'",
 ];
 
 const RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -141,8 +148,8 @@ fn watch_forever(bus: &Bus, uid: u32, events: &Sender<Event>) {
     }
 }
 
-/// Subscribe and forward events until the connection fails. Always returns
-/// an error: a watch doesn't end on purpose.
+/// Subscribe and forward events until the connection fails or logind's name
+/// changes owner. Always returns an error: a watch doesn't end on purpose.
 fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut bool) -> String {
     // Created before the match rules are added, so nothing sent after the
     // subscription is missed.
@@ -159,6 +166,12 @@ fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut b
         }
     }
 
+    // Read once the rules are in, so a later change of owner arrives as a
+    // message and ends the watch.
+    let owner = match logind_owner(conn) {
+        Ok(owner) => owner,
+        Err(err) => return err,
+    };
     let user = match get_user(conn, uid) {
         Ok(user) => user,
         Err(err) => return err,
@@ -182,7 +195,8 @@ fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut b
             Ok(message) => message,
             Err(err) => return err.to_string(),
         };
-        match interpret(&message, user.as_str(), session.as_ref()) {
+        match interpret(&message, &owner, user.as_str(), session.as_ref()) {
+            Step::OwnerChanged => return "logind's name changed owner".to_string(),
             Step::LockRequested => {
                 let _ = events.send(Event::LockRequested);
             }
@@ -225,6 +239,9 @@ struct LogindSession {
 /// What one incoming message means to the watcher.
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
+    /// The bus reports that logind's name has a new owner (or none). What was
+    /// resolved when the watch subscribed no longer says who logind is.
+    OwnerChanged,
     /// The display session's `Lock` signal.
     LockRequested,
     /// `PrepareForSleep`: `true` just before sleep, `false` on resume.
@@ -247,15 +264,29 @@ enum Property {
 }
 
 /// Classify a message. Pure, so the matching can be tested without a bus.
-/// `user` is the user object kpa watches; `session` is the display session
-/// it currently follows.
-fn interpret(message: &Message, user: &str, session: Option<&LogindSession>) -> Step {
+/// `owner` is the unique name of the connection that owns logind's name.
+/// Its messages are the only ones that count, besides the bus's own report
+/// that logind's name changed owner. `user` is the user object kpa watches;
+/// `session` is the display session it currently follows.
+fn interpret(message: &Message, owner: &str, user: &str, session: Option<&LogindSession>) -> Step {
     let header = message.header();
-    let (Some(path), Some(interface), Some(member)) =
-        (header.path(), header.interface(), header.member())
-    else {
+    let (Some(sender), Some(path), Some(interface), Some(member)) = (
+        header.sender(),
+        header.path(),
+        header.interface(),
+        header.member(),
+    ) else {
         return Step::Ignore;
     };
+    if sender.as_str() == DBUS {
+        return match (interface.as_str(), member.as_str()) {
+            (DBUS, "NameOwnerChanged") if names_logind(message) => Step::OwnerChanged,
+            _ => Step::Ignore,
+        };
+    }
+    if sender.as_str() != owner {
+        return Step::Ignore;
+    }
     let on_session = session.is_some_and(|session| session.path.as_str() == path.as_str());
 
     match (interface.as_str(), member.as_str()) {
@@ -295,6 +326,14 @@ fn interpret(message: &Message, user: &str, session: Option<&LogindSession>) -> 
     }
 }
 
+/// Whether a `NameOwnerChanged` is about logind's name.
+fn names_logind(message: &Message) -> bool {
+    message
+        .body()
+        .deserialize::<(String, String, String)>()
+        .is_ok_and(|(name, _old_owner, _new_owner)| name == LOGIND)
+}
+
 /// Parse a `User.Display` value, `(so)`. Returns `Some(None)` for logind's
 /// "no display session" (`"/"`), `None` if the value doesn't have that shape.
 fn parse_display(value: &OwnedValue) -> Option<Option<LogindSession>> {
@@ -304,6 +343,23 @@ fn parse_display(value: &OwnedValue) -> Option<Option<LogindSession>> {
     } else {
         Some(Some(LogindSession { id, path }))
     }
+}
+
+/// The unique name of the connection that owns logind's name now.
+fn logind_owner(conn: &Connection) -> Result<String, String> {
+    let reply = conn
+        .call_method(
+            Some(DBUS),
+            "/org/freedesktop/DBus",
+            Some(DBUS),
+            "GetNameOwner",
+            &LOGIND,
+        )
+        .map_err(|err| format!("GetNameOwner({LOGIND}): {err}"))?;
+    reply
+        .body()
+        .deserialize::<String>()
+        .map_err(|err| err.to_string())
 }
 
 fn get_user(conn: &Connection, uid: u32) -> Result<OwnedObjectPath, String> {
@@ -436,25 +492,50 @@ impl LogindInhibitor {
 mod tests {
     use super::*;
 
-    fn signal<B>(path: &str, interface: &str, member: &str, body: &B) -> Message
+    /// The connection that owns logind's name in these tests.
+    const OWNER: &str = ":1.7";
+    /// Another connection on the bus.
+    const PEER: &str = ":1.99";
+
+    fn signal_from<B>(sender: &str, path: &str, interface: &str, member: &str, body: &B) -> Message
     where
         B: serde::Serialize + zbus::zvariant::DynamicType,
     {
         Message::signal(path, interface, member)
             .unwrap()
+            .sender(sender)
+            .unwrap()
             .build(body)
             .unwrap()
     }
 
-    fn properties_changed(path: &str, iface: &str, key: &str, value: OwnedValue) -> Message {
+    fn signal<B>(path: &str, interface: &str, member: &str, body: &B) -> Message
+    where
+        B: serde::Serialize + zbus::zvariant::DynamicType,
+    {
+        signal_from(OWNER, path, interface, member, body)
+    }
+
+    fn properties_changed_from(
+        sender: &str,
+        path: &str,
+        iface: &str,
+        key: &str,
+        value: OwnedValue,
+    ) -> Message {
         let mut changed = HashMap::new();
         changed.insert(key.to_string(), value);
-        signal(
+        signal_from(
+            sender,
             path,
             PROPERTIES_IFACE,
             "PropertiesChanged",
             &(iface, changed, Vec::<String>::new()),
         )
+    }
+
+    fn properties_changed(path: &str, iface: &str, key: &str, value: OwnedValue) -> Message {
+        properties_changed_from(OWNER, path, iface, key, value)
     }
 
     const USER: &str = "/org/freedesktop/login1/user/_1000";
@@ -472,7 +553,7 @@ mod tests {
     fn a_lock_signal_on_the_display_session_is_a_screen_lock() {
         let msg = signal(SESSION, SESSION_IFACE, "Lock", &());
         assert_eq!(
-            interpret(&msg, USER, Some(&session_at("31", SESSION))),
+            interpret(&msg, OWNER, USER, Some(&session_at("31", SESSION))),
             Step::LockRequested
         );
     }
@@ -481,7 +562,7 @@ mod tests {
     fn a_lock_signal_on_another_session_is_ignored() {
         let msg = signal(OTHER, SESSION_IFACE, "Lock", &());
         assert_eq!(
-            interpret(&msg, USER, Some(&session_at("31", SESSION))),
+            interpret(&msg, OWNER, USER, Some(&session_at("31", SESSION))),
             Step::Ignore
         );
     }
@@ -496,11 +577,11 @@ mod tests {
             OwnedValue::from(false),
         );
         assert_eq!(
-            interpret(&on, USER, Some(&session_at("31", SESSION))),
+            interpret(&on, OWNER, USER, Some(&session_at("31", SESSION))),
             Step::Property(Property::Locked(true))
         );
         assert_eq!(
-            interpret(&off, USER, Some(&session_at("31", SESSION))),
+            interpret(&off, OWNER, USER, Some(&session_at("31", SESSION))),
             Step::Property(Property::Locked(false))
         );
     }
@@ -509,7 +590,7 @@ mod tests {
     fn locked_hint_on_another_session_is_ignored() {
         let other = properties_changed(OTHER, SESSION_IFACE, "LockedHint", OwnedValue::from(true));
         assert_eq!(
-            interpret(&other, USER, Some(&session_at("31", SESSION))),
+            interpret(&other, OWNER, USER, Some(&session_at("31", SESSION))),
             Step::Ignore
         );
     }
@@ -523,11 +604,11 @@ mod tests {
         let on = properties_changed(SESSION, SESSION_IFACE, "Active", OwnedValue::from(true));
         let off = properties_changed(SESSION, SESSION_IFACE, "Active", OwnedValue::from(false));
         assert_eq!(
-            interpret(&on, USER, Some(&session_at("31", SESSION))),
+            interpret(&on, OWNER, USER, Some(&session_at("31", SESSION))),
             Step::Property(Property::Active(true))
         );
         assert_eq!(
-            interpret(&off, USER, Some(&session_at("31", SESSION))),
+            interpret(&off, OWNER, USER, Some(&session_at("31", SESSION))),
             Step::Property(Property::Active(false))
         );
     }
@@ -536,7 +617,7 @@ mod tests {
     fn active_on_another_session_is_ignored() {
         let other = properties_changed(OTHER, SESSION_IFACE, "Active", OwnedValue::from(false));
         assert_eq!(
-            interpret(&other, USER, Some(&session_at("31", SESSION))),
+            interpret(&other, OWNER, USER, Some(&session_at("31", SESSION))),
             Step::Ignore
         );
     }
@@ -545,8 +626,8 @@ mod tests {
     fn prepare_for_sleep_maps_to_sleeping() {
         let start = signal(MANAGER_PATH, MANAGER_IFACE, "PrepareForSleep", &true);
         let end = signal(MANAGER_PATH, MANAGER_IFACE, "PrepareForSleep", &false);
-        assert_eq!(interpret(&start, USER, None), Step::Sleeping(true));
-        assert_eq!(interpret(&end, USER, None), Step::Sleeping(false));
+        assert_eq!(interpret(&start, OWNER, USER, None), Step::Sleeping(true));
+        assert_eq!(interpret(&end, OWNER, USER, None), Step::Sleeping(false));
     }
 
     #[test]
@@ -558,7 +639,7 @@ mod tests {
         .unwrap();
         let msg = properties_changed(USER, USER_IFACE, "Display", display);
         assert_eq!(
-            interpret(&msg, USER, None),
+            interpret(&msg, OWNER, USER, None),
             Step::DisplayChanged(Some(session_at("32", OTHER)))
         );
     }
@@ -571,7 +652,10 @@ mod tests {
         )))
         .unwrap();
         let msg = properties_changed(USER, USER_IFACE, "Display", display);
-        assert_eq!(interpret(&msg, USER, None), Step::DisplayChanged(None));
+        assert_eq!(
+            interpret(&msg, OWNER, USER, None),
+            Step::DisplayChanged(None)
+        );
     }
 
     #[test]
@@ -587,6 +671,88 @@ mod tests {
             "Display",
             display,
         );
-        assert_eq!(interpret(&msg, USER, None), Step::Ignore);
+        assert_eq!(interpret(&msg, OWNER, USER, None), Step::Ignore);
+    }
+
+    /// A signal a peer sends straight to kpa's connection arrives whatever
+    /// the match rules say, so only the sender tells it from logind's. Each of
+    /// these changes what the watcher reports when logind is the sender.
+    #[test]
+    fn a_signal_from_a_peer_that_isnt_logind_is_ignored() {
+        let session = session_at("31", SESSION);
+        let display = OwnedValue::try_from(zvariant::Value::from((
+            "32",
+            OwnedObjectPath::try_from(OTHER).unwrap(),
+        )))
+        .unwrap();
+        let spoofs = [
+            signal_from(PEER, SESSION, SESSION_IFACE, "Lock", &()),
+            signal_from(PEER, MANAGER_PATH, MANAGER_IFACE, "PrepareForSleep", &true),
+            properties_changed_from(
+                PEER,
+                SESSION,
+                SESSION_IFACE,
+                "LockedHint",
+                OwnedValue::from(false),
+            ),
+            properties_changed_from(
+                PEER,
+                SESSION,
+                SESSION_IFACE,
+                "Active",
+                OwnedValue::from(false),
+            ),
+            properties_changed_from(PEER, USER, USER_IFACE, "Display", display),
+        ];
+        for spoof in &spoofs {
+            assert_eq!(
+                interpret(spoof, OWNER, USER, Some(&session)),
+                Step::Ignore,
+                "{spoof:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_without_a_sender_is_ignored() {
+        let msg = Message::signal(MANAGER_PATH, MANAGER_IFACE, "PrepareForSleep")
+            .unwrap()
+            .build(&true)
+            .unwrap();
+        assert_eq!(interpret(&msg, OWNER, USER, None), Step::Ignore);
+    }
+
+    fn name_owner_changed(sender: &str, name: &str, old_owner: &str, new_owner: &str) -> Message {
+        signal_from(
+            sender,
+            "/org/freedesktop/DBus",
+            DBUS,
+            "NameOwnerChanged",
+            &(name, old_owner, new_owner),
+        )
+    }
+
+    #[test]
+    fn the_bus_reporting_a_change_of_logind_s_owner_ends_the_watch() {
+        for (old_owner, new_owner) in [(OWNER, ""), ("", ":1.8"), (OWNER, ":1.8")] {
+            let msg = name_owner_changed(DBUS, LOGIND, old_owner, new_owner);
+            assert_eq!(
+                interpret(&msg, OWNER, USER, None),
+                Step::OwnerChanged,
+                "{old_owner:?} to {new_owner:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bus_reporting_another_name_changing_owner_is_ignored() {
+        let msg = name_owner_changed(DBUS, "org.example.Other", ":1.8", ":1.9");
+        assert_eq!(interpret(&msg, OWNER, USER, None), Step::Ignore);
+    }
+
+    #[test]
+    fn a_peer_reporting_a_change_of_logind_s_owner_is_ignored() {
+        let msg = name_owner_changed(PEER, LOGIND, OWNER, "");
+        assert_eq!(interpret(&msg, OWNER, USER, None), Step::Ignore);
     }
 }
