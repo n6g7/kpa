@@ -55,12 +55,6 @@ pub struct Databases {
     /// Keeps the placeholder files of [`Databases::for_test`] alive.
     #[cfg(test)]
     scratch: Option<tempfile::TempDir>,
-    /// What the freshness guard's `stat` is replaced by, and how long it may
-    /// take ([`Databases::stat_for_test`]).
-    #[cfg(test)]
-    stat_hook: Option<testing::StatHook>,
-    #[cfg(test)]
-    stat_deadline: Option<Duration>,
 }
 
 struct Slot {
@@ -134,10 +128,6 @@ impl Databases {
             observers: Vec::new(),
             #[cfg(test)]
             scratch: None,
-            #[cfg(test)]
-            stat_hook: None,
-            #[cfg(test)]
-            stat_deadline: None,
         }
     }
 

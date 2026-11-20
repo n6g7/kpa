@@ -9,9 +9,8 @@
 //! deadline, takes the lock again and applies the verdict only if no lock has
 //! come in meanwhile: the slot's token is the one it copied.
 
-use std::path::PathBuf;
-use std::sync::MutexGuard;
-use std::sync::mpsc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use super::vault::{self, Fingerprint};
@@ -70,6 +69,21 @@ impl Databases {
         &self,
         index: usize,
     ) -> (MutexGuard<'_, Vec<Slot>>, Option<CancelToken>) {
+        self.checked_slots_with(index, vault::is_unchanged, STAT_DEADLINE)
+    }
+
+    /// [`Databases::checked_slots`] with the `stat` and its deadline given,
+    /// so that a test can make the `stat` stall.
+    pub(super) fn checked_slots_with<S>(
+        &self,
+        index: usize,
+        stat: S,
+        deadline: Duration,
+    ) -> (MutexGuard<'_, Vec<Slot>>, Option<CancelToken>)
+    where
+        S: Fn(&Path, &Fingerprint) -> bool + Send + Sync + 'static,
+    {
+        let stat = Arc::new(stat);
         // Looks again when a lock came in during the `stat`. That can't spin:
         // a pass is repeated only if the database was locked and then unlocked
         // again meanwhile (a lock alone leaves nothing to check), and each
@@ -81,7 +95,7 @@ impl Databases {
             };
             drop(slots);
 
-            let unchanged = self.unchanged([(check.path, check.stamp)])[0];
+            let unchanged = unchanged_within([(check.path, check.stamp)], deadline, &stat)[0];
 
             let mut slots = self.slots();
             if slots[index].source.token() != check.token {
@@ -99,6 +113,18 @@ impl Databases {
     /// changed, or did not answer in time, then tells the observers. One
     /// deadline covers all the files.
     pub fn drop_stale<'a>(&self, names: impl IntoIterator<Item = &'a str>) {
+        self.drop_stale_with(names, vault::is_unchanged, STAT_DEADLINE);
+    }
+
+    /// [`Databases::drop_stale`] with the `stat` and its deadline given.
+    pub(super) fn drop_stale_with<'a, S>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+        stat: S,
+        deadline: Duration,
+    ) where
+        S: Fn(&Path, &Fingerprint) -> bool + Send + Sync + 'static,
+    {
         let mut indices = Vec::new();
         for name in names {
             if let Some(index) = self.index(name)
@@ -120,10 +146,12 @@ impl Databases {
         if checks.is_empty() {
             return;
         }
-        let verdicts = self.unchanged(
+        let verdicts = unchanged_within(
             checks
                 .iter()
                 .map(|(_, check)| (check.path.clone(), check.stamp)),
+            deadline,
+            &Arc::new(stat),
         );
 
         let covered: Vec<Covered> = {
@@ -141,50 +169,43 @@ impl Databases {
         };
         self.tell_locked(&covered);
     }
+}
 
-    /// Whether each file is still the one its stamp was taken from, in the
-    /// order given. The `stat`s run on threads of their own, all under one
-    /// deadline: a file that has not answered by then, and one whose thread
-    /// could not be started, count as changed.
-    fn unchanged(&self, files: impl IntoIterator<Item = (PathBuf, Fingerprint)>) -> Vec<bool> {
-        let files: Vec<_> = files.into_iter().collect();
-        let (answers, answered) = mpsc::channel();
-        for (position, (path, stamp)) in files.iter().enumerate() {
-            let (path, stamp) = (path.clone(), *stamp);
-            #[cfg(test)]
-            let hook = self.stat_hook.clone();
-            let answers = answers.clone();
-            // A thread that can't be started never answers, which reads as
-            // changed.
-            let _ = std::thread::Builder::new()
-                .name("freshness-stat".to_string())
-                .spawn(move || {
-                    #[cfg(test)]
-                    if let Some(hook) = hook {
-                        let _ = answers.send((position, hook(&path, &stamp)));
-                        return;
-                    }
-                    let _ = answers.send((position, vault::is_unchanged(&path, &stamp)));
-                });
-        }
-        drop(answers);
-
-        let mut verdicts = vec![false; files.len()];
-        let deadline = Instant::now() + self.stat_deadline();
-        // Ends when every thread has answered, or at the deadline.
-        while let Ok((position, unchanged)) =
-            answered.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        {
-            verdicts[position] = unchanged;
-        }
-        verdicts
+/// Whether each file is still the one its stamp was taken from, in the order
+/// given. `stat` runs for each on a thread of its own, all under one
+/// `deadline`: a file that has not answered by then, and one whose thread
+/// could not be started, count as changed.
+fn unchanged_within<S>(
+    files: impl IntoIterator<Item = (PathBuf, Fingerprint)>,
+    deadline: Duration,
+    stat: &Arc<S>,
+) -> Vec<bool>
+where
+    S: Fn(&Path, &Fingerprint) -> bool + Send + Sync + 'static,
+{
+    let files: Vec<_> = files.into_iter().collect();
+    let (answers, answered) = mpsc::channel();
+    for (position, (path, stamp)) in files.iter().enumerate() {
+        let (path, stamp) = (path.clone(), *stamp);
+        let stat = Arc::clone(stat);
+        let answers = answers.clone();
+        // A thread that can't be started never answers, which reads as
+        // changed.
+        let _ = std::thread::Builder::new()
+            .name("freshness-stat".to_string())
+            .spawn(move || {
+                let _ = answers.send((position, stat(&path, &stamp)));
+            });
     }
+    drop(answers);
 
-    fn stat_deadline(&self) -> Duration {
-        #[cfg(test)]
-        if let Some(deadline) = self.stat_deadline {
-            return deadline;
-        }
-        STAT_DEADLINE
+    let mut verdicts = vec![false; files.len()];
+    let deadline = Instant::now() + deadline;
+    // Ends when every thread has answered, or at the deadline.
+    while let Ok((position, unchanged)) =
+        answered.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    {
+        verdicts[position] = unchanged;
     }
+    verdicts
 }
