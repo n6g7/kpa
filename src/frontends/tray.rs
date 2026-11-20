@@ -496,7 +496,7 @@ mod tests {
 
     use super::*;
     use crate::config::{Config, DatabaseConfig};
-    use crate::databases::testing::TestEntry;
+    use crate::databases::testing::{PASSWORD, TestEntry};
     use crate::display_session::{self, DisplaySession, DisplayWriter};
     use crate::prompt::{PromptQueue, Scripted, Step};
 
@@ -577,8 +577,9 @@ mod tests {
         }
     }
 
-    fn typed() -> Step<Zeroizing<String>> {
-        Step::new(PromptOutcome::Answer(Zeroizing::new("hunter2".to_string())))
+    /// A prompt answered with `password`.
+    fn typed(password: &str) -> Step<Zeroizing<String>> {
+        Step::new(PromptOutcome::Answer(Zeroizing::new(password.to_string())))
     }
 
     #[test]
@@ -1117,7 +1118,7 @@ mod tests {
     #[test]
     fn an_answered_prompt_goes_on_to_read_the_database() {
         let fx = fixture(&["personal"]);
-        fx.prompts.push(typed());
+        fx.prompts.push(typed(PASSWORD));
 
         assert_eq!(fx.unlock("personal"), Err("corrupt"));
         assert!(!fx.claimed());
@@ -1127,8 +1128,8 @@ mod tests {
     fn an_answered_prompt_unlocks_the_database_and_tells_the_loop() {
         let fx = fixture(&["personal"]);
         fx.databases
-            .stage_for_test("personal", vec![TestEntry::new("site")]);
-        fx.prompts.push(typed());
+            .write_for_test("personal", vec![TestEntry::new("site")]);
+        fx.prompts.push(typed(PASSWORD));
 
         assert_eq!(fx.unlock("personal"), Ok(()));
 
@@ -1138,10 +1139,23 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_that_does_not_open_the_file_is_wrong_credentials() {
+        let fx = fixture(&["personal"]);
+        fx.databases
+            .write_for_test("personal", vec![TestEntry::new("site")]);
+        fx.prompts.push(typed("not the password"));
+
+        assert_eq!(fx.unlock("personal"), Err("wrong_credentials"));
+
+        assert!(fx.databases.snapshot()[0].is_locked());
+        assert!(!fx.claimed());
+    }
+
+    #[test]
     fn a_screen_lock_while_the_prompt_is_up_ends_it() {
         let fx = fixture(&["personal"]);
         let (databases, display) = (Arc::clone(&fx.databases), Arc::clone(&fx.display));
-        fx.prompts.push(typed().while_up(move || {
+        fx.prompts.push(typed(PASSWORD).while_up(move || {
             display.set(display_session(true));
             databases.lock_all();
         }));
@@ -1159,7 +1173,7 @@ mod tests {
                 let databases = Arc::clone(&databases);
                 move || databases.lock("work").expect("configured")
             }));
-        fx.prompts.push(typed().while_up(move || {
+        fx.prompts.push(typed(PASSWORD).while_up(move || {
             databases.lock("personal").expect("configured");
         }));
 
