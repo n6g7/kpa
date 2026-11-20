@@ -336,9 +336,12 @@ before any keyed check, so ACT-3 controls them); hangs or panics.
 Response: `(dev, ino, size, mtime, ctime)`, with nanoseconds, recorded by
 `fstat` on the fd that was read, before and after the read (a difference
 fails the unlock); re-checked by `stat` on the path before serving; any
-difference drops the database and answers `stale`. Residual: ctime is
-only as good as the filesystem's; on coarse-timestamp, FUSE or network
-mounts the guard is best effort.
+difference drops the database and answers `stale`. The `stat` runs without
+the core's lock, on a thread per file, under a 2 s deadline, and a file
+that has not answered by then counts as changed: a mount that stops
+answering cannot hold up a lock. Residual: ctime is only as good as the
+filesystem's; on coarse-timestamp, FUSE or network mounts the guard is best
+effort.
 
 **T-13 · Hostile entry content** (T, S) — ACT-4 · TB-3 · A-2, A-3 → G-10  
 Response: line-delimited JSON is serialized, never concatenated; `copy`
