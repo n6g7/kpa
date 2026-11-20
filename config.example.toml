@@ -37,6 +37,14 @@ log_level = "info"
 # and a program that only takes its prompt text as an argument needs a
 # wrapper like this one to pass the variable along.
 #
+# The message is in the environment rather than the argv because some of it
+# is text the daemon didn't author (an SSH key's name, for the agent's
+# prompts): it is escaped the way the CLI escapes its own terminal output,
+# plus tab and newline so it stays one line, and capped in length. A wrapper
+# puts the message right back into its own argv, which other users can read
+# in /proc/<pid>/cmdline; only a program that reads the variable itself
+# avoids that.
+#
 # An empty stdout means "no password" — which is how a keyfile-only
 # database (tests/fixtures/fixture-kf.kdbx) gets unlocked. `prompt` is a
 # single global setting, so one prompt can't serve both that and a

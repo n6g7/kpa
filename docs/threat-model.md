@@ -341,14 +341,22 @@ the core's lock, on a thread per file, under a 2 s deadline, and a file
 that has not answered by then counts as changed: a mount that stops
 answering cannot hold up a lock. Residual: ctime is only as good as the
 filesystem's; on coarse-timestamp, FUSE or network mounts the guard is best
-effort.
+effort. A chmod, a link change, or a backup tool that hard-links the file
+also moves ctime and causes a spurious `stale`, which fails safe. Not
+caught: a same-size write that leaves mtime and ctime equal to the recorded
+values. ctime moves on every write and every time change, and a tool that
+sets times cannot set it, so the tuple misses such a write only if the
+kernel's timestamp for that write equals the recorded one: a filesystem with
+coarse timestamps where the write lands in the same tick, or a writer that
+sets the system clock back, which needs root. A file replaced while the
+database is locked is T-17.
 
 **T-13 · Hostile entry content** (T, S) — ACT-4 · TB-3 · A-2, A-3 → G-10  
 Response: line-delimited JSON is serialized, never concatenated; `copy`
 addresses entries by `(db, uuid, field)`; the CLI escapes DEL, C1 controls
 and Unicode bidi/format characters before writing to a terminal (JSON
 escaping covers only C0). A custom field's key is entry content too: the
-collision rule (`docs/design.md` § Protocol) makes a bare name that spells
+collision rule (`docs/protocol.md`) makes a bare name that spells
 a built-in case-insensitively always mean the built-in, by type rather than
 by convention, so a custom key crafted to spell `password` or `title`
 cannot stand in for the real field or intercept a `copy` meant for it. In

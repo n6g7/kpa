@@ -40,9 +40,12 @@ One constraint that matters for running both at once: **there is no
 per-database lock file.** KeePassXC 2.7.12's only `QLockFile` is a
 single-instance lock in `/tmp` (`gui/Application.cpp:79-84`), and saves go
 through `QSaveFile` (`core/Database.cpp:361`) — write-to-temp plus atomic
-rename. A concurrent reader never sees a torn file, so freshness (not
-locking) is the only real problem to solve — see `design.md`'s
-"Concurrency and file freshness".
+rename; the non-atomic fallback for cloud-sync directories still ends in a
+rename (`:409`). A concurrent reader never sees a torn file, so freshness (not
+locking) is the only real problem to solve — see `design.md` § Files and
+freshness. This was checked against KeePassXC 2.7.12's source; most modern
+KeePass clients follow the same pattern (decrypt into memory, save through a
+temp file and a rename), but it is worth re-verifying against another client.
 
 ## Verified constraints
 

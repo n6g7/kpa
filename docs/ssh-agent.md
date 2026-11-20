@@ -5,10 +5,11 @@ client's SSH agent integration. The client remains a vault editor if
 wanted, but stops handling SSH. Linux only, like the rest of kpa: a machine without kpa keeps
 its own KeePass client's agent over the same synced vault (§ 2).
 
-It reverses one line of [`design.md`](./design.md) § Scope ("Is not: … an
-SSH agent") and extends [`threat-model.md`](./threat-model.md); § 10 lists
-those edits. It builds on [`headless.md`](./headless.md) for prompt routing,
-prompt timeouts and unlocking from a terminal.
+[`design.md`](./design.md) § Scope covers it: kpa serves SSH keys under the
+same read-only rule as everything else. It extends
+[`threat-model.md`](./threat-model.md) (§ 9 says how), and builds on
+[`headless.md`](./headless.md) for prompt routing, prompt timeouts and
+unlocking from a terminal.
 
 ## 1. Recommendation
 
@@ -930,25 +931,7 @@ programs' settings.
     desktop.
   - Residual: NG-7 (nuisance) and NG-8 (look-alike prompts).
 
-## 10. Changes to existing docs
-
-- **`design.md`**
-  - § Scope: replace "an SSH agent" in **Is not**, and say kpa serves SSH
-    keys under the same read-only rule.
-  - § Architecture: add the agent socket and the key cache.
-  - § Lock policy: lock drops cached keys and approvals, and kills open
-    prompts. Local signatures are activity.
-  - Settled decisions: one row for "kpa is the agent, databases opt in,
-    approval once per key per destination per unlock".
-- **`background.md`**: the "SSH agent" row of the gap table changes. A
-  full client covers SSH, but only while it runs, and only by pushing keys
-  into a separate agent.
-- **`threat-model.md`**: § 9 above.
-- **`config.example.toml`**: an `[ssh_agent]` section, `serve_ssh_keys = true`
-  on one fixture database, and one `[[database.ssh_key]]` against a fixture key.
-- **`nix/hm-module.nix`**: `services.kpa.sshAgent.enable` (§ 8).
-
-## 11. Implementation
+## 10. Implementation
 
 **Modules** (`src/frontends/ssh_agent/`, plus `src/ssh/` for `keys.rs` and `approvals/`, which the daemon's own socket shares):
 
@@ -1024,11 +1007,11 @@ programs' settings.
 - **`tests/control.rs`** spawns `kpa serve`: once a database serves SSH
   keys, the agent's socket appears and `ssh-add -l` reaches it, and
   otherwise there is no agent socket.
-- **Phase 2** (unlock on demand, requests from outside the desktop) adds:
+- **Unlock on demand, and requests from outside the desktop**:
   `ssh-keygen -Y sign` failing when the scripted prompt cancels, and, from
   outside the desktop (`authn::assume_cgroup`), a refused signature that
   `ssh_pending` lists and whose retry signs after `ssh_approve`.
-- **Forwarding** (phase 3): an unprivileged `sshd` on a high port with a temporary
+- **Forwarding**: an unprivileged `sshd` on a high port with a temporary
   host key, then `ssh -A` to localhost. This covers session-bind for real:
   a forwarded login approved by a scripted confirm, a second `ssh -A`
   session asking again, a `forwarded = false` key absent from the
@@ -1036,33 +1019,7 @@ programs' settings.
 - **Fuzzing**: `fuzz_targets/agent_request.rs` covers `wire`, the
   session-bind parser and `classify`.
 
-**Size**: roughly 1,500–2,000 lines of Rust plus tests. That is about as
-much as kpa's existing code, so it warrants its own security-audit pass
-once it lands.
-
-**Phases**, each leaving a usable state. The SSH release ships all three.
-
-1. **Local agent.**
-   - Socket, identities, signing (Ed25519, ECDSA, RSA), database opt-in,
-     discovery, the key cache, overrides, lock coupling, idle activity.
-   - Approvals on screen, with the approval program.
-   - session-bind parsing, with every forwarded request refused.
-   - `kpa ssh keys`, logging, fixtures, fuzz target, threat-model and
-     design edits, `services.kpa.sshAgent.enable`.
-   - The user unlocks from the launcher or tray first.
-   - Enough to switch off a KeePass client's agent on Linux.
-2. **Unlock on demand, and requests from outside the desktop.**
-   - `KPA_PROMPT_MESSAGE`, backoff, unlock waiters.
-   - Pending requests, `kpa ssh pending`, `kpa ssh approve`, the hints in
-     key comments.
-3. **Forwarding.**
-   - `forwarded`, forwarded listing, forwarding-session approvals.
-   - `known_hosts` names, the end-to-end `sshd` test.
-
-Later, if needed: read notifications covering both `copy` and signatures
-(T-16), and an upstream agent relay (approach C).
-
-## 12. Open questions
+## 11. Open questions
 
 1. **Shared terminal servers.** [`headless.md`](./headless.md) open
    question 1 asks whether config should name a terminal server whose

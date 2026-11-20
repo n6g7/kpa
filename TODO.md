@@ -21,6 +21,8 @@ Roadmap, in release order. Each item gets its design written before its implemen
 Unscheduled:
 
 - [ ] Document assumptions (Linux only, logind, etc)
+- [ ] Read notifications that cover both `copy` and SSH signatures (`docs/threat-model.md` T-16)
+- [ ] An upstream agent relay: kpa in front of another agent (`docs/ssh-agent.md` § 4, approach C)
 
 ## Done
 
