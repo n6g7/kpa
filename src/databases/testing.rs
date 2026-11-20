@@ -5,10 +5,15 @@
 use std::io::Write;
 use std::time::Duration;
 
+use keepass::DatabaseKey;
+use keepass::config::KdfConfig;
 use keepass::db::{Value, fields};
 
 use super::{Databases, Slot, vault};
 use crate::config::DatabaseConfig;
+
+/// The password of the databases [`Databases::write_for_test`] writes.
+pub(crate) const PASSWORD: &str = "hunter2";
 
 /// One entry of an in-memory database.
 pub(crate) struct TestEntry {
@@ -103,28 +108,16 @@ impl Databases {
         self.installed(index, &token);
     }
 
-    /// Makes the next unlock of `name` read `entries` instead of its file,
-    /// whatever the password: `Unlocking::finish` installs them through the
-    /// path it installs a real file's.
-    pub(crate) fn stage_for_test(&self, name: &str, entries: Vec<TestEntry>) {
-        self.index(name).expect("a configured database");
-        self.staged
-            .lock()
-            .expect("staged")
-            .insert(name.to_string(), build(entries));
-    }
-
-    /// The staged database for `name`, with the stamp of its placeholder
-    /// file, taken once.
-    pub(super) fn take_staged(
-        &self,
-        name: &str,
-    ) -> Option<(keepass::Database, vault::Fingerprint)> {
-        let db = self.staged.lock().expect("staged").remove(name)?;
+    /// Writes a real database holding `entries` to `name`'s file, which
+    /// [`PASSWORD`] opens: an unlock reads it as it reads any file. Its key
+    /// derivation is a single round, so reading it is quick.
+    pub(crate) fn write_for_test(&self, name: &str, entries: Vec<TestEntry>) {
         let index = self.index(name).expect("a configured database");
-        let stamp = vault::Fingerprint::from_file(&self.configs[index].path)
-            .expect("`for_test` made the placeholder file");
-        Some((db, stamp))
+        let mut db = build(entries);
+        db.config.kdf_config = KdfConfig::Aes { rounds: 1 };
+        let mut file = std::fs::File::create(&self.configs[index].path).expect("the file");
+        db.save(&mut file, DatabaseKey::new().with_password(PASSWORD))
+            .expect("saves");
     }
 
     /// Rewrites the placeholder file, so the freshness guard sees a change.

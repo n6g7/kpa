@@ -314,14 +314,14 @@ mod tests {
     use super::super::request::sign_line;
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
+    use crate::databases::testing::PASSWORD;
     use crate::display_session::DisplaySession;
     use crate::frontends::ssh_agent::testing::{
-        Fixture, IDLE, Options, SESSION, outside, outside_running, requester, serving,
+        Fixture, IDLE, Options, SESSION, outside, outside_running, requester,
     };
     use crate::frontends::ssh_agent::wire::SignFlags;
     use crate::prompt::{ConfirmAnswer, PromptOutcome, Step};
     use crate::ssh::approvals::Scope;
-    use crate::ssh::keys;
     use crate::ssh::testing::{RSA_3072, database, key_entry, requested, test_key};
 
     /// A fixture whose cancelled prompts hold nothing back: the backoff has
@@ -335,7 +335,7 @@ mod tests {
 
     /// A prompt that types the master password.
     fn typed() -> Step<Zeroizing<String>> {
-        Step::new(PromptOutcome::Answer(Zeroizing::new("hunter2".to_string())))
+        Step::new(PromptOutcome::Answer(Zeroizing::new(PASSWORD.to_string())))
     }
 
     fn request_with(key: &PrivateKey, flags: u32) -> SignRequest {
@@ -831,16 +831,16 @@ mod tests {
     #[test]
     fn a_failed_unlock_refuses_without_a_backoff() {
         let key = test_key(1);
-        // The database's file reads as no database, and nothing is staged.
-        let fx = Fixture::new(
-            vec![serving(&key, SshKeyConfirm::Never)],
-            Options::default(),
-        );
-        let cache = fx.cache_dir().expect("a cache directory");
-        keys::write_cache(&cache, "personal", &[key.public_key().clone()]).expect("write cache");
-        fx.unlocks.push(typed());
+        let fx = Fixture::locked(&key, SshKeyConfirm::Never);
+        fx.unlocks
+            .push(Step::new(PromptOutcome::Answer(Zeroizing::new(
+                "not the password".to_string(),
+            ))));
 
-        assert!(matches!(outcome(&fx, &key), Err(Refused::UnlockFailed(_))));
+        assert!(matches!(
+            outcome(&fx, &key),
+            Err(Refused::UnlockFailed(VaultError::WrongCredentials))
+        ));
         assert!(!fx.state.inner().backoff.contains_key("personal"));
     }
 

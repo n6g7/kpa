@@ -186,8 +186,8 @@ impl Fixture {
     }
 
     /// As [`Fixture::unlocked`], but locked as an earlier unlock leaves it:
-    /// the cache lists `key`, and an unlock prompt that is answered opens the
-    /// database with `key` in it.
+    /// the cache lists `key`, and an unlock prompt that is answered with the
+    /// right password opens the database with `key` in it.
     pub(super) fn locked(key: &PrivateKey, confirm: SshKeyConfirm) -> Fixture {
         Fixture::locked_with(key, confirm, Options::default())
     }
@@ -200,7 +200,7 @@ impl Fixture {
         let fixture = Fixture::new(vec![serving(key, confirm)], options);
         let cache = fixture.cache_dir().expect("a fixture with a cache");
         keys::write_cache(&cache, "personal", &[key.public_key().clone()]).expect("write cache");
-        fixture.stage(key);
+        fixture.write(key);
         fixture
     }
 
@@ -221,10 +221,11 @@ impl Fixture {
             .install_for_test("personal", vec![key_entry("github", key)]);
     }
 
-    /// The next unlock of `personal` finds `key` in it.
-    pub(super) fn stage(&self, key: &PrivateKey) {
+    /// `personal`'s file is a real database holding `key`, which the next
+    /// unlock reads: `databases::testing::PASSWORD` opens it.
+    pub(super) fn write(&self, key: &PrivateKey) {
         self.databases
-            .stage_for_test("personal", vec![key_entry("github", key)]);
+            .write_for_test("personal", vec![key_entry("github", key)]);
     }
 
     /// Whether `personal` is unlocked.
