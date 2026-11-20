@@ -3,7 +3,9 @@
 //! the clipboard or the display session.
 //!
 //! - An unlocked database is read through an [`Open`] guard, which holds the
-//!   core's lock and runs the freshness guard first.
+//!   core's lock and runs the freshness guard first. The guard's `stat` runs
+//!   without that lock, under a deadline: a file that doesn't answer reads as
+//!   changed.
 //! - Unlocking is [`Databases::begin_unlock`], whatever the front end does to
 //!   get a password, then [`Unlocking::finish`].
 //! - Every lock replaces the database's cancel source, which cancels the
@@ -12,6 +14,7 @@
 //! - What must die with a lock lives in the front ends, which register an
 //!   [`Observer`] and are told after the core's lock is released.
 
+mod freshness;
 mod observer;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -52,6 +55,12 @@ pub struct Databases {
     /// Keeps the placeholder files of [`Databases::for_test`] alive.
     #[cfg(test)]
     scratch: Option<tempfile::TempDir>,
+    /// What the freshness guard's `stat` is replaced by, and how long it may
+    /// take ([`Databases::stat_for_test`]).
+    #[cfg(test)]
+    stat_hook: Option<testing::StatHook>,
+    #[cfg(test)]
+    stat_deadline: Option<Duration>,
 }
 
 struct Slot {
@@ -98,16 +107,6 @@ impl Slot {
         });
         true
     }
-
-    /// The freshness guard: locks the database if its file is no longer the
-    /// one it was read from. Returns the token the lock ended.
-    fn lock_if_stale(&mut self, config: &DatabaseConfig) -> Option<CancelToken> {
-        let stale = self
-            .loaded
-            .as_ref()
-            .is_some_and(|loaded| !vault::is_unchanged(&config.path, &loaded.stamp));
-        stale.then(|| self.lock())
-    }
 }
 
 /// A database a lock covered, and the token of the unlock the lock ended.
@@ -135,6 +134,10 @@ impl Databases {
             observers: Vec::new(),
             #[cfg(test)]
             scratch: None,
+            #[cfg(test)]
+            stat_hook: None,
+            #[cfg(test)]
+            stat_deadline: None,
         }
     }
 
@@ -149,11 +152,13 @@ impl Databases {
     }
 
     /// Holds the core's lock while the guard lives. The freshness guard runs
-    /// first: a changed file locks the database and says `Stale`.
+    /// first, and a changed file, or one that doesn't answer in time, locks
+    /// the database and says `Stale`. A lock that came in meanwhile says
+    /// `Locked`.
     pub fn open(&self, name: &str) -> Result<Open<'_>, OpenError> {
         let index = self.index(name).ok_or(OpenError::UnknownDb)?;
-        let mut slots = self.slots();
-        if let Some(token) = slots[index].lock_if_stale(&self.configs[index]) {
+        let (slots, stale) = self.checked_slots(index);
+        if let Some(token) = stale {
             drop(slots);
             self.tell_locked(&[self.covered(index, token)]);
             return Err(OpenError::Stale);
@@ -233,22 +238,6 @@ impl Databases {
                 locked.name, self.idle_timeout
             ));
         }
-        self.tell_locked(&covered);
-    }
-
-    /// The freshness guard for the named databases.
-    pub fn drop_stale<'a>(&self, names: impl IntoIterator<Item = &'a str>) {
-        let covered: Vec<Covered> = {
-            let mut slots = self.slots();
-            names
-                .into_iter()
-                .filter_map(|name| {
-                    let index = self.index(name)?;
-                    let token = slots[index].lock_if_stale(&self.configs[index])?;
-                    Some(self.covered(index, token))
-                })
-                .collect()
-        };
         self.tell_locked(&covered);
     }
 

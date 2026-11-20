@@ -3,17 +3,24 @@
 //! as in production. No test names a `keepass` type.
 
 use std::io::Write;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use keepass::DatabaseKey;
 use keepass::config::KdfConfig;
 use keepass::db::{Value, fields};
 
-use super::{Databases, Slot, vault};
+use super::vault::{self, Fingerprint};
+use super::{Databases, Slot};
 use crate::config::DatabaseConfig;
 
 /// The password of the databases [`Databases::write_for_test`] writes.
 pub(crate) const PASSWORD: &str = "hunter2";
+
+/// What replaces the freshness guard's `stat` of a file: given its path and
+/// the fingerprint it was read with, whether it is still unchanged.
+pub(super) type StatHook = Arc<dyn Fn(&Path, &Fingerprint) -> bool + Send + Sync>;
 
 /// One entry of an in-memory database.
 pub(crate) struct TestEntry {
@@ -118,6 +125,18 @@ impl Databases {
         let mut file = std::fs::File::create(&self.configs[index].path).expect("the file");
         db.save(&mut file, DatabaseKey::new().with_password(PASSWORD))
             .expect("saves");
+    }
+
+    /// Replaces the freshness guard's `stat` with `stat`, and its deadline with
+    /// `deadline`. Before the core is shared, like `observe`.
+    pub(crate) fn stat_for_test(
+        mut self,
+        deadline: Duration,
+        stat: impl Fn(&Path, &Fingerprint) -> bool + Send + Sync + 'static,
+    ) -> Databases {
+        self.stat_hook = Some(Arc::new(stat));
+        self.stat_deadline = Some(deadline);
+        self
     }
 
     /// Rewrites the placeholder file, so the freshness guard sees a change.

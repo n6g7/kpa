@@ -40,8 +40,7 @@ impl Databases {
     /// token.
     pub fn begin_unlock(&self, name: &str) -> Result<Begin<'_>, BeginError> {
         let index = self.index(name).ok_or(BeginError::UnknownDb)?;
-        let mut slots = self.slots();
-        let stale = slots[index].lock_if_stale(&self.configs[index]);
+        let (mut slots, stale) = self.checked_slots(index);
         let slot = &mut slots[index];
         let begin = if slot.loaded.is_some() {
             Ok(Begin::AlreadyUnlocked)
