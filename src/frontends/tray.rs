@@ -25,6 +25,7 @@
 //! [`item_status`] never returns `Passive`, which real hosts hide or dim.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 
@@ -95,6 +96,7 @@ impl Tray {
         // `TrayItem::watcher_offline` instead of failing `spawn` outright, so
         // `kpa serve` started ahead of a tray host (e.g. by systemd) keeps
         // waiting instead of giving up on the tray for the daemon's life.
+        let waiting_for_host = Arc::clone(&item.waiting_for_host);
         let handle = match item.assume_sni_available(true).spawn() {
             Ok(handle) => handle,
             // No session bus at all, or a D-Bus error other than the missing
@@ -107,6 +109,12 @@ impl Tray {
         };
 
         log::debug(format_args!("tray service started"));
+        // `spawn` succeeds both when the item registered with the watcher and
+        // when there was no watcher yet, which `watcher_offline` has already
+        // said. `watcher_online` says the first registration after that one.
+        if !waiting_for_host.load(Ordering::SeqCst) {
+            log::info(format_args!("tray registered"));
+        }
 
         // Give the item its own handle, so a finished background unlock
         // (`TrayItem::start_unlock`) can tell `ksni` to refresh.
@@ -152,6 +160,10 @@ struct TrayItem {
     /// the next `lock`/`unlock`. Never a prompt's own error text, and never
     /// set by a prompt the user dismissed.
     last_error: Option<(String, &'static str)>,
+    /// Whether `ksni` found no StatusNotifierWatcher to register with, until
+    /// one appears. Shared with `Tray::run`, which reads it once `spawn` has
+    /// returned.
+    waiting_for_host: Arc<AtomicBool>,
 }
 
 impl ksni::Tray for TrayItem {
@@ -185,10 +197,12 @@ impl ksni::Tray for TrayItem {
     // item on its own once a watcher reappears. Only a real "Quit"
     // (`build_menu`'s `std::process::exit`) ends the daemon.
     fn watcher_online(&self) {
+        self.waiting_for_host.store(false, Ordering::SeqCst);
         log::info(format_args!("tray registered"));
     }
 
     fn watcher_offline(&self, reason: OfflineReason) -> bool {
+        self.waiting_for_host.store(true, Ordering::SeqCst);
         match reason {
             OfflineReason::No => {
                 log::info(format_args!("no tray host; waiting for one"));
@@ -218,6 +232,7 @@ impl TrayItem {
             unlock,
             handle: None,
             last_error: None,
+            waiting_for_host: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -857,7 +872,12 @@ mod tests {
     fn a_missing_tray_host_never_shuts_the_service_down() {
         let fx = fixture(&[]);
 
+        assert!(!fx.item.waiting_for_host.load(Ordering::SeqCst));
         assert!(ksni::Tray::watcher_offline(&fx.item, OfflineReason::No));
+        assert!(
+            fx.item.waiting_for_host.load(Ordering::SeqCst),
+            "`run` doesn't log a registration while there is no host"
+        );
         assert!(ksni::Tray::watcher_offline(
             &fx.item,
             OfflineReason::Error(ksni::Error::WontShow)
@@ -869,6 +889,16 @@ mod tests {
                     .to_string()
             )))
         ));
+    }
+
+    #[test]
+    fn a_host_appearing_ends_the_wait_for_one() {
+        let fx = fixture(&[]);
+        ksni::Tray::watcher_offline(&fx.item, OfflineReason::No);
+
+        ksni::Tray::watcher_online(&fx.item);
+
+        assert!(!fx.item.waiting_for_host.load(Ordering::SeqCst));
     }
 
     #[test]
