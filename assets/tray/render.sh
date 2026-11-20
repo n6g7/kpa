@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerates the PNGs in this directory from the SVGs beside it, at the
-# sizes `src/tray.rs` embeds. Run from inside `nix develop` — `resvg` is a
+# sizes `src/frontends/tray.rs` embeds. Run from inside `nix develop` — `resvg` is a
 # devShell-only tool (see flake.nix), not a Rust dependency — any time a
 # .svg here changes:
 #

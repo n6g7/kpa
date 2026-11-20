@@ -571,7 +571,7 @@ mod raw {
 
     /// A deterministic, non-cryptographic stand-in for `OsRng` — these
     /// tests only need *a* valid keypair. It duplicates
-    /// `src/ssh_agent/testing.rs`'s, which is test-only code inside the
+    /// `src/ssh/testing.rs`'s, which is test-only code inside the
     /// library crate and so out of reach of an integration test.
     pub struct TestRng(pub u64);
 
