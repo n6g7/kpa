@@ -1,11 +1,11 @@
-//! Integration tests for `docs/plan.md` step 3's `copy` op.
+//! Integration tests for the `copy` op against a real clipboard.
 //!
 //! `copy_fails_cleanly_without_a_wayland_compositor` runs unconditionally —
 //! it's exactly what this sandbox's own environment exercises, and it's a
 //! real property worth pinning: a daemon that can't reach a compositor
 //! must still answer instead of hanging or crashing.
 //!
-//! The rest of `docs/plan.md` step 3's test plan — `wl-paste` actually
+//! The rest — `wl-paste` actually
 //! seeing the secret, `wl-paste --list-types` showing the password-manager
 //! hint, the timeout expiring it, and the ownership test (copy, then
 //! `wl-copy hello`, confirm `hello` survives past the timeout) — needs a
@@ -206,9 +206,9 @@ fn copy_from_the_desktop_is_refused_without_an_active_unlocked_display_session()
     }
 }
 
-/// `docs/plan.md` step 3's own test plan, run against a real compositor
-/// when one is reachable: `copy`, then a real `wl-paste` sees the secret
-/// and `wl-paste --list-types` shows the password-manager hint.
+/// `copy` against a real compositor, when one is reachable: a real
+/// `wl-paste` sees the secret and `wl-paste --list-types` shows the
+/// password-manager hint.
 #[test]
 #[ignore = "drives the live Wayland clipboard; run with --ignored when changing clipboard logic"]
 fn copy_reaches_a_reachable_compositor() {
@@ -216,8 +216,8 @@ fn copy_reaches_a_reachable_compositor() {
     let (Some(display), Some(session)) = (compositor(), display_session()) else {
         eprintln!(
             "skipping: no reachable Wayland compositor in the service manager's \
-             environment, or no display session; docs/plan.md step 3's full \
-             clipboard test plan needs both"
+             environment, or no display session; the live clipboard test \
+             needs both"
         );
         return;
     };
@@ -259,7 +259,7 @@ fn copy_reaches_a_reachable_compositor() {
     );
 }
 
-/// The ownership test from `docs/plan.md` step 3: copy, then something
+/// The ownership test: copy, then something
 /// else (`wl-copy hello`) takes the clipboard immediately, then wait past
 /// `clipboard_timeout` — `hello` must survive, proving the timeout-driven
 /// drop was a no-op once superseded rather than a blind clear.
@@ -270,7 +270,7 @@ fn surviving_a_takeover_past_the_timeout() {
     let (Some(display), Some(session)) = (compositor(), display_session()) else {
         eprintln!(
             "skipping: no reachable Wayland compositor or display session; \
-             this is docs/plan.md step 3's ownership test"
+             this is the ownership test"
         );
         return;
     };

@@ -118,7 +118,7 @@ here before. They are starting points, not the limit of scope: test every
 
 ### W1: Socket and uid isolation
 
-- Socket creation path in `src/server.rs` (`bind_socket`) and default-path
+- Socket creation path in `src/socket.rs` (`bind_socket`) and default-path
   resolution in `src/main.rs`. Test with `$XDG_RUNTIME_DIR` unset, empty,
   relative, pointing at a world-writable dir, and at a dir owned by
   another uid you can simulate. Test a pre-existing path that is a
@@ -142,7 +142,7 @@ here before. They are starting points, not the limit of scope: test every
 Follow every password, keyfile byte and protected field from entry to rest.
 
 1. **Map the lifecycle first**, before any test. Entry points: the prompt
-   program's stdout pipe (`src/server.rs`), keyfile bytes, and the
+   program's stdout pipe (`src/prompt/program.rs`), keyfile bytes, and the
    decrypted database. List every copy (`clone`, `to_owned`, `to_string`,
    `String::from`, `format!`, serde) and every sink (stdout, stderr,
    socket, logs, error `Display`, protocol `detail` fields, panic
@@ -213,7 +213,7 @@ Follow every password, keyfile byte and protected field from entry to rest.
   that only locks is out of scope (NG-7).
 - **Not yet implemented** is a goal status, not a finding, unless the
   README or `design.md` presents the feature as existing. Check
-  `docs/plan.md` to tell planned from forgotten.
+  `TODO.md` to tell planned from forgotten.
 
 ### W5: Clipboard and entry content
 

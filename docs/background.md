@@ -200,8 +200,7 @@ what gets built.
   impossible. Unlock via a `--dmenu`-style prompt or `pinentry`. Locks on
   idle timeout and on the session-lock signal, so it locks with the screen.
 - **Client:** a thin CLI that a launcher and a shell both call.
-- **Complexity:** roughly 400-900 LoC for agent and client together — see
-  `plan.md` for the actual staging.
+- **Complexity:** roughly 400-900 LoC for agent and client together.
 - **Risk: medium.** Holds a decrypted vault for the session. Mitigated by
   being read-only, small, and aggressively locked.
 - **Why not just `keepmenu`:** it's the zero-glue alternative and a
@@ -241,8 +240,8 @@ the vault. Write UI, not crypto.**
 
 ## Open questions (as of this research)
 
-These were open when this research was done; `design.md` and `plan.md`
-reflect what was actually decided.
+These were open when this research was done; `design.md` reflects what was
+actually decided.
 
 - Build the agent (candidate 1), or just use `keepmenu` 1.6.0+ and accept
   its limitations? → **agent**, this project.

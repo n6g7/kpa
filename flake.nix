@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    # Pinned nightly rustc for fuzz/ (docs/plan.md step 6): cargo-fuzz's
+    # Pinned nightly rustc for fuzz/: cargo-fuzz's
     # instrumentation flags (`-Cinstrument-coverage`, `-Zsanitizer=...`) are
     # nightly-only, and nixpkgs itself only packages stable. Only
     # `devShells.fuzz` below pulls this in.
@@ -52,13 +52,12 @@
             # agent fixture's keys with ssh-keygen, and the SSH agent's
             # integration tests drive kpa with ssh-add and ssh-keygen -Y.
             openssh
-            # wl-copy/wl-paste, for driving docs/plan.md step 3's manual
-            # clipboard test by hand — kpa itself doesn't use them (its own
+            # wl-copy/wl-paste, for driving the clipboard by hand and in
+            # tests/clipboard.rs — kpa itself doesn't use them (its own
             # client is src/clipboard/wayland/).
             wl-clipboard
-            # A StatusNotifierItem host, for driving docs/plan.md step 4's
-            # tray test by hand — not a Rust dependency (that's ksni, in
-            # Cargo.toml). Any host that advertises
+            # A StatusNotifierItem host, for trying the tray by hand — not a
+            # Rust dependency (that's ksni, in Cargo.toml). Any host that advertises
             # org.kde.StatusNotifierWatcher on the session bus works; this
             # is just a small, scriptable one to run for that.
             waybar
@@ -73,7 +72,7 @@
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };
 
-        # fuzz/ (docs/plan.md step 6): `nix develop .#fuzz -c cargo fuzz run
+        # fuzz/: `nix develop .#fuzz -c cargo fuzz run
         # decode_request -- -max_total_time=180`, from the repo root. Kept
         # separate from `devShells.default` so the nightly toolchain and
         # `cargo-fuzz` never show up in, or affect, a normal `cargo

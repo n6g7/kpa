@@ -1,4 +1,4 @@
-//! Integration test for `docs/plan.md` step 2: runs the daemon against a
+//! Integration tests for kpa's own socket: they run the daemon against a
 //! temp socket and config, then drives it through the actual `kpa` client
 //! subcommands — not a hand-rolled socket client — so this exercises the
 //! real protocol round-trip an operator would see. The raw-socket tests are
@@ -292,7 +292,7 @@ fn version_mismatch_is_rejected() {
         // The response always carries the daemon's own version, not the
         // client's claimed one — that's the whole point (docs/design.md).
         assert_eq!(response["v"], kpa::frontends::control::proto::VERSION);
-        // `docs/plan.md` step 2 asks for "a clear error naming both versions".
+        // A version mismatch is "a clear error naming both versions".
         let detail = response["detail"]
             .as_str()
             .expect("version mismatch should explain itself");
@@ -310,9 +310,9 @@ fn version_mismatch_is_rejected() {
 }
 
 /// Malformed JSON must get a clean error, never take the daemon down —
-/// the socket is the untrusted-input boundary `docs/plan.md` step 6's
-/// fuzzing will exercise harder later, but even a single malformed line
-/// must not be special.
+/// the socket is the untrusted-input boundary the `decode_request` fuzz
+/// target exercises harder, but even a single malformed line must not be
+/// special.
 #[test]
 fn malformed_request_is_rejected_without_crashing_the_daemon() {
     let daemon = Daemon::start(common::PASSWORD);
@@ -343,8 +343,8 @@ fn failing_prompt_daemon() -> Daemon {
 
 /// A `lock` issued while an `unlock` is still prompting wins: the unlock
 /// finishes, discards what it opened, and reports `locked`
-/// (docs/review-2026-09-robustness.md finding 3). Before the lock epoch,
-/// the unlock re-opened the database after the lock was acknowledged.
+/// (`docs/threat-model.md` G-5): an unlock that re-opened the database
+/// after the lock was acknowledged would undo it.
 #[test]
 fn a_lock_during_an_unlock_is_not_undone() {
     let daemon = in_process_slow(common::PASSWORD);
@@ -515,7 +515,7 @@ fn a_lock_while_a_prompt_is_queued_cancels_it() {
 }
 
 /// Nobody reading the daemon's log must not kill it or cost a client
-/// its reply (docs/review-2026-09-robustness.md finding 4). Both requests
+/// its reply. Both requests
 /// log a line: a failed unlock a warning, a lock an info.
 #[test]
 fn a_closed_log_does_not_take_the_daemon_down() {
@@ -998,7 +998,7 @@ fn copy_of_a_bare_title_is_field_empty() {
 /// default:
 ///
 /// ```sh
-/// nix develop -c cargo test --test server -- --ignored copy_of_a_resolvable_field
+/// nix develop -c cargo test --test control -- --ignored copy_of_a_resolvable_field
 /// ```
 #[test]
 #[ignore = "drives the live clipboard; run with --ignored when changing field resolution"]

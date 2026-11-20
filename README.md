@@ -14,8 +14,9 @@ to a launcher and a CLI over a Unix socket. Read-only by design — no code
 path can write to a database — so it's meant to be safe to run alongside a
 client that already has write access to the same files.
 
-See [`docs/design.md`](./docs/design.md) for the design and
-[`docs/plan.md`](./docs/plan.md) for what's built versus planned.
+See [`docs/design.md`](./docs/design.md) for the design,
+[`docs/module-structure.md`](./docs/module-structure.md) for how the code is
+divided, and [`TODO.md`](./TODO.md) for what is planned.
 
 ## Platform
 
@@ -90,11 +91,12 @@ touches `cargo build`/`cargo test`/`cargo clippy`:
 nix develop .#fuzz -c cargo fuzz run decode_request -- -max_total_time=180
 ```
 
-The target feeds random bytes through the same two steps the server runs
-on a request line: a UTF-8 check, then `kpa::proto::decode_request`. The
+The target feeds random bytes through the same two steps the daemon runs
+on a request line: a UTF-8 check, then
+`kpa::frontends::control::proto::decode_request`. The
 property it checks is that every input returns `Ok` or `Err` — a panic, a
 hang, or a timeout/out-of-memory kill is a failure. It does not check that
-*valid* requests get handled correctly (no server, no vaults involved), and
+*valid* requests get handled correctly (no daemon, no vaults involved), and
 it doesn't exercise the socket's own request-size cap.
 
 Reading the output: a `#N NEW cov: ... ft: ... corp: ...` line means input
