@@ -29,10 +29,6 @@ pub struct SshState {
     /// prompts back (`docs/ssh-agent.md` § 6.6).
     backoff: Duration,
     inner: Mutex<Inner>,
-    /// How many holds have been taken: what a test waits on to know its
-    /// signers have looked.
-    #[cfg(test)]
-    pub(super) holds: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Default)]
@@ -64,8 +60,6 @@ impl SshState {
             cache_dir,
             backoff,
             inner: Mutex::new(Inner::default()),
-            #[cfg(test)]
-            holds: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 

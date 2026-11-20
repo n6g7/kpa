@@ -50,8 +50,6 @@ impl SshState {
             Err(OpenError::UnknownDb) => return None,
         };
         let state = self.inner();
-        #[cfg(test)]
-        self.holds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let open = open.filter(|open| {
             state
                 .scanned
