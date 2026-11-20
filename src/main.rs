@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use kpa::config::Config;
+use kpa::frontends::auto_lock::SleepState;
+use kpa::frontends::auto_lock::logind::{self, Bus};
 use kpa::frontends::control::client::{self, Format, ssh_keys_report, ssh_requests_report};
 use kpa::frontends::control::proto::{
     CopyRequest, Field, ListRequest, LockRequest, Op, SshApproveRequest, SshKeysReport,
@@ -20,7 +22,6 @@ use kpa::log::{self, Level};
 use kpa::output::report_error;
 use kpa::paths::Paths;
 use kpa::server::{self, Server};
-use kpa::session_watch::{self, Bus};
 use kpa::socket;
 use uuid::Uuid;
 
@@ -274,14 +275,18 @@ fn run_serve(
         kpa::VERSION,
         socket_path.display()
     ));
-    // Before serving, so no unlock can happen without the sleep delay
+    // Before serving, so no unlock can happen without the inhibitor
     // hearing of it.
-    let (session_events, sleep_delay) = session_watch::start(Bus::System);
-    let server = Arc::new(Server::new(config, paths, sleep_delay));
+    let (events, incoming) = std::sync::mpsc::channel();
+    let inhibitor = logind::start(Bus::System, events.clone());
+    let server = Arc::new(Server::new(config, paths, events));
     let reacting = server.clone();
     std::thread::spawn(move || {
-        for event in session_events {
+        let mut sleep = SleepState::default();
+        for event in incoming {
+            let hold = sleep.hold_after(&event);
             reacting.on_session_event(event);
+            inhibitor.hold(hold);
         }
     });
     tray::start(server.clone());

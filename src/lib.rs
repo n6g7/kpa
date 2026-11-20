@@ -10,6 +10,7 @@ mod cancel;
 pub mod clipboard;
 pub mod config;
 pub mod databases;
+pub mod display_session;
 pub mod frontends;
 mod io;
 pub mod log;
@@ -17,7 +18,6 @@ pub mod output;
 pub mod paths;
 mod prompt;
 pub mod server;
-pub mod session_watch;
 pub mod socket;
 pub mod ssh;
 

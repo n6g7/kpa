@@ -490,10 +490,13 @@ Prompts are bounded too:
 knows nothing about databases or locking. Its events are the display
 session's state, a lock request (the `Lock` signal), suspend and a lost
 watch, and the server reacts to them in one place,
-`Server::on_session_event`. The other direction is a `SleepDelay`: the
-server tells it after every change to what is unlocked, and a thread of
-`session_watch` of its own holds or releases the sleep inhibitor, so no
-request ever waits on D-Bus.
+`Server::on_session_event`. They come on one channel of `Event`s with one
+reader, which also hears from the server, after every change, whether
+anything is unlocked. The reader reacts to each event first, then tells an
+`Inhibitor` whether to hold the sleep inhibitor: held exactly while
+something is unlocked and never while the machine sleeps. A thread of
+`logind` of its own holds or releases it, so no request ever waits on
+D-Bus.
 
 The logind watch reports **the display session's state** to the server: no display
 session, or the display session's id with its `LockedHint` (locked or

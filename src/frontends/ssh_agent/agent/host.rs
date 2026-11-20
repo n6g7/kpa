@@ -8,8 +8,8 @@ use keepass::Database;
 use super::SshSlot;
 use crate::cancel::{CancelSource, CancelToken};
 use crate::config::DatabaseConfig;
+use crate::display_session::DisplaySession;
 use crate::frontends::control::proto::Unlock;
-use crate::session_watch::DisplaySession;
 
 /// What the agent needs from the daemon that hosts it. The daemon
 /// implements it as a thin adapter over its database slots; the agent's

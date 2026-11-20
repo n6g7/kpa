@@ -24,7 +24,7 @@ use zbus::zvariant::OwnedValue;
 use super::Error;
 use crate::authn::Requester;
 use crate::authz;
-use crate::session_watch::DisplaySession;
+use crate::display_session::DisplaySession;
 
 const SYSTEMD: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";

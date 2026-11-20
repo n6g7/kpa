@@ -18,10 +18,13 @@ mod common;
 
 use kpa::authn::Requester;
 use kpa::config::Config;
+use kpa::databases::{Begin, Databases};
+use kpa::display_session::{self, DisplaySession};
+use kpa::frontends::auto_lock::logind::{self, Bus, Inhibitor};
+use kpa::frontends::auto_lock::{self, Event, Source};
 use kpa::frontends::control::proto::{Unlock, UnlockError, UnlockRequest};
 use kpa::paths::Paths;
 use kpa::server::Server;
-use kpa::session_watch::{self, Bus, DisplaySession, SessionEvent};
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::zvariant::{self, OwnedObjectPath, Value};
@@ -366,11 +369,19 @@ impl MockLogind {
 /// thread of their own.
 #[derive(Default)]
 struct Observed {
-    events: Mutex<Vec<SessionEvent>>,
+    events: Mutex<Vec<Event>>,
+}
+
+/// Starts the watcher on the private bus at `address`, with its events on a
+/// channel of its own.
+fn watch(address: &str) -> (Receiver<Event>, Inhibitor) {
+    let (events, incoming) = std::sync::mpsc::channel();
+    let inhibitor = logind::start(Bus::Address(address.to_string()), events);
+    (incoming, inhibitor)
 }
 
 /// Collects `events` until the watcher is gone.
-fn observe(events: Receiver<SessionEvent>) -> Arc<Observed> {
+fn observe(events: Receiver<Event>) -> Arc<Observed> {
     let observed = Arc::new(Observed::default());
     let collecting = observed.clone();
     thread::spawn(move || {
@@ -390,8 +401,8 @@ impl Observed {
             .iter()
             .rev()
             .find_map(|event| match event {
-                SessionEvent::Changed(display_session) => Some(display_session.clone()),
-                SessionEvent::WatchLost => Some(DisplaySession::None),
+                Event::DisplayChanged(display_session) => Some(display_session.clone()),
+                Event::WatchLost => Some(DisplaySession::None),
                 _ => None,
             })
             .unwrap_or_default()
@@ -404,7 +415,8 @@ impl Observed {
             .unwrap()
             .iter()
             .filter(|event| match event {
-                SessionEvent::Changed(display_session) => display_session.is_locked(),
+                Event::DisplayChanged(display_session) => display_session.is_locked(),
+                Event::Resumed | Event::Unlocked(_) => false,
                 _ => true,
             })
             .count()
@@ -415,7 +427,16 @@ impl Observed {
             .lock()
             .unwrap()
             .iter()
-            .filter(|event| **event == SessionEvent::Sleeping)
+            .filter(|event| **event == Event::Sleeping)
+            .count()
+    }
+
+    fn resumes(&self) -> usize {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| **event == Event::Resumed)
             .count()
     }
 
@@ -442,7 +463,7 @@ fn quiet() {
 fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
     let mut bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let (events, delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let (events, inhibitor) = watch(&bus.address);
     let observed = observe(events);
 
     // Wait for the watcher to subscribe: a lock signal sent before that is
@@ -480,50 +501,35 @@ fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
     assert_eq!(observed.locks(), 1, "LockedHint=false is not a lock");
     observed.clear();
 
-    // 3. Telling the delay that something is unlocked takes the inhibitor.
-    delay.hold_while(true);
+    // 3. Asking to hold takes the inhibitor, once however often it is asked.
+    inhibitor.hold(true);
+    inhibitor.hold(true);
     eventually("the sleep inhibitor to be taken", || {
         mock.inhibitor_count() == 1
     });
-    assert!(!mock.last_inhibitor_released(), "held while unlocked");
-
-    // 4. PrepareForSleep(true) is reported, and releases nothing by
-    //    itself: the server locks first, then says nothing is unlocked.
-    mock.prepare_for_sleep(true);
-    eventually("the suspend to be reported", || observed.sleeps() == 1);
     quiet();
+    assert_eq!(mock.inhibitor_count(), 1, "holding twice takes one");
     assert!(
         !mock.last_inhibitor_released(),
-        "held until the server has locked"
+        "held until asked to let go"
     );
-    delay.hold_while(false);
-    eventually("the inhibitor to be released", || {
-        mock.last_inhibitor_released()
-    });
 
-    // 5. While the machine sleeps nothing is held, but an unlock that came
-    //    in the meantime holds at resume.
-    delay.hold_while(true);
-    quiet();
-    assert_eq!(mock.inhibitor_count(), 1, "no inhibitor while sleeping");
+    // 4. PrepareForSleep is reported both ways, and releases nothing by
+    //    itself.
+    mock.prepare_for_sleep(true);
+    eventually("the suspend to be reported", || observed.sleeps() == 1);
     mock.prepare_for_sleep(false);
-    eventually("the inhibitor to be taken at resume", || {
-        mock.inhibitor_count() == 2
-    });
+    eventually("the resume to be reported", || observed.resumes() == 1);
     assert!(!mock.last_inhibitor_released());
 
-    // 6. Resume with nothing unlocked does not take the inhibitor again.
-    delay.hold_while(false);
+    // 5. Asking to let go releases it, and letting go again does nothing.
+    inhibitor.hold(false);
+    inhibitor.hold(false);
     eventually("the inhibitor to be released", || {
         mock.last_inhibitor_released()
     });
-    mock.prepare_for_sleep(true);
-    eventually("the second suspend to be reported", || {
-        observed.sleeps() == 2
-    });
-    mock.prepare_for_sleep(false);
     quiet();
-    assert_eq!(mock.inhibitor_count(), 2, "no inhibitor without an unlock");
+    assert_eq!(mock.inhibitor_count(), 1);
     observed.clear();
 
     // 7. A display change moves the watch: the old session is ignored,
@@ -553,7 +559,7 @@ fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
 fn the_display_session_state_follows_logind_over_a_bus() {
     let mut bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let (events, _delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let (events, _inhibitor) = watch(&bus.address);
     let recorder = observe(events);
 
     // 1. Subscribing reads the display session and its hint.
@@ -611,7 +617,7 @@ fn the_display_session_state_follows_logind_over_a_bus() {
 fn the_active_state_follows_logind_and_never_locks() {
     let bus = PrivateBus::start();
     let mock = MockLogind::start(&bus.address);
-    let (events, _delay) = session_watch::start(Bus::Address(bus.address.clone()));
+    let (events, _inhibitor) = watch(&bus.address);
     let recorder = observe(events);
 
     // 1. Subscribing reads the session as active.
@@ -683,11 +689,12 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         common::password_db().display().to_string()
     ))
     .unwrap();
-    let (events, delay) = session_watch::start(Bus::Address(bus.address.clone()));
-    let server = Arc::new(Server::new(config, Paths::default(), delay));
+    let (events, incoming) = std::sync::mpsc::channel();
+    let _inhibitor = logind::start(Bus::Address(bus.address.clone()), events.clone());
+    let server = Arc::new(Server::new(config, Paths::default(), events));
     let reacting = server.clone();
     thread::spawn(move || {
-        for event in events {
+        for event in incoming {
             reacting.on_session_event(event);
         }
     });
@@ -745,4 +752,97 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         assert!(locked_at.elapsed() < Duration::from_secs(5));
     });
     assert!(!server.any_unlocked());
+}
+
+/// Unlocks every database in `databases` with the fixture's password.
+fn unlock_all(databases: &Databases) {
+    let password = zeroize::Zeroizing::new(common::PASSWORD.to_string());
+    for config in databases.configs() {
+        match databases.begin_unlock(&config.name) {
+            Ok(Begin::Started(unlocking)) => unlocking.finish(Some(&password)).expect("unlock"),
+            _ => panic!("expected to start an unlock of {}", config.name),
+        }
+    }
+    assert!(databases.any_unlocked());
+}
+
+#[test]
+fn auto_lock_locks_everything_and_follows_the_display_session_over_a_bus() {
+    let mut bus = PrivateBus::start();
+    let mock = MockLogind::start(&bus.address);
+    let config = Config::parse(&format!(
+        "[[database]]\nname = \"personal\"\npath = {:?}\n",
+        common::password_db().display().to_string()
+    ))
+    .unwrap();
+
+    let (writer, display) = display_session::channel();
+    let (hold, auto_lock) = auto_lock::start(Source::at(bus.address.clone()), writer);
+    let mut databases = Databases::new(config.databases.clone(), Duration::from_secs(3600));
+    databases.observe(Arc::new(hold));
+    let databases = Arc::new(databases);
+    let running = databases.clone();
+    thread::spawn(move || auto_lock.run(running, Duration::from_secs(3600)));
+
+    // A Lock signal sent before the watcher subscribes is lost, so keep
+    // sending until one locks.
+    unlock_all(&databases);
+    eventually("a Lock signal to lock everything", || {
+        mock.lock_signal(SESSION_1);
+        thread::sleep(Duration::from_millis(50));
+        !databases.any_unlocked()
+    });
+    assert!(
+        !display.get().is_locked(),
+        "a Lock signal alone doesn't mark the display session"
+    );
+
+    // A locked display session is marked, and locks everything.
+    unlock_all(&databases);
+    mock.set_hint(SESSION_1, true);
+    eventually("LockedHint=true to lock everything", || {
+        !databases.any_unlocked()
+    });
+    assert!(display.get().is_locked());
+    mock.set_hint(SESSION_1, false);
+    eventually("LockedHint=false to be recorded", || {
+        !display.get().is_locked()
+    });
+
+    // The inhibitor is taken by an unlock, and released by the lock on
+    // suspend.
+    unlock_all(&databases);
+    eventually("the sleep inhibitor to be taken", || {
+        mock.inhibitor_count() >= 1 && !mock.last_inhibitor_released()
+    });
+    mock.prepare_for_sleep(true);
+    eventually("the suspend to lock everything", || {
+        !databases.any_unlocked()
+    });
+    eventually("the inhibitor to be released", || {
+        mock.last_inhibitor_released()
+    });
+
+    // While the machine sleeps nothing is held, even by an unlock; resuming
+    // holds again because something is unlocked, and locking releases it.
+    let taken = mock.inhibitor_count();
+    unlock_all(&databases);
+    quiet();
+    assert_eq!(mock.inhibitor_count(), taken, "no inhibitor while sleeping");
+    mock.prepare_for_sleep(false);
+    eventually("the inhibitor to be taken at resume", || {
+        mock.inhibitor_count() == taken + 1 && !mock.last_inhibitor_released()
+    });
+    databases.lock_all();
+    eventually("the inhibitor to be released once locked", || {
+        mock.last_inhibitor_released()
+    });
+
+    // A lost watch forgets the display session and locks everything.
+    unlock_all(&databases);
+    bus.kill();
+    eventually("a lost bus to lock everything", || {
+        !databases.any_unlocked()
+    });
+    assert_eq!(display.get(), DisplaySession::None);
 }
