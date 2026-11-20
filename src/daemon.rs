@@ -4,6 +4,7 @@
 
 use std::os::unix::net::UnixListener;
 use std::sync::Arc;
+use std::sync::mpsc;
 
 use zeroize::Zeroizing;
 
@@ -14,6 +15,7 @@ use crate::display_session::{self, DisplayHandle};
 use crate::frontends::auto_lock::{self, Source};
 use crate::frontends::control::{self, Api, CopyState};
 use crate::frontends::ssh_agent::{self, Agent, SshState};
+use crate::frontends::tray::{self, Tray};
 use crate::paths::Paths;
 use crate::prompt::{self, ConfirmAnswer, ConfirmProgram, Prompt, PromptQueue, SecretProgram};
 use crate::ssh::approvals::Approvals;
@@ -48,25 +50,32 @@ pub struct Daemon {
 /// Builds the core with its observers registered, in this order: what holds
 /// a secret (the clipboard offer, the approvals, the agent's keys), then
 /// `sleep_hold`, so that when a suspend's lock has let the sleep delay go,
-/// every offer has ended and every private key is gone.
+/// every offer has ended and every private key is gone, then the tray's,
+/// which holds nothing.
+///
+/// The tray comes beside the daemon, not in it: it runs once, on a thread of
+/// its own, and holds the receiving end of a channel, which a daemon shared
+/// between threads can't.
 pub fn build(
     config: Config,
     paths: Paths,
     backends: Backends,
     display: DisplayHandle,
     sleep_hold: Arc<dyn Observer>,
-) -> Daemon {
+) -> (Daemon, Tray) {
     let copies = Arc::new(CopyState::new(backends.clipboard));
     let approvals = Arc::new(Approvals::new());
     let ssh = Arc::new(SshState::new(
         keys::cache_dir(&paths),
         config.ssh_agent.backoff,
     ));
+    let (changed, wake) = mpsc::channel();
     let mut databases = Databases::new(config.databases.clone(), config.idle_timeout);
     databases.observe(copies.clone());
     databases.observe(approvals.clone());
     databases.observe(ssh.clone());
     databases.observe(sleep_hold);
+    databases.observe(Arc::new(tray::Changed::new(changed)));
     let databases = Arc::new(databases);
 
     // One prompt on screen at a time, whoever asks.
@@ -76,6 +85,12 @@ pub fn build(
         Arc::clone(&backends.unlock_prompt),
         config.prompt_timeout,
     ));
+    let tray = Tray::new(
+        Arc::clone(&databases),
+        display.clone(),
+        Arc::clone(&screen_unlock),
+        wake,
+    );
     let api = Arc::new(Api::new(
         Arc::clone(&databases),
         display.clone(),
@@ -98,11 +113,12 @@ pub fn build(
         ),
         paths.known_hosts,
     ));
-    Daemon {
+    let daemon = Daemon {
         databases,
         api,
         agent,
-    }
+    };
+    (daemon, tray)
 }
 
 impl Daemon {
@@ -117,8 +133,8 @@ impl Daemon {
     }
 }
 
-/// Runs the daemon: the lock triggers, and the SSH agent's socket if there
-/// is one, on threads of their own, kpa's own socket on this one.
+/// Runs the daemon: the lock triggers, the tray, and the SSH agent's socket
+/// if there is one, on threads of their own, kpa's own socket on this one.
 pub fn serve(
     config: Config,
     paths: Paths,
@@ -130,13 +146,17 @@ pub fn serve(
     let (sleep_hold, auto_lock) = auto_lock::start(source, writer);
     let idle_timeout = config.idle_timeout;
     let backends = Backends::real(&config);
-    let daemon = build(config, paths, backends, display, Arc::new(sleep_hold));
+    let (daemon, tray) = build(config, paths, backends, display, Arc::new(sleep_hold));
 
     let databases = Arc::clone(&daemon.databases);
     std::thread::Builder::new()
         .name("auto-lock".to_string())
         .spawn(move || auto_lock.run(databases, idle_timeout))
         .expect("spawn the auto-lock thread");
+    std::thread::Builder::new()
+        .name("tray".to_string())
+        .spawn(move || tray.run())
+        .expect("spawn the tray thread");
     if let Some(listener) = agent {
         let agent = Arc::clone(&daemon.agent);
         std::thread::Builder::new()
@@ -151,14 +171,19 @@ pub fn serve(
 mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    use std::sync::Mutex;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, mpsc};
+    use std::time::Duration;
 
     use super::*;
     use crate::cancel::CancelToken;
     use crate::clipboard::{OfferHandles, RecordingBackend};
     use crate::databases::testing::TestEntry;
     use crate::display_session::DisplaySession;
-    use crate::frontends::control::proto::{CopyRequest, Field, Op, Request, encode_request};
+    use crate::frontends::control::proto::{
+        CopyRequest, Field, Op, Request, UnlockRequest, encode_request,
+    };
+    use crate::prompt::{PromptOutcome, Scripted, Step};
 
     /// Notes whether the clipboard offer was still live when it was told of
     /// a lock.
@@ -174,67 +199,167 @@ mod tests {
         }
     }
 
-    /// The sleep hold is registered after what holds a secret, so when it
-    /// is told of a lock the clipboard offer has ended.
-    #[test]
-    fn the_sleep_hold_is_told_after_the_secret_holders() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("personal.kdbx");
-        std::fs::write(&path, b"placeholder").expect("placeholder");
-        let config = Config::parse(&format!(
-            "[[database]]\nname = \"personal\"\npath = {:?}\n",
-            path.display().to_string()
-        ))
-        .expect("valid config");
+    /// Hears everything and does nothing.
+    struct NoSleepHold;
+
+    impl Observer for NoSleepHold {}
+
+    /// `names` configured, their files placeholders.
+    fn config_of(dir: &Path, names: &[&str]) -> Config {
+        let databases: String = names
+            .iter()
+            .map(|name| {
+                let path = dir.join(format!("{name}.kdbx"));
+                std::fs::write(&path, b"placeholder").expect("placeholder");
+                format!(
+                    "[[database]]\nname = \"{name}\"\npath = {:?}\n",
+                    path.display().to_string()
+                )
+            })
+            .collect();
+        Config::parse(&databases).expect("valid config")
+    }
+
+    fn backends(unlock_prompt: Scripted<Zeroizing<String>>) -> (Backends, OfferHandles) {
         let (backend, _offered, offers) = RecordingBackend::new_tracking();
         let backends = Backends {
             clipboard: Box::new(backend),
-            unlock_prompt: Arc::new(prompt::Scripted::<Zeroizing<String>>::new()),
-            confirm_prompt: Arc::new(prompt::Scripted::<ConfirmAnswer>::new()),
+            unlock_prompt: Arc::new(unlock_prompt),
+            confirm_prompt: Arc::new(Scripted::<ConfirmAnswer>::new()),
         };
-        let (display, handle) = display_session::channel();
-        display.set(DisplaySession::Unlocked {
+        (backends, offers)
+    }
+
+    /// An active, unlocked display session, session 1.
+    fn desktop_display() -> DisplayHandle {
+        let (writer, handle) = display_session::channel();
+        writer.set(DisplaySession::Unlocked {
             id: "1".to_string(),
             active: true,
         });
-        let probe = Arc::new(SleepHoldProbe {
-            offers,
-            live_when_told: Mutex::new(Vec::new()),
-        });
-        let daemon = build(config, Paths::default(), backends, handle, probe.clone());
-        daemon.databases.install_for_test(
-            "personal",
-            vec![TestEntry::new("site").field("Password", "secret")],
-        );
-        let uuid = daemon.databases.open("personal").ok().unwrap().entries()[0].uuid;
-        let socket = dir.path().join("sock");
+        handle
+    }
+
+    /// Serves `api` on a socket in `dir`, to connections that come from the
+    /// desktop of session 1.
+    fn serve_on_the_desktop(api: Arc<Api>, dir: &Path) -> PathBuf {
+        let socket = dir.join("sock");
         let uid = crate::authn::process_uid();
         crate::authn::assume_cgroup(
             &socket,
             &format!("0::/user.slice/user-{uid}.slice/session-1.scope\n"),
         );
         let listener = UnixListener::bind(&socket).expect("bind");
-        let databases = Arc::clone(&daemon.databases);
-        std::thread::spawn(move || daemon.serve_control(listener));
+        std::thread::spawn(move || control::serve(api, listener));
+        socket
+    }
+
+    /// The reply to `op`, as the line the daemon wrote.
+    fn ask(socket: &Path, op: Op) -> String {
         let request = Request {
             v: crate::frontends::control::proto::VERSION,
             preferred_prompt: None,
-            op: Op::Copy(CopyRequest {
-                db: "personal".to_string(),
-                uuid,
-                field: Field::Password,
-            }),
+            op,
         };
-        let mut stream = UnixStream::connect(&socket).expect("connect");
+        let mut stream = UnixStream::connect(socket).expect("connect");
         stream
             .write_all(&encode_request(&request).expect("encodes"))
             .expect("send");
         let mut reply = String::new();
         BufReader::new(stream).read_line(&mut reply).expect("reply");
+        reply
+    }
+
+    /// The sleep hold is registered after what holds a secret, so when it
+    /// is told of a lock the clipboard offer has ended.
+    #[test]
+    fn the_sleep_hold_is_told_after_the_secret_holders() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = config_of(dir.path(), &["personal"]);
+        let (backends, offers) = backends(Scripted::new());
+        let probe = Arc::new(SleepHoldProbe {
+            offers,
+            live_when_told: Mutex::new(Vec::new()),
+        });
+        let (daemon, _tray) = build(
+            config,
+            Paths::default(),
+            backends,
+            desktop_display(),
+            probe.clone(),
+        );
+        daemon.databases.install_for_test(
+            "personal",
+            vec![TestEntry::new("site").field("Password", "secret")],
+        );
+        let uuid = daemon.databases.open("personal").ok().unwrap().entries()[0].uuid;
+        let databases = Arc::clone(&daemon.databases);
+        let socket = serve_on_the_desktop(Arc::clone(&daemon.api), dir.path());
+
+        let reply = ask(
+            &socket,
+            Op::Copy(CopyRequest {
+                db: "personal".to_string(),
+                uuid,
+                field: Field::Password,
+            }),
+        );
         assert!(reply.contains("\"ok\":true"), "the copy failed: {reply}");
 
         databases.lock_all();
 
         assert_eq!(*probe.live_when_told.lock().unwrap(), [false]);
+    }
+
+    /// The tray and kpa's own socket ask through one prompt queue: while the
+    /// tray's unlock prompt is on screen, an unlock over the socket waits
+    /// for its turn.
+    #[test]
+    fn an_unlock_from_the_tray_and_one_from_control_take_turns_on_screen() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = config_of(dir.path(), &["personal", "work"]);
+        let prompts = Scripted::<Zeroizing<String>>::new();
+        let (up, tray_prompt_is_up) = mpsc::channel();
+        let (release, held_up) = mpsc::channel::<()>();
+        prompts.push(Step::new(PromptOutcome::Cancelled).while_up(move || {
+            up.send(()).expect("the test is waiting");
+            held_up.recv().expect("the test releases the prompt");
+        }));
+        prompts.push(Step::new(PromptOutcome::Cancelled));
+        let (backends, _offers) = backends(prompts.clone());
+        let (daemon, tray) = build(
+            config,
+            Paths::default(),
+            backends,
+            desktop_display(),
+            Arc::new(NoSleepHold),
+        );
+        let socket = serve_on_the_desktop(Arc::clone(&daemon.api), dir.path());
+
+        let clicked = std::thread::spawn(move || tray.unlock("personal"));
+        tray_prompt_is_up
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the tray's prompt comes up");
+        let unlocking = std::thread::spawn(move || {
+            ask(
+                &socket,
+                Op::Unlock(UnlockRequest {
+                    db: "work".to_string(),
+                }),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            prompts.shown(),
+            ["Unlock personal"],
+            "the socket's prompt was shown over the tray's"
+        );
+
+        release.send(()).expect("the prompt is up");
+
+        assert_eq!(clicked.join().expect("tray thread"), Ok(()));
+        let reply = unlocking.join().expect("control thread");
+        assert!(reply.contains("prompt_cancelled"), "{reply}");
+        assert_eq!(prompts.shown(), ["Unlock personal", "Unlock work"]);
     }
 }

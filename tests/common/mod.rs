@@ -274,13 +274,10 @@ impl InProcessDaemon {
         };
         let idle_timeout = config.idle_timeout;
         let backends = kpa::daemon::Backends::real(&config);
-        let daemon = Arc::new(kpa::daemon::build(
-            config,
-            paths.clone(),
-            backends,
-            display,
-            sleep_hold,
-        ));
+        // No tray: there is no session bus to show one on.
+        let (daemon, _tray) =
+            kpa::daemon::build(config, paths.clone(), backends, display, sleep_hold);
+        let daemon = Arc::new(daemon);
         let databases = Arc::clone(&daemon.databases);
         match auto_lock {
             Some(auto_lock) => {

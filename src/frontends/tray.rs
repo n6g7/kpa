@@ -118,6 +118,15 @@ impl Tray {
     }
 }
 
+#[cfg(test)]
+impl Tray {
+    /// What a click on "Unlock" comes to, on the calling thread.
+    pub(crate) fn unlock(&self, name: &str) -> Result<(), &'static str> {
+        let item = &self.item;
+        unlock(&item.databases, &item.display, &item.unlock, name)
+    }
+}
+
 /// Calls `refresh` once for each run of wakes, until it says the service is
 /// gone or every sender is.
 fn refresh_when_told(wake: &Receiver<()>, mut refresh: impl FnMut() -> bool) {
