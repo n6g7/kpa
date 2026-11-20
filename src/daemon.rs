@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use zeroize::Zeroizing;
 
-use crate::clipboard::{Clipboard, WaylandBackend};
+use crate::clipboard::{self, WaylandBackend};
 use crate::config::Config;
 use crate::databases::{Databases, Observer};
 use crate::display_session::{self, DisplayHandle};
@@ -19,7 +19,7 @@ use crate::ssh::approvals::Approvals;
 /// What tests replace: the clipboard, and how the unlock prompt asks on
 /// screen.
 pub struct Backends {
-    pub clipboard: Clipboard,
+    pub clipboard: Box<dyn clipboard::Backend>,
     pub unlock_prompt: Arc<dyn prompt::Backend<Zeroizing<String>>>,
 }
 
@@ -27,7 +27,7 @@ impl Backends {
     /// The Wayland clipboard and the configured prompt program.
     pub fn real(config: &Config) -> Backends {
         Backends {
-            clipboard: Clipboard::new(WaylandBackend),
+            clipboard: Box::new(WaylandBackend),
             unlock_prompt: Arc::new(SecretProgram::new(config.prompt.clone())),
         }
     }
@@ -132,7 +132,7 @@ mod tests {
         .expect("valid config");
         let (backend, _offered, offers) = RecordingBackend::new_tracking();
         let backends = Backends {
-            clipboard: Clipboard::new(backend),
+            clipboard: Box::new(backend),
             unlock_prompt: Arc::new(prompt::Scripted::<Zeroizing<String>>::new()),
         };
         let (display, handle) = display_session::channel();

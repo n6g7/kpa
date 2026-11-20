@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 use super::{Api, CopyState};
 use crate::authn::Requester;
-use crate::clipboard::{Clipboard, OfferHandles, RecordingBackend};
+use crate::clipboard::{OfferHandles, RecordingBackend};
 use crate::config::Config;
 use crate::databases::Databases;
 use crate::display_session::{self, DisplaySession, DisplayWriter};
@@ -44,7 +44,7 @@ pub(super) fn fixture_with(names: &[&str], extra: &str) -> Fixture {
         id: SESSION.to_string(),
         active: true,
     });
-    let copies = Arc::new(CopyState::new(Clipboard::new(backend)));
+    let copies = Arc::new(CopyState::new(Box::new(backend)));
     let approvals = Arc::new(Approvals::new());
     let mut core = Databases::for_test(config.databases.clone(), config.idle_timeout);
     core.observe(copies.clone());

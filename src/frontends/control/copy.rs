@@ -11,7 +11,7 @@ use super::proto::{CopyError, CopyOutcome, CopyRequest, Field};
 use super::{Api, authz};
 use crate::authn::Requester;
 use crate::cancel::CancelToken;
-use crate::clipboard::{Clipboard, Offer};
+use crate::clipboard::{Backend, Offer};
 use crate::databases::{Databases, Entry, Observer, OpenError, fields};
 use crate::display_session::DisplaySession;
 
@@ -19,7 +19,7 @@ use crate::display_session::DisplaySession;
 /// each with the database and unlock it came from. An observer that ends the
 /// offers of an unlock when it is locked.
 pub struct CopyState {
-    clipboard: Arc<Clipboard>,
+    clipboard: Box<dyn Backend>,
     held: Arc<Mutex<Vec<Held>>>,
 }
 
@@ -34,9 +34,9 @@ fn held(held: &Mutex<Vec<Held>>) -> MutexGuard<'_, Vec<Held>> {
 }
 
 impl CopyState {
-    pub fn new(clipboard: Clipboard) -> CopyState {
+    pub fn new(clipboard: Box<dyn Backend>) -> CopyState {
         CopyState {
-            clipboard: Arc::new(clipboard),
+            clipboard,
             held: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -60,21 +60,20 @@ impl CopyState {
         }
         let offer = self
             .clipboard
-            .offer(value, session)
+            .start(value, session)
             .map_err(|err| CopyError::Clipboard {
                 db: db.to_string(),
                 detail: err.to_string(),
             })?;
         if !self.record(db, unlock, &offer) {
-            self.clipboard.expire(&offer);
+            offer.end();
             return Err(locked());
         }
 
-        let clipboard = Arc::clone(&self.clipboard);
         let records = Arc::clone(&self.held);
         let _ = thread::Builder::new().spawn(move || {
             thread::sleep(timeout);
-            clipboard.expire(&offer);
+            offer.end();
             held(&records).retain(|held| !Arc::ptr_eq(&held.offer, &offer));
         });
         Ok(())
@@ -107,7 +106,7 @@ impl Observer for CopyState {
         held(&self.held).retain(|held| {
             let ended = held.db == db && held.unlock == *unlock;
             if ended {
-                self.clipboard.expire(&held.offer);
+                held.offer.end();
             }
             !ended
         });
@@ -458,7 +457,7 @@ mod tests {
     fn rig() -> Rig {
         let offers = OfferHandles::default();
         let after_taken = Arc::new(Mutex::new(None));
-        let copies = Arc::new(CopyState::new(Clipboard::new(Compositor {
+        let copies = Arc::new(CopyState::new(Box::new(Compositor {
             last: Mutex::new(None),
             offers: Arc::clone(&offers),
             after_taken: Arc::clone(&after_taken),

@@ -115,8 +115,14 @@ impl Offer {
     }
 
     /// Stops serving and waits, up to [`END_TIMEOUT`], until the compositor
-    /// has processed it.
+    /// has processed it. Does nothing to an offer that isn't live: it ended
+    /// already, or something else took the clipboard and the compositor
+    /// cancelled it. Ending an offer destroys only its own data source, so
+    /// it never clears a clipboard someone else now holds.
     pub fn end(&self) {
+        if !self.is_live() {
+            return;
+        }
         let _ = self.stop.shutdown(Shutdown::Both);
         let done = self.done.lock().unwrap_or_else(|e| e.into_inner());
         let _ = done.recv_timeout(END_TIMEOUT);
@@ -311,7 +317,20 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
 
-    use super::write_all_by;
+    use super::{END_TIMEOUT, Offer, write_all_by};
+
+    #[test]
+    fn ending_an_offer_ends_it_and_ending_it_again_does_nothing() {
+        let offer = Offer::detached();
+        assert!(offer.is_live());
+
+        offer.end();
+        assert!(!offer.is_live());
+
+        let started = Instant::now();
+        offer.end();
+        assert!(started.elapsed() < END_TIMEOUT / 2, "the second end waited");
+    }
 
     #[test]
     fn a_reader_gets_everything() {
