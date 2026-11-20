@@ -102,7 +102,7 @@ src/
     observer.rs         Observer, and telling observers in their order
     freshness.rs        the freshness guard: a changed file locks the database
     vault.rs            reading a .kdbx (private to databases)
-    testing.rs          in-memory databases for other subsystems' tests
+    testing.rs          in-memory databases, and files to unlock, for other subsystems' tests
   frontends/
     mod.rs
     control/            kpa's own socket
@@ -150,12 +150,14 @@ test-support crate.
 - **`databases` is tested alone**: the state machine (a lock beats an unlock, a
   token is cancelled when its unlock's lock happens, idle expiry per database,
   the freshness guard, `InProgress`), with in-memory databases installed through
-  `install_for_test`, and observers that record what they are told and call back
-  into the core.
+  `install_for_test`, a real KDBX4 file written by `write_for_test` where a test
+  unlocks, and observers that record what they are told and call back into the
+  core.
 - **No front-end test uses a mock of `Databases`.** A mock needs a trait in
   front of the core and a second implementation of its lock and token
   semantics, which can drift from the real one. The stand-in sits at the
-  lowest seam, the file read: the real core holding an in-memory database.
+  lowest seam, the file: the real core holding an in-memory database, or reading
+  a real file the test wrote.
   Likewise the prompts are `prompt::Scripted`, the clipboard is
   `clipboard::RecordingBackend`, and the display session is a writer the test
   sets.
