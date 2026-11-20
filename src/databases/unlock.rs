@@ -83,6 +83,10 @@ impl Unlocking<'_> {
     /// password is borrowed for the read; the core keeps no copy.
     pub fn finish(self, password: Option<&Zeroizing<String>>) -> Result<(), UnlockFailure> {
         let config = &self.databases.configs[self.index];
+        #[cfg(test)]
+        if let Some((db, stamp)) = self.databases.take_staged(&config.name) {
+            return self.install(db, stamp);
+        }
         let (db, stamp) = vault::open(&config.path, password, config.keyfile.as_deref())
             .map_err(UnlockFailure::Vault)?;
         self.install(db, stamp)

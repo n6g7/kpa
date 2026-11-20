@@ -433,3 +433,33 @@ fn open_reads_entries_fields_and_attachments() {
         .for_each_attachment(|_| none += 1);
     assert_eq!(none, 0);
 }
+
+/// A staged database is what the next `finish` installs, whatever the
+/// password, through the install path a file's database takes: observers are
+/// told, and a lock beats it as it beats any unlock.
+#[test]
+fn a_staged_database_is_what_the_next_finish_installs() {
+    let (databases, _recorder, log) = observed(&["work"]);
+    databases.stage_for_test("work", vec![TestEntry::new("site")]);
+
+    started(&databases, "work").finish(None).unwrap();
+    assert_eq!(databases.open("work").ok().unwrap().entry_count(), 1);
+    assert_eq!(*log.lock().unwrap(), ["a:unlocked:work"]);
+
+    databases.lock("work").unwrap();
+    let unlocking = started(&databases, "work");
+    // Staged once: a second unlock reads the placeholder file again.
+    assert!(matches!(
+        unlocking.finish(None),
+        Err(UnlockFailure::Vault(_))
+    ));
+
+    databases.stage_for_test("work", vec![TestEntry::new("site")]);
+    let unlocking = started(&databases, "work");
+    databases.lock("work").unwrap();
+    assert!(matches!(
+        unlocking.finish(None),
+        Err(UnlockFailure::LockedMeanwhile)
+    ));
+    assert!(!is_unlocked(&databases, "work"));
+}

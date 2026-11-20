@@ -103,6 +103,30 @@ impl Databases {
         self.installed(index, &token);
     }
 
+    /// Makes the next unlock of `name` read `entries` instead of its file,
+    /// whatever the password: `Unlocking::finish` installs them through the
+    /// path it installs a real file's.
+    pub(crate) fn stage_for_test(&self, name: &str, entries: Vec<TestEntry>) {
+        self.index(name).expect("a configured database");
+        self.staged
+            .lock()
+            .expect("staged")
+            .insert(name.to_string(), build(entries));
+    }
+
+    /// The staged database for `name`, with the stamp of its placeholder
+    /// file, taken once.
+    pub(super) fn take_staged(
+        &self,
+        name: &str,
+    ) -> Option<(keepass::Database, vault::Fingerprint)> {
+        let db = self.staged.lock().expect("staged").remove(name)?;
+        let index = self.index(name).expect("a configured database");
+        let stamp = vault::Fingerprint::from_file(&self.configs[index].path)
+            .expect("`for_test` made the placeholder file");
+        Some((db, stamp))
+    }
+
     /// Rewrites the placeholder file, so the freshness guard sees a change.
     pub(crate) fn change_file_for_test(&self, name: &str) {
         let index = self.index(name).expect("a configured database");

@@ -52,6 +52,10 @@ pub struct Databases {
     /// Keeps the placeholder files of [`Databases::for_test`] alive.
     #[cfg(test)]
     scratch: Option<tempfile::TempDir>,
+    /// What the next unlock of a database reads instead of its file
+    /// ([`Databases::stage_for_test`]).
+    #[cfg(test)]
+    staged: Mutex<std::collections::HashMap<String, keepass::Database>>,
 }
 
 struct Slot {
@@ -135,6 +139,8 @@ impl Databases {
             observers: Vec::new(),
             #[cfg(test)]
             scratch: None,
+            #[cfg(test)]
+            staged: Mutex::default(),
         }
     }
 
