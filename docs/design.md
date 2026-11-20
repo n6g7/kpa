@@ -422,8 +422,8 @@ resolve against the daemon's working directory.
 
 `serve` writes one line per event to stderr at `error`, `warn`, `info` (the
 default) or `debug`; `log_level` sets it and `serve --log-level` overrides it.
-`info` carries every unlock, lock and copy; `warn` failed or refused requests;
-`debug` why. Under systemd each line carries a `<N>` syslog priority prefix, so
+`info` carries every unlock, lock and copy, and the tray starting and its host
+coming and going; `warn` failed or refused requests; `debug` why. Under systemd each line carries a `<N>` syslog priority prefix, so
 `journalctl -p warning` filters by level. What a line may contain is under
 § Secrets.
 
