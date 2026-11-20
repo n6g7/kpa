@@ -148,9 +148,9 @@ impl Databases {
     pub fn open(&self, name: &str) -> Result<Open<'_>, OpenError> {
         let index = self.index(name).ok_or(OpenError::UnknownDb)?;
         let (slots, stale) = self.checked_slots(index);
-        if let Some(token) = stale {
+        if let Some(ended) = stale {
             drop(slots);
-            self.tell_locked(&[self.covered(index, token)]);
+            self.tell_locked(&[self.logged(index, ended)]);
             return Err(OpenError::Stale);
         }
         if slots[index].loaded.is_none() {

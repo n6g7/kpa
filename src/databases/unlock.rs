@@ -56,8 +56,8 @@ impl Databases {
             }))
         };
         drop(slots);
-        if let Some(token) = stale {
-            self.tell_locked(&[self.covered(index, token)]);
+        if let Some(ended) = stale {
+            self.tell_locked(&[self.logged(index, ended)]);
         }
         begin
     }
