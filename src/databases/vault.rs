@@ -2,7 +2,7 @@
 //!
 //! Kept deliberately dumb: open a `.kdbx` given a password and/or keyfile,
 //! and list or count what's in it. No caching and no locking — that is
-//! daemon state, and it lives in `server.rs`. The freshness fingerprint is
+//! daemon state, and it lives in `databases`. The freshness fingerprint is
 //! taken here, because it has to bracket the read.
 //!
 //! Every field/method name below was checked against the vendored source
@@ -203,7 +203,7 @@ pub struct EntrySummary {
 /// pushed into holding it in a wiped-on-drop buffer instead of a plain
 /// `String` — `&str` alone can't carry that guarantee. The daemon reads it
 /// from its configured prompt command straight into `Zeroizing` buffers
-/// (`server.rs`). That covers the copies kpa holds; the ones it can't reach
+/// (`control`'s unlock). That covers the copies kpa holds; the ones it can't reach
 /// are inside the prompt program itself and inside `keepass`, whose
 /// key-derivation intermediates are not zeroized — half of
 /// `sha256(password)`, which is password-equivalent, survives a lock
@@ -889,7 +889,7 @@ mod tests {
     }
 
     /// An unknown uuid is `None`, distinct from a known entry with an
-    /// absent field — `server.rs` maps these to different wire errors.
+    /// absent field — `control` maps these to different wire errors.
     #[test]
     fn entry_field_distinguishes_unknown_uuid_from_empty_field() {
         let mut db = Database::new();

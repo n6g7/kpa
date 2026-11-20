@@ -91,8 +91,8 @@ in `clipboard/wayland/compositor.rs`) stays inside its own module.
 These cross a module boundary with Linux details today. Fix each one when
 work next changes that code:
 
-- `clipboard::Backend::start` and `Clipboard::offer` take a logind session id
-  and return `wayland::Offer`, which `clipboard/mod.rs` re-exports.
+- `clipboard::Backend::start` takes a logind session id and returns
+  `wayland::Offer`, which `clipboard/mod.rs` re-exports.
 - `display_session::DisplaySession::{Locked, Unlocked}` carry the display session's logind id,
   which the clipboard uses to find the compositor. Callers other than the
   clipboard must treat it as opaque.

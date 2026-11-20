@@ -1,6 +1,6 @@
 //! What the daemon writes to its log, for the cases that need an unlock:
 //! the daemon runs in-process (`common::InProcessDaemon`, see
-//! `tests/server.rs`), with this process's stderr pointed at a file while
+//! `tests/control.rs`), with this process's stderr pointed at a file while
 //! it serves.
 //!
 //! Its own test binary because stderr and the log level are process-wide.

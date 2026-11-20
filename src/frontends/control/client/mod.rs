@@ -250,7 +250,7 @@ enum ClientError {
 
 /// Refuses to go on talking to `stream` unless its peer is `expected`,
 /// mirroring `handle_connection`'s server-side check
-/// (`src/server.rs:722-735`) on the other end of the same socket. An
+/// (`serve::handle_connection`) on the other end of the same socket. An
 /// unreadable credential is treated the same as a mismatch: a socket
 /// where `SO_PEERCRED` can't be read is not one to trust with a request.
 /// A separate function, rather than inlined in `send_request`, so a test
@@ -343,7 +343,7 @@ mod tests {
     use super::{ClientError, check_peer_uid, parse_response};
 
     /// `UnixStream::pair()` gives both ends our own real uid, so the
-    /// mismatch is simulated the same way `server.rs`'s
+    /// mismatch is simulated the same way `serve.rs`'s
     /// `handle_connection_drops_a_peer_of_another_uid` does: not by
     /// faking the peer's credential, but by giving `check_peer_uid` a
     /// different `expected` uid to compare it against.

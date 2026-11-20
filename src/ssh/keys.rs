@@ -17,7 +17,7 @@ use ssh_key::{Algorithm, EcdsaCurve, Fingerprint, HashAlg, PrivateKey, PublicKey
 use uuid::Uuid;
 
 use crate::config::{DatabaseConfig, SshKeyConfirm};
-use crate::databases::vault::{self, AttachmentView};
+use crate::databases::{Attachment, Open};
 use crate::paths::Paths;
 
 /// Marks the one private-key format kpa reads (`docs/ssh-agent.md` § 6.4).
@@ -109,20 +109,20 @@ pub struct ScanResult {
     pub skipped: Vec<SkippedAttachment>,
 }
 
-/// Scans `db`'s current-entry attachments, in tree order
-/// (`vault::for_each_attachment`), for OpenSSH private keys, per
+/// Scans the open database's current-entry attachments, in tree order
+/// (`Open::for_each_attachment`), for OpenSSH private keys, per
 /// `docs/ssh-agent.md` § 6.4. Each is parsed straight from the database's
 /// own bytes, never copied. An attachment that doesn't start with either
 /// the OpenSSH or a PEM marker isn't a key at all and is silently ignored,
 /// rather than reported skipped — most attachments in a vault are not SSH
 /// keys.
-pub fn scan(db: &keepass::Database) -> ScanResult {
+pub fn scan(open: &Open) -> ScanResult {
     let mut result = ScanResult::default();
-    vault::for_each_attachment(db, |attachment| classify(attachment, &mut result));
+    open.for_each_attachment(|attachment| classify(attachment, &mut result));
     result
 }
 
-fn classify(attachment: AttachmentView<'_>, result: &mut ScanResult) {
+fn classify(attachment: Attachment<'_>, result: &mut ScanResult) {
     let data = attachment.data;
     if !data.starts_with(OPENSSH_MARKER) {
         if PEM_MARKERS.iter().any(|marker| data.starts_with(marker)) {
@@ -168,7 +168,7 @@ fn classify(attachment: AttachmentView<'_>, result: &mut ScanResult) {
     });
 }
 
-fn skipped(attachment: AttachmentView<'_>, reason: SkipReason) -> SkippedAttachment {
+fn skipped(attachment: Attachment<'_>, reason: SkipReason) -> SkippedAttachment {
     SkippedAttachment {
         entry_uuid: attachment.entry_uuid,
         entry_title: attachment.entry_title.map(str::to_owned),
@@ -522,7 +522,7 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
         let mut result = ScanResult::default();
         for attachment in attachments {
             classify(
-                AttachmentView {
+                Attachment {
                     entry_uuid: attachment.entry_uuid,
                     entry_title: Some(&attachment.entry_title),
                     name: &attachment.name,

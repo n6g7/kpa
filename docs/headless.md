@@ -316,7 +316,7 @@ stays refused while it is locked (§ 5).
 | `socket.rs`   | Sends and receives a request line with one descriptor attached (`SCM_RIGHTS`, close-on-exec on receipt) |
 | `frontends/control/proto/` | `Request` gains `preferred_prompt`, and `no_prompt` joins the error codes. `UnlockRequest` is just `db` |
 | `prompt/terminal.rs` | The terminal backend: echo off, one line, modes put back, ended by the deadline, a lock, the requester leaving or a hang-up |
-| `server.rs`   | Keeps the passed terminal in the `Requester`; decides where an unlock asks; prompt timeout; locks end prompts; `copy` gated on origin and the display session's state |
+| `frontends/control/{serve,unlock,copy,authz}.rs` | Keep the passed terminal in the `Requester`; decide where an unlock asks; prompt timeout; locks end prompts; `copy` gated on origin and the display session's state |
 | `main.rs`, `frontends/control/client/tty.rs` | `kpa unlock` passes `/dev/tty`, waits for the daemon after an interrupt, and has `--tty` |
 
 **Tests**

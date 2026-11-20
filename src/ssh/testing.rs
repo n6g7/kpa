@@ -51,6 +51,7 @@ pub(crate) fn test_key(seed: u64) -> PrivateKey {
 
 /// A database whose root holds one entry per `(title, key)`, each with the
 /// key as an OpenSSH attachment, the way a KeePass client stores one.
+#[allow(dead_code, reason = "the SSH agent is off until it runs on the core")]
 pub(crate) fn key_database(keys: &[(&str, &PrivateKey)]) -> keepass::Database {
     use keepass::db::{Value, fields};
 

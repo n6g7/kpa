@@ -97,8 +97,3 @@ impl SshKeysError {
         }
     }
 }
-
-/// Serving `ssh_keys`.
-pub trait SshKeys {
-    fn ssh_keys(&self, request: &SshKeysRequest) -> Result<SshKeysReport, SshKeysError>;
-}

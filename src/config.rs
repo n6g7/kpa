@@ -1,7 +1,7 @@
 //! The config file, matching the shape settled in `docs/design.md`
 //! § Configuration. `Config::load` does everything from finding the file to
 //! expanding `~` in its paths; `main.rs`'s `serve` calls it once at startup,
-//! and `server::Server` owns the result for the life of the daemon.
+//! and `daemon` hands each part of the result to what uses it.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -719,7 +719,7 @@ mod tests {
     /// `load` end to end on a real file. Absolute paths only, so the
     /// result doesn't depend on this process's `$HOME`; `~` through `load`
     /// is covered by spawning the daemon with its own `HOME`, in
-    /// `tests/server.rs`.
+    /// `tests/control.rs`.
     #[test]
     fn load_reads_and_parses_a_file() {
         let dir = tempfile::tempdir().expect("tempdir");

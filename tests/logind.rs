@@ -16,15 +16,11 @@ use std::time::{Duration, Instant};
 
 mod common;
 
-use kpa::authn::Requester;
 use kpa::config::Config;
 use kpa::databases::{Begin, Databases};
 use kpa::display_session::{self, DisplaySession};
 use kpa::frontends::auto_lock::logind::{self, Bus, Inhibitor};
 use kpa::frontends::auto_lock::{self, Event, Source};
-use kpa::frontends::control::proto::{Unlock, UnlockError, UnlockRequest};
-use kpa::paths::Paths;
-use kpa::server::Server;
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::zvariant::{self, OwnedObjectPath, Value};
@@ -661,10 +657,10 @@ fn the_active_state_follows_logind_and_never_locks() {
     assert_eq!(recorder.locks(), 1, "LockedHint still locks while inactive");
 }
 
-/// The real server reacting to what the watcher reports: while the display session's
-/// `LockedHint` is true, an unlock raises no prompt; once it clears, the
-/// prompt runs and the fixture unlocks; and a `Lock` signal ends a prompt
-/// still open.
+/// The real daemon reacting to what the watcher reports: while the display
+/// session's `LockedHint` is true, an unlock raises no prompt; once it
+/// clears, the prompt runs and the fixture unlocks; and a `Lock` signal ends
+/// a prompt still open.
 #[test]
 fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
     let bus = PrivateBus::start();
@@ -689,53 +685,31 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         common::password_db().display().to_string()
     ))
     .unwrap();
-    let (events, incoming) = std::sync::mpsc::channel();
-    let _inhibitor = logind::start(Bus::Address(bus.address.clone()), events.clone());
-    let server = Arc::new(Server::new(config, Paths::default(), events));
-    let reacting = server.clone();
-    thread::spawn(move || {
-        for event in incoming {
-            reacting.on_session_event(event);
-        }
-    });
-    let unlock = || {
-        server.unlock(
-            &UnlockRequest {
-                db: "personal".to_string(),
-            },
-            &Requester {
-                uid: kpa::authn::process_uid(),
-                // On the desktop of the mock's display session.
-                cgroup: Some(common::cgroup_on(true, "31")),
-                command: None,
-                terminal: None,
-                preferred: None,
-            },
-            None,
-        )
-    };
-    let refused = Err(UnlockError::NoPrompt);
+    let daemon = common::InProcessDaemon::on_bus(config, &bus.address, "31");
+    let unlock = || daemon.run(&["unlock", "personal"]);
+    let refused = |reply: &serde_json::Value| reply["error"] == "no_prompt";
 
     // 1. While the display session is known locked, no prompt runs. Until kpa has
     //    subscribed it doesn't know, so the marker is cleared before each
     //    try: only the last, refused, one counts.
     eventually("a locked display session to refuse the unlock", || {
         let _ = std::fs::remove_file(&prompted);
-        unlock() == refused
+        refused(&unlock())
     });
     assert!(!prompted.exists(), "a prompt ran behind the locker");
 
     // 2. Once the hint clears, the prompt runs and the fixture unlocks.
     mock.set_hint(SESSION_1, false);
     eventually("an unlocked display session to allow the prompt", || {
-        unlock().is_ok()
+        unlock()["ok"] == true
     });
     assert!(prompted.exists());
-    assert_eq!(server.display_session(), unlocked("31"));
 
     // 3. A Lock signal ends a prompt still open.
     mock.lock_signal(SESSION_1);
-    eventually("the Lock signal to lock", || !server.any_unlocked());
+    eventually("the Lock signal to lock", || {
+        !daemon.databases.any_unlocked()
+    });
     std::fs::write(&hang, b"").unwrap();
     std::fs::remove_file(&prompted).unwrap();
     thread::scope(|scope| {
@@ -743,15 +717,11 @@ fn the_display_session_state_gates_prompts_and_a_lock_ends_them_over_a_bus() {
         eventually("the prompt to start", || prompted.exists());
         mock.lock_signal(SESSION_1);
         let locked_at = Instant::now();
-        assert_eq!(
-            unlocking.join().unwrap(),
-            Err(UnlockError::LockedDuringUnlock {
-                db: "personal".to_string()
-            })
-        );
+        let reply = unlocking.join().unwrap();
+        assert_eq!(reply["error"], "locked", "{reply}");
         assert!(locked_at.elapsed() < Duration::from_secs(5));
     });
-    assert!(!server.any_unlocked());
+    assert!(!daemon.databases.any_unlocked());
 }
 
 /// Unlocks every database in `databases` with the fixture's password.

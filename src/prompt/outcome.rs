@@ -48,6 +48,7 @@ impl PromptOutcome {
 
 impl<T> PromptOutcome<T> {
     /// Interprets an answer, leaving the other outcomes as they are.
+    #[allow(dead_code, reason = "the SSH agent is off until it runs on the core")]
     pub(super) fn map<U>(self, f: impl FnOnce(T) -> U) -> PromptOutcome<U> {
         match self {
             PromptOutcome::Cancelled => PromptOutcome::Cancelled,

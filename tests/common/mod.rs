@@ -5,7 +5,7 @@
 //! module, imported by the actual test files.
 //!
 //! Cargo compiles this module once per integration-test binary, so a
-//! helper only some binaries call (e.g. `tests/server.rs` doesn't need
+//! helper only some binaries call (e.g. `tests/control.rs` doesn't need
 //! `keyfile_db`) shows up as dead code in the others. The allow is for that
 //! structural fact, not for genuinely unused fixtures.
 #![allow(dead_code)]
@@ -90,15 +90,36 @@ pub fn ssh_db() -> PathBuf {
     ensure_fixtures().join("fixture-ssh.kdbx")
 }
 
+/// A `Databases` holding the one fixture at `path`, named `"fixture"`,
+/// unlocked with the fixtures' password.
+pub fn unlocked_fixture(path: &Path) -> kpa::databases::Databases {
+    let databases = kpa::databases::Databases::new(
+        vec![kpa::config::DatabaseConfig {
+            name: "fixture".to_string(),
+            path: path.to_path_buf(),
+            keyfile: None,
+            serve_ssh_keys: true,
+            ssh_keys: Vec::new(),
+        }],
+        std::time::Duration::from_secs(3600),
+    );
+    let password = zeroize::Zeroizing::new(PASSWORD.to_string());
+    match databases.begin_unlock("fixture") {
+        Ok(kpa::databases::Begin::Started(unlocking)) => {
+            unlocking.finish(Some(&password)).expect("fixture unlocks");
+        }
+        _ => panic!("expected to start an unlock of the fixture"),
+    }
+    databases
+}
+
 /// The fingerprint of `ssh_db()`'s entry named `title` (`"Ed25519"`,
 /// `"Ecdsa"` or `"Rsa"`), for building a `[[database.ssh_key]]` override
 /// before a daemon that serves it has started: a fresh fixture has
 /// different keys every run.
 pub fn ssh_fixture_fingerprint(title: &str) -> String {
-    let password = zeroize::Zeroizing::new(PASSWORD.to_string());
-    let (db, _) = kpa::databases::vault::open(&ssh_db(), Some(&password), None)
-        .expect("ssh fixture should open");
-    kpa::ssh::keys::scan(&db)
+    let db = unlocked_fixture(&ssh_db());
+    kpa::ssh::keys::scan(&db.open("fixture").expect("unlocked"))
         .found
         .into_iter()
         .find(|key| key.entry_title.as_deref() == Some(title))
@@ -147,36 +168,43 @@ pub fn cgroup_on(on_desktop: bool, session: &str) -> String {
 }
 
 /// The daemon, run on threads of the test process rather than as a
-/// spawned `kpa serve`, and driven with the real `kpa` CLI over its socket.
+/// spawned `kpa serve`, built by `kpa::daemon` and driven with the real
+/// `kpa` CLI over its socket.
 ///
 /// Every connection counts as coming from the desktop by default
 /// (`authn::assume_cgroup`; `with_requester_on` overrides it), so `unlock`
 /// raises the configured prompt wherever the tests run: a test runner is
-/// rarely in the display session. No logind watch runs, so nothing
-/// publishes the display session's state on its own: `with_config` and `with_requester_on`
-/// seed it as an active, unlocked session (`Server::on_session_event`),
-/// standing in for logind the same way `authn::assume_cgroup` stands in for the
-/// peer's cgroup, so `copy` passes its gate the way it always did before
-/// that gate existed. A test about the gate itself (a requester outside the desktop, or
-/// a locked/inactive/absent display session) overrides either through `self.server`.
-/// No tray is started either. The daemon's threads run until the test
-/// binary exits.
+/// rarely in the display session. No logind watch runs unless a test asks
+/// for one (`on_bus`), so nothing publishes the display session's state on
+/// its own: the other constructors seed it as an active, unlocked session,
+/// standing in for logind the same way `authn::assume_cgroup` stands in
+/// for the peer's cgroup, so `copy` passes its gate. A test about the gate
+/// itself (a requester outside the desktop, or a locked, inactive or absent
+/// display session) sets it through `display`. The daemon's threads run
+/// until the test binary exits.
 ///
 /// What this doesn't cover, and the tests on the spawned binary do:
-/// `kpa serve`'s argument and config-file handling, its startup
-/// (`PR_SET_DUMPABLE`, the logind watch, the tray), and logging to a
-/// stderr of its own.
+/// `kpa serve`'s argument and config-file handling and its startup
+/// (`PR_SET_DUMPABLE`), and logging to a stderr of its own.
 pub struct InProcessDaemon {
     pub socket: PathBuf,
     /// The cgroup its connections are taken to have, on this socket and on
     /// an agent socket a test starts (`kpa::authn::assume_cgroup`).
     pub cgroup: String,
-    pub server: Arc<kpa::server::Server>,
+    pub databases: Arc<kpa::databases::Databases>,
+    /// The display session as the daemon's front ends read it. Written by
+    /// the test, or by the logind watch of `on_bus` (then `None`).
+    pub display: Option<Arc<kpa::display_session::DisplayWriter>>,
     /// The daemon's file locations: its SSH key cache and `known_hosts`
     /// live under its own tempdir, so a test never touches the real ones.
     pub paths: kpa::paths::Paths,
     _dir: tempfile::TempDir,
 }
+
+/// The sleep hold's place in a daemon with no logind watch.
+struct NoSleepHold;
+
+impl kpa::databases::Observer for NoSleepHold {}
 
 impl InProcessDaemon {
     /// Starts a daemon on `config`, TOML as in a config file.
@@ -191,6 +219,49 @@ impl InProcessDaemon {
     /// Like `with_config`, but every connection runs on the desktop only if
     /// `on_desktop`: for copy-gating tests that need a requester outside it.
     pub fn with_requester_on(config: kpa::config::Config, on_desktop: bool) -> InProcessDaemon {
+        let (writer, display) = kpa::display_session::channel();
+        writer.set(kpa::display_session::DisplaySession::Unlocked {
+            id: "test".to_string(),
+            active: true,
+        });
+        InProcessDaemon::build(
+            config,
+            cgroup_on(on_desktop, "test"),
+            Some(writer),
+            display,
+            Arc::new(NoSleepHold),
+            None,
+        )
+    }
+
+    /// A daemon whose lock triggers come from a message bus at `address`
+    /// (a private bus a test runs a mock logind on), and whose display
+    /// session is whatever that bus reports; its connections run on the
+    /// desktop of the display session `session`.
+    pub fn on_bus(config: kpa::config::Config, address: &str, session: &str) -> InProcessDaemon {
+        let (writer, display) = kpa::display_session::channel();
+        let (sleep_hold, auto_lock) = kpa::frontends::auto_lock::start(
+            kpa::frontends::auto_lock::Source::at(address),
+            writer,
+        );
+        InProcessDaemon::build(
+            config,
+            cgroup_on(true, session),
+            None,
+            display,
+            Arc::new(sleep_hold),
+            Some(auto_lock),
+        )
+    }
+
+    fn build(
+        config: kpa::config::Config,
+        cgroup: String,
+        writer: Option<kpa::display_session::DisplayWriter>,
+        display: kpa::display_session::DisplayHandle,
+        sleep_hold: Arc<dyn kpa::databases::Observer>,
+        auto_lock: Option<kpa::frontends::auto_lock::AutoLock>,
+    ) -> InProcessDaemon {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let socket = dir.path().join("sock");
         let paths = kpa::paths::Paths {
@@ -198,33 +269,66 @@ impl InProcessDaemon {
             known_hosts: Some(dir.path().join("known_hosts")),
             ..kpa::paths::Paths::default()
         };
-        let server = Arc::new(kpa::server::Server::new(
-            config,
-            paths.clone(),
-            std::sync::mpsc::channel().0,
-        ));
-        let cgroup = cgroup_on(on_desktop, "test");
+        let idle_timeout = config.idle_timeout;
+        let backends = kpa::daemon::Backends::real(&config);
+        let daemon = kpa::daemon::build(config, backends, display, sleep_hold);
+        let databases = Arc::clone(&daemon.databases);
+        match auto_lock {
+            Some(auto_lock) => {
+                let databases = Arc::clone(&databases);
+                std::thread::spawn(move || auto_lock.run(databases, idle_timeout));
+            }
+            // No logind watch, so no idle tick either: this one stands in for
+            // `auto_lock`'s, at the same rate.
+            None => {
+                let databases = Arc::clone(&databases);
+                let tick = (idle_timeout / 10).clamp(
+                    std::time::Duration::from_millis(10),
+                    std::time::Duration::from_secs(1),
+                );
+                std::thread::spawn(move || {
+                    loop {
+                        std::thread::sleep(tick);
+                        databases.expire_idle(std::time::Instant::now());
+                    }
+                });
+            }
+        }
         kpa::authn::assume_cgroup(&socket, &cgroup);
-        server.on_session_event(kpa::frontends::auto_lock::Event::DisplayChanged(
-            kpa::display_session::DisplaySession::Unlocked {
-                id: "test".to_string(),
-                active: true,
-            },
-        ));
         // Not `socket::bind_socket`: it sets the process-wide umask for the
         // bind, and a directory another test thread created meanwhile
         // would come out without its search bit.
         let listener =
             std::os::unix::net::UnixListener::bind(&socket).expect("failed to bind socket");
-        let serving = server.clone();
-        std::thread::spawn(move || kpa::server::serve(serving, listener));
+        std::thread::spawn(move || daemon.serve_control(listener));
         InProcessDaemon {
             socket,
             cgroup,
-            server,
+            databases,
+            display: writer.map(Arc::new),
             paths,
             _dir: dir,
         }
+    }
+
+    /// Unlocks `name` with the fixtures' password, as an unlock at the desk
+    /// would.
+    pub fn unlock(&self, name: &str) {
+        let password = zeroize::Zeroizing::new(PASSWORD.to_string());
+        match self.databases.begin_unlock(name) {
+            Ok(kpa::databases::Begin::Started(unlocking)) => {
+                unlocking.finish(Some(&password)).expect("unlock");
+            }
+            _ => panic!("expected to start an unlock of {name}"),
+        }
+    }
+
+    /// Sets the display session the daemon's front ends read.
+    pub fn set_display(&self, session: kpa::display_session::DisplaySession) {
+        self.display
+            .as_ref()
+            .expect("the logind watch writes this daemon's display session")
+            .set(session);
     }
 
     pub fn run(&self, args: &[&str]) -> serde_json::Value {

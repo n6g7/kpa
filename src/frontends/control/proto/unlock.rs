@@ -5,7 +5,6 @@
 use serde::{Deserialize, Serialize};
 
 use super::error::{ErrorCode, ErrorFields};
-use crate::authn::Requester;
 
 /// What `{"op":"unlock", ...}` carries; `Op::Unlock` wraps it. `db` is
 /// required — there is no "unlock everything".
@@ -104,20 +103,4 @@ impl UnlockError {
             }
         }
     }
-}
-
-/// Serving `unlock`. The implementor owns credential acquisition: nothing
-/// about *how* it asks for the password appears in this signature but where
-/// the request would like to be asked.
-pub trait Unlock {
-    /// `Ok` names the database that is now unlocked. `requester` says where
-    /// the request came from, which terminal it passed and where it asked to
-    /// be asked, and together they decide where the prompt appears. `message`
-    /// is what the prompt says; `None` is the plain "Unlock <db>".
-    fn unlock(
-        &self,
-        request: &UnlockRequest,
-        requester: &Requester,
-        message: Option<&str>,
-    ) -> Result<String, UnlockError>;
 }
