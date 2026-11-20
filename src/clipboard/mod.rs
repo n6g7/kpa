@@ -6,11 +6,11 @@
 //!   start serving a secret as an [`Offer`]. [`WaylandBackend`] implements
 //!   it on kpa's own Wayland client (`wayland`). Nothing here
 //!   decides *when* to stop serving.
-//! - [`Clipboard`] is the part that decides: "a second `copy` replaces the
-//!   first" and "drop the offer after the timeout, but only if nothing else
-//!   already took the clipboard" are both decided against the [`Backend`]
-//!   trait alone, so they're tested with a fake backend whose offers have
-//!   no Wayland connection at all (see the tests below).
+//! - [`Clipboard`] is the part that decides: "drop the offer after the
+//!   timeout, but only if nothing else already took the clipboard" is
+//!   decided against the [`Backend`] trait alone, so it's tested with a fake
+//!   backend whose offers have no Wayland connection at all (see the tests
+//!   below).
 //!
 //! **Why `clipboard_timeout` isn't enforced inside this module.** Driving a
 //! timeout needs a sleep somewhere, and [`Clipboard::expire`] is written so
@@ -30,7 +30,9 @@
 
 mod wayland;
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use zeroize::Zeroizing;
 
@@ -65,80 +67,46 @@ pub trait Backend: Send + Sync {
     ) -> Result<Arc<Offer>, ClipboardError>;
 }
 
-/// Tracks the most recently started offer, so a later timeout can tell
-/// whether it's still the one to drop. Backend-agnostic: everything here is
-/// decided against [`Backend`] alone, which is what makes it
-/// testable with a fake backend (see `tests` below), with no Wayland
-/// connection.
+/// Starts offers on a [`Backend`] and drops them. Keeps no state of its own:
+/// a new offer supersedes the one before at the protocol level, so which
+/// offers are still live is the offers' own to say ([`Offer::is_live`]), and
+/// it is decided against [`Backend`] alone, which is what makes it testable
+/// with a fake backend (see `tests` below), with no Wayland connection.
 pub struct Clipboard {
     backend: Box<dyn Backend>,
-    current: Mutex<Option<Arc<Offer>>>,
 }
 
 impl Clipboard {
     pub fn new(backend: impl Backend + 'static) -> Clipboard {
         Clipboard {
             backend: Box::new(backend),
-            current: Mutex::new(None),
         }
     }
 
     /// Starts serving `secret`. "A second `copy` call replaces the first"
-    /// falls out of the backend itself (a new offer supersedes the old one
-    /// at the protocol level) plus this call remembering the new offer as
-    /// current, so a stale timeout for the old one no longer matches it.
+    /// falls out of the backend itself: a new offer supersedes the old one
+    /// at the protocol level, which turns the old one's `is_live` false.
     pub fn offer(
         &self,
         secret: Zeroizing<String>,
         display_session: &DisplaySession,
     ) -> Result<Arc<Offer>, ClipboardError> {
-        let offer = self.backend.start(secret, display_session)?;
-        *lock(&self.current) = Some(Arc::clone(&offer));
-        Ok(offer)
+        self.backend.start(secret, display_session)
     }
 
-    /// Drops `offer` if it is still both the most recently started offer
-    /// and live. Either condition failing means there is nothing to do:
-    /// a newer `copy` already replaced it (and, in doing so, already
-    /// caused the backend to supersede it — see `offer`'s doc), or
-    /// something else already took the clipboard, in which case `is_live`
-    /// is already false and no action is taken at all.
+    /// Drops `offer` if it is still live. Nothing to do if something else
+    /// already took the clipboard (a newer `copy` included), since that
+    /// turned `is_live` false, and ending an offer destroys only its own data
+    /// source, so a dropped offer never clears anyone else's clipboard.
     ///
-    /// Called after `clipboard_timeout` elapses for `offer` — `control::CopyState`
-    /// spawns a thread that sleeps and then calls this; nothing in this
-    /// method itself waits.
+    /// Called when `clipboard_timeout` elapses for `offer`, and when a lock
+    /// ends the unlock it came from: `control::CopyState` does both, and
+    /// nothing in this method itself waits.
     pub fn expire(&self, offer: &Arc<Offer>) {
-        let mut current = lock(&self.current);
-        let is_current = matches!(&*current, Some(c) if Arc::ptr_eq(c, offer));
-        if is_current && offer.is_live() {
-            offer.end();
-            *current = None;
-        }
-    }
-
-    /// Ends whatever offer is current right now, unconditionally — unlike
-    /// [`expire`](Self::expire), this isn't told which offer it means, so
-    /// it ends the current one regardless of which `copy` started it.
-    /// Called when a lock ends the unlock an offer came from (`control::CopyState`): a database locking is exactly the
-    /// moment `docs/threat-model.md` G-6 ("lock clears what kpa owns")
-    /// says a copied secret kpa still owns should stop being served. A
-    /// `current` that is `None`, or already not live (already superseded
-    /// by something else taking the clipboard), is a no-op — the same
-    /// "nothing to do" cases `expire` already handles.
-    pub fn end_now(&self) {
-        let mut current = lock(&self.current);
-        // `current.take()` always runs, live or not — only `end()` is
-        // conditional on `is_live()`.
-        if let Some(offer) = current.take()
-            && offer.is_live()
-        {
+        if offer.is_live() {
             offer.end();
         }
     }
-}
-
-fn lock(mutex: &Mutex<Option<Arc<Offer>>>) -> MutexGuard<'_, Option<Arc<Offer>>> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The real backend: kpa's own Wayland client, in-process, per
@@ -223,23 +191,26 @@ impl Backend for RecordingBackend {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use zeroize::Zeroizing;
 
     use super::{Backend, Clipboard, ClipboardError, Offer};
     use crate::display_session::DisplaySession;
 
-    /// A backend whose offers have no Wayland connection at all.
+    /// A backend whose offers have no Wayland connection at all. Like a
+    /// compositor, it ends the previous offer when a new one starts.
     struct FakeBackend {
         fail_next: AtomicBool,
+        last: Mutex<Option<Arc<Offer>>>,
     }
 
     impl FakeBackend {
         fn new() -> FakeBackend {
             FakeBackend {
                 fail_next: AtomicBool::new(false),
+                last: Mutex::new(None),
             }
         }
 
@@ -257,7 +228,11 @@ mod tests {
             if self.fail_next.swap(false, Ordering::SeqCst) {
                 return Err(ClipboardError("fake backend refused".to_string()));
             }
-            Ok(Arc::new(Offer::detached()))
+            let offer = Arc::new(Offer::detached());
+            if let Some(previous) = self.last.lock().unwrap().replace(Arc::clone(&offer)) {
+                previous.end();
+            }
+            Ok(offer)
         }
     }
 
@@ -272,10 +247,10 @@ mod tests {
         Zeroizing::new(s.to_string())
     }
 
-    /// The timeout firing on an offer nothing has touched since: it's both
-    /// current and live, so `expire` ends it.
+    /// The timeout firing on an offer nothing has touched since: it's live,
+    /// so `expire` ends it.
     #[test]
-    fn expire_drops_a_still_live_current_offer() {
+    fn expire_drops_a_still_live_offer() {
         let backend = FakeBackend::new();
         let clip = Clipboard::new(backend);
         let offer = clip
@@ -287,10 +262,9 @@ mod tests {
         assert!(!offer.is_live(), "expire should have ended it");
     }
 
-    /// A second `copy` before the first's timeout: the first offer is
-    /// still live (nothing superseded it), but it is no longer current, so
-    /// its own eventual `expire` must leave it alone — ending the
-    /// *second* offer's timer is what's supposed to drop the clipboard.
+    /// A second `copy` before the first's timeout supersedes the first, so
+    /// the first's own eventual `expire` has nothing to do, and the second
+    /// stays until its own timeout.
     #[test]
     fn a_second_copy_makes_the_first_offers_timeout_a_no_op() {
         let backend = FakeBackend::new();
@@ -301,17 +275,18 @@ mod tests {
         let second = clip
             .offer(secret("second"), &session())
             .expect("fake backend accepts");
+        assert!(!first.is_live(), "sanity: the second copy superseded it");
 
         clip.expire(&first);
         assert!(
-            first.is_live(),
-            "the superseded offer's own timeout must not act"
+            second.is_live(),
+            "the superseded offer's own timeout must not act on the new one"
         );
 
         clip.expire(&second);
         assert!(
             !second.is_live(),
-            "the current offer's timeout must still drop it"
+            "the newer offer's timeout must still drop it"
         );
     }
 
@@ -325,30 +300,5 @@ mod tests {
         let clip = Clipboard::new(backend);
 
         assert!(clip.offer(secret("hunter2"), &session()).is_err());
-    }
-
-    /// `end_now` is `lock`'s hook (`docs/threat-model.md` G-6): it ends
-    /// the current offer without being told which one it is, unlike
-    /// `expire`.
-    #[test]
-    fn end_now_drops_a_live_current_offer() {
-        let backend = FakeBackend::new();
-        let clip = Clipboard::new(backend);
-        let offer = clip
-            .offer(secret("hunter2"), &session())
-            .expect("fake backend accepts");
-
-        clip.end_now();
-
-        assert!(!offer.is_live(), "end_now should have ended it");
-    }
-
-    /// Nothing offered yet: `end_now` has nothing to do and must not panic.
-    #[test]
-    fn end_now_on_an_empty_clipboard_does_nothing() {
-        let backend = FakeBackend::new();
-        let clip = Clipboard::new(backend);
-
-        clip.end_now();
     }
 }

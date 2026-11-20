@@ -15,12 +15,12 @@ use crate::clipboard::{Clipboard, Offer};
 use crate::databases::{Databases, Entry, Observer, OpenError, fields};
 use crate::display_session::DisplaySession;
 
-/// The clipboard, and the one offer a `copy` has made that is still live:
-/// which database and unlock it came from. An observer that ends the offer
-/// when that unlock is locked.
+/// The clipboard, and every offer a `copy` has made that may still be live,
+/// each with the database and unlock it came from. An observer that ends the
+/// offers of an unlock when it is locked.
 pub struct CopyState {
     clipboard: Arc<Clipboard>,
-    held: Arc<Mutex<Option<Held>>>,
+    held: Arc<Mutex<Vec<Held>>>,
 }
 
 struct Held {
@@ -29,7 +29,7 @@ struct Held {
     offer: Arc<Offer>,
 }
 
-fn held(held: &Mutex<Option<Held>>) -> MutexGuard<'_, Option<Held>> {
+fn held(held: &Mutex<Vec<Held>>) -> MutexGuard<'_, Vec<Held>> {
     held.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -37,16 +37,15 @@ impl CopyState {
     pub fn new(clipboard: Clipboard) -> CopyState {
         CopyState {
             clipboard: Arc::new(clipboard),
-            held: Arc::new(Mutex::new(None)),
+            held: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Hands `value` to the clipboard as the content of `session` for
-    /// `timeout`, remembering which unlock of `db` it came from. A lock that
-    /// ended `unlock` before the offer was recorded ends the offer here and
-    /// the copy is `Locked`: either that lock's notice finds the record, or
-    /// this finds the token cancelled, since the lock cancels it before any
-    /// observer is told.
+    /// `timeout`, remembering which unlock of `db` it came from. A copy of
+    /// an unlock that is already locked offers nothing, and one a lock
+    /// overtakes while the clipboard takes the offer ends it: either way the
+    /// copy is `Locked`.
     fn offer(
         &self,
         value: Zeroizing<String>,
@@ -55,6 +54,10 @@ impl CopyState {
         unlock: &CancelToken,
         timeout: Duration,
     ) -> Result<(), CopyError> {
+        let locked = || CopyError::Locked { db: db.to_string() };
+        if unlock.is_cancelled() {
+            return Err(locked());
+        }
         let offer = self
             .clipboard
             .offer(value, session)
@@ -62,50 +65,52 @@ impl CopyState {
                 db: db.to_string(),
                 detail: err.to_string(),
             })?;
-        {
-            let mut current = held(&self.held);
-            if unlock.is_cancelled() {
-                drop(current);
-                self.clipboard.expire(&offer);
-                return Err(CopyError::Locked { db: db.to_string() });
-            }
-            *current = Some(Held {
-                db: db.to_string(),
-                unlock: unlock.clone(),
-                offer: Arc::clone(&offer),
-            });
+        if !self.record(db, unlock, &offer) {
+            self.clipboard.expire(&offer);
+            return Err(locked());
         }
 
         let clipboard = Arc::clone(&self.clipboard);
-        let current = Arc::clone(&self.held);
+        let records = Arc::clone(&self.held);
         let _ = thread::Builder::new().spawn(move || {
             thread::sleep(timeout);
             clipboard.expire(&offer);
-            let mut current = held(&current);
-            if current
-                .as_ref()
-                .is_some_and(|held| Arc::ptr_eq(&held.offer, &offer))
-            {
-                *current = None;
-            }
+            held(&records).retain(|held| !Arc::ptr_eq(&held.offer, &offer));
         });
         Ok(())
+    }
+
+    /// Remembers `offer` as one of `unlock`'s, unless `unlock` has been
+    /// locked: then it is not remembered, and `false`. A lock cancels its
+    /// token before any observer is told, and `locked` takes the records, so
+    /// either that notice finds this record or this finds the token
+    /// cancelled.
+    fn record(&self, db: &str, unlock: &CancelToken, offer: &Arc<Offer>) -> bool {
+        let mut records = held(&self.held);
+        if unlock.is_cancelled() {
+            return false;
+        }
+        records.push(Held {
+            db: db.to_string(),
+            unlock: unlock.clone(),
+            offer: Arc::clone(offer),
+        });
+        true
     }
 }
 
 impl Observer for CopyState {
-    /// Ends the offer if it came from the unlock this lock ended, and
+    /// Ends every offer that came from the unlock this lock ended, and
     /// leaves any other: a lock of another database, or a late notice for
     /// an old unlock.
     fn locked(&self, _: &Databases, db: &str, unlock: &CancelToken) {
-        let mut current = held(&self.held);
-        if current
-            .as_ref()
-            .is_some_and(|held| held.db == db && held.unlock == *unlock)
-            && let Some(held) = current.take()
-        {
-            self.clipboard.expire(&held.offer);
-        }
+        held(&self.held).retain(|held| {
+            let ended = held.db == db && held.unlock == *unlock;
+            if ended {
+                self.clipboard.expire(&held.offer);
+            }
+            !ended
+        });
     }
 }
 
@@ -176,7 +181,11 @@ fn field_value(entry: &Entry<'_>, field: &Field) -> Option<Zeroizing<String>> {
 mod tests {
     use std::time::Instant;
 
+    use std::sync::mpsc;
+
     use super::*;
+    use crate::clipboard::{Backend, ClipboardError, OfferHandles};
+    use crate::config::Config;
     use crate::databases::testing::TestEntry;
     use crate::frontends::control::proto::LockRequest;
     use crate::frontends::control::testing::{
@@ -372,10 +381,10 @@ mod tests {
         }
     }
 
-    /// A lock that lands between reading the secret and recording the offer
-    /// ends the offer: the copy is `Locked` and its own offer is gone.
+    /// A copy of an unlock that is already locked offers nothing to the
+    /// clipboard.
     #[test]
-    fn a_copy_overtaken_by_a_lock_ends_its_own_offer() {
+    fn a_copy_of_an_unlock_that_is_already_locked_offers_nothing() {
         let fx = fixture();
         unlock_with_entry(&fx, "personal");
         let token = fx.databases.open("personal").ok().unwrap().unlock_token();
@@ -398,7 +407,164 @@ mod tests {
                 db: "personal".to_string()
             })
         );
-        assert!(!live(&fx, 0), "the copy left its offer live");
+        assert!(
+            fx.offered.lock().unwrap().is_empty(),
+            "the secret reached the clipboard"
+        );
+    }
+
+    /// What the tests below run a `CopyState` against: a backend that, like
+    /// a compositor, ends the previous offer when a new one starts, and that
+    /// runs `after_taken` once, on the first offer, after the compositor has
+    /// taken it and before the offer comes back.
+    struct Compositor {
+        last: Mutex<Option<Arc<Offer>>>,
+        offers: OfferHandles,
+        after_taken: Arc<Mutex<Option<Hook>>>,
+    }
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    impl Backend for Compositor {
+        fn start(
+            &self,
+            _secret: Zeroizing<String>,
+            _display_session: &DisplaySession,
+        ) -> Result<Arc<Offer>, ClipboardError> {
+            let offer = Arc::new(Offer::detached());
+            let previous = self.last.lock().unwrap().replace(Arc::clone(&offer));
+            if let Some(previous) = previous {
+                previous.end();
+            }
+            self.offers.lock().unwrap().push(Arc::clone(&offer));
+            let hook = self.after_taken.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            Ok(offer)
+        }
+    }
+
+    /// Databases `a` and `b`, unlocked, with a `CopyState` on a
+    /// [`Compositor`] observing them.
+    struct Rig {
+        databases: Arc<Databases>,
+        copies: Arc<CopyState>,
+        /// Every offer the compositor took, oldest first.
+        offers: OfferHandles,
+        after_taken: Arc<Mutex<Option<Hook>>>,
+    }
+
+    fn rig() -> Rig {
+        let offers = OfferHandles::default();
+        let after_taken = Arc::new(Mutex::new(None));
+        let copies = Arc::new(CopyState::new(Clipboard::new(Compositor {
+            last: Mutex::new(None),
+            offers: Arc::clone(&offers),
+            after_taken: Arc::clone(&after_taken),
+        })));
+        let configs = Config::parse(
+            "[[database]]\nname = \"a\"\npath = \"a.kdbx\"\n\
+             [[database]]\nname = \"b\"\npath = \"b.kdbx\"\n",
+        )
+        .expect("valid config")
+        .databases;
+        let mut core = Databases::for_test(configs, Duration::from_secs(3600));
+        core.observe(copies.clone());
+        let databases = Arc::new(core);
+        for name in ["a", "b"] {
+            databases.install_for_test(name, vec![TestEntry::new("site")]);
+        }
+        Rig {
+            databases,
+            copies,
+            offers,
+            after_taken,
+        }
+    }
+
+    impl Rig {
+        fn token(&self, db: &str) -> CancelToken {
+            self.databases.open(db).ok().unwrap().unlock_token()
+        }
+
+        fn offer(&self, secret: &str, db: &str, unlock: &CancelToken) -> Result<(), CopyError> {
+            self.copies.offer(
+                Zeroizing::new(secret.to_string()),
+                &DisplaySession::Unlocked {
+                    id: SESSION.to_string(),
+                    active: true,
+                },
+                db,
+                unlock,
+                Duration::from_secs(3600),
+            )
+        }
+
+        fn after_taken(&self, hook: impl FnOnce() + Send + 'static) {
+            *self.after_taken.lock().unwrap() = Some(Box::new(hook));
+        }
+
+        fn live_offers(&self) -> Vec<bool> {
+            let offers = self.offers.lock().unwrap();
+            offers.iter().map(|offer| offer.is_live()).collect()
+        }
+    }
+
+    /// A lock that lands while the compositor takes the offer ends it: the
+    /// copy is `Locked` and its own offer is gone.
+    #[test]
+    fn a_copy_overtaken_by_a_lock_ends_its_own_offer() {
+        let rig = rig();
+        let token = rig.token("a");
+        let databases = Arc::clone(&rig.databases);
+        rig.after_taken(move || databases.lock("a").unwrap());
+
+        let result = rig.offer("secret", "a", &token);
+
+        assert_eq!(
+            result,
+            Err(CopyError::Locked {
+                db: "a".to_string()
+            })
+        );
+        assert_eq!(rig.live_offers(), [false]);
+    }
+
+    /// Two copies overlap: the first is held up after the compositor took
+    /// its offer, the second completes, and then the first returns. The
+    /// second's offer is the live one, and the lock of its database ends it,
+    /// whatever order the copies finished in.
+    #[test]
+    fn overlapping_copies_leave_no_offer_that_a_lock_cannot_end() {
+        let rig = rig();
+        let (first_token, second_token) = (rig.token("a"), rig.token("b"));
+        let (entered, first_is_held_up) = mpsc::channel();
+        let (release, held_up) = mpsc::channel::<()>();
+        rig.after_taken(move || {
+            entered.send(()).expect("the test is waiting");
+            held_up.recv().expect("the test releases the copy");
+        });
+
+        thread::scope(|scope| {
+            let first = scope.spawn(|| rig.offer("slow", "a", &first_token));
+            first_is_held_up
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the first copy is inside the clipboard");
+            rig.offer("fast", "b", &second_token).expect("copied");
+            release.send(()).expect("the first copy waits");
+            first.join().expect("first copy").expect("copied");
+        });
+        assert_eq!(
+            rig.live_offers(),
+            [false, true],
+            "sanity: the second is live"
+        );
+
+        rig.databases.lock("b").unwrap();
+        rig.databases.lock("a").unwrap();
+
+        assert_eq!(rig.live_offers(), [false, false]);
     }
 
     /// A late notice for an old unlock leaves a newer offer alone.
