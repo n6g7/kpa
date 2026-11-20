@@ -298,18 +298,19 @@ fn handle_connection(api: &Api, mut stream: UnixStream, owner: u32) {
             Ok(RequestLine::TooLong | RequestLine::TooManyFds) => {
                 Response::Protocol(ProtocolError::MalformedRequest)
             }
-            Ok(RequestLine::Line { len, fd }) => {
-                match fd.map(|fd| Terminal::new(fd, &stream)).transpose() {
-                    Ok(terminal) => {
-                        requester.terminal = terminal;
-                        respond(api, &buf[..len], &requester)
-                    }
-                    Err(err) => {
-                        log::debug(format_args!("the descriptor sent with a request: {err}"));
-                        Response::Protocol(ProtocolError::MalformedRequest)
-                    }
+            // A request needs no terminal: only one that came with a
+            // descriptor that isn't a terminal is refused.
+            Ok(RequestLine::Line { len, fd: None }) => respond(api, &buf[..len], &requester),
+            Ok(RequestLine::Line { len, fd: Some(fd) }) => match Terminal::new(fd, &stream) {
+                Ok(terminal) => {
+                    requester.terminal = Some(terminal);
+                    respond(api, &buf[..len], &requester)
                 }
-            }
+                Err(err) => {
+                    log::debug(format_args!("the descriptor sent with a request: {err}"));
+                    Response::Protocol(ProtocolError::MalformedRequest)
+                }
+            },
         }
     };
 
