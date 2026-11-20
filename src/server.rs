@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use keepass::Database;
 use uuid::Uuid;
@@ -475,6 +475,11 @@ fn slots(dbs: &Mutex<HashMap<String, Slot>>) -> MutexGuard<'_, HashMap<String, S
     dbs.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// `at` in Unix seconds, 0 for a time before the epoch.
+fn unix_seconds(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
 /// Freshness guard (`docs/threat-model.md` T-12): if the file behind `slot`
 /// is no longer the one its database was opened from, drops the database
 /// and returns `true`. Called by `drop_stale`, which also ends the
@@ -671,6 +676,7 @@ impl SshHost for Server {
             let stale = drop_if_stale(slot);
             let view = SlotView::new(
                 Instant::now(),
+                SystemTime::now(),
                 slot.db.as_ref(),
                 &mut slot.ssh,
                 &mut slot.last_activity,
@@ -776,7 +782,7 @@ impl SshPending for Server {
             .into_iter()
             .map(|pending| WirePending {
                 id: pending.id,
-                age: pending.age.as_secs(),
+                refused_at: unix_seconds(pending.refused_at),
                 scope: WireScope {
                     key: WireSshKey {
                         db: pending.key.database,

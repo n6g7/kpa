@@ -10,24 +10,7 @@ use uuid::Uuid;
 
 use super::SshHost;
 use crate::log;
-use crate::ssh::approvals::RequestDetails;
-use crate::ssh::approvals::SignatureApproval;
-use crate::ssh::keys::ServedKey;
-
-/// One pending request, as `ssh_pending` lists it.
-#[derive(Debug, Clone)]
-pub struct PendingRequest {
-    /// What names it to [`approve_pending`].
-    pub id: Uuid,
-    /// What approving it grants.
-    pub approval: SignatureApproval,
-    /// The key the approval is for, as its database serves it.
-    pub key: ServedKey,
-    /// What was refused.
-    pub request: RequestDetails,
-    /// Since it was last refused.
-    pub age: Duration,
-}
+use crate::ssh::approvals::PendingRequest;
 
 /// Every pending request: each database's in config order, oldest first.
 pub fn pending_requests(host: &impl SshHost) -> Vec<PendingRequest> {
@@ -38,14 +21,8 @@ pub fn pending_requests(host: &impl SshHost) -> Vec<PendingRequest> {
             host.with_slot(&cfg.name, |slot| {
                 slot.ssh
                     .pending
-                    .list(slot.now())
-                    .map(|listed| PendingRequest {
-                        id: listed.id,
-                        approval: listed.approval.clone(),
-                        key: listed.key.clone(),
-                        request: listed.request.clone(),
-                        age: listed.age,
-                    })
+                    .list(slot.wall_now())
+                    .cloned()
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
@@ -66,7 +43,7 @@ pub fn approve_pending(host: &impl SshHost, id: Uuid, window: Duration) -> bool 
             let approved = host
                 .with_slot(&cfg.name, |slot| {
                     let now = slot.now();
-                    let approval = slot.ssh.pending.take(id, now)?;
+                    let approval = slot.ssh.pending.take(id, slot.wall_now())?;
                     let key = approval.scope.key();
                     slot.ssh.approvals.approve(approval, now, window);
                     Some(key)
@@ -91,8 +68,8 @@ mod tests {
     use super::super::fake::FakeHost;
     use super::*;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
-    use crate::ssh::approvals::SignatureApproval;
     use crate::ssh::approvals::{PENDING_TTL, Scope};
+    use crate::ssh::approvals::{RequestDetails, SignatureApproval};
     use crate::ssh::testing::{database, key_database, test_key};
 
     const WINDOW: Duration = Duration::from_secs(60);
@@ -134,7 +111,7 @@ mod tests {
                 .clone();
             slot.ssh
                 .pending
-                .record(approval, served, requested(), slot.now())
+                .record(approval, served, requested(), slot.wall_now())
         });
     }
 
@@ -154,9 +131,10 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_request_is_listed_with_its_age_and_what_it_was() {
+    fn a_pending_request_is_listed_with_when_it_was_refused_and_what_it_was() {
         let key = test_key(1);
         let host = host(&key, SshKeyConfirm::Once);
+        let refused_at = host.wall_now();
         record(&host, &key, true);
         host.advance(Duration::from_secs(5));
 
@@ -173,7 +151,7 @@ mod tests {
         assert_eq!(listed[0].approval.scope.destination(), None);
         assert!(listed[0].approval.remember);
         assert_eq!(listed[0].request, requested());
-        assert_eq!(listed[0].age, Duration::from_secs(5));
+        assert_eq!(listed[0].refused_at, refused_at);
     }
 
     #[test]

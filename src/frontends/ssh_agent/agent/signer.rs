@@ -107,7 +107,7 @@ fn sign_with(key: &PrivateKey, data: &[u8], flags: SignFlags) -> Option<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime};
 
     use ssh_key::{Algorithm, Signature};
 
@@ -136,6 +136,7 @@ mod tests {
         let mut backoff = None;
         let mut slot = SlotView::new(
             Instant::now(),
+            SystemTime::now(),
             db,
             ssh,
             &mut last_activity,

@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
 use kpa::config::Config;
@@ -182,7 +183,9 @@ fn dispatch(cli: Cli) -> ExitCode {
             &socket_path,
             Op::SshPending,
             if cli.json { Format::Json } else { Format::Text },
-            |pending: ssh_requests_report::Pending| ssh_requests_report::render(&pending),
+            |pending: ssh_requests_report::Pending| {
+                ssh_requests_report::render(&pending, SystemTime::now())
+            },
         ),
         Command::Ssh {
             command: SshCommand::Approve { id },

@@ -3,14 +3,14 @@
 //! each with the id `kpa ssh approve` takes, and the line that says one was
 //! approved.
 //!
-//! Pure: the requests in, text out. Cells go through `output::Table`, which
+//! Pure: the requests and the time now in, text out. Cells go through `output::Table`, which
 //! escapes them (`docs/threat-model.md` T-13): key names come from the
 //! vault, and users and command names from the requester. The key is shown
 //! by its name, which is its entry's title unless the config names it
 //! otherwise; the entry's title and the attachment's name would say no more
 //! about which key it is.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::frontends::control::proto::WirePending;
 use crate::output::Table;
@@ -36,7 +36,8 @@ pub fn approved(id: Uuid, _: &Approved) -> String {
 /// A cell with nothing to say.
 const NONE: &str = "-";
 
-pub fn render(answer: &Pending) -> String {
+/// The table of `answer`, with each request's age at `now`.
+pub fn render(answer: &Pending, now: SystemTime) -> String {
     if answer.pending.is_empty() {
         return "No SSH request is pending.\n".to_string();
     }
@@ -56,7 +57,7 @@ pub fn render(answer: &Pending) -> String {
             &request.scope.key.db,
             &what(request),
             request.request.command.as_deref().unwrap_or(NONE),
-            &age(Duration::from_secs(request.age)),
+            &age(now, request.refused_at),
             &request
                 .scope
                 .destination
@@ -83,8 +84,14 @@ fn what(request: &WirePending) -> String {
     }
 }
 
-fn age(age: Duration) -> String {
-    match age.as_secs() {
+/// How long before `now` a request was refused. A request dated in the future
+/// is just refused.
+fn age(now: SystemTime, refused_at: u64) -> String {
+    let now = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    match now
+        .saturating_sub(Duration::from_secs(refused_at))
+        .as_secs()
+    {
         secs if secs < 60 => format!("{secs}s"),
         secs => format!("{}m", secs / 60),
     }
@@ -99,12 +106,14 @@ mod tests {
     /// Real `SHA256:…` fingerprints, `ssh_key`'s own doc example and one
     /// that differs from it.
     const KEY: &str = "SHA256:Nh0Me49Zh9fDw/VYUfq43IJmI1T+XrjiYONPND8GzaM";
+    /// The clock the reports are rendered at.
+    const NOW: u64 = 1_700_000_000;
     const DESTINATION: &str = "SHA256:BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     fn request() -> WirePending {
         WirePending {
             id: Uuid::from_u128(1),
-            age: 75,
+            refused_at: NOW - 75,
             scope: WireScope {
                 key: WireSshKey {
                     db: "personal".to_string(),
@@ -135,6 +144,10 @@ mod tests {
         named
     }
 
+    fn at_now() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(NOW)
+    }
+
     fn pending(pending: Vec<WirePending>) -> Pending {
         Pending { pending }
     }
@@ -144,7 +157,7 @@ mod tests {
         let signing = {
             let mut signing = named("deploy-key");
             signing.id = Uuid::from_u128(2);
-            signing.age = 4;
+            signing.refused_at = NOW - 4;
             signing.scope.destination = None;
             signing.request = WireRequestDetails {
                 purpose: "sshsig".to_string(),
@@ -156,7 +169,7 @@ mod tests {
             signing
         };
 
-        let text = render(&pending(vec![request(), signing]));
+        let text = render(&pending(vec![request(), signing]), at_now());
 
         assert_eq!(
             text,
@@ -173,6 +186,14 @@ Approve one with `kpa ssh approve <id>`. A request left alone expires after 5 mi
     }
 
     #[test]
+    fn a_request_from_the_future_is_just_refused() {
+        let mut ahead = request();
+        ahead.refused_at = NOW + 30;
+
+        assert!(render(&pending(vec![ahead]), at_now()).contains("  0s  "));
+    }
+
+    #[test]
     fn an_approval_names_the_request_and_says_to_retry() {
         assert_eq!(
             approved(Uuid::from_u128(1), &Approved {}),
@@ -182,7 +203,10 @@ Approve one with `kpa ssh approve <id>`. A request left alone expires after 5 mi
 
     #[test]
     fn nothing_pending_says_so() {
-        assert_eq!(render(&pending(Vec::new())), "No SSH request is pending.\n");
+        assert_eq!(
+            render(&pending(Vec::new()), at_now()),
+            "No SSH request is pending.\n"
+        );
     }
 
     /// Text the requester or the vault chose can't drive the terminal or
@@ -194,7 +218,7 @@ Approve one with `kpa ssh approve <id>`. A request left alone expires after 5 mi
         hostile.request.user = Some("evil\u{1b}[2J\n".to_string());
         hostile.request.command = Some("a\u{9b}b".to_string());
 
-        let text = render(&pending(vec![hostile]));
+        let text = render(&pending(vec![hostile]), at_now());
 
         assert!(!text.contains(['\u{1b}', '\u{9b}', '\u{7}']), "{text:?}");
         assert!(text.contains("evil\\u001b[2J\\u000a"), "{text}");
