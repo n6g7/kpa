@@ -6,6 +6,7 @@ use ssh_key::public::KeyData;
 use ssh_key::{Algorithm, Fingerprint, LineEnding, PrivateKey};
 
 use crate::config::{DatabaseConfig, SshKeyConfig};
+use crate::databases::testing::TestEntry;
 use crate::ssh::approvals::{RequestDetails, Scope, SignatureApproval};
 use crate::ssh::keys::{self, ServedKey};
 
@@ -49,23 +50,11 @@ pub(crate) fn test_key(seed: u64) -> PrivateKey {
     PrivateKey::random(&mut TestRng(seed), Algorithm::Ed25519).expect("key generation")
 }
 
-/// A database whose root holds one entry per `(title, key)`, each with the
-/// key as an OpenSSH attachment, the way a KeePass client stores one.
-#[allow(dead_code, reason = "the SSH agent is off until it runs on the core")]
-pub(crate) fn key_database(keys: &[(&str, &PrivateKey)]) -> keepass::Database {
-    use keepass::db::{Value, fields};
-
-    let mut db = keepass::Database::new();
-    {
-        let mut root = db.root_mut();
-        for (title, key) in keys {
-            let pem = key.to_openssh(LineEnding::LF).expect("key encodes");
-            let mut entry = root.add_entry();
-            entry.set_unprotected(fields::TITLE, *title);
-            entry.add_attachment("id_ed25519", Value::unprotected(pem.as_bytes().to_vec()));
-        }
-    }
-    db
+/// An entry titled `title` holding `key` as an OpenSSH attachment, the way a
+/// KeePass client stores one.
+pub(crate) fn key_entry(title: &str, key: &PrivateKey) -> TestEntry {
+    let pem = key.to_openssh(LineEnding::LF).expect("key encodes");
+    TestEntry::new(title).attachment("id_ed25519", pem.as_bytes().to_vec())
 }
 
 /// A `serve_ssh_keys` database named `name`, with `ssh_keys` as its

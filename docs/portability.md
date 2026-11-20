@@ -53,8 +53,8 @@ covers:
 - a choice between backends at runtime, such as an unlock or approval
   prompt run as an external program, or a native one where the OS has it
   (Touch ID answers allow or deny, with no string and no child process);
-- a test double, such as `clip::Backend` and
-  `frontends::ssh_agent::SshHost`.
+- a test double, such as `clipboard::Backend` (`RecordingBackend`) and
+  `prompt::Backend` (`Scripted`).
 
 These traits often sit on an OS boundary already. Keep their method
 signatures OS-neutral, like any other interface.

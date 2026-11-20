@@ -158,7 +158,7 @@ fn dispatch(cli: Cli) -> ExitCode {
     };
 
     match cli.command {
-        Command::Serve { log_level } => run_serve(&socket_path, cli.config, log_level),
+        Command::Serve { log_level } => run_serve(&socket_path, cli.config, log_level, paths),
         Command::Status => client::run_client(&socket_path, Op::Status),
         Command::Unlock { db, tty } => client::run_unlock(&socket_path, db, tty),
         Command::Lock { db } => client::run_client(&socket_path, Op::Lock(LockRequest { db })),
@@ -225,6 +225,7 @@ fn run_serve(
     socket_path: &Path,
     config_path: Option<PathBuf>,
     log_level: Option<Level>,
+    paths: Paths,
 ) -> ExitCode {
     // `dispatch` already marked this process non-dumpable, before it ever
     // reached this subcommand.
@@ -244,13 +245,41 @@ fn run_serve(
         }
     };
 
+    // The SSH agent's socket (`docs/ssh-agent.md` § 7), bound only once a
+    // database serves SSH keys.
+    let agent = if config.databases.iter().any(|cfg| cfg.serve_ssh_keys) {
+        let Some(path) = config.ssh_agent.socket_path(paths.runtime_dir.as_deref()) else {
+            report_error(
+                "ssh_agent.socket is unset and XDG_RUNTIME_DIR is not set to an absolute path; \
+                 a database has serve_ssh_keys = true, so the SSH agent socket needs one",
+            );
+            return ExitCode::FAILURE;
+        };
+        match socket::bind_socket(&path) {
+            Ok(listener) => Some((path, listener)),
+            Err(err) => {
+                report_error(format_args!(
+                    "binding the ssh agent socket {}: {err}",
+                    path.display()
+                ));
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
     log::set_level(log_level.unwrap_or(config.log_level));
     log::info(format_args!(
         "kpa {} listening on {}",
         kpa::VERSION,
         socket_path.display()
     ));
-    daemon::serve(config, listener, Source::system());
+    let agent = agent.map(|(path, listener)| {
+        log::info(format_args!("ssh agent listening on {}", path.display()));
+        listener
+    });
+    daemon::serve(config, paths, listener, agent, Source::system());
     ExitCode::SUCCESS
 }
 

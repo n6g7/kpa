@@ -1,12 +1,12 @@
 //! The SSH agent socket's listener and per-connection protocol loop
 //! (`docs/ssh-agent.md` § 6.1): accepts connections, frames them with
 //! [`wire`], tracks each one's `session-bind@openssh.com` state with
-//! [`bind::SessionBindState`], and dispatches identities and signatures through
-//! [`SshSign::ssh_identities`]/[`SshSign::ssh_sign`].
+//! [`bind::SessionBindState`], and dispatches identities and signatures to
+//! the [`Agent`].
 //!
-//! What a request may do is [`SshSign`]'s decision, not this module's: a
-//! forwarded `SIGN_REQUEST` reaches `ssh_sign` with its connection's class
-//! like any other.
+//! What a request may do is the agent's decision, not this module's: a
+//! forwarded `SIGN_REQUEST` reaches [`Agent::sign`] with its connection's
+//! class like any other.
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -19,27 +19,9 @@ use crate::authn::Requester;
 use crate::authz;
 use crate::log;
 
+use super::Agent;
 use super::bind::{self, BindOutcome, SessionBindState};
 use super::wire::{self, AgentRequest, AgentResponse, Frame};
-
-/// What the agent socket needs from the daemon: where a peer runs, identity
-/// listing and signing (`docs/ssh-agent.md` § 6). The protocol loop is
-/// generic over it, as `proto::dispatch` is over `Handler`.
-pub trait SshSign {
-    fn ssh_identities(
-        &self,
-        class: &bind::ConnectionClass,
-        requester: &Requester,
-    ) -> Vec<wire::Identity>;
-
-    fn ssh_sign(
-        &self,
-        class: &bind::ConnectionClass,
-        request: &wire::SignRequest,
-        login_session_id: Option<&[u8]>,
-        requester: &Requester,
-    ) -> wire::AgentResponse;
-}
 
 /// Connections handled at once — separate from the JSON socket's own cap
 /// (`docs/ssh-agent.md` § 6.1).
@@ -97,7 +79,7 @@ impl Drop for CapSlot {
 /// Accept connections on the SSH agent socket forever, handling each on
 /// its own thread. Mirrors `control::serve`'s shape: a stuck `accept`
 /// pauses rather than spins, and a connection over the cap is dropped.
-pub fn serve<S: SshSign + Send + Sync + 'static>(server: Arc<S>, listener: UnixListener) {
+pub fn serve(agent: Arc<Agent>, listener: UnixListener) {
     let limits = Arc::new(Limits::new());
     let owner = crate::authn::process_uid();
     for conn in listener.incoming() {
@@ -114,11 +96,11 @@ pub fn serve<S: SshSign + Send + Sync + 'static>(server: Arc<S>, listener: UnixL
             ));
             continue;
         };
-        let server = Arc::clone(&server);
+        let agent = Arc::clone(&agent);
         let limits = Arc::clone(&limits);
         let _ = thread::Builder::new().spawn(move || {
             let _slot = slot;
-            handle_connection(server.as_ref(), stream, owner, &limits);
+            handle_connection(agent.as_ref(), stream, owner, &limits);
         });
     }
 }
@@ -126,7 +108,7 @@ pub fn serve<S: SshSign + Send + Sync + 'static>(server: Arc<S>, listener: UnixL
 /// Serves one connection until it closes, errors, sends an oversize frame,
 /// lets a frame take longer than `limits.frame_timeout`, or becomes
 /// forwarded while the forwarded cap is full.
-fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32, limits: &Limits) {
+fn handle_connection(agent: &Agent, mut stream: UnixStream, owner: u32, limits: &Limits) {
     let requester = match Requester::of(&stream) {
         Ok(requester) if authz::may_connect(&requester, owner) => requester,
         Ok(requester) => {
@@ -154,7 +136,7 @@ fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32, 
                 Err(_oversize) => return,
                 Ok(Frame::Complete { message, consumed }) => {
                     let request = wire::decode_request(message);
-                    let response = dispatch(server, &mut bindings, &request, &requester);
+                    let response = dispatch(agent, &mut bindings, &request, &requester);
                     buf.drain(..consumed);
                     frame_deadline = None;
                     if forwarded_slot.is_none()
@@ -208,18 +190,18 @@ fn handle_connection(server: &impl SshSign, mut stream: UnixStream, owner: u32, 
 
 /// Answers one decoded request against `bindings`' accumulated state.
 fn dispatch(
-    server: &impl SshSign,
+    agent: &Agent,
     bindings: &mut SessionBindState,
     request: &AgentRequest,
     requester: &Requester,
 ) -> AgentResponse {
     match request {
         AgentRequest::RequestIdentities => {
-            AgentResponse::IdentitiesAnswer(server.ssh_identities(&bindings.class(), requester))
+            AgentResponse::IdentitiesAnswer(agent.identities(&bindings.class(), requester))
         }
         AgentRequest::SignRequest(sign_request) => {
             let class = bindings.class();
-            server.ssh_sign(&class, sign_request, bindings.login_session_id(), requester)
+            agent.sign(&class, sign_request, bindings.login_session_id(), requester)
         }
         AgentRequest::SessionBind(msg) => match bindings.apply(msg) {
             BindOutcome::Accepted => AgentResponse::Success,
@@ -235,153 +217,109 @@ fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use ssh_key::PrivateKey;
 
-    use super::super::testing::signed_bind;
-    use super::super::wire::{Identity, SignFlags, SignRequest};
+    use super::super::testing::{Fixture, Options, outside, requester, signed_bind};
+    use super::super::wire::{SignFlags, SignRequest};
     use super::*;
-    use crate::ssh::testing::test_key;
-    use bind::ConnectionClass;
+    use crate::config::SshKeyConfirm;
+    use crate::ssh::testing::{database, test_key};
 
-    fn requester() -> Requester {
-        Requester {
-            uid: 0,
-            cgroup: None,
-            command: Some("ssh".to_string()),
-            terminal: None,
-            preferred: None,
-        }
+    /// An agent with one database, locked, and no keys.
+    fn keyless() -> Fixture {
+        Fixture::new(vec![database("personal", vec![])], Options::default())
     }
 
-    /// What the fake saw of one `ssh_sign` call.
-    #[derive(Debug, Clone, PartialEq)]
-    struct SignCall {
-        class: ConnectionClass,
-        login_session_id: Option<Vec<u8>>,
-        requester: Requester,
+    fn string(bytes: &[u8]) -> Vec<u8> {
+        let mut out = u32::try_from(bytes.len())
+            .expect("a short field")
+            .to_be_bytes()
+            .to_vec();
+        out.extend_from_slice(bytes);
+        out
     }
 
-    /// Lists one identity, signs everything with a fixed blob, and records
-    /// what each request came with.
-    struct FakeSigner {
-        calls: Mutex<Vec<SignCall>>,
-        listed_for: Mutex<Vec<Requester>>,
-    }
-
-    impl FakeSigner {
-        fn new() -> FakeSigner {
-            FakeSigner {
-                calls: Mutex::new(Vec::new()),
-                listed_for: Mutex::new(Vec::new()),
-            }
+    /// The request OpenSSH makes to log in as `alice` with `key` on the
+    /// connection `session_id`.
+    fn login_request(key: &PrivateKey, session_id: &[u8]) -> AgentRequest {
+        let key_blob = key.public_key().to_bytes().expect("key encodes");
+        let mut data = string(session_id);
+        data.push(50); // SSH_MSG_USERAUTH_REQUEST
+        for field in ["alice", "ssh-connection", "publickey"] {
+            data.extend(string(field.as_bytes()));
         }
-
-        fn calls(&self) -> Vec<SignCall> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl SshSign for FakeSigner {
-        fn ssh_identities(
-            &self,
-            _: &bind::ConnectionClass,
-            requester: &Requester,
-        ) -> Vec<wire::Identity> {
-            self.listed_for.lock().unwrap().push(requester.clone());
-            vec![Identity {
-                key_blob: b"key".to_vec(),
-                comment: "github".to_string(),
-            }]
-        }
-
-        fn ssh_sign(
-            &self,
-            class: &bind::ConnectionClass,
-            _: &wire::SignRequest,
-            login_session_id: Option<&[u8]>,
-            requester: &Requester,
-        ) -> wire::AgentResponse {
-            self.calls.lock().unwrap().push(SignCall {
-                class: class.clone(),
-                login_session_id: login_session_id.map(<[u8]>::to_vec),
-                requester: requester.clone(),
-            });
-            AgentResponse::SignResponse(b"signature".to_vec())
-        }
-    }
-
-    fn sign_request() -> AgentRequest {
+        data.push(1); // sig-follows
+        data.extend(string(b"ssh-ed25519"));
+        data.extend(string(&key_blob));
         AgentRequest::SignRequest(SignRequest {
-            key_blob: b"key".to_vec(),
-            data: b"data".to_vec(),
+            key_blob,
+            data,
             flags: SignFlags::new(0),
         })
     }
 
+    fn signs(response: &AgentResponse) -> bool {
+        matches!(response, AgentResponse::SignResponse(_))
+    }
+
+    /// What a request outside the desktop is listed differs from what one on
+    /// it is: the connection's requester reaches the agent.
     #[test]
-    fn identities_come_from_the_signer_with_the_connections_requester() {
-        let signer = FakeSigner::new();
-        let mut state = SessionBindState::new();
-        let response = dispatch(
-            &signer,
-            &mut state,
-            &AgentRequest::RequestIdentities,
-            &requester(),
+    fn identities_are_listed_for_the_connections_requester() {
+        let key = test_key(1);
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Once);
+        let comment = |requester: &Requester| {
+            let response = dispatch(
+                &fx.agent,
+                &mut SessionBindState::new(),
+                &AgentRequest::RequestIdentities,
+                requester,
+            );
+            let AgentResponse::IdentitiesAnswer(listed) = response else {
+                panic!("expected an identities answer");
+            };
+            assert_eq!(listed.len(), 1);
+            listed[0].comment.clone()
+        };
+
+        assert_eq!(comment(&requester()), "github");
+        assert_eq!(
+            comment(&outside()),
+            "github (needs approval: kpa ssh pending)"
         );
-        assert!(matches!(
-            response,
-            AgentResponse::IdentitiesAnswer(ids) if ids.len() == 1 && ids[0].comment == "github"
-        ));
-        assert_eq!(*signer.listed_for.lock().unwrap(), [requester()]);
     }
 
     /// A verified `session-bind` changes the class every later signature
-    /// on the connection is asked with, and supplies its session id.
+    /// on the connection is asked with, and supplies its session id: a
+    /// login for another session than the bound one is refused, which only
+    /// a bound connection checks.
     #[test]
     fn a_session_bind_reaches_later_signatures() {
-        let signer = FakeSigner::new();
+        let key = test_key(1);
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Never);
         let mut state = SessionBindState::new();
+        let mut ask =
+            |request: &AgentRequest| dispatch(&fx.agent, &mut state, request, &requester());
 
-        dispatch(&signer, &mut state, &sign_request(), &requester());
-        let host = test_key(1);
-        let bound = dispatch(
-            &signer,
-            &mut state,
-            &AgentRequest::SessionBind(signed_bind(&host, b"sid", false)),
-            &requester(),
-        );
+        assert!(signs(&ask(&login_request(&key, b"other"))));
+        let bound = ask(&AgentRequest::SessionBind(signed_bind(
+            &test_key(2),
+            b"sid",
+            false,
+        )));
         assert!(matches!(bound, AgentResponse::Success));
-        dispatch(&signer, &mut state, &sign_request(), &requester());
-
-        let calls = signer.calls();
-        assert_eq!(
-            calls[0],
-            SignCall {
-                class: ConnectionClass::LocalUnbound,
-                login_session_id: None,
-                requester: requester(),
-            }
-        );
-        assert_eq!(
-            calls[1],
-            SignCall {
-                class: ConnectionClass::LocalBound {
-                    dest: host.public_key().key_data().clone(),
-                },
-                login_session_id: Some(b"sid".to_vec()),
-                requester: requester(),
-            }
-        );
+        assert!(!signs(&ask(&login_request(&key, b"other"))));
+        assert!(signs(&ask(&login_request(&key, b"sid"))));
     }
 
     #[test]
     fn a_bad_session_bind_is_an_extension_failure() {
-        let signer = FakeSigner::new();
+        let fx = keyless();
         let mut state = SessionBindState::new();
         let mut forged = signed_bind(&test_key(2), b"sid", false);
         forged.hostkey = test_key(3).public_key().to_bytes().expect("key encodes");
         let response = dispatch(
-            &signer,
+            &fx.agent,
             &mut state,
             &AgentRequest::SessionBind(forged),
             &requester(),
@@ -391,10 +329,10 @@ mod tests {
 
     #[test]
     fn only_session_bind_is_advertised_and_everything_else_fails() {
-        let signer = FakeSigner::new();
+        let fx = keyless();
         let mut state = SessionBindState::new();
         let query = dispatch(
-            &signer,
+            &fx.agent,
             &mut state,
             &AgentRequest::ExtensionQuery,
             &requester(),
@@ -404,7 +342,7 @@ mod tests {
             AgentResponse::ExtensionResponse(names) if names == ["session-bind@openssh.com"]
         ));
         let unsupported = dispatch(
-            &signer,
+            &fx.agent,
             &mut state,
             &AgentRequest::Unsupported,
             &requester(),
@@ -422,15 +360,15 @@ mod tests {
     }
 
     /// A connection answers each frame in order, including two that arrive
-    /// in one write, and asks the signer where its peer runs.
+    /// in one write.
     #[test]
     fn a_connection_answers_each_frame_in_order() {
-        let signer = FakeSigner::new();
+        let fx = keyless();
         let owner = crate::authn::process_uid();
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
 
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, owner, &Limits::new()));
+            scope.spawn(|| handle_connection(&fx.agent, theirs, owner, &Limits::new()));
             let mut sign = vec![13u8];
             for field in [b"key".as_slice(), b"data".as_slice()] {
                 sign.extend_from_slice(&u32::try_from(field.len()).unwrap().to_be_bytes());
@@ -442,23 +380,20 @@ mod tests {
             ours.write_all(&both).expect("write");
 
             assert_eq!(read_response(&mut ours)[0], 12); // IDENTITIES_ANSWER
-            assert_eq!(read_response(&mut ours)[0], 14); // SIGN_RESPONSE
+            assert_eq!(read_response(&mut ours)[0], 5); // FAILURE: no such key
             drop(ours);
         });
-
-        let owner_uid = crate::authn::process_uid();
-        assert_eq!(signer.calls()[0].requester.uid, owner_uid);
     }
 
     /// A frame over `wire::MAX_FRAME_LEN` ends the connection unanswered.
     #[test]
     fn an_oversize_frame_closes_the_connection() {
-        let signer = FakeSigner::new();
+        let fx = keyless();
         let owner = crate::authn::process_uid();
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
 
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, owner, &Limits::new()));
+            scope.spawn(|| handle_connection(&fx.agent, theirs, owner, &Limits::new()));
             let len = u32::try_from(wire::MAX_FRAME_LEN + 1).unwrap();
             ours.write_all(&len.to_be_bytes()).expect("write");
             let mut rest = Vec::new();
@@ -492,20 +427,19 @@ mod tests {
     /// about it.
     #[test]
     fn a_peer_of_another_uid_is_closed_unanswered() {
-        let signer = FakeSigner::new();
+        let fx = keyless();
         let other = crate::authn::process_uid().wrapping_add(1);
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
         send(&mut ours, &[11]); // REQUEST_IDENTITIES
 
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, other, &Limits::new()));
+            scope.spawn(|| handle_connection(&fx.agent, theirs, other, &Limits::new()));
             // The connection closes with the request unread, so the
             // kernel may reset it rather than end it: either way, no reply.
             let mut reply = Vec::new();
             let _ = ours.read_to_end(&mut reply);
             assert!(reply.is_empty(), "a refused peer got {reply:?}");
         });
-        assert!(signer.calls().is_empty() && signer.listed_for.lock().unwrap().is_empty());
     }
 
     /// The frame deadline runs from a frame's first byte, so a peer that
@@ -513,7 +447,7 @@ mod tests {
     /// promptly each byte arrives.
     #[test]
     fn a_frame_that_trickles_in_is_closed_at_its_deadline() {
-        let signer = FakeSigner::new();
+        let fx = keyless();
         let owner = crate::authn::process_uid();
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
         let limits = Limits {
@@ -523,7 +457,7 @@ mod tests {
 
         let started = Instant::now();
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, owner, &limits));
+            scope.spawn(|| handle_connection(&fx.agent, theirs, owner, &limits));
             let mut writer = ours.try_clone().expect("clone");
             scope.spawn(move || {
                 let _ = writer.write_all(&100u32.to_be_bytes());
@@ -547,7 +481,7 @@ mod tests {
     /// forwarded places, and is closed unanswered when none is left.
     #[test]
     fn the_forwarded_cap_closes_a_connection_that_becomes_forwarded() {
-        let signer = FakeSigner::new();
+        let fx = keyless();
         let owner = crate::authn::process_uid();
         // SSH_AGENTC_EXTENSION carrying a real forwarding session-bind.
         let forwarding_bind = || {
@@ -571,7 +505,7 @@ mod tests {
             .store(MAX_FORWARDED_CONNECTIONS, Ordering::SeqCst);
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, owner, &full));
+            scope.spawn(|| handle_connection(&fx.agent, theirs, owner, &full));
             send(&mut ours, &forwarding_bind());
             assert!(closed_unanswered(&mut ours));
         });
@@ -585,7 +519,7 @@ mod tests {
             .store(MAX_FORWARDED_CONNECTIONS - 1, Ordering::SeqCst);
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
         std::thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&signer, theirs, owner, &room));
+            scope.spawn(|| handle_connection(&fx.agent, theirs, owner, &room));
             send(&mut ours, &forwarding_bind());
             assert_eq!(read_response(&mut ours), [6]); // SUCCESS
             assert_eq!(

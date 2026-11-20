@@ -6,19 +6,20 @@
 //! none of the three touches a socket, a vault or a config file.
 //! `ssh::keys` is where that wiring starts: config, key discovery and the key
 //! cache.
-//! [`authz`] decides what a signature request needs, and `ssh::approvals`
-//! holds the approvals that cover it. [`serve`] is the
-//! socket: it accepts connections and answers each request through
-//! [`serve::SshSign`], the interface it defines for whatever lists and
-//! signs.
-//!
-//! `agent/` holds the agent's own logic. It is in the tree and not compiled
-//! until it runs on the core.
+//! `authz` decides what a signature request needs, and `ssh::approvals`
+//! holds the approvals that cover it. [`serve`] is the socket: it accepts
+//! connections and answers each request through the [`Agent`], which holds
+//! the databases, [`SshState`], the approvals and the prompts, and is the
+//! sign flow.
 
-pub mod authz;
+mod agent;
+mod authz;
 pub mod bind;
 pub mod classify;
-pub mod serve;
+mod serve;
 #[cfg(test)]
-pub(crate) mod testing;
+mod testing;
 pub mod wire;
+
+pub use agent::{Agent, SshState};
+pub use serve::serve;

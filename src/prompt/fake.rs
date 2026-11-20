@@ -34,7 +34,6 @@ impl<T> Step<T> {
 
     /// A prompt that fails to show, with an I/O error, as one whose program
     /// doesn't run.
-    #[allow(dead_code, reason = "the SSH agent is off until it runs on the core")]
     pub(crate) fn fails() -> Step<T> {
         Step {
             reply: Err(io::Error::other("the scripted prompt failed")),
@@ -52,7 +51,6 @@ impl<T> Step<T> {
 
     /// Runs `f` once the prompt has answered, before its caller sees the
     /// answer.
-    #[allow(dead_code, reason = "the SSH agent is off until it runs on the core")]
     pub(crate) fn then(mut self, f: impl FnOnce() + Send + 'static) -> Step<T> {
         self.then = Some(Box::new(f));
         self
@@ -61,7 +59,6 @@ impl<T> Step<T> {
 
 impl Step<ConfirmAnswer> {
     /// A confirm prompt answered `Allow`.
-    #[allow(dead_code, reason = "the SSH agent is off until it runs on the core")]
     pub(crate) fn allow() -> Step<ConfirmAnswer> {
         Step::new(PromptOutcome::Answer(ConfirmAnswer::Allow))
     }
