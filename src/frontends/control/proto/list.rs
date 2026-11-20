@@ -21,13 +21,13 @@ pub struct ListRequest {
 }
 
 /// A `vault::EntrySummary` plus the database it came from. `list` can span
-/// every unlocked database at once (`docs/design.md`'s example response
+/// every unlocked database at once (`docs/protocol.md`'s example response
 /// tags each entry with `"db"`), but `vault::EntrySummary` itself has no
 /// notion of which database it came from.
 ///
 /// Carries no secret: no password, no notes, and any field the user marked
 /// protected is absent rather than de-protected — `vault::list_entries`
-/// does that filtering, per `docs/design.md` § Protocol ("`list` never
+/// does that filtering, per `docs/protocol.md` § What `list` returns ("`list` never
 /// returns secrets"). `fields` is the one exception to "no secret-shaped
 /// content": it carries *names* only, never values, and a field's
 /// protectedness never hides its name here — only `title`/`username`/`url`
@@ -49,7 +49,7 @@ pub struct WireEntry {
     /// `password`, `url`, `notes`, then its custom (user-defined) fields
     /// by their KeePass key — `custom:`-prefixed when that key collides
     /// case-insensitively with a built-in name or with `title`
-    /// (`docs/design.md` § Protocol's collision rule). Omitted from the
+    /// (`docs/protocol.md`'s collision rule). Omitted from the
     /// wire when empty, like the `Option` fields above.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<String>,

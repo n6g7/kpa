@@ -1,5 +1,5 @@
 //! [`Request`]: one `SIGN_REQUEST` as the sign flow sees it, and the log
-//! line it ends in (`docs/ssh-agent.md` § 11).
+//! line it ends in (`docs/ssh-agent.md` § 10).
 
 use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg, PublicKey};

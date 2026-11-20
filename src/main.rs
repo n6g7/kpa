@@ -76,8 +76,8 @@ enum Command {
     /// Copy one field of one entry to the clipboard; the daemon drops it
     /// again after `clipboard_timeout`. `field` is `username`, `password`,
     /// `url`, `notes`, a custom field's bare key, or `custom:<key>` for a
-    /// custom key that collides with one of those (`docs/design.md` §
-    /// Protocol's collision rule).
+    /// custom key that collides with one of those (`docs/protocol.md`'s
+    /// collision rule).
     #[command(visible_alias = "cp")]
     Copy {
         db: String,
@@ -215,7 +215,7 @@ fn default_socket_path(paths: &Paths) -> Result<PathBuf, String> {
 ///
 /// That's kpa's claim only up to the host's `fs.suid_dumpable`: with it set
 /// to `2`, the kernel still writes a core for a non-dumpable process, just
-/// root-owned. Like the swap and ptrace notes in `docs/design.md`, that
+/// root-owned. Like the swap and ptrace notes in `docs/design.md` § Secrets, that
 /// part is a property of the machine, not of kpa.
 fn forbid_core_dumps() -> rustix::io::Result<()> {
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
@@ -297,7 +297,7 @@ mod tests {
     /// turns through this lock rather than racing each other's state.
     static DUMPABLE_LOCK: Mutex<()> = Mutex::new(());
 
-    /// `docs/design.md` § Security promises the daemon is non-dumpable;
+    /// `docs/design.md` § Secrets promises the daemon is non-dumpable;
     /// this is what makes that a fact about the code rather than the doc.
     #[test]
     fn the_daemon_marks_itself_non_dumpable() {

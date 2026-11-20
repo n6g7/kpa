@@ -18,7 +18,7 @@ use super::{Backend, ConfirmAnswer, MAX_ANSWER_LEN, PromptOutcome, poll_timeout}
 use crate::cancel::CancelToken;
 
 /// The environment variable a prompt program finds its message in
-/// (`docs/design.md` § Configuration, `docs/ssh-agent.md` § 6.6). A prompt
+/// (`config.example.toml`, `docs/ssh-agent.md` § 6.6). A prompt
 /// program that wants it reads the variable directly; one that only takes
 /// its prompt text as an argument needs a wrapper script that reads the
 /// variable and passes it on, e.g.

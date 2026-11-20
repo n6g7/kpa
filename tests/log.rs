@@ -35,7 +35,7 @@ fn capture_stderr(body: impl FnOnce()) -> String {
 
 /// What the daemon logs names operations and databases, never what a
 /// database holds — at the most verbose level too (`docs/design.md`
-/// § Logging).
+/// § Secrets).
 #[test]
 fn the_log_never_carries_vault_contents_or_the_password() {
     let daemon = InProcessDaemon::start(&config_toml(

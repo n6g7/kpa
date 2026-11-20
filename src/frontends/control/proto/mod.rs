@@ -1,5 +1,5 @@
 //! Wire protocol: the JSON shape exchanged over the Unix socket, per
-//! `docs/design.md` § Protocol.
+//! `docs/protocol.md`.
 //!
 //! One module per op, since an op's payload type and its error type belong
 //! together and nothing outside that op needs either: [`status`],
@@ -42,8 +42,8 @@ use error::serialize_error;
 
 /// Protocol version this build speaks. Every `Response` carries this,
 /// regardless of what the request asked for or which version it claimed —
-/// see `decode_request` and `docs/design.md`'s "skew impossible to ignore"
-/// rationale.
+/// see `decode_request` and `docs/protocol.md` § Version's "skew impossible to
+/// ignore" rationale.
 pub const VERSION: u32 = 2;
 
 /// One response, one variant per `Op`. Each variant carries a `Result`
@@ -59,8 +59,8 @@ pub const VERSION: u32 = 2;
 /// `Serialize` only: on the wire, a successful `Unlock` and a successful
 /// `Lock(Ok(Some(_)))` are genuinely indistinguishable
 /// (`{"v":1,"ok":true,"db":"personal"}` either way) — the response doesn't
-/// self-describe which op produced it, by design (`docs/design.md` § "which
-/// response is this? answered by which socket it arrived on"). That's fine
+/// self-describe which op produced it, by design (`docs/protocol.md` § Connections: "which
+/// response is this?" is answered by which socket it arrived on). That's fine
 /// for encoding, since the daemon always knows which variant it's building,
 /// but it means decoding one generically, without already knowing the
 /// request, isn't meaningful — so this type doesn't implement `Deserialize`.
@@ -164,7 +164,7 @@ mod tests {
     use super::*;
 
     /// `Response`'s `Serialize` is hand-written, so these pin the exact wire
-    /// shape of each variant against `docs/design.md` § Protocol rather than
+    /// shape of each variant against `docs/protocol.md` rather than
     /// trusting a derive to keep matching it.
     #[test]
     fn success_responses_match_the_documented_wire_shape() {

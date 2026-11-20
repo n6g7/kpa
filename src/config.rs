@@ -1,5 +1,5 @@
 //! The config file, matching the shape settled in `docs/design.md`
-//! § Configuration. `Config::load` does everything from finding the file to
+//! § Configuration and logging. `Config::load` does everything from finding the file to
 //! expanding `~` in its paths; `main.rs`'s `serve` calls it once at startup,
 //! and `daemon` hands each part of the result to what uses it.
 
@@ -47,7 +47,7 @@ pub struct Config {
     pub clipboard_timeout: Duration,
 
     /// How much `serve` logs; `--log-level` overrides it. See
-    /// `docs/design.md` § Logging.
+    /// `docs/design.md` § Configuration and logging.
     #[serde(default)]
     pub log_level: Level,
 
@@ -517,18 +517,19 @@ mod tests {
 
     #[test]
     fn parses_full_example_from_design_doc() {
-        // Verbatim from docs/design.md § Configuration, so this test is
+        // Verbatim from docs/design.md § Configuration and logging, so this test is
         // really "does the design doc's own example parse".
         let input = r#"
             idle_timeout = "30m"
             prompt = ["sh", "-c", "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""]
-            prompt_timeout = "60s"
+            prompt_timeout = "60s"         # an unanswered prompt is killed after this
             clipboard_timeout = "30s"
+            log_level = "info"             # error | warn | info | debug
 
             [[database]]
-            name    = "personal"
+            name    = "personal"           # stable id used in requests and the tray
             path    = "~/vault/personal.kdbx"
-            keyfile = "~/.keys/personal.key"
+            keyfile = "~/.keys/personal.key"   # optional
 
             [[database]]
             name = "work"
@@ -777,7 +778,7 @@ mod tests {
     /// `docs/ssh-agent.md` § 7's example, with real fingerprints in place of
     /// its elided ones.
     #[test]
-    fn parses_the_ssh_agent_example_from_the_design_doc() {
+    fn parses_the_example_in_ssh_agent_md() {
         let input = r#"
             idle_timeout = "30m"
             clipboard_timeout = "30s"
@@ -810,7 +811,7 @@ mod tests {
             # No `serve_ssh_keys`: this database's keys are never served.
         "#;
 
-        let config = Config::parse(input).expect("the design doc's own example should parse");
+        let config = Config::parse(input).expect("`docs/ssh-agent.md`'s own example should parse");
 
         assert_eq!(
             config.ssh_agent.confirm_prompt,
@@ -841,7 +842,7 @@ mod tests {
 
         config
             .validate(Path::new("config.toml"))
-            .expect("the design doc's own example should validate");
+            .expect("`docs/ssh-agent.md`'s own example should validate");
     }
 
     #[test]

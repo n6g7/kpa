@@ -64,9 +64,9 @@ pub enum VaultError {
     /// Deliberately content-free in `Display`: `keepass`'s own error text
     /// can embed raw bytes out of the decrypted database (e.g. its
     /// `cs_bool` deserializer echoes the offending element's text
-    /// verbatim). That must never cross a process boundary — today the
-    /// only sink is `probe`'s stderr, but `docs/design.md` already plans
-    /// `detail` strings reaching a socket client. The original message is
+    /// verbatim). That must never cross a process boundary, and a `detail`
+    /// string on a socket client's response is never derived from file
+    /// contents (`docs/protocol.md`). The original message is
     /// kept for developers via `Debug` (`{err:?}`), which nothing currently
     /// prints.
     #[error("database file is malformed or corrupt")]
@@ -164,8 +164,8 @@ impl From<DatabaseOpenError> for VaultError {
     }
 }
 
-/// One entry, index-only — matches the shape of the design doc's `list`
-/// response (`docs/design.md` § Protocol). No password, no notes: `list` is
+/// One entry, index-only — matches the shape of the `list` response
+/// (`docs/protocol.md`). No password, no notes: `list` is
 /// an index, never a secret dump — and that holds for *any* field the user
 /// marked protected in their KeePass client, not just Password: a protected
 /// `Title`/`UserName`/`URL` is omitted here rather than de-protected (see
@@ -390,7 +390,7 @@ fn open_file(
 
 /// List every entry in the database, recursing into all groups. Always
 /// returns everything — no filtering — matching "kpa stays dumb and returns
-/// everything" from `docs/design.md` § Protocol.
+/// everything" from `docs/protocol.md` § What `list` returns.
 pub fn list_entries(db: &Database) -> Vec<EntrySummary> {
     let mut out = Vec::new();
     collect_entries(db, &mut out);
@@ -677,7 +677,7 @@ const RESERVED_ENTRY_KEYS: [&str; 6] = [
 ];
 
 /// Field names `copy` can be asked for on this entry — never values.
-/// Built-ins in the fixed order `docs/design.md` § Protocol documents
+/// Built-ins in the fixed order `docs/protocol.md` documents
 /// (`username`, `password`, `url`, `notes`, `totp`), each listed only when
 /// present and non-empty; then this entry's custom (user-defined) string
 /// fields, by their KeePass key, `custom:`-prefixed exactly when that key
@@ -730,7 +730,7 @@ fn copyable_field_names(entry: &keepass::db::Entry) -> Vec<String> {
 }
 
 /// Whether `key` collides, case-insensitively, with a name
-/// `docs/design.md` § Protocol reserves on the wire — the five built-ins
+/// `docs/protocol.md` reserves on the wire — the five built-ins
 /// `copyable_field_names` lists plus `title`. Kept in lockstep with
 /// `proto::copy::Field`'s own `RESERVED_NAMES`: that one decides what a
 /// *request* means, this one decides how a *listed* custom key is spelled,

@@ -10,7 +10,7 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
-/// The `error` strings the protocol uses (`docs/design.md` § Protocol). A
+/// The `error` strings the protocol uses (`docs/protocol.md` § Errors). A
 /// client can match on a code it recognizes without knowing which op
 /// produced it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,6 +1,6 @@
 //! The OS side of the lock triggers: what logind reports about the user's
 //! display session and about suspend, and the inhibitor that delays suspend
-//! (`docs/threat-model.md` T-8 and ASM-7, `docs/design.md` § Lock policy).
+//! (`docs/threat-model.md` T-8 and ASM-7, `docs/design.md` § Locking).
 //!
 //! This module only watches and executes; it knows nothing about databases
 //! or locking. [`start`] sends the watcher's [`Event`]s on the channel it is

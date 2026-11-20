@@ -152,7 +152,7 @@ mod tests {
         Uuid::nil()
     }
 
-    /// Every request shape from `docs/design.md` § Requests, and the one
+    /// Every request shape from `docs/protocol.md` § Requests, and the one
     /// each `kpa` subcommand sends. Worth pinning because `Op`'s variants
     /// wrap per-op structs and it's `#[serde(tag = "op")]` that flattens
     /// them back into a single object — a change there would silently
