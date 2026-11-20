@@ -1,15 +1,14 @@
-# kpa — SSH agent (proposal)
+# kpa — SSH agent
 
 kpa serves the SSH keys stored in its databases, replacing a KeePass
 client's SSH agent integration. The client remains a vault editor if
 wanted, but stops handling SSH. Linux only, like the rest of kpa: a machine without kpa keeps
 its own KeePass client's agent over the same synced vault (§ 2).
 
-This is a proposal. It reverses one line of
-[`design.md`](./design.md) § Scope ("Is not: … an SSH agent") and extends
-[`threat-model.md`](./threat-model.md); § 10 lists those edits. It builds
-on [`headless.md`](./headless.md) for prompt routing, prompt timeouts and
-unlocking from a terminal.
+It reverses one line of [`design.md`](./design.md) § Scope ("Is not: … an
+SSH agent") and extends [`threat-model.md`](./threat-model.md); § 10 lists
+those edits. It builds on [`headless.md`](./headless.md) for prompt routing,
+prompt timeouts and unlocking from a terminal.
 
 ## 1. Recommendation
 
@@ -298,7 +297,7 @@ scans it:
    config order.
 
 The private key is read again at its first signature and cached in the
-database's `Slot` until lock.
+database's `SshState` until lock.
 
 **The key cache.** After each scan, kpa writes the database's public keys
 to `$XDG_CACHE_HOME/kpa/ssh-keys/<database>`, where `<database>` is the
@@ -526,7 +525,9 @@ needs an approval is refused, and kpa remembers it as pending:
   namespace, the requester's command name), and the time it was last
   refused;
 - at most 16 pending requests, identical ones merged (a repeat keeps its id
-  and is kept another 5 minutes), each kept for 5 minutes, all dropped on
+  and is kept another 5 minutes), each kept for 5 minutes by the wall clock
+  (the one time it keeps is `refused_at`, so a clock set back keeps a
+  request longer and one set forward expires it sooner), all dropped on
   lock.
 
 `kpa ssh pending` lists them, one line each, with the id, and `kpa ssh
@@ -949,7 +950,7 @@ programs' settings.
 
 ## 11. Implementation
 
-**Modules** (new `src/frontends/ssh_agent/`, plus `src/ssh/` for `keys.rs` and `approvals.rs`, which the daemon's own socket shares):
+**Modules** (`src/frontends/ssh_agent/`, plus `src/ssh/` for `keys.rs` and `approvals/`, which the daemon's own socket shares):
 
 | File          | Role                                                                                                                                            |
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
