@@ -19,6 +19,7 @@ use ssh_key::{Fingerprint, HashAlg};
 use uuid::Uuid;
 
 use granted::GrantedApprovals;
+pub use granted::{Grant, GrantSource, Lasts};
 pub use pending::PENDING_TTL;
 use pending::PendingRequests;
 
@@ -205,17 +206,33 @@ impl Approvals {
         Self::current(&mut self.held(), open).is_some_and(|state| state.granted.covers(scope, now))
     }
 
-    /// Approves `scope` until the lock that ends this unlock.
-    pub fn grant(&self, open: &Open, scope: Scope) {
-        Self::fresh(&mut self.held(), open).granted.grant(scope);
+    /// Approves `scope`, for `key`, until the lock that ends this unlock.
+    pub fn grant(
+        &self,
+        open: &Open,
+        scope: Scope,
+        key: ServedKey,
+        by: GrantSource,
+        wall: SystemTime,
+    ) {
+        Self::fresh(&mut self.held(), open)
+            .granted
+            .grant(scope, key, by, wall);
     }
 
-    /// Uses up `scope`'s one-signature approval, if it has one. An approval
-    /// kept until lock stays.
-    pub fn spend(&self, open: &Open, scope: &Scope) {
+    /// Records a signature `scope`'s approval covered, once it is made: a
+    /// one-signature approval is used up, and one kept until lock counts it.
+    pub fn used(&self, open: &Open, scope: &Scope) {
         if let Some(state) = Self::current(&mut self.held(), open) {
-            state.granted.spend(scope);
+            state.granted.used(scope);
         }
+    }
+
+    /// This database's grants at `now`, oldest first.
+    pub fn granted(&self, open: &Open, now: Instant) -> Vec<Grant> {
+        Self::current(&mut self.held(), open)
+            .map(|state| state.granted.list(now).cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Records that `request` was refused for want of `approval`, which is
@@ -255,10 +272,10 @@ impl Approvals {
     ) -> Option<Fingerprint> {
         let mut held = self.held();
         let state = Self::current(&mut held, open)?;
-        let approval = state.pending.take(id, wall)?;
-        let key = approval.scope.key();
-        state.granted.approve(approval, now, window);
-        Some(key)
+        let (approval, key) = state.pending.take(id, wall)?;
+        let approved = approval.scope.key();
+        state.granted.approve(approval, key, now, wall, window);
+        Some(approved)
     }
 }
 
@@ -297,6 +314,11 @@ mod tests {
         (databases, approvals)
     }
 
+    /// Grants `scope` on screen, as of now.
+    fn grant(approvals: &Approvals, open: &Open, scope: Scope) {
+        approvals.grant(open, scope, key(), GrantSource::OnScreen, SystemTime::now());
+    }
+
     fn unlock_again(databases: &Databases, db: &str) {
         databases.lock(db).expect("configured");
         databases.install_for_test(db, vec![TestEntry::new("github")]);
@@ -307,7 +329,11 @@ mod tests {
         let (databases, approvals) = fixture();
         let now = Instant::now();
         let scope = approval(1, None, true).scope;
-        approvals.grant(&databases.open("personal").unwrap(), scope.clone());
+        grant(
+            &approvals,
+            &databases.open("personal").unwrap(),
+            scope.clone(),
+        );
 
         let open = databases.open("personal").unwrap();
         assert!(approvals.covers(&open, &scope, now + WINDOW * 100));
@@ -338,7 +364,7 @@ mod tests {
 
         assert!(approvals.covers(&open, &ask.scope, t0 + WINDOW - Duration::from_millis(1)));
         assert!(!approvals.covers(&open, &ask.scope, t0 + WINDOW));
-        approvals.spend(&open, &ask.scope);
+        approvals.used(&open, &ask.scope);
         assert!(!approvals.covers(&open, &ask.scope, t0));
     }
 
@@ -456,7 +482,11 @@ mod tests {
         let (databases, approvals) = fixture();
         let (now, wall) = (Instant::now(), SystemTime::now());
         let scope = approval(1, None, true).scope;
-        approvals.grant(&databases.open("personal").unwrap(), scope.clone());
+        grant(
+            &approvals,
+            &databases.open("personal").unwrap(),
+            scope.clone(),
+        );
         // The old unlock's state is still in the map, as if its notice were late.
         let stale = approvals.held().remove("personal").unwrap();
         unlock_again(&databases, "personal");
@@ -464,7 +494,7 @@ mod tests {
 
         let open = databases.open("personal").unwrap();
         assert!(!approvals.covers(&open, &scope, now));
-        approvals.spend(&open, &scope);
+        approvals.used(&open, &scope);
         approvals.record(
             &open,
             approval(2, None, true),
@@ -474,5 +504,32 @@ mod tests {
         );
         assert!(!approvals.covers(&open, &scope, now));
         assert_eq!(approvals.pending(&open, wall).len(), 1);
+    }
+
+    #[test]
+    fn grants_are_listed_per_database_with_their_uses_and_gone_with_the_lock() {
+        let (databases, approvals) = fixture();
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        let scope = approval(1, None, true).scope;
+        let open = databases.open("personal").unwrap();
+        approvals.grant(&open, scope.clone(), key(), GrantSource::OnScreen, wall);
+        approvals.used(&open, &scope);
+
+        let granted = approvals.granted(&open, now);
+        assert_eq!(granted.len(), 1);
+        assert_eq!((granted[0].uses, granted[0].granted_at), (1, wall));
+        drop(open);
+        assert!(
+            approvals
+                .granted(&databases.open("work").unwrap(), now)
+                .is_empty()
+        );
+
+        unlock_again(&databases, "personal");
+        assert!(
+            approvals
+                .granted(&databases.open("personal").unwrap(), now)
+                .is_empty()
+        );
     }
 }

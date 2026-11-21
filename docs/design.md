@@ -282,8 +282,8 @@ response per connection**: "which response is this?" is answered by which
 socket it arrived on, and a client that wants several ops opens several
 connections. `v` is checked on every request and a mismatch is rejected, not
 negotiated. The ops are `status`, `unlock`, `lock`, `list`, `copy`,
-`ssh_keys`, `ssh_pending` and `ssh_approve`. No request carries the master
-password.
+`ssh_keys`, `ssh_pending`, `ssh_approve` and `ssh_grants`. No request carries
+the master password.
 
 **`list` never returns secrets** — it is an index. A field the user marked
 protected is omitted, not de-protected, and `fields` names what `copy` can be

@@ -59,20 +59,15 @@ impl PendingRequests {
     }
 
     /// Answers the request `id` names: removes it, and every other request
-    /// pending for its scope, and returns the approval it recorded. `None` if
-    /// none has that id at `now`: it expired, a lock dropped it, or `id`
-    /// never named one.
-    pub fn take(&mut self, id: Uuid, now: SystemTime) -> Option<SignatureApproval> {
+    /// pending for its scope, and returns the approval it recorded and the
+    /// key it is for. `None` if none has that id at `now`: it expired, a lock
+    /// dropped it, or `id` never named one.
+    pub fn take(&mut self, id: Uuid, now: SystemTime) -> Option<(SignatureApproval, ServedKey)> {
         self.0.retain(|pending| !expired(pending, now));
-        let approval = self
-            .0
-            .iter()
-            .find(|pending| pending.id == id)?
-            .approval
-            .clone();
+        let taken = self.0.iter().find(|pending| pending.id == id)?.clone();
         self.0
-            .retain(|pending| pending.approval.scope != approval.scope);
-        Some(approval)
+            .retain(|pending| pending.approval.scope != taken.approval.scope);
+        Some((taken.approval, taken.key))
     }
 }
 
@@ -129,7 +124,7 @@ mod tests {
             1
         );
         assert_eq!(pending.list(t0 + PENDING_TTL).count(), 0);
-        assert_eq!(pending.take(id, t0 + PENDING_TTL), None);
+        assert!(pending.take(id, t0 + PENDING_TTL).is_none());
     }
 
     #[test]
@@ -166,9 +161,12 @@ mod tests {
         pending.record(approval(2, None, true), key(), requested("ssh"), now);
         let ids: Vec<_> = pending.list(now).map(|listed| listed.id).collect();
 
-        assert_eq!(pending.take(Uuid::new_v4(), now), None);
-        assert_eq!(pending.take(ids[1], now), Some(approval(1, None, false)));
-        assert_eq!(pending.take(ids[0], now), None);
+        assert!(pending.take(Uuid::new_v4(), now).is_none());
+        assert_eq!(
+            pending.take(ids[1], now).map(|(approval, _)| approval),
+            Some(approval(1, None, false))
+        );
+        assert!(pending.take(ids[0], now).is_none());
         assert_eq!(pending.list(now).count(), 1);
     }
 }

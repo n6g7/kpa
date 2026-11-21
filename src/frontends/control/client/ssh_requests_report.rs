@@ -91,12 +91,18 @@ fn what(request: &WirePending) -> String {
 
 /// How long before `now` a request was refused. A request dated in the future
 /// is just refused.
-fn age(now: SystemTime, refused_at: u64) -> String {
+pub(super) fn age(now: SystemTime, refused_at: u64) -> String {
     let now = now.duration_since(UNIX_EPOCH).unwrap_or_default();
-    match now
-        .saturating_sub(Duration::from_secs(refused_at))
-        .as_secs()
-    {
+    span(
+        now.saturating_sub(Duration::from_secs(refused_at))
+            .as_secs(),
+    )
+}
+
+/// `secs` seconds as the tables show a span: seconds below a minute, whole
+/// minutes after.
+pub(super) fn span(secs: u64) -> String {
+    match secs {
         secs if secs < 60 => format!("{secs}s"),
         secs => format!("{}m", secs / 60),
     }

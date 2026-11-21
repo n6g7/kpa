@@ -617,6 +617,44 @@ can't hide it or drive the terminal.
 
 kpa also logs each refusal.
 
+**Listing what is approved.** `kpa ssh grants` lists the approvals now in
+force, without changing any: `ssh_grants` reads them, is never logged, and
+needs no terminal. Like every request on the JSON socket it is for the same
+uid (NG-1). Each grant, oldest first within its database, is:
+
+- `granted_at`, in Unix seconds, from which a client works out the age;
+- `scope`: the `scope` `ssh_pending` shows, with the key, the
+  destination of a bound connection and the forwarding host of a forwarded
+  one;
+- `remember`: `true` for an approval kept until lock, `false` for one that
+  covers a single signature, which also has `expires_in`, the seconds its
+  retry window still has;
+- `by`: `on_screen` for an `Allow` on the confirm prompt, `ssh_approve` for
+  `kpa ssh approve`;
+- `uses`, the signatures it has covered. A signature counts once it is
+  made. The one `Allow` on screen approved counts as the first. A
+  one-signature approval is gone with its signature, so it always lists
+  `0`;
+- `idle_lock_in`, the seconds before its database locks for being idle, if
+  nothing uses it. A forwarded signature never counts as use (§ 6.9).
+
+```json
+{
+  "granted_at": 1700000000,
+  "scope": { "key": { "db": "personal", "…": "…" }, "destination": "SHA256:…" },
+  "remember": true,
+  "by": "on_screen",
+  "uses": 3,
+  "idle_lock_in": 1740
+}
+```
+
+The table's columns are KEY, DATABASE, DESTINATION, FORWARDING HOST, LASTS
+(`until lock`, or `1 signature, 42s left`), AGE, GRANTED BY (`screen` or
+`kpa ssh approve`), USES and IDLE LOCK. A locked database lists nothing,
+since a lock drops its approvals. There is no way to revoke one: `kpa lock
+<database>` drops a database's.
+
 ### 6.9 Lock and idle
 
 - **Lock** drops the private-key cache and every approval with the

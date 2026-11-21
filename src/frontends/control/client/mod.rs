@@ -22,6 +22,7 @@ use crate::socket;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+pub mod ssh_grants_report;
 pub mod ssh_keys_report;
 pub mod ssh_requests_report;
 mod tty;

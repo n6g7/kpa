@@ -12,7 +12,9 @@ use clap::{Parser, Subcommand};
 use kpa::config::Config;
 use kpa::daemon;
 use kpa::frontends::auto_lock::Source;
-use kpa::frontends::control::client::{self, Format, ssh_keys_report, ssh_requests_report};
+use kpa::frontends::control::client::{
+    self, Format, ssh_grants_report, ssh_keys_report, ssh_requests_report,
+};
 use kpa::frontends::control::proto::{
     CopyRequest, Field, ListRequest, LockRequest, Op, SshApproveRequest, SshKeysReport,
     SshKeysRequest,
@@ -112,6 +114,10 @@ enum SshCommand {
     /// takes (`docs/ssh-agent.md` § 6.8). A request nobody approves expires
     /// after 5 minutes.
     Pending,
+    /// List the signature approvals currently granted, with how long each
+    /// lasts, how it was given and how often it has been used
+    /// (`docs/ssh-agent.md` § 6.8). `kpa lock <database>` drops a database's.
+    Grants,
     /// Approve one pending SSH request, by the id `kpa ssh pending` shows;
     /// the command that was refused then works on its next try.
     Approve { id: Uuid },
@@ -182,6 +188,16 @@ fn dispatch(cli: Cli) -> ExitCode {
             if cli.json { Format::Json } else { Format::Text },
             |pending: ssh_requests_report::Pending| {
                 ssh_requests_report::render(&pending, SystemTime::now())
+            },
+        ),
+        Command::Ssh {
+            command: SshCommand::Grants,
+        } => client::run(
+            &socket_path,
+            Op::SshGrants,
+            if cli.json { Format::Json } else { Format::Text },
+            |grants: ssh_grants_report::Grants| {
+                ssh_grants_report::render(&grants, SystemTime::now())
             },
         ),
         Command::Ssh {

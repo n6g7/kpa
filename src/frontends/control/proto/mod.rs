@@ -4,7 +4,7 @@
 //! One module per op, since an op's payload type and its error type belong
 //! together and nothing outside that op needs either: [`status`],
 //! [`unlock`], [`lock`], [`list`], [`copy`], [`ssh_keys`], [`ssh_pending`],
-//! [`ssh_approve`]. [`request`] holds the request half plus the failures that precede dispatch, and [`error`] the wire
+//! [`ssh_approve`], [`ssh_grants`]. [`request`] holds the request half plus the failures that precede dispatch, and [`error`] the wire
 //! vocabulary all of them share.
 //!
 //! [`Response`] itself stays here rather than being split up: it's the one
@@ -17,6 +17,7 @@ mod list;
 mod lock;
 mod request;
 mod ssh_approve;
+mod ssh_grants;
 mod ssh_keys;
 mod ssh_pending;
 mod status;
@@ -28,6 +29,7 @@ pub use list::{ListError, ListRequest, WireEntry};
 pub use lock::{LockError, LockRequest};
 pub use request::{DecodeError, Op, ProtocolError, Request, decode_request, encode_request};
 pub use ssh_approve::{SshApproveError, SshApproveRequest};
+pub use ssh_grants::WireGrant;
 pub use ssh_keys::{SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey};
 pub use ssh_pending::{WirePending, WireRequestDetails, WireScope};
 pub use status::DatabaseStatus;
@@ -92,6 +94,9 @@ pub enum Response {
     /// carries no `Result`.
     SshPending(Vec<WirePending>),
     SshApprove(Result<(), SshApproveError>),
+    /// The signature approvals currently granted. Like `Status` it carries no
+    /// `Result`.
+    SshGrants(Vec<WireGrant>),
     /// Rejected before the daemon knew which op was even being asked for,
     /// so it belongs to no op's `Result`.
     Protocol(ProtocolError),
@@ -150,6 +155,10 @@ impl Serialize for Response {
             }
             Response::SshApprove(Ok(())) => map.serialize_entry("ok", &true)?,
             Response::SshApprove(Err(err)) => serialize_error(&mut map, &err.fields())?,
+            Response::SshGrants(grants) => {
+                map.serialize_entry("ok", &true)?;
+                map.serialize_entry("grants", grants)?;
+            }
             Response::Protocol(err) => serialize_error(&mut map, &err.fields())?,
         }
         map.end()

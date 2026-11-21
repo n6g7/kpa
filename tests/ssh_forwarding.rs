@@ -299,6 +299,13 @@ impl Rig {
         words.join(" ")
     }
 
+    /// What `kpa ssh grants` lists: each approval in force, as JSON.
+    fn grants(&self) -> Vec<serde_json::Value> {
+        let listed = self.daemon.run(&["--json", "ssh", "grants"]);
+        assert_eq!(listed["ok"], true, "{listed}");
+        listed["grants"].as_array().expect("grants").clone()
+    }
+
     /// The questions kpa's confirm prompt has asked so far.
     fn confirmations(&self) -> Vec<String> {
         std::fs::read_to_string(&self.confirmations)
@@ -356,6 +363,16 @@ fn a_forwarded_login_asks_once_per_ssh_session() {
     let first = rig.forwarded(&format!("{hop} && {hop}"));
     assert!(first.status.success(), "{}", output_text(&first));
     assert_eq!(rig.confirmations(), [rig.question("Ed25519")]);
+    // The approval is listed with the host the session was forwarded to, how
+    // it was given, and the two logins it has covered.
+    let grants = rig.grants();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0]["by"], "on_screen");
+    assert_eq!(grants[0]["uses"], 2);
+    assert_eq!(grants[0]["remember"], true);
+    let scope = &grants[0]["scope"];
+    assert!(scope["forwarding_host"].is_string());
+    assert_eq!(scope["forwarding_host"], scope["destination"]);
 
     let second = rig.forwarded(&hop);
     assert!(second.status.success(), "{}", output_text(&second));
@@ -363,6 +380,9 @@ fn a_forwarded_login_asks_once_per_ssh_session() {
         rig.confirmations(),
         [rig.question("Ed25519"), rig.question("Ed25519")]
     );
+    let grants = rig.grants();
+    assert_eq!(grants.len(), 2);
+    assert_eq!(grants[1]["uses"], 1);
 }
 
 /// A key with `forwarded = false` is not listed to the forwarded agent and

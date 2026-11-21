@@ -25,9 +25,9 @@ use crate::databases::Databases;
 use crate::display_session::{self, DisplaySession, DisplayWriter};
 use crate::paths::Paths;
 use crate::prompt::{ConfirmAnswer, Prompt, PromptQueue, Scripted};
-use crate::ssh::approvals::{Approvals, PendingRequest, Scope};
+use crate::ssh::approvals::{Approvals, Grant, GrantSource, PendingRequest, Scope};
 use crate::ssh::keys;
-use crate::ssh::testing::{database, key_entry};
+use crate::ssh::testing::{database, key, key_entry};
 
 /// A real `session-bind@openssh.com` message for `session_id`, signed by
 /// `host`.
@@ -272,6 +272,14 @@ impl Fixture {
             .approve(&open, id, Instant::now(), SystemTime::now(), window)
     }
 
+    /// What `kpa ssh grants` lists for `personal`.
+    pub(super) fn grants(&self) -> Vec<Grant> {
+        match self.databases.open("personal") {
+            Ok(open) => self.approvals.granted(&open, Instant::now()),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Whether an approval covers `scope` in `personal` now.
     pub(super) fn is_approved(&self, scope: &Scope) -> bool {
         match self.databases.open("personal") {
@@ -283,7 +291,13 @@ impl Fixture {
     /// Approves `scope` in `personal` until it locks.
     pub(super) fn grant(&self, scope: Scope) {
         let open = self.databases.open("personal").expect("unlocked");
-        self.approvals.grant(&open, scope);
+        self.approvals.grant(
+            &open,
+            scope,
+            key(),
+            GrantSource::OnScreen,
+            SystemTime::now(),
+        );
     }
 }
 

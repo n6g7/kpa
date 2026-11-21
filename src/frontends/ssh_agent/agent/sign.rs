@@ -39,7 +39,7 @@ use crate::frontends::ssh_agent::bind::ConnectionClass;
 use crate::frontends::ssh_agent::wire::{AgentResponse, SignRequest};
 use crate::output;
 use crate::prompt::Declined;
-use crate::ssh::approvals::{Approvals, SignatureApproval};
+use crate::ssh::approvals::{Approvals, GrantSource, SignatureApproval};
 use crate::ssh::keys::ServedKey;
 
 /// The longest key name a log line carries: a `[[database.ssh_key]]`
@@ -242,14 +242,12 @@ impl Agent {
             return Err(lacking.refusal());
         }
         let signature = sign_and_touch(&mut hold, request)?;
-        // The approval for one signature this request rode on is used
-        // up, now that the signature is made: a failed one leaves it
-        // for the retry.
-        if let Some(approval) = needed
-            && !approval.remember
-        {
+        // The approval this request rode on counts the signature, now that
+        // it is made, and an approval for one signature is used up: a failed
+        // one leaves it for the retry.
+        if let Some(approval) = needed {
             let open = hold.open().ok_or(Refused::Locked)?;
-            self.approvals.spend(open, &approval.scope);
+            self.approvals.used(open, &approval.scope);
         }
         Ok(signature)
     }
@@ -269,8 +267,14 @@ impl Agent {
         }
         let signature = sign_and_touch(&mut hold, request)?;
         if allowed.approval.remember {
+            let key = hold.served(request.fingerprint)?.clone();
+            let wall = hold.wall();
             let open = hold.open().ok_or(Refused::Locked)?;
-            self.approvals.grant(open, allowed.approval.scope);
+            let scope = allowed.approval.scope;
+            self.approvals
+                .grant(open, scope.clone(), key, GrantSource::OnScreen, wall);
+            // The signature the user allowed is the first one it covers.
+            self.approvals.used(open, &scope);
         }
         Ok(signature)
     }
@@ -325,7 +329,7 @@ mod tests {
     };
     use crate::frontends::ssh_agent::wire::SignFlags;
     use crate::prompt::{ConfirmAnswer, PromptOutcome, Step};
-    use crate::ssh::approvals::Scope;
+    use crate::ssh::approvals::{GrantSource, Scope};
     use crate::ssh::testing::{RSA_3072, database, key_entry, requested, test_key};
 
     /// A fixture whose cancelled prompts hold nothing back: the backoff has
@@ -1368,6 +1372,75 @@ mod tests {
         assert!(!signed(&login(2)));
         assert_eq!(fx.pending().len(), 1);
         assert!(fx.confirms.shown().is_empty());
+    }
+
+    /// A grant counts the signatures it covers: the one the user allowed on
+    /// screen, and each one after it. Nothing is granted, so nothing is
+    /// counted, for a key that never asks or asks every time.
+    #[test]
+    fn a_grant_counts_the_signatures_it_covers() {
+        let key = test_key(1);
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Once);
+        fx.confirms.push(Step::allow());
+
+        for _ in 0..3 {
+            assert!(signed(&sign(&fx, &key)));
+        }
+        let grants = fx.grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].by, GrantSource::OnScreen);
+        assert_eq!(grants[0].uses, 3);
+
+        for confirm in [SshKeyConfirm::Never, SshKeyConfirm::Always] {
+            let fx = Fixture::unlocked(&key, confirm);
+            fx.confirms.push(Step::allow());
+            assert!(signed(&sign(&fx, &key)));
+            assert!(fx.grants().is_empty(), "{confirm:?}");
+        }
+    }
+
+    /// What `kpa ssh approve` approves for a key that asks every time is a
+    /// grant given by it, until its one signature.
+    #[test]
+    fn an_approved_request_is_a_grant_by_ssh_approve_until_its_one_signature() {
+        let key = test_key(1);
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Always);
+        assert!(!signed(&sign_from_outside(&fx, &key)));
+        assert!(approve_from_terminal(&fx, &key));
+
+        let grants = fx.grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].by, GrantSource::SshApprove);
+        assert_eq!(grants[0].uses, 0);
+        assert!(grants[0].time_left(Instant::now()).is_some());
+
+        assert!(signed(&sign_from_outside(&fx, &key)));
+        assert!(fx.grants().is_empty());
+    }
+
+    /// A forwarded grant names its forwarding session's host.
+    #[test]
+    fn a_forwarded_grant_names_its_forwarding_host() {
+        let key = test_key(1);
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Never);
+        fx.confirms.push(Step::allow());
+        for _ in 0..2 {
+            assert!(signed(&forwarded_login(
+                &fx,
+                &key,
+                &forwarded(1),
+                &[1],
+                &requester()
+            )));
+        }
+
+        let grants = fx.grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            grants[0].scope.forwarding_host(),
+            Some(test_key(9).public_key().fingerprint(HashAlg::Sha256))
+        );
+        assert_eq!(grants[0].uses, 2);
     }
 
     /// A forwarded signature is a remote host's: it doesn't keep the
