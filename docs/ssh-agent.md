@@ -673,11 +673,23 @@ uid (NG-1). Each grant, oldest first within its database, is:
 }
 ```
 
-The table's columns are KEY, DATABASE, DESTINATION, FORWARDING HOST, SESSION,
-LASTS (`until lock`, or `1 signature, 42s left`), AGE, GRANTED BY (`screen`
-or `cli`), USES, LAST USED (an age, `-` if never) and IDLE LOCK. A locked
-database lists nothing, since a lock drops its approvals. There is no way to revoke one: `kpa lock
-<database>` drops a database's.
+`kpa ssh grants` shows the columns KEY, DESTINATION, FORWARDING HOST, LASTS
+(`until lock`, or `1 signature, 42s left`) and USES. `--full` adds DATABASE,
+SESSION, AGE, GRANTED BY (`screen` or `cli`), LAST USED (an age, `-` if
+never) and IDLE LOCK, between them in that order. The JSON always has
+everything. A locked database lists nothing, since a lock drops its
+approvals. There is no way to revoke one: `kpa lock <database>` drops a
+database's.
+
+**Host names in the tables.** `kpa ssh grants` and `kpa ssh pending` show a
+destination and a forwarding host by the host name `known_hosts` gives its
+host key, else by its fingerprint. The CLI looks the names up itself, in the
+user's `~/.ssh/known_hosts`, so the requests carry fingerprints only and
+`--json` prints them. Only an unhashed entry gives a name: a hashed one
+can't be reversed without the name that produced it, so a host known by one
+shows as its fingerprint, as do hosts from `@revoked` or `@cert-authority`
+entries and negated or wildcard patterns, which name no one host. The
+prompts (§ 6.7) name hosts by the same rule.
 
 ### 6.9 Lock and idle
 

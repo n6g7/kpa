@@ -23,6 +23,7 @@ use kpa::log::{self, Level};
 use kpa::output::report_error;
 use kpa::paths::Paths;
 use kpa::socket;
+use kpa::ssh::known_hosts::HostNames;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -117,7 +118,12 @@ enum SshCommand {
     /// List the signature approvals currently granted, with how long each
     /// lasts, how it was given and how often it has been used
     /// (`docs/ssh-agent.md` § 6.8). `kpa lock <database>` drops a database's.
-    Grants,
+    Grants {
+        /// Show every column: the database, the forwarding session, the
+        /// age, how it was granted, when it was last used and the idle lock.
+        #[arg(long)]
+        full: bool,
+    },
     /// Approve one pending SSH request, by the id `kpa ssh pending` shows;
     /// the command that was refused then works on its next try.
     Approve { id: Uuid },
@@ -187,17 +193,19 @@ fn dispatch(cli: Cli) -> ExitCode {
             Op::SshPending,
             if cli.json { Format::Json } else { Format::Text },
             |pending: ssh_requests_report::Pending| {
-                ssh_requests_report::render(&pending, SystemTime::now())
+                let names = HostNames::read(paths.known_hosts.as_deref());
+                ssh_requests_report::render(&pending, SystemTime::now(), &names)
             },
         ),
         Command::Ssh {
-            command: SshCommand::Grants,
+            command: SshCommand::Grants { full },
         } => client::run(
             &socket_path,
             Op::SshGrants,
             if cli.json { Format::Json } else { Format::Text },
             |grants: ssh_grants_report::Grants| {
-                ssh_grants_report::render(&grants, SystemTime::now())
+                let names = HostNames::read(paths.known_hosts.as_deref());
+                ssh_grants_report::render(&grants, SystemTime::now(), &names, full)
             },
         ),
         Command::Ssh {
