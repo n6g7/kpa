@@ -45,7 +45,9 @@ with nothing to choose between. It also can't check that the two
 implementations agree: neither compiles on the other OS, so only building
 for both targets does that. Until macOS work starts, a seam's Linux code
 stays where it is, behind its module's API, so the split is a move rather
-than a redesign.
+than a redesign. `frontends/auto_lock/` is shaped this way already: its
+`mod.rs` is OS-neutral and `logind.rs` is the Linux side, so a macOS side
+would be a `macos.rs` beside it.
 
 **Traits are for more than one implementation in the same build.** That
 covers:
@@ -76,7 +78,7 @@ interface's shape against, not as a plan.
 | File locations | `paths.rs` (sockets, caches, `known_hosts`), `config.rs` (the config file) | `$XDG_RUNTIME_DIR`, `$XDG_CONFIG_HOME`, `$XDG_CACHE_HOME`, `$HOME` | `~/Library/…`, the per-user `$TMPDIR` | paths resolved in one helper per location, handed to callers as `Path`s. Socket paths stay under 104 bytes, macOS's `sun_path` limit. |
 | Lock triggers | `frontends/auto_lock/logind.rs` | logind over D-Bus: `Lock`, `LockedHint`, `PrepareForSleep`, a sleep inhibitor | screen-lock and sleep notifications | `auto_lock::Event` and `logind::Inhibitor`: the module sends events and holds the inhibitor when told, and knows nothing about databases. |
 | Clipboard | `clipboard/mod.rs`, `clipboard/wayland/` | kpa's own Wayland client: data-control, serving each paste | `NSPasteboard` | "serve this secret, end it after the timeout, never clear anyone else's". |
-| Tray | `frontends/tray.rs` | StatusNotifierItem over D-Bus (`ksni`) | `NSStatusItem` | database states in, menu actions out. |
+| Tray | `frontends/tray.rs` | StatusNotifierItem over D-Bus (`ksni`) | `NSStatusItem` | `databases::Snapshot`s in, lock and unlock out, told of every change by an observer that only sends on a channel; the unlock asks through the shared screen prompt, gated on `authz::display_allows_prompt`. |
 | Prompts | `prompt/` | an external program per kind of prompt (`prompt/program.rs`), or the terminal a requester passed (`prompt/terminal.rs`: termios and `poll`, POSIX calls macOS has too), behind `prompt::Backend<T>`, ended through `cancel.rs`'s socket pair | another `Backend<T>` for a kind: the same program, or a native dialog, or Touch ID for an approval. The terminal backend needs nothing else | `Prompt<T>`, one per kind, sharing one `PromptQueue` that only a backend taking the screen (`Backend::is_queued`) waits in; `PromptOutcome<T>`; no assumption of a child process or a string answer; a `CancelToken` ends one. |
 | Terminal passed with a request | `socket.rs` (`send_with_fd`, `recv_with_fd`), `authn.rs` (`Terminal`) | `SCM_RIGHTS`, received with `MSG_CMSG_CLOEXEC` | `SCM_RIGHTS`; no `MSG_CMSG_CLOEXEC`, so `FD_CLOEXEC` is set on the descriptor after it arrives | a request's bytes with at most one descriptor, close-on-exec once received; `Requester::terminal`, an `isatty` file descriptor and the connection it came on. |
 | Process hardening | `main.rs` | `prctl(PR_SET_DUMPABLE)` | `setrlimit(RLIMIT_CORE)`, `ptrace(PT_DENY_ATTACH)` | one startup call. |

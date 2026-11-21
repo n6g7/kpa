@@ -2,7 +2,7 @@
 //! state, the scan at unlock, identity listing, and the sign flow, on the
 //! core.
 //!
-//! - [`Agent`]: what [`serve`](super::serve) answers each request with.
+//! - [`Agent`]: what [`serve`](fn@super::serve) answers each request with.
 //! - [`SshState`]: what the agent keeps per database and per unlock, as an
 //!   observer of the core: the scan, the private keys, the backoff.
 //! - `hold`: [`Hold`], one database as the agent reads it, over the core's

@@ -207,13 +207,12 @@ pub struct EntrySummary {
 /// are inside the prompt program itself and inside `keepass`, whose
 /// key-derivation intermediates are not zeroized — half of
 /// `sha256(password)`, which is password-equivalent, survives a lock
-/// (`docs/review-2026-09-secrets.md` finding 4; fix is upstream).
+/// (the fix is upstream).
 ///
 /// **Never panics.** `keepass` indexes past the end of short header fields
-/// in several places and panics on them (`docs/review-2026-09-robustness.md`
-/// finding 8; fix is upstream), so the parse runs under `catch_unwind` and
-/// a panic comes back as `Corrupt`. See the comment at that call for when
-/// this stops holding.
+/// in several places and panics on them (the fix is upstream), so the parse
+/// runs under `catch_unwind` and a panic comes back as `Corrupt`. See the
+/// comment at that call for when this stops holding.
 ///
 /// Upstream hazards this cannot catch, all in `keepass` 0.15.0:
 ///
@@ -222,14 +221,14 @@ pub struct EntrySummary {
 ///   implausible Argon2 memory cost aborts the process on allocation
 ///   failure — no unwind, so `catch_unwind` doesn't help. Random corruption
 ///   reaches this for KDBX3 only; KDBX4's header HMAC rejected every
-///   mutation tried (robustness finding 6). In the daemon the stakes are
-///   higher than in a one-shot CLI: a hung unlock keeps its core busy and
-///   its file descriptor open after the client gives up, each retry stacks
-///   another, and an abort ends every unlocked session at once. Rust
-///   threads can't be cancelled, so a timeout here would not help either.
+///   mutation tried. In the daemon the stakes are higher than in a one-shot
+///   CLI: a hung unlock keeps its core busy and its file descriptor open
+///   after the client gives up, each retry stacks another, and an abort ends
+///   every unlocked session at once. Rust threads can't be cancelled, so a
+///   timeout here would not help either.
 ///   The fix is ceilings in `keepass` before the KDF runs; a header
 ///   pre-check in this repo is the fallback if upstream hasn't moved by
-///   the time the daemon is meant to run unattended (`docs/plan.md` step 5).
+///   the time the daemon is meant to run unattended.
 /// - **KDBX3's header hash is checked here, not by `keepass`.** KDBX3
 ///   authenticates its outer header only through `Meta/HeaderHash` inside
 ///   the encrypted payload, and `keepass` 0.15 never compares it. `open`
@@ -271,8 +270,7 @@ pub fn open(
             // Upstream leak: `keepass` zeroizes its own copy of the raw keyfile,
             // but its XML keyfile parser makes about six unzeroized
             // intermediate copies of the key material, which together cover
-            // the whole 32-byte key and survive a lock
-            // (`docs/review-2026-09-secrets.md` finding 2). Pre-parsing the
+            // the whole 32-byte key and survive a lock. Pre-parsing the
             // keyfile here would remove most of those at the cost of
             // duplicating `keepass`'s format detection; the fix belongs
             // upstream.
@@ -636,8 +634,7 @@ fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
     // Explicit worklist over group ids, rather than recursion or a stack of
     // borrowed `GroupRef`s: a `.kdbx` with a deep enough group nesting can
     // otherwise overflow the stack and abort the process (verified down to
-    // a 2 MiB thread stack — see `docs/review-2026-09.md` finding 5). Ids
-    // rather than `GroupRef`s because `GroupRef::groups()` ties its
+    // a 2 MiB thread stack). Ids rather than `GroupRef`s because `GroupRef::groups()` ties its
     // children's lifetime to the parent `GroupRef`'s own borrow, which
     // doesn't outlive one loop iteration; going back through `Database::group`
     // re-borrows from `db` itself instead. This changes traversal from
@@ -816,10 +813,9 @@ mod tests {
         assert_eq!(entry_title(&db, Uuid::new_v4()), None);
     }
 
-    /// Regression for `docs/review-2026-09.md` finding 1: a field the user
-    /// marked protected must not come back as plaintext from `list`, for
-    /// any of the fields `list` surfaces, not just `Password`. Built
-    /// in-process — this needs no fixture file.
+    /// A field the user marked protected must not come back as plaintext
+    /// from `list`, for any of the fields `list` surfaces, not just
+    /// `Password`. Built in-process — this needs no fixture file.
     #[test]
     fn list_omits_protected_fields() {
         let mut db = Database::new();
@@ -838,9 +834,9 @@ mod tests {
         assert_eq!(entries[0].url, None);
     }
 
-    /// Regression for `docs/review-2026-09.md` finding 5: `collect_entries`
-    /// used to recurse once per group nesting level, which overflowed and
-    /// aborted the process well before this depth on a 2 MiB thread stack.
+    /// `collect_entries` doesn't recurse once per group nesting level: that
+    /// would overflow and abort the process well before this depth on a
+    /// 2 MiB thread stack.
     /// Built in-process — this needs no fixture file, and fails loudly
     /// (abort) rather than merely failing an assertion on regression.
     #[test]

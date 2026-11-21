@@ -183,7 +183,9 @@ failing for an in-scope actor.
   prompt in flight, on screen or on a terminal. A prompt ends after
   `prompt_timeout`, and a terminal prompt ends when its requester leaves or
   the terminal hangs up. A copied secret expires after
-  `clipboard_timeout`.
+  `clipboard_timeout`, and sooner if a lock ends the unlock it was read
+  from, even a lock that lands while the `copy` is in flight (the copy
+  answers `locked`).
 - **G-6 Lock clears what kpa owns.** On lock, every copy of A-1/A-2 that kpa
   itself made or controls is zeroized. (Copies inside dependencies: NG-4.)
 - **G-7 Clipboard hygiene.** Every copy carries the
@@ -206,7 +208,9 @@ failing for an in-scope actor.
   never raises the graphical prompt. `unlock` asks such a request on the
   terminal it passed instead, and answers `no_prompt` if it passed none.
   A request that asks for the terminal gets only the terminal, however the
-  screen stands.
+  screen stands. The tray has no requester to place, so a click on its
+  "Unlock" is asked on screen only while there is a display session that
+  isn't known to be locked, and answers `no_prompt` otherwise.
 
 ## 7. Threats
 
@@ -354,7 +358,8 @@ outright (NG-7).
 **T-15 · Sandboxed process reaches kpa** (E, I) — ACT-6 · TB-1, TB-6 · A-1–A-3 → G-2  
 Response: the socket is a filesystem path, absent from a sandbox unless
 granted. Residual: a sandbox with session-bus access can activate tray
-menu items — lock, or raise an unlock prompt, but not read anything.
+menu items — lock, or raise an unlock prompt (only while a display session
+exists and isn't known to be locked, G-12), but not read anything.
 
 **T-16 · No trace of reads** (R) — ACT-10 · TB-1 · A-2 → —  
 Unaddressed: a `copy` produces no user-visible notification, so an

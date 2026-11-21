@@ -1,15 +1,16 @@
-# kpa — headless use (proposal)
+# kpa — headless use
 
-kpa assumes a desktop. `unlock` runs a graphical prompt, and `copy` offers
-the secret on the Wayland clipboard. This proposal makes kpa usable from a
-session outside the desktop: an SSH login or a terminal-server shell into
-the machine that runs kpa, or a machine with no desktop session at all.
+kpa's `unlock` runs a graphical prompt and its `copy` offers the secret on
+the Wayland clipboard, both of which assume a desktop. This doc says how kpa
+is used from a session outside the desktop: an SSH login or a terminal-server
+shell into the machine that runs kpa, or a machine with no desktop session
+at all.
 
-This is a proposal: nothing here is built. It changes the "daemon always
-prompts" rule in [`design.md`](./design.md) and extends
-[`threat-model.md`](./threat-model.md). § 8 lists those edits. The SSH agent
-proposal builds on it: unlock on demand needs the prompt routing in § 3,
-and remote use needs the terminal unlock in § 4.
+It replaces the "daemon always prompts" rule in [`design.md`](./design.md)
+with where each request is asked, and extends
+[`threat-model.md`](./threat-model.md). The SSH agent
+([`ssh-agent.md`](./ssh-agent.md)) builds on it: unlock on demand needs the
+prompt routing in § 3, and remote use needs the terminal unlock in § 4.
 
 ## 1. Summary
 
@@ -138,7 +139,8 @@ behaves like a screen prompt:
   and so does the terminal hanging up;
 - it doesn't wait in the prompt queue, since it doesn't take the screen,
   but each database still allows one unlock at a time
-  (`unlock_in_progress`);
+  (`unlock_in_progress`, answered before the request is asked where to
+  prompt, so it comes before `no_prompt`);
 - an empty line is an empty password, the one way to reach a keyfile-only
   database from here, same as from the graphical prompt;
 - the line goes into a fixed, zeroizing buffer of `MAX_ANSWER_LEN` bytes
@@ -190,6 +192,11 @@ Otherwise it fails with `no_display` and the clipboard is left alone. A locker t
 reports the unlock (ASM-7), so kpa can't track its state. With such a
 locker, `copy` behaves as it does today. The `Lock` signal still locks
 every database, so nothing is copied until the next unlock anyway.
+
+A copy's offer lasts until `clipboard_timeout` or until a lock ends the
+unlock the entry was read from, whichever comes first. A lock of another
+database leaves it. A `copy` that a lock overtakes before its offer is
+recorded answers `locked` and leaves nothing on the clipboard.
 
 Why:
 
@@ -256,6 +263,11 @@ These hold for a prompt on a terminal as for one on screen (§ 4).
   that only sends the `Lock` signal never reports the unlock (ASM-7). Then
   kpa doesn't know the screen is locked, and the timeout bounds the cost.
   A terminal prompt isn't behind the locker, so it is still allowed.
+- **The tray has no requester.** A click on its "Unlock" is asked on screen
+  only while there is a display session that isn't known to be locked, and
+  is `no_prompt` otherwise. Where the daemon runs (the desktop's cgroup or
+  not) decides nothing: the tray is the daemon itself, and a click can't be
+  traced to a caller.
 
 ## 7. Lock policy without a desktop
 
@@ -274,49 +286,22 @@ typed the master password, the same consent the graphical prompt collects.
 The desk's lock protects the desk, and the desk still gets nothing: `copy`
 stays refused while it is locked (§ 5).
 
-## 8. Changes to existing docs
-
-- **`design.md`**
-  - Settled decision 9 and § Protocol: `unlock` prompts on screen from the
-    desktop, and on the terminal passed with the request otherwise.
-  - § Clipboard: `copy` needs an active, unlocked display session.
-  - § Lock policy: a lock ends open prompts; prompts time out.
-  - § Configuration: `prompt_timeout`.
-- **`threat-model.md`**
-  - **TB-1**: the socket accepts one inbound terminal descriptor with a
-    request.
-  - **G-3**: A-1 never leaves the process, and never enters it over the
-    socket or the CLI either: the daemon reads it from the terminal.
-    `copy` offers only for a requester on the desktop, while the display
-    session is active and unlocked.
-  - **G-5** gains: "A lock ends any prompt in flight. A prompt ends after
-    `prompt_timeout`."
-  - **New goal: no prompt where nobody can see it.** A request from outside
-    the desktop, or while the screen is locked, never raises a prompt on
-    screen.
-  - **T-4**: the master password never reaches the CLI, so none of its
-    argv, environment, stdout, stderr or logs can carry it.
-  - **New threat: misrouted prompt** (S) — ACT-5, ACT-10. A prompt raised
-    on an unattended screen, or a terminal prompt in the wrong place.
-    Response: classification errs toward the terminal, timeouts, locks end
-    prompts. Residual: a multiplexer attached over SSH (§ 3), and a
-    requester that aims a prompt at a terminal it can open.
-- **`config.example.toml`**: `prompt_timeout`.
-- **`TODO.md`**: this proposal is the "Support headless use" entry.
-
-## 9. Implementation
+## 8. Implementation
 
 **Modules**
 
 | File          | Role                                                                                                     |
 | ------------- | -------------------------------------------------------------------------------------------------------- |
 | `authn.rs`   | Peer pidfd or pid → uid, cgroup path and command name, kept in a `Requester`. Plain facts, no rules |
-| `authz.rs`   | Who may do what, as pure functions of a `Requester` and the display session as it is when asked. The checks both sockets share (`may_connect`, `on_desktop`, `may_prompt_on_screen`; the cgroup-path classifier is table-tested), and kpa's own socket's policy, one function per request type (`authorize_copy`: the session whose clipboard may be used, or `no_display`; `choose_unlock_prompt`: a prompt may appear, or `no_display`). The SSH agent's equivalent is `frontends::ssh_agent::authz`; `display_session.rs` holds `DisplaySession` |
+| `authz.rs`   | Who may do what, as pure functions of a `Requester` and the display session as it is when asked: the checks every front end shares (`may_connect`, `on_desktop`, whose cgroup-path classifier is table-tested, `display_allows_prompt`, the display half that the tray asks alone, and `may_prompt_on_screen`). kpa's own socket's policy is `frontends/control/authz.rs` and the SSH agent's is `frontends::ssh_agent::authz` |
+| `display_session.rs` | `DisplaySession`, the one writer of it (`auto_lock`) and read-only handles to it |
+| `frontends/control/authz.rs` | `authorize_copy`: the session whose clipboard may be used, or `no_display`; `choose_unlock_prompt`: where an unlock asks, or `no_prompt` |
 | `frontends/auto_lock/logind.rs` | The whole logind side: reports the display session's state (no session, locked, unlocked), which `copy` and classification read, a lock request, suspend and a lost watch as `auto_lock::Event`s, and holds the sleep inhibitor when `auto_lock` asks. Knows nothing about databases |
 | `socket.rs`   | Sends and receives a request line with one descriptor attached (`SCM_RIGHTS`, close-on-exec on receipt) |
-| `frontends/control/proto/` | `Request` gains `preferred_prompt`, and `no_prompt` joins the error codes. `UnlockRequest` is just `db` |
+| `frontends/control/proto/` | `Request` carries `preferred_prompt`, and `no_prompt` is among the error codes. `UnlockRequest` is just `db` |
 | `prompt/terminal.rs` | The terminal backend: echo off, one line, modes put back, ended by the deadline, a lock, the requester leaving or a hang-up |
-| `frontends/control/{serve,unlock,copy,authz}.rs` | Keep the passed terminal in the `Requester`; decide where an unlock asks; prompt timeout; locks end prompts; `copy` gated on origin and the display session's state |
+| `frontends/control/{serve,unlock,copy}.rs` | Keep the passed terminal in the `Requester`; the unlock is begin, choose where to ask, ask, finish; prompt timeout; locks end prompts; `copy` gated on origin and the display session's state |
+| `frontends/tray.rs` | The tray's unlock: begin, `display_allows_prompt`, ask on screen, finish |
 | `main.rs`, `frontends/control/client/tty.rs` | `kpa unlock` passes `/dev/tty`, waits for the daemon after an interrupt, and has `--tty` |
 
 **Tests**
@@ -335,13 +320,7 @@ stays refused while it is locked (§ 5).
 - Version skew: a request of the previous protocol version gets
   `version_mismatch`.
 
-**Phases**, each leaving a usable state:
-
-1. Prompt timeout and locks end prompts. These help the desktop today.
-2. Classification, `no_prompt`, terminal unlock.
-3. `copy` gated on origin and the display session's state.
-
-## 10. Open questions
+## 9. Open questions
 
 1. **Shared terminal servers.** Should config be able to name a service
    whose shells count as the desktop? That would bring back the graphical

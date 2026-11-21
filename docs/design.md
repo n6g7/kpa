@@ -4,7 +4,6 @@ A small, read-only KeePass agent: holds one or more `.kdbx` files unlocked
 in memory and serves lookups to a launcher and a CLI over a Unix socket.
 
 Background and the research this rests on is in [`background.md`](./background.md).
-Staging is in [`plan.md`](./plan.md).
 
 ## Scope
 
@@ -624,11 +623,6 @@ overnight, secrets in shell scrollback — and that is the whole claim.
 (clipboard), `zeroize`, `rustix`
 and `libc` (`SO_PEERPIDFD`, which `rustix` lacks).
 Threads over async unless `ksni`'s runtime choice makes tokio simpler.
-
-## Staging
-
-See [`plan.md`](./plan.md) — several sequential steps, each with a testable
-intermediate state. Total is roughly 900 LoC of Rust.
 
 ## Deferred
 

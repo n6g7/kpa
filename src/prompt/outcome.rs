@@ -7,8 +7,7 @@ use std::io;
 use zeroize::Zeroizing;
 
 /// How a prompt ended. `T` is what an answered prompt yields: by default
-/// what the user typed, as [`PromptQueue::secret`](super::PromptQueue::secret)
-/// returns it.
+/// what the user typed, as [`Prompt::ask`](super::Prompt::ask) returns it.
 pub enum PromptOutcome<T = Zeroizing<String>> {
     /// The user dismissed the prompt rather than answering it — for a
     /// prompt program, an unsuccessful exit; for a terminal, its hang-up or
@@ -68,9 +67,9 @@ impl<T> PromptOutcome<T> {
     }
 }
 
-/// Redacts the answer, same reasoning as `UnlockRequest`'s own `Debug`
-/// (`docs/headless.md` § 9): this is cheap insurance against it ending up
-/// in a test failure message or a future `{:?}` log line.
+/// Redacts the answer, which can be a password: this is cheap insurance
+/// against it ending up in a test failure message or a future `{:?}` log
+/// line.
 impl<T> std::fmt::Debug for PromptOutcome<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

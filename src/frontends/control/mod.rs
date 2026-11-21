@@ -1,5 +1,5 @@
 //! kpa's own socket: the front end `kpa status`, `unlock`, `lock`, `list`,
-//! `copy` and `ssh keys` talk to. [`serve`] is the transport, [`Api`] answers
+//! `copy` and `ssh keys` talk to. [`serve`](fn@serve) is the transport, [`Api`] answers
 //! each request against the databases, and [`CopyState`] ends a clipboard
 //! offer when the unlock it came from is locked.
 

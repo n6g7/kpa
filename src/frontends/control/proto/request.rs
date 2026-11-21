@@ -115,7 +115,7 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, serde_json::Error> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
     /// Carries the version the client claimed, so the response can name it
-    /// alongside `VERSION` (`docs/plan.md` step 2 asks for exactly that).
+    /// alongside `VERSION`.
     VersionMismatch {
         client_v: u64,
     },

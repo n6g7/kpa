@@ -21,8 +21,8 @@
 # directory, so run `serve` from the repository root. A leading `~/`
 # expands to $HOME (`~user/` is refused).
 
-# Parsed today, but nothing acts on them yet: the idle timer lands in step
-# 5 and the clipboard in step 3 (docs/plan.md).
+# A database locks after idle_timeout without a request that reads it, and
+# a copied secret leaves the clipboard after clipboard_timeout.
 idle_timeout = "30m"
 clipboard_timeout = "30s"
 

@@ -1,4 +1,4 @@
-//! The clipboard (`docs/plan.md` step 3, `docs/design.md` § Clipboard).
+//! The clipboard (`docs/design.md` § Clipboard).
 //!
 //! - [`Backend`] is the primitive a real clipboard gives us: the ability to
 //!   start serving a secret as an [`Offer`]. [`WaylandBackend`] implements

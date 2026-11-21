@@ -7,7 +7,7 @@
 //! `ssh::keys` is where that wiring starts: config, key discovery and the key
 //! cache.
 //! `authz` decides what a signature request needs, and `ssh::approvals`
-//! holds the approvals that cover it. [`serve`] is the socket: it accepts
+//! holds the approvals that cover it. [`serve`](fn@serve) is the socket: it accepts
 //! connections and answers each request through the [`Agent`], which holds
 //! the databases, [`SshState`], the approvals and the prompts, and is the
 //! sign flow.

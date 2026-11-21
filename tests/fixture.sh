@@ -1,8 +1,7 @@
 #!/usr/bin/env sh
 # Builds throwaway .kdbx fixtures for the test suite using keepassxc-cli
-# (expected on PATH — not a Cargo dependency, see docs/plan.md's "Test
-# fixtures" section: "every step below tests against those, never your
-# real vault").
+# (expected on PATH — not a Cargo dependency). Every test runs against these
+# fixtures, never a real vault.
 #
 # Idempotent-ish: if $OUT already has the fixtures, does nothing, so
 # `cargo test` re-runs stay fast. Delete $OUT (or just `/tests/fixtures`)
@@ -28,8 +27,7 @@ fi
 # refuses to overwrite an existing file, so a partial set can't be topped up.
 rm -f "$PASSWORD_DB" "$KEYFILE_DB" "$KEYFILE" "$KDBX4_DB" "$HOSTILE_DB" "$FIELDS_DB" "$SSH_DB"
 
-# Password-only db with one group and one entry. The exact incantations
-# below are verbatim from docs/plan.md step 1 — keepassxc-cli's interactive
+# Password-only db with one group and one entry. keepassxc-cli's interactive
 # prompts are fed over stdin since there's no non-interactive password flag.
 #
 # Note this is a KDBX3 database, not KDBX4: keepassxc-cli 2.7.12's

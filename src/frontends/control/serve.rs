@@ -4,7 +4,7 @@
 //! The limits below (request size, I/O timeouts, concurrent connections)
 //! exist because one crashed daemon loses every unlocked database at once:
 //! nothing a client sends, and nothing the host refuses, should be able to
-//! take it down. See `docs/review-2026-09-robustness.md` findings 1–4, 7, 9.
+//! take it down (`docs/threat-model.md` G-11).
 
 use std::io::Write;
 use std::os::fd::OwnedFd;
@@ -171,8 +171,7 @@ fn log_response(response: &Response) {
 /// [`ByteCounter`]), once into a zeroizing buffer allocated at exactly that
 /// size. A `list` response holds every entry's title, username and
 /// URL, and a buffer that grows while being filled frees an unwiped copy
-/// at each reallocation — which is what survived a lock before
-/// (`docs/review-2026-09-secrets.md` finding 5).
+/// at each reallocation, and that copy would survive a lock.
 fn write_response(stream: &mut UnixStream, response: &Response) {
     let mut counter = ByteCounter(0);
     if serde_json::to_writer(&mut counter, response).is_err() {

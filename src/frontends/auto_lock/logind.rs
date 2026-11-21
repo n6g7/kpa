@@ -17,7 +17,7 @@
 //! on a non-Linux platform such as macOS, there's no logind to connect
 //! to: the watcher retries forever and the inhibitor never holds, so
 //! screen-lock and suspend never produce an event and no inhibitor is ever
-//! held. None of that panics or stops the server: databases still lock on
+//! held. None of that panics or stops the daemon: databases still lock on
 //! their own idle timer, the only trigger left.
 
 use std::collections::HashMap;

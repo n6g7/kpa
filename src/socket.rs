@@ -1,8 +1,8 @@
 //! Filesystem and socket helpers for the daemon's Unix socket: the
 //! process-wide umask guard, the owner-only bind, the socket directory
 //! check, and sending and receiving a request with a file descriptor
-//! attached. Split out of `server` so that everything that touches
-//! permissions lives in one place.
+//! attached. Everything that touches the socket's permissions lives here,
+//! in one place.
 
 use std::fs;
 use std::io::{self, IoSlice, IoSliceMut, Write};

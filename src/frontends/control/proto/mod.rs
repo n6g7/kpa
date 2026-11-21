@@ -586,9 +586,8 @@ mod tests {
         );
     }
 
-    /// `docs/plan.md` step 2 asks for "a clear error naming both versions",
-    /// and the response's own `v` is always the daemon's, never the
-    /// client's claim.
+    /// A version mismatch is "a clear error naming both versions", and the
+    /// response's own `v` is always the daemon's, never the client's claim.
     #[test]
     fn version_mismatch_names_both_versions() {
         let response = Response::Protocol(ProtocolError::VersionMismatch { client_v: 99 });

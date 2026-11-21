@@ -404,7 +404,7 @@ impl Observed {
             .unwrap_or_default()
     }
 
-    /// How many reports the server answers with a lock of everything.
+    /// How many reports the daemon answers with a lock of everything.
     fn locks(&self) -> usize {
         self.events
             .lock()
@@ -548,7 +548,7 @@ fn logind_reports_lock_triggers_and_holds_the_sleep_inhibitor_over_a_bus() {
     eventually("a lost bus to be reported", || observed.locks() == 1);
 }
 
-/// The display session's state as published to the server: its id
+/// The display session's state as published to the daemon: its id
 /// and `LockedHint`, following display changes, with no session when
 /// logind reports none or the watch is lost.
 #[test]

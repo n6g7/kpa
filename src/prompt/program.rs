@@ -56,10 +56,9 @@ impl Backend<Zeroizing<String>> for SecretProgram {
     /// grows. That's the point: `Command::output()` collects into a `Vec`
     /// that reallocates as it fills, and every reallocation frees an unwiped
     /// copy of what it held so far — for a long passphrase, most of it
-    /// survived both unlock and lock (`docs/review-2026-09-secrets.md`
-    /// finding 1). Output longer than `MAX_ANSWER_LEN` is refused rather
-    /// than accommodated. The copies kpa can't reach are the ones inside the
-    /// prompt program itself.
+    /// survived both unlock and lock. Output longer than `MAX_ANSWER_LEN` is
+    /// refused rather than accommodated. The copies kpa can't reach are the
+    /// ones inside the prompt program itself.
     fn show(
         &self,
         message: &str,

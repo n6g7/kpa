@@ -254,7 +254,7 @@ fn malformed_file_errors_without_panicking() {
 
 /// A legacy KDB file whose header parses far enough to reach `keepass`'s
 /// short-field reads, which index past the end of the buffer and panic
-/// (docs/review-2026-09-robustness.md finding 8). The unlock must turn
+/// (`keepass` indexes past the end of a short header field). The unlock must turn
 /// that into `Corrupt` rather than unwinding into its caller. Generated
 /// here, so no committed fixture: a 124-byte header (KDB signatures, flags
 /// = 2) plus 16 zero bytes, with a keyfile and no password.
