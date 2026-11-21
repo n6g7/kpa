@@ -65,6 +65,28 @@ fn unlocked_inactive(session: &str) -> DisplaySession {
     }
 }
 
+/// Any peer may send anything to anyone, and call anyone.
+const OPEN_POLICY: &str = "<allow send_destination=\"*\" eavesdrop=\"true\"/>\
+                           <allow eavesdrop=\"true\"/>\
+                           <allow own=\"*\"/>";
+
+/// The system bus's stock default policy: every user may connect, send
+/// signals (to anyone, whatever they subscribed to) and receive them, and
+/// call the bus itself and logind, but not other peers.
+const STOCK_POLICY: &str = "<allow user=\"*\"/>\
+                            <allow own=\"*\"/>\
+                            <deny send_type=\"method_call\"/>\
+                            <allow send_type=\"signal\"/>\
+                            <allow send_requested_reply=\"true\" send_type=\"method_return\"/>\
+                            <allow send_requested_reply=\"true\" send_type=\"error\"/>\
+                            <allow receive_type=\"method_call\"/>\
+                            <allow receive_type=\"method_return\"/>\
+                            <allow receive_type=\"error\"/>\
+                            <allow receive_type=\"signal\"/>\
+                            <allow send_destination=\"org.freedesktop.DBus\" \
+                                   send_interface=\"org.freedesktop.DBus\"/>\
+                            <allow send_destination=\"org.freedesktop.login1\"/>";
+
 /// A `dbus-daemon` on a socket inside a temp directory, killed on drop.
 struct PrivateBus {
     child: Child,
@@ -74,6 +96,10 @@ struct PrivateBus {
 
 impl PrivateBus {
     fn start() -> PrivateBus {
+        PrivateBus::with_policy(OPEN_POLICY)
+    }
+
+    fn with_policy(policy: &str) -> PrivateBus {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("bus");
         let stderr_path = dir.path().join("dbus-daemon.stderr");
@@ -87,11 +113,7 @@ impl PrivateBus {
                 "<busconfig>\
                  <type>session</type>\
                  <listen>unix:path={}</listen>\
-                 <policy context=\"default\">\
-                 <allow send_destination=\"*\" eavesdrop=\"true\"/>\
-                 <allow eavesdrop=\"true\"/>\
-                 <allow own=\"*\"/>\
-                 </policy>\
+                 <policy context=\"default\">{policy}</policy>\
                  </busconfig>",
                 socket.display()
             ),
@@ -436,6 +458,11 @@ impl Observed {
             .count()
     }
 
+    /// Every event the watcher has sent, in order.
+    fn reported(&self) -> Vec<Event> {
+        self.events.lock().unwrap().clone()
+    }
+
     fn clear(&self) {
         self.events.lock().unwrap().clear();
     }
@@ -736,10 +763,10 @@ fn unlock_all(databases: &Databases) {
     assert!(databases.any_unlocked());
 }
 
-#[test]
-fn auto_lock_locks_everything_and_follows_the_display_session_over_a_bus() {
-    let mut bus = PrivateBus::start();
-    let mock = MockLogind::start(&bus.address);
+/// One database, locked by the real `auto_lock` front end watching the bus at
+/// `address`. Returns the databases and the display session `auto_lock`
+/// writes.
+fn auto_locked(address: &str) -> (Arc<Databases>, display_session::DisplayHandle) {
     let config = Config::parse(&format!(
         "[[database]]\nname = \"personal\"\npath = {:?}\n",
         common::password_db().display().to_string()
@@ -747,12 +774,20 @@ fn auto_lock_locks_everything_and_follows_the_display_session_over_a_bus() {
     .unwrap();
 
     let (writer, display) = display_session::channel();
-    let (hold, auto_lock) = auto_lock::start(Source::at(bus.address.clone()), writer);
+    let (hold, auto_lock) = auto_lock::start(Source::at(address), writer);
     let mut databases = Databases::new(config.databases.clone(), Duration::from_secs(3600));
     databases.observe(Arc::new(hold));
     let databases = Arc::new(databases);
     let running = databases.clone();
     thread::spawn(move || auto_lock.run(running, Duration::from_secs(3600)));
+    (databases, display)
+}
+
+#[test]
+fn auto_lock_locks_everything_and_follows_the_display_session_over_a_bus() {
+    let mut bus = PrivateBus::start();
+    let mock = MockLogind::start(&bus.address);
+    let (databases, display) = auto_locked(&bus.address);
 
     // A Lock signal sent before the watcher subscribes is lost, so keep
     // sending until one locks.
@@ -815,4 +850,190 @@ fn auto_lock_locks_everything_and_follows_the_display_session_over_a_bus() {
         !databases.any_unlocked()
     });
     assert_eq!(display.get(), DisplaySession::None);
+}
+
+/// A second client of the bus. Under the stock policy it can't call anyone
+/// but the bus and logind, but it can send a signal to any connection, and
+/// the receiver's match rules don't apply to a signal sent to it.
+struct Attacker {
+    conn: Connection,
+}
+
+impl Attacker {
+    fn start(address: &str) -> Attacker {
+        Attacker {
+            conn: Builder::address(address).unwrap().build().unwrap(),
+        }
+    }
+
+    /// Sends every other connection but `mock`'s the three signals that
+    /// would change what the watcher reports if they came from logind (the
+    /// display session's `LockedHint` clearing, the user's `Display` moving
+    /// to another session, `PrepareForSleep(true)`) and a report from the bus
+    /// that logind's name lost its owner. Returns once the bus has passed
+    /// them on, so anything sent after it arrives after them.
+    fn spoof_logind(&self, mock: &MockLogind) {
+        let mine = self.conn.unique_name().unwrap().to_string();
+        let logind = mock.conn.unique_name().unwrap().to_string();
+        let names: Vec<String> = self.bus_call("ListNames").body().deserialize().unwrap();
+        for victim in names
+            .iter()
+            .filter(|name| name.starts_with(':') && **name != mine && **name != logind)
+        {
+            let to = Some(victim.as_str());
+            self.properties_changed(
+                to,
+                SESSION_1,
+                "org.freedesktop.login1.Session",
+                "LockedHint",
+                Value::from(false),
+            );
+            self.properties_changed(
+                to,
+                USER,
+                "org.freedesktop.login1.User",
+                "Display",
+                Value::from((
+                    session_id(SESSION_2),
+                    OwnedObjectPath::try_from(SESSION_2).unwrap(),
+                )),
+            );
+            self.conn
+                .emit_signal(
+                    to,
+                    MANAGER,
+                    "org.freedesktop.login1.Manager",
+                    "PrepareForSleep",
+                    &true,
+                )
+                .unwrap();
+            self.conn
+                .emit_signal(
+                    to,
+                    "/org/freedesktop/DBus",
+                    "org.freedesktop.DBus",
+                    "NameOwnerChanged",
+                    &("org.freedesktop.login1", logind.as_str(), ""),
+                )
+                .unwrap();
+        }
+        self.bus_call("GetId");
+    }
+
+    fn bus_call(&self, method: &str) -> zbus::Message {
+        self.conn
+            .call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                method,
+                &(),
+            )
+            .unwrap()
+    }
+
+    fn properties_changed(
+        &self,
+        to: Option<&str>,
+        path: &str,
+        iface: &str,
+        name: &str,
+        value: Value<'_>,
+    ) {
+        let mut changed: HashMap<&str, Value<'_>> = HashMap::new();
+        changed.insert(name, value);
+        self.conn
+            .emit_signal(
+                to,
+                path,
+                "org.freedesktop.DBus.Properties",
+                "PropertiesChanged",
+                &(iface, changed, Vec::<&str>::new()),
+            )
+            .unwrap();
+    }
+}
+
+/// A peer that sends signals straight to kpa's connection can't pass for
+/// logind: they're delivered whatever kpa subscribed to, and only their
+/// sender tells them from logind's. Under the stock policy a second client
+/// sends the display session's `LockedHint` clearing, the user's `Display`
+/// moving to another session and `PrepareForSleep(true)` to every other
+/// connection on the bus. The watcher reports nothing of it, the display
+/// session stays locked, a `Lock` from logind still locks, and an unlock
+/// still takes the sleep inhibitor.
+#[test]
+fn signals_from_a_peer_other_than_logind_are_ignored_over_a_bus() {
+    let bus = PrivateBus::with_policy(STOCK_POLICY);
+    let mock = MockLogind::start(&bus.address);
+    // Locked before kpa subscribes, so it reads the hint on subscribing.
+    mock.set_hint(SESSION_1, true);
+
+    // The watcher on its own, for what it reports...
+    let (events, _inhibitor) = watch(&bus.address);
+    let observed = observe(events);
+    // ...and the front end around one, for what that does with it.
+    let (databases, display) = auto_locked(&bus.address);
+    eventually("a locked display session", || {
+        observed.display_session() == locked("31") && display.get() == locked("31")
+    });
+    unlock_all(&databases);
+    eventually("the sleep inhibitor to be taken", || {
+        mock.inhibitor_count() == 1 && !mock.last_inhibitor_released()
+    });
+
+    Attacker::start(&bus.address).spoof_logind(&mock);
+
+    // logind's own `Lock` came after the spoofs, so once it is reported they
+    // have been dealt with.
+    mock.lock_signal(SESSION_1);
+    eventually("the Lock from logind to be reported", || {
+        observed.reported().len() > 1
+    });
+    assert_eq!(
+        observed.reported(),
+        [Event::DisplayChanged(locked("31")), Event::LockRequested]
+    );
+    assert_eq!(display.get(), locked("31"));
+    eventually("the Lock from logind to lock everything", || {
+        !databases.any_unlocked()
+    });
+    eventually("the inhibitor to be released", || {
+        mock.last_inhibitor_released()
+    });
+
+    unlock_all(&databases);
+    eventually("an unlock to take the sleep inhibitor", || {
+        mock.inhibitor_count() == 2 && !mock.last_inhibitor_released()
+    });
+}
+
+/// A new logind is a new connection with the same name. The watch resolved
+/// the old one, so it ends (everything locks) and the next one follows the
+/// new logind, whose messages the old one would have refused.
+#[test]
+fn a_restarted_logind_is_a_lost_watch_and_the_next_one_follows_it_over_a_bus() {
+    let bus = PrivateBus::with_policy(STOCK_POLICY);
+    let mock = MockLogind::start(&bus.address);
+    let (events, _inhibitor) = watch(&bus.address);
+    let observed = observe(events);
+    eventually("the first display session state", || {
+        observed.display_session() == unlocked("31")
+    });
+
+    drop(mock);
+    eventually("a lost watch", || {
+        observed.display_session() == DisplaySession::None
+    });
+    assert_eq!(observed.locks(), 1, "the lost watch locks everything");
+
+    let restarted = MockLogind::start(&bus.address);
+    restarted.set_hint(SESSION_1, true);
+    eventually("the restarted logind's display session state", || {
+        observed.display_session() == locked("31")
+    });
+    restarted.set_hint(SESSION_1, false);
+    eventually("the restarted logind's changes", || {
+        observed.display_session() == unlocked("31")
+    });
 }
