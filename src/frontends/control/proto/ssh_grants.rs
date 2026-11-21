@@ -23,7 +23,7 @@ pub struct WireGrant {
     /// signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_in: Option<u64>,
-    /// How it was given: `on_screen` or `ssh_approve`.
+    /// How it was given: `on_screen` or `cli`.
     pub by: String,
     /// The signatures it has covered.
     pub uses: u64,
@@ -72,7 +72,7 @@ mod tests {
         let mut one_signature = grant();
         one_signature.remember = false;
         one_signature.expires_in = Some(42);
-        one_signature.by = "ssh_approve".to_string();
+        one_signature.by = "cli".to_string();
 
         let kept = serde_json::to_value(grant()).expect("serializes");
         assert_eq!(kept["granted_at"], 1_700_000_000);

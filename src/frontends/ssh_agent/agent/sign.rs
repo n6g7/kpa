@@ -1410,7 +1410,7 @@ mod tests {
 
         let grants = fx.grants();
         assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].by, GrantSource::SshApprove);
+        assert_eq!(grants[0].by, GrantSource::Cli);
         assert_eq!(grants[0].uses, 0);
         assert!(grants[0].time_left(Instant::now()).is_some());
 

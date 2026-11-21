@@ -55,8 +55,8 @@ pub fn render(answer: &Grants, now: SystemTime) -> String {
             &lasts(grant),
             &age(now, grant.granted_at),
             match grant.by.as_str() {
-                "ssh_approve" => "kpa ssh approve",
-                _ => "screen",
+                "on_screen" => "screen",
+                by => by,
             },
             &grant.uses.to_string(),
             &format!("in {}", span(grant.idle_lock_in)),
@@ -127,7 +127,7 @@ mod tests {
         once.scope.forwarding_host = Some(KEY.parse().expect("a fingerprint"));
         once.remember = false;
         once.expires_in = Some(42);
-        once.by = "ssh_approve".to_string();
+        once.by = "cli".to_string();
         once.uses = 0;
         once.granted_at = NOW - 4;
 
@@ -142,9 +142,9 @@ mod tests {
             text,
             format!(
                 "\
-KEY         DATABASE  DESTINATION                                         FORWARDING HOST                                     LASTS                  AGE  GRANTED BY       USES  IDLE LOCK
-github      personal  {DESTINATION}  -                                                   until lock             1m   screen           3     in 29m
-deploy-key  personal  -                                                   {KEY}  1 signature, 42s left  4s   kpa ssh approve  0     in 29m
+KEY         DATABASE  DESTINATION                                         FORWARDING HOST                                     LASTS                  AGE  GRANTED BY  USES  IDLE LOCK
+github      personal  {DESTINATION}  -                                                   until lock             1m   screen      3     in 29m
+deploy-key  personal  -                                                   {KEY}  1 signature, 42s left  4s   cli         0     in 29m
 
 `kpa lock <database>` drops a database's approvals. IDLE LOCK is when the database locks if nothing uses it.
 "

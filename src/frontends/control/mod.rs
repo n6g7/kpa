@@ -285,7 +285,7 @@ impl Api {
             for grant in self.approvals.granted(&open, now) {
                 let by = match grant.by {
                     GrantSource::OnScreen => "on_screen",
-                    GrantSource::SshApprove => "ssh_approve",
+                    GrantSource::Cli => "cli",
                 };
                 let expires_in = grant.time_left(now).map(|left| left.as_secs());
                 grants.push(WireGrant {
@@ -617,7 +617,7 @@ mod tests {
 
         let grants = fx.api.ssh_grants();
         assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].by, "ssh_approve");
+        assert_eq!(grants[0].by, "cli");
         assert!(grants[0].remember);
         assert_eq!((grants[0].uses, grants[0].expires_in), (0, None));
         assert!(grants[0].idle_lock_in > 0);

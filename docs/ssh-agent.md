@@ -629,7 +629,7 @@ uid (NG-1). Each grant, oldest first within its database, is:
 - `remember`: `true` for an approval kept until lock, `false` for one that
   covers a single signature, which also has `expires_in`, the seconds its
   retry window still has;
-- `by`: `on_screen` for an `Allow` on the confirm prompt, `ssh_approve` for
+- `by`: `on_screen` for an `Allow` on the confirm prompt, `cli` for
   `kpa ssh approve`;
 - `uses`, the signatures it has covered. A signature counts once it is
   made. The signature the user allowed on screen counts as the first. A
@@ -651,7 +651,7 @@ uid (NG-1). Each grant, oldest first within its database, is:
 
 The table's columns are KEY, DATABASE, DESTINATION, FORWARDING HOST, LASTS
 (`until lock`, or `1 signature, 42s left`), AGE, GRANTED BY (`screen` or
-`kpa ssh approve`), USES and IDLE LOCK. A locked database lists nothing,
+`cli`), USES and IDLE LOCK. A locked database lists nothing,
 since a lock drops its approvals. There is no way to revoke one: `kpa lock
 <database>` drops a database's.
 

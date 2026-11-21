@@ -17,7 +17,7 @@ pub enum Lasts {
     /// a forwarded login's.
     UntilLock,
     /// For one signature, which has to come before `until`: a `confirm =
-    /// "always"` key's, approved by `ssh_approve`.
+    /// "always"` key's, approved by `kpa ssh approve`.
     OneSignature { until: Instant },
 }
 
@@ -26,8 +26,9 @@ pub enum Lasts {
 pub enum GrantSource {
     /// `Allow` on the confirm prompt.
     OnScreen,
-    /// `kpa ssh approve`, for a request that was refused.
-    SshApprove,
+    /// The command line: `kpa ssh approve`, for a request that was
+    /// refused.
+    Cli,
 }
 
 /// One approval the user gave: what it covers, how long, and what it has
@@ -125,7 +126,7 @@ impl GrantedApprovals {
         window: Duration,
     ) {
         if approval.remember {
-            self.grant(approval.scope, key, GrantSource::SshApprove, wall);
+            self.grant(approval.scope, key, GrantSource::Cli, wall);
         } else {
             self.0
                 .retain(|grant| grant.scope != approval.scope && !grant.expired(now));
@@ -136,7 +137,7 @@ impl GrantedApprovals {
                     until: now + window,
                 },
                 granted_at: wall,
-                by: GrantSource::SshApprove,
+                by: GrantSource::Cli,
                 uses: 0,
             });
         }
@@ -240,7 +241,7 @@ mod tests {
         approvals.grant(
             scope.clone(),
             key(),
-            GrantSource::SshApprove,
+            GrantSource::Cli,
             wall + Duration::from_secs(5),
         );
 
@@ -263,7 +264,7 @@ mod tests {
         let later = now + Duration::from_secs(15);
         let listed: Vec<_> = approvals.list(later).collect();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].by, GrantSource::SshApprove);
+        assert_eq!(listed[0].by, GrantSource::Cli);
         assert_eq!(
             listed[0].time_left(later),
             Some(WINDOW - Duration::from_secs(15))
