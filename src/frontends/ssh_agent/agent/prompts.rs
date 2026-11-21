@@ -13,6 +13,7 @@
 
 use std::sync::MutexGuard;
 
+use super::message::Host;
 use super::request::Request;
 use super::sign::{Asked, Lacking, Refused};
 use super::{Agent, message};
@@ -22,6 +23,7 @@ use crate::databases::{Begin, BeginError, UnlockFailure};
 use crate::prompt::Declined;
 use crate::ssh::approvals::SignatureApproval;
 use crate::ssh::keys::ServedKey;
+use ssh_key::public::KeyData;
 
 impl Refused {
     /// Whether this is the user declining to answer a prompt, as opposed to
@@ -125,11 +127,12 @@ impl Agent {
         request: &Request<'_>,
         asked: &Asked,
     ) -> Result<(), Refused> {
+        let (destination, forwarding) = self.hosts(request);
         let message = message::approval(
             key,
             &request.purpose,
-            request.destination(),
-            self.known_hosts_name(request).as_deref(),
+            destination.as_ref(),
+            forwarding.as_ref(),
         );
         self.confirm_prompt
             .ask(&message, &asked.unlock)
@@ -160,11 +163,12 @@ impl Agent {
         if !may_prompt_on_screen(requester, &self.display.get()) {
             return Err(Refused::Locked);
         }
+        let (destination, forwarding) = self.hosts(request);
         let message = message::unlock(
             key,
             &request.purpose,
-            request.destination(),
-            self.known_hosts_name(request).as_deref(),
+            destination.as_ref(),
+            forwarding.as_ref(),
         );
         let password = self
             .screen_unlock
@@ -182,11 +186,21 @@ impl Agent {
             })
     }
 
-    /// The host name `known_hosts` gives the connection's destination, if
-    /// it is bound to one that has one.
-    fn known_hosts_name(&self, request: &Request<'_>) -> Option<String> {
-        let path = self.known_hosts.as_deref()?;
-        message::known_hosts_name(path, request.destination()?)
+    /// The hosts a message names, each with the name `known_hosts` gives it
+    /// if it has one: the connection's destination, if it is bound to one,
+    /// and the host it is forwarded through, if it is forwarded.
+    fn hosts<'r>(&self, request: &'r Request<'_>) -> (Option<Host<'r>>, Option<Host<'r>>) {
+        let host = |key: &'r KeyData| Host {
+            name: self
+                .known_hosts
+                .as_deref()
+                .and_then(|path| message::known_hosts_name(path, key)),
+            key,
+        };
+        (
+            request.destination().map(host),
+            request.forwarding_host().map(host),
+        )
     }
 
     /// Holds `db`'s prompts back, as a prompt the user cancelled or left

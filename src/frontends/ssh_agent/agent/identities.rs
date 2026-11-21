@@ -74,6 +74,9 @@ impl Agent {
     /// requester is told. A key that is refused for no remedy, a forwarded
     /// connection's included, has none to give.
     fn remedy(&self, key: &keys::ServedKey, class: &ConnectionClass) -> Option<String> {
+        if class.is_forwarded() {
+            return None;
+        }
         // The purpose only matters to a login's session check, which doesn't
         // change what the key needs.
         let approval = authorize_sign(key, class, &Purpose::Other, None).ok()?;
@@ -349,7 +352,7 @@ mod tests {
     }
 
     fn scope(key: &PrivateKey) -> Scope {
-        Scope::new(key.public_key().fingerprint(HashAlg::Sha256), None)
+        Scope::local(key.public_key().fingerprint(HashAlg::Sha256), None)
     }
 
     /// A requester outside the desktop is told what to run, and only while

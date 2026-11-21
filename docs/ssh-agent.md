@@ -35,9 +35,7 @@ routing, prompt timeouts and unlocking from a terminal.
   `ssh -A`. The first forwarded signature per key, forwarding session,
   forwarding host and destination asks on this machine's screen. Over a
   forwarded connection kpa signs SSH logins only, never arbitrary data. A
-  key can be kept off forwarding entirely. **Not built yet:** kpa tells
-  forwarded connections apart and lists them only the keys allowed on them,
-  but refuses every forwarded signature.
+  key can be kept off forwarding entirely.
 - **No prompt where nobody can see it.** A request from outside the desktop
   (an SSH login, a terminal-server shell), or while the screen is locked,
   never raises a prompt on screen. If it only lacks an approval, kpa
@@ -144,7 +142,7 @@ once per key and destination until lock by default.
 | --- | ------------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
 | S1  | At the desk: `ssh`, `git push`, an IDE                       | No binding, or an authentication binding from the local `ssh`           | Unlock prompt naming the key and destination, then the confirm prompt for a key that needs one | Sign if the key is approved for that destination. Otherwise a confirm prompt first                          |
 | S2  | Commit or tag signing (`ssh-keygen -Y sign`)                 | `SSHSIG` data, no binding                                               | As S1                                                                    | As S1                                                                                      |
-| S3  | `ssh -A` from here; the remote host uses the key (not built yet, § 1) | First binding has `is_forwarding` (§ 6.2)                               | Unlock prompt naming the forwarding host and destination, then the confirm prompt for the forwarding session | Sign if this forwarding session is approved for the key and destination. Otherwise a confirm prompt first. SSH logins only. A key with `forwarded = false` is neither listed nor used |
+| S3  | `ssh -A` from here; the remote host uses the key | First binding has `is_forwarding` (§ 6.2)                               | Unlock prompt naming the forwarding host and destination, then the confirm prompt for the forwarding session | Sign if this forwarding session is approved for the key and destination. Otherwise a confirm prompt first. SSH logins only. A key with `forwarded = false` is neither listed nor used |
 | S4  | Working on this machine from elsewhere, with no agent forwarded: an SSH login, a terminal-server shell | The requester runs outside the desktop (§ 6.8) | Refused, no prompt. `kpa unlock` in that shell asks on the terminal (§ 6.10) | Sign if approved for that destination. Otherwise refused and remembered; `kpa ssh pending` lists it and `kpa ssh approve <id>` approves it, and the retry signs (§ 6.8). An `ssh -A` started from that shell works the same way |
 | S5  | Screen locked or machine suspended                           | logind (existing lock policy)                                           | Everything is already locked. No prompt                                  | Not possible: a screen lock locks every database                                           |
 | S6  | Background jobs: user timers, IDE auto-fetch                 | Indistinguishable from S1. Jobs outside the user manager (cron, system services) fall under S4 | Unlock prompt, with backoff after a cancel (§ 6.6)    | As S1: one confirm prompt per key per destination per unlock, with backoff after a cancel |
@@ -401,7 +399,7 @@ confirm prompt's words (§ 6.7): "Unlock database personal to use key
 database personal to use key "github" to log in to git@github.com?" for
 one bound to a destination. A key without a `name` override is named
 `<database> <fingerprint>` there, since the vault is locked and its entry
-titles are unknown. Answering it approves nothing: the confirm prompt
+titles are unknown, cut to the key name's length budget. Answering it approves nothing: the confirm prompt
 follows it for a key that needs one (§ 6.7). `prompt` runs exactly as configured; kpa sets
 `KPA_PROMPT_MESSAGE` in its environment instead, so a prompt program that
 reads it — directly, or through a wrapper script — can show the reason:
@@ -438,12 +436,13 @@ Two per-key settings decide when a signature needs approval:
     database locks.
   - `"always"`: every signature asks, forwarded ones included.
   - `"never"`: local signatures never ask.
-- **`forwarded`**, for use through `ssh -A` (approvals not built yet, § 1):
+- **`forwarded`**, for use through `ssh -A`:
   - `true` (default): the first signature per (key, forwarding session,
     forwarding host, destination) asks. The approval holds until the
-    database locks or the forwarding session ends, whichever comes first.
-    Forwarded use always needs an approval: `confirm = "never"` doesn't
-    exempt it.
+    database locks; a later `ssh -A` session never reuses it. At most 64
+    forwarded approvals are kept per database unlock, and past that the
+    oldest is dropped. Forwarded use always needs an approval: `confirm =
+    "never"` doesn't exempt it.
   - `false`: the key is neither listed nor used over a forwarded
     connection.
 
@@ -478,15 +477,20 @@ is one question, "Approve use of key (name) to (purpose)?":
 | Login, bound to any other host | `Approve use of key "github" to log in as git to host key SHA256:…?` |
 | `SSHSIG` | `Approve use of key "github" to sign for namespace git?`, with `on github.com` or `on host key SHA256:…` after the namespace for a bound connection |
 | Anything else | `Approve use of key "github"?`, with the same `on …` for a bound connection |
+| Forwarded login, through a host `~/.ssh/known_hosts` names, to a host it names | `Approve use of key "github" on build-box to log in to git@github.com?` |
+| Forwarded login, through a host it doesn't name | `Approve use of key "github" on host key SHA256:… to log in to git@github.com?`, the destination worded as above |
 
 The destination is the connection's last binding's host key, named by the
 host name `~/.ssh/known_hosts` has an unhashed entry for, else by its
-fingerprint. Every piece that comes from outside kpa's own text (the key
+fingerprint. On a forwarded connection the forwarding host, the first
+binding's host key, is named the same way after the key, and the unlock
+prompt (§ 6.6) says the same: `Unlock database personal to use key "github"
+on build-box to log in to git@github.com?`. Every piece that comes from outside kpa's own text (the key
 name, the database name, the remote user, the namespace, the host name)
 passes through the escaping the CLI uses for terminal output (T-13), with
 tab and newline escaped too so the message stays one line, and gets its
 own length budget, so no piece can push the destination past the prompt's
-cap. The key name's quotes are escaped, so a name can't end its quotation
+cap (the worst message is 251 bytes). The key name's quotes are escaped, so a name can't end its quotation
 and carry on the sentence.
 
 Approvals live in memory only and are dropped on lock. A forwarded
@@ -515,7 +519,8 @@ Two points are specific to the agent:
 needs an approval is refused, and kpa remembers it as pending:
 
 - a random id, the approval it asks for (the key, the destination of a
-  bound connection, and whether it is kept until lock), what the request
+  bound connection, the forwarding host of a forwarded one, and whether it
+  is kept until lock), what the request
   was (the purpose, the connection class, the remote user or the
   namespace, the requester's command name), and the time it was last
   refused;
@@ -545,16 +550,20 @@ refused:
       "name": "github", "entry": "3f2a9c1e-5b7d-4e08-8a62-1d4c9b0e7f35",
       "title": "GitHub", "attachment": "id_ed25519"
     },
-    "destination": "SHA256:…"
+    "destination": "SHA256:…",
+    "forwarding_host": "SHA256:…"
   },
   "remember": true,
-  "request": { "purpose": "login", "user": "git", "class": "local, bound", "command": "ssh" }
+  "request": { "purpose": "login", "user": "git", "class": "forwarded", "command": "ssh" }
 }
 ```
 
 `scope.key` is the object `ssh_keys` reports for a key, with the key's
 `name` (its override's, else its entry's title) and its entry's `entry`
-uuid. `destination` is there for a bound connection only, `request.user`
+uuid. `destination` is there for a bound connection only, and
+`forwarding_host`, the forwarding host's host key, for a forwarded one
+(`kpa ssh pending` shows it as FORWARDING HOST; the forwarding session
+identifier itself is never shown). `request.user`
 for a login and `request.namespace` for an `SSHSIG`. Titles, names, users
 and command names reach the caller of this request, and never the
 daemon's log.

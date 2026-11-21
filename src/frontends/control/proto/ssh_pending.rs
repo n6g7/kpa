@@ -27,14 +27,18 @@ pub struct WirePending {
     pub request: WireRequestDetails,
 }
 
-/// What an approval covers: a key, and for a bound connection the
-/// destination it was bound to.
+/// What an approval covers: a key, for a bound connection the destination
+/// it was bound to, and for a forwarded one the host it is forwarded through
+/// (the approval covers that one forwarding session).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WireScope {
     pub key: WireSshKey,
     /// The destination's host key, of a bound connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<Fingerprint>,
+    /// The forwarding host's host key, of a forwarded connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarding_host: Option<Fingerprint>,
 }
 
 /// What a refused request was.
@@ -48,8 +52,8 @@ pub struct WireRequestDetails {
     /// The namespace, of an `sshsig`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
-    /// How the requester's connection was classified: `local` or `local,
-    /// bound`.
+    /// How the requester's connection was classified: `local`, `local,
+    /// bound` or `forwarded`.
     pub class: String,
     /// The requester's command name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,6 +83,7 @@ mod tests {
                     attachment: "id_ed25519".to_string(),
                 },
                 destination: Some(KEY.parse().expect("a fingerprint")),
+                forwarding_host: None,
             },
             remember: true,
             request: WireRequestDetails {
@@ -133,6 +138,7 @@ mod tests {
                     ..pending().scope.key
                 },
                 destination: None,
+                forwarding_host: None,
             },
             request: WireRequestDetails {
                 user: None,
@@ -145,6 +151,7 @@ mod tests {
         let json = serde_json::to_value(&bare).expect("serializes");
 
         assert!(json["scope"].get("destination").is_none());
+        assert!(json["scope"].get("forwarding_host").is_none());
         assert!(json["scope"]["key"].get("title").is_none());
         assert!(json["request"].get("user").is_none());
         assert!(json["request"].get("command").is_none());

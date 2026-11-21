@@ -27,25 +27,58 @@ use crate::cancel::CancelToken;
 use crate::databases::{Databases, Observer, Open};
 
 /// What one approval covers: a key, for one destination — the last
-/// binding's host key on a `LocalBound` connection, `None` on a
-/// `LocalUnbound` one (`ssh-keygen -Y sign`, and clients other than
-/// OpenSSH's `ssh`, which never bind at all). Approving a key for one
-/// destination never covers another, or covers unbound use, and vice versa
-/// (`docs/ssh-agent.md` § 6.7). Computed once, by
-/// `ssh_agent::authz::authorize_sign`, and carried to the lookup and
-/// the grant.
+/// binding's host key on a bound connection, `None` on a `LocalUnbound` one
+/// (`ssh-keygen -Y sign`, and clients other than OpenSSH's `ssh`, which never
+/// bind at all) — and, on a forwarded connection, one forwarding session.
+/// Approving a key for one destination never covers another, or covers
+/// unbound use, and vice versa. A forwarded approval covers its forwarding
+/// session only: not another `ssh -A`, not local use, and not the same
+/// destination reached through another forwarding host (`docs/ssh-agent.md`
+/// § 6.7). Computed once, by `ssh_agent::authz::authorize_sign`, and carried
+/// to the lookup and the grant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Scope {
     key: Fingerprint,
     /// The destination's host key, by its SHA-256 fingerprint.
     destination: Option<Fingerprint>,
+    /// The forwarding session, for a forwarded connection.
+    forwarding: Option<Box<Forwarding>>,
+}
+
+/// The forwarding session a [`Scope`] is limited to: the session identifier
+/// the local `ssh` bound before the remote side could send anything, and the
+/// host it forwarded to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Forwarding {
+    session: Vec<u8>,
+    host: Fingerprint,
 }
 
 impl Scope {
-    pub fn new(key: Fingerprint, destination: Option<&KeyData>) -> Scope {
+    /// A local connection's scope, for `destination` if it is bound to one.
+    pub fn local(key: Fingerprint, destination: Option<&KeyData>) -> Scope {
         Scope {
             key,
             destination: destination.map(|dest| dest.fingerprint(HashAlg::Sha256)),
+            forwarding: None,
+        }
+    }
+
+    /// A forwarded connection's scope: forwarding session `session`, to
+    /// `host`, signing for `destination`.
+    pub fn forwarded(
+        key: Fingerprint,
+        session: &[u8],
+        host: &KeyData,
+        destination: &KeyData,
+    ) -> Scope {
+        Scope {
+            key,
+            destination: Some(destination.fingerprint(HashAlg::Sha256)),
+            forwarding: Some(Box::new(Forwarding {
+                session: session.to_vec(),
+                host: host.fingerprint(HashAlg::Sha256),
+            })),
         }
     }
 
@@ -55,6 +88,17 @@ impl Scope {
 
     pub fn destination(&self) -> Option<Fingerprint> {
         self.destination
+    }
+
+    /// The host key of the forwarding host, for a forwarded connection's
+    /// scope. The session identifier is never shown.
+    pub fn forwarding_host(&self) -> Option<Fingerprint> {
+        self.forwarding.as_ref().map(|forwarding| forwarding.host)
+    }
+
+    /// Whether this is a forwarded connection's scope.
+    fn is_forwarded(&self) -> bool {
+        self.forwarding.is_some()
     }
 }
 

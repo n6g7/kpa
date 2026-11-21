@@ -104,6 +104,10 @@ pub enum ConnectionClass {
 }
 
 impl ConnectionClass {
+    pub fn is_forwarded(&self) -> bool {
+        matches!(self, ConnectionClass::Forwarded { .. })
+    }
+
     /// The class in a few words, for a log line or a listing.
     pub fn label(&self) -> &'static str {
         match self {
