@@ -1,71 +1,406 @@
 # kpa — design
 
 A small, read-only KeePass agent: holds one or more `.kdbx` files unlocked
-in memory and serves lookups to a launcher and a CLI over a Unix socket.
+in memory, and serves lookups and secret-copy to a launcher and a CLI over a
+Unix socket, SSH signatures to `ssh` and `git` over an agent socket, and its
+lock state to a tray icon.
 
-Background and the research this rests on is in [`background.md`](./background.md).
+This doc says how kpa is put together and why; the detail of each piece is in
+the doc or the module that owns it:
+
+| Doc | Owns |
+|---|---|
+| [`protocol.md`](./protocol.md) | the wire: requests, responses, errors |
+| [`module-structure.md`](./module-structure.md) | the subsystems, who uses whom, the file layout, how tests are built |
+| [`headless.md`](./headless.md) | where a request is asked and where a copy lands, for a requester outside the desktop |
+| [`ssh-agent.md`](./ssh-agent.md) | the SSH agent: policy, approvals, the sign flow |
+| [`threat-model.md`](./threat-model.md) | what kpa claims to protect, against whom |
+| [`portability.md`](./portability.md) | the OS seams, and the rules for keeping them replaceable |
+| [`config.example.toml`](../config.example.toml) | every config key |
 
 ## Scope
 
-**Is:** a read-only index and secret-copier for `.kdbx` files, plus a tray icon
-showing lock state.
+**Is:** a read-only index and secret-copier for `.kdbx` files, an SSH agent
+that signs with the keys stored in them, and a tray icon showing lock state.
 
-**Is not:** a vault editor, an SSH agent, a Secret Service provider, a browser
-backend, or a replacement for a full-featured KeePass client. A client like
-that already covers browser autofill, an SSH agent, and its own tray. kpa
-adds the two things nothing in that ecosystem provides — free-text search
-over all entries, and a CLI that reuses an already-unlocked session.
+**Is not:** a vault editor, a Secret Service provider (an unlocked Secret
+Service collection takes new items from any app, ungated), a browser backend,
+or a replacement for a full-featured KeePass client, which already covers browser
+autofill and its own tray. kpa adds free-text search over all entries, a CLI
+that reuses an already-unlocked session, and an SSH agent that serves the keys
+straight from the daemon instead of pushing them into a separate agent.
 
 **Read-only is the defining property.** It is what makes this design safe to
 run alongside any KeePass client that already has write access to the same
-files (see `background.md` § Direction for why that guarantee matters). The
-guarantee is structural: the protocol's op enum (`Op`, in
-`src/proto/request.rs`) has no write variants, so there is no code path
-that can modify a database. `keepass` is also built without its
-`save_kdbx4` feature, which gives the claim a second leg.
+files. The guarantee is structural: the
+protocol's op enum (`Op`, in `src/frontends/control/proto/request.rs`) has no
+write variants, the agent's wire layer answers every message that adds,
+removes, locks or unlocks keys with a failure, and `keepass` is built without
+its `save_kdbx4` feature, so no code path can modify a database.
 
 ## Settled decisions
 
-| #   | Decision                                                                                                  | Rationale                                                                                                                                                                                                                     |
-| --- | --------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **Rust**                                                                                                  | `keepass` (the crate) covers KDBX3/4 + Argon2 + keyfile + (later) challenge-response; `zeroize`; single binary.                                                                                              |
-| 2   | **JSON over a Unix socket**, serde                                                                        | Fewest moving parts; hand-debuggable with `socat`; self-describing. Protobuf was considered and is defensible, but costs `protoc`, a second type system, and ~150 LoC of conversion boilerplate for no benefit at this scale. |
-| 3   | **Single binary, two roles** — `kpa serve` + client subcommands                                           | No client/daemon version skew within a release; one build artifact.                                                                                                                                                           |
-| 4   | **No `get` in v1 — `copy` only**                                                                          | The daemon owns the clipboard, so the secret never enters the client's address space. `get` would print secrets to stdout, into shell history and scrollback. Deferred, and will be opt-in behind a flag if added.            |
-| 5   | **v1 keys: master password + keyfile only**                                                               | Challenge-response deferred.                                                                                                                                                                                                  |
-| 6   | **TOTP via `keepass`'s `totp` feature, read-only**                                                       | `copy` generates the current code from the `otp` field at copy time; the seed never leaves the process. HOTP is permanently out — counters need writes.                                                                     |
-| 7   | **Idle timeout 30 min per database**, config-overridable                                                               | logind's `Lock` signal already covers screen-lock; this only catches walking away without locking.                                                                                                                            |
-| 8   | **Daemon autostarts locked**                                                                              | A tray should show state from login onward, and nothing prompts until something actually asks.                                                                                                                                |
-| 9   | **Unlock prompt: a `--dmenu`-style password prompt** (e.g. `fuzzel --password --dmenu`) in v1, config key; the terminal the client passes with its request otherwise | Trivial to wire up and fits most Wayland setups out of the box. `pinentry` is the better long-term answer for secure memory, but driving Assuan is fiddly — so the prompt is swappable from day one rather than hardcoded. A request from outside the desktop never raises it; the daemon asks on the terminal `kpa unlock` passed instead, so the password never crosses the socket (`docs/headless.md` § 4). |
-| 10  | **Multiple databases**, TOML array of tables                                                              | Per-database unlock, per-database tray state.                                                                                                                                                                                 |
-| 11  | **Linux only, with OS-neutral interfaces**                                                                | macOS support is planned, so each OS-specific part sits behind an interface a macOS implementation can share. Windows is out of scope. Rules and the list of OS seams: [`portability.md`](./portability.md).                     |
-| 12  | **Subsystem dependencies form a DAG**                                                                     | Each top-level module exports a small API and depends on others in one direction, with decisions kept pure, so it reads and tests on its own. Rules: [`module-structure.md`](./module-structure.md).                          |
+| #   | Decision | Rationale |
+| --- | --- | --- |
+| 1   | **Rust** | `keepass` (the crate) covers KDBX3/4 + Argon2 + keyfile; `zeroize`; single binary. |
+| 2   | **JSON over a Unix socket**, serde | Fewest moving parts; hand-debuggable with `socat`; self-describing. Protobuf was considered and is defensible, but costs `protoc`, a second type system, and ~150 LoC of conversion boilerplate for no benefit at this scale. |
+| 3   | **Single binary, two roles** — `kpa serve` + client subcommands | No client/daemon version skew within a release; one build artifact. |
+| 4   | **No `get` — `copy` only** | The daemon owns the clipboard, so the secret never enters the client's address space. `get` would print secrets to stdout, into shell history and scrollback. |
+| 5   | **Keys: master password + keyfile only** | Challenge-response isn't supported. |
+| 6   | **TOTP via `keepass`'s `totp` feature, read-only** | `copy` generates the current code from the `otp` field at copy time; the seed never leaves the process. HOTP is permanently out — counters need writes. |
+| 7   | **Idle timeout 30 min per database**, config-overridable | logind's `Lock` signal already covers screen-lock; this only catches walking away without locking. |
+| 8   | **Daemon autostarts locked** | A tray should show state from login onward, and nothing prompts until something actually asks. |
+| 9   | **The daemon asks for the password, never the client**: on screen through a configured `--dmenu`-style program (e.g. `fuzzel --password --dmenu`), or on the terminal the request passed | Trivial to wire up and fits most Wayland setups out of the box. The prompt is a command in config, so any program that prints the password works, `pinentry` included through a short wrapper that speaks its Assuan protocol. A request from outside the desktop is never asked on screen; the daemon asks on the terminal `kpa unlock` passed, so the password never crosses the socket (§ Unlocking). |
+| 10  | **Multiple databases**, TOML array of tables | Per-database unlock, per-database tray state. |
+| 11  | **Linux only, with OS-neutral interfaces** | macOS support is planned, so each OS-specific part sits behind an interface a macOS implementation can share. Windows is out of scope. Rules and the OS seams: [`portability.md`](./portability.md). |
+| 12  | **Subsystem dependencies form a DAG** | Each top-level module exports a small API and depends on others in one direction, with decisions kept pure, so it reads and tests on its own. Rules: [`module-structure.md`](./module-structure.md). |
+| 13  | **One stateful core, driven by front ends** | `databases` holds every database and what locks it. The front ends call it through a small Rust API and none uses another, so a new one is a new module that touches no other, and the core is tested alone. |
+| 14  | **Observers, not events, tell what a lock must clear** | State that must die with a lock belongs to the module that made it, and the core tells it through an `Observer` before the lock call returns. A `kpa lock` is then answered with the clipboard offer already ended; an event on a channel would arrive after. |
+| 15  | **The front end prompts; the core never does** | Where a prompt may appear is per requester, and its text and what its answer means differ per front end. The core hands out the token that ends the question. |
+| 16  | **Threads, not async** | `std::thread`, a core behind one mutex, and `ksni`'s blocking API. Most requests are sub-millisecond and the slow ones wait on a human, so a runtime would buy nothing. |
 
-## Architecture
+## How it is put together
+
+One long-lived daemon, `kpa serve`, and short-lived clients (every other
+`kpa <subcommand>`, and whatever speaks the socket protocol). "Your launcher"
+is deliberately generic: kpa doesn't ship or assume a particular launcher,
+tray host or keybinding scheme.
 
 ```mermaid
-graph LR
-    keybind["compositor keybind"] --> launcher["your launcher"]
-    shell["shell"] --> subcmd
-    launcher --> subcmd["kpa &lt;subcommand&gt;"]
-    subcmd -->|unix socket| serve["kpa serve"]
-
-    lock["loginctl lock-session"] --> signal["logind Lock signal"] --> serve
-
-    serve --> keepass["keepass crate<br/>(kdbx, read-only)"]
-    serve -->|ksni| tray["tray<br/>(any SNI host)"]
-    serve --> clip["src/wayland<br/>(owns clipboard offer)"]
+graph TD
+    cli["kpa CLI, launchers"] -->|"kpa socket"| control
+    client["ssh, git"] -->|"agent socket"| ssh_agent
+    bus["tray host"] <-->|"D-Bus"| tray
+    logind["logind"] -->|"events"| auto_lock
+    subgraph frontends
+        control
+        ssh_agent
+        tray
+        auto_lock
+    end
+    frontends --> databases
+    databases -. "tells observers" .-> frontends
+    control --> ssh
+    ssh_agent --> ssh
+    ssh -->|"reads"| databases
+    databases -. "tells observers" .-> ssh
+    control --> clipboard
 ```
 
-One long-lived daemon (`kpa serve`); short-lived clients (every other
-`kpa <subcommand>`). "Your launcher" and "compositor keybind" are
-deliberately generic — kpa doesn't ship or assume a particular launcher,
-tray host, or keybinding scheme. Anything that can shell out to `kpa` or
-speak the socket protocol directly works.
+`ssh` is what the first two front ends share about SSH keys and approvals. The
+dotted edges are calls the core makes through `Observer`; they are not
+dependencies. The front ends also use `prompt`, `authn` and `authz`, and read the
+display session `auto_lock` writes; [`module-structure.md`](./module-structure.md)
+has every subsystem and what it uses.
 
-## Configuration
+`databases` is the one stateful module: it holds every database and what makes
+one lock, and knows nothing about a socket, a prompt, the clipboard, a display
+session, the SSH agent or the tray (§ The core). The front ends drive it, and
+only they unlock or lock; `ssh` only reads it, through a guard a front end hands
+it. What must die with a lock is owned by whoever made it and told through an
+observer (§ Locking), and a front end prompts, never the core (§ Unlocking).
+`daemon` is the one place that wires it together and lists what reacts to a
+lock.
 
-`$XDG_CONFIG_HOME/kpa/config.toml`.
+`daemon::build` registers the observers in this order: what holds a secret
+(the clipboard offers, the approvals, the agent's keys), then the sleep hold,
+then the tray's. The order is the point: when a suspend's `lock_all` has let
+the sleep delay go, every offer has ended and every private key is gone. The
+integration tests build the daemon with the same function; the threads `serve`
+starts are listed in `daemon.rs`.
+
+## The core: `databases`
+
+`Databases` is one mutex over a slot per configured database, `Send + Sync`,
+shared as an `Arc`. An unlocked database is read through the `Open` guard,
+which holds the core's lock and carries the reads the front ends need (the
+index, one entry's field, TOTP and attachments, `touch` for activity) and never
+hands out the `keepass` database. No public signature names a `keepass` type
+and no other subsystem imports the crate, so the audit of what reads vault
+content is the call sites of those methods.
+
+Per database it owns the `Database` while unlocked, the file's fingerprint
+taken when it was read, the idle timer, an unlock-in-progress flag, and a
+source of cancel tokens that every lock covering the database replaces,
+cancelling every token taken from the one before. A token from the current
+source is *the unlock's token*: it belongs to the unlock the database is in,
+and the lock that ends that unlock cancels it for good.
+
+It decides by itself that the freshness guard runs before any access (§ Files
+and freshness); that a lock replaces the token source even for a database
+already locked, which ends a prompt still waiting for it; that an unlock
+installs only if its token is still live, so a lock beats an unlock; and that
+idle expiry is per database. What counts as activity is the front end's: it
+calls `touch`.
+
+It never prompts, reads the display session, classifies a requester, writes a
+file, spawns a thread or logs vault content. Other subsystems' tests use its
+in-memory stand-in; there is no mock of it (`module-structure.md` § Testing).
+
+## Unlocking
+
+The core owns the steps that have to be atomic; the front end owns every
+decision about the prompt. `control`'s `unlock`:
+
+```rust
+let unlocking = match databases.begin_unlock(name) {
+    Err(BeginError::UnknownDb) => return Err(UnknownDb),
+    Err(BeginError::InProgress) => return Err(InProgress),
+    Ok(Begin::AlreadyUnlocked) => return Ok(name),
+    Ok(Begin::Started(unlocking)) => unlocking,
+};
+// Read the display session only now, after the unlock's token exists.
+let place = authz::choose_unlock_prompt(requester, &display.get())?;
+let password = ask(place, unlocking.unlock_token())?;   // screen, or the passed terminal
+// An empty answer is "no password": the way to a keyfile-only database.
+unlocking.finish(Some(&password).filter(|p| !p.is_empty()))?;  // key derivation, then install
+```
+
+`begin_unlock` runs the freshness guard and takes the database's one unlock
+and its token; dropping the `Unlocking` gives the claim back, so every way out,
+a panic included, ends the unlock. `finish` derives the key outside the core's
+lock and installs only if no lock has ended the unlock meanwhile. The password
+is borrowed for the call and the core keeps no copy.
+
+The three front ends that unlock run the same four steps with their own gate:
+
+| Front end | Gate | Asks |
+|---|---|---|
+| `control` | `choose_unlock_prompt`: the place the request prefers, if a prompt may appear there; else the screen where one may; else the terminal it passed; else `no_prompt` | the screen, or a terminal prompt built for the request |
+| `ssh_agent` | `may_prompt_on_screen`: the requester is on the desktop and the display session allows a prompt | the screen, with a message naming the key and destination |
+| `tray` | `display_allows_prompt`: there is a display session and it isn't known to be locked (a click has no requester) | the screen |
+
+How a requester is classified as on or outside the desktop, and how a terminal
+is asked, are [`headless.md`](./headless.md) §§ 2–4.
+
+**Why this order.** A screen lock is "mark the display session locked, then
+lock every database". An unlock that takes its token and then reads the
+display session meets that in one of three ways: the lock came before the
+token (the read sees the mark, so no prompt is raised on screen), between the
+token and the read (the read sees the mark, and the token is already
+cancelled), or after the read (it cancels the token, which kills the prompt).
+No interleaving raises a prompt behind the locker; reading first and taking the
+token second would (read "unlocked", the whole screen lock, then a token from
+the next unlock). The order is a rule of the API, not of the types, and a test
+walks the three cases.
+
+**Refusals and bounds.** An unlock for a database whose unlock is already in
+progress is `unlock_in_progress` even from a requester who couldn't be asked:
+the claim is taken before authorization. A prompt is ended by `prompt_timeout`
+(default 60 s) or by a lock of its database, and prompts share one queue, so a
+prompt still waiting its turn is cancelled the moment its database locks.
+
+## Locking
+
+A lock drops the `Database`, cancels any unlock still in flight for it (which
+ends its prompt), and ends what that unlock made. Each of these goes at once
+([`threat-model.md`](./threat-model.md) G-5, G-6), and each belongs to the
+module that made it:
+
+| State | Owner |
+|---|---|
+| served keys, cached private keys | `ssh_agent::SshState` |
+| approvals and pending requests, entry titles included | `ssh::approvals::Approvals` |
+| the clipboard offers a `copy` started | `control::CopyState` |
+| the sleep inhibitor's hold | `auto_lock::SleepHold` |
+| the tray's display of what is unlocked | `tray::Changed` |
+| an unlock's prompt and its answer | the unlock's token |
+
+The first five are observers; the last is not.
+
+```rust
+pub trait Observer: Send + Sync {
+    /// `db` was unlocked. The core's lock is not held, so it may take it.
+    fn unlocked(&self, _databases: &Databases, _db: &str, _unlock: &CancelToken) {}
+    /// A lock covered `db`, unlocked or not. `unlock` is the token of the
+    /// unlock it ended.
+    fn locked(&self, _databases: &Databases, _db: &str, _unlock: &CancelToken) {}
+}
+```
+
+Observers run after the core's mutex is released, in the thread that caused
+the change, before the call returns: when `kpa lock` is answered, the clipboard
+offer has ended. Each tags what it holds with the token of the unlock it was
+made for and compares on every use, so a notice that arrives late for an old
+unlock can't touch a new one's state; "a lock beats an unlock" holds because
+the core's mutex orders the token check and the lock. The order they are told
+in, and the lock order between the core, the agent's state and approvals, are
+`databases/observer.rs`'s.
+
+Triggers:
+
+| Trigger | Source |
+|---|---|
+| Screen lock | logind session `Lock` signal, or `LockedHint` becoming true, on the user's display session (`User.Display` of `Manager.GetUser(uid)`). Covers `loginctl lock-session` and `IdleAction=lock`; a locker that calls neither is invisible (threat model ASM-7) |
+| Suspend | logind `PrepareForSleep(true)`: lock everything, then release the `delay` sleep inhibitor, which kpa holds while anything is unlocked. Logind allows `InhibitDelayMaxUSec` (5 s default) before sleeping regardless |
+| Lost watch | the connection to the bus drops, or logind's name changes owner (a restart): every database locks, and the subscription is re-established with backoff, resolving the new owner |
+| Idle | per database: no successful `list` of it (a `list` of all counts for each database it reads), and no `copy`, `ssh keys`, local signature or unlock that installed it, for `idle_timeout` (default 30m); `status` and `lock` don't count |
+| Explicit | `kpa lock`, or the tray menu |
+| File changed | the freshness guard, at the next request that reads the database, `status` included (§ Files and freshness) |
+
+The display session (`display_session.rs`) has one writer, `auto_lock`, and
+read-only handles for everyone else. `auto_lock` writes it *before* it locks,
+so a locked display session is marked before anything is locked and the core
+never sees a display session. Only `LockedHint` locks anything; `Active` (a VT
+switch away) never does, and only `copy`'s gate reads it.
+
+## Front ends
+
+Each front end owns its listener (or equivalent), its handlers, and how it
+learns who is asking (`authn`) and what that requester may do (`authz`: pure
+functions of a `Requester` and the display session, judged each time they are
+asked). They are different protocols with different refusals.
+
+- **`control`** is kpa's own socket: bounded transport, an `Api` with a plain
+  method per op, and `CopyState`, which keeps a record per clipboard offer and
+  ends every offer of an unlock when it is locked (a `copy` a lock overtakes
+  ends its own).
+- **`ssh_agent`** is the agent socket and its own policy. It reads a database
+  through a `Hold` (the core's guard, then its own state, then approvals); a
+  locked database lists from the public-key cache. Its unlock on demand is its
+  own four steps with its own refusals. The sign flow, turns, backoff and hints
+  are [`ssh-agent.md`](./ssh-agent.md)'s.
+- **`tray`** is a StatusNotifierItem over D-Bus (`ksni`): icon, tooltip and a
+  per-database Lock / Unlock menu. No tray host, or one that disappears and
+  returns, is a normal state. It has no requester, so its one gate is
+  `display_allows_prompt`, and it learns of every lock through an observer that
+  only sends on a channel, since a menu "Lock" runs inside the service's lock.
+- **`auto_lock`** is the OS side of the lock triggers: `logind.rs` watches the
+  display session, a lock request, suspend and the watch itself, and holds the
+  sleep inhibitor; `mod.rs` is OS-neutral and turns each event into locks. The
+  inhibitor is held exactly while something is unlocked and the machine is
+  awake, and released on suspend only after everything is locked.
+- **`ssh`** is what `control` and `ssh_agent` share: `ssh::keys` finds the keys
+  in an open database and keeps the public-key cache; `ssh::approvals` holds
+  approvals and pending requests per database and unlock, behind its own lock,
+  with calls that take the core's guard. It reads the core and never locks it.
+
+## Protocol
+
+kpa's own socket speaks line-delimited JSON, **exactly one request and one
+response per connection**: "which response is this?" is answered by which
+socket it arrived on, and a client that wants several ops opens several
+connections. `v` is checked on every request and a mismatch is rejected, not
+negotiated. The ops are `status`, `unlock`, `lock`, `list`, `copy`,
+`ssh_keys`, `ssh_pending` and `ssh_approve`. No request carries the master
+password.
+
+**`list` never returns secrets** — it is an index. A field the user marked
+protected is omitted, not de-protected, and `fields` names what `copy` can be
+asked for, never a value.
+
+A `list` or `ssh keys` for every database reads each one under its own guard of
+the core, one after another, so a lock can land between two of them.
+
+Requests, responses, errors, the field collision rule and version skew are in
+[`protocol.md`](./protocol.md).
+
+## Files and freshness
+
+A KeePass client and kpa can both have the file open at once. Clients write
+through a temp file and a rename, and there is no per-database lock file. So:
+
+1. **Never create a lock file. Never hold an fd.** Open, read the whole file,
+   close, parse. (Upstream, a file with pathological KDF parameters can make
+   `keepass` hang mid-unlock, holding its fd.)
+2. **Never write.** Guaranteed by the shape of `Op` and the agent's wire layer.
+3. **Freshness guard** (threat model T-12, G-8). The core records the file's
+   `(dev, ino, size, mtime, ctime)` when it reads it, and before each use of an
+   unlocked database `stat`s the path again: any difference locks the database
+   and answers `stale`. Another client saving, or a sync tool landing a new copy,
+   both cause this, and serving stale entries silently is the worse failure. The
+   check happens at the next request that reads the database (`status`
+   included), not when the file changes. The `stat` runs without the core's lock,
+   on a thread per file, under a 2 s deadline, and a file that hasn't answered
+   counts as changed: a mount that stops answering must not hold up a lock. What
+   the guard misses is T-12's and T-17's.
+4. **Concurrency.** `unlock` is the slow request, waiting on a human and the
+   KDF, and releases the core's mutex for that part: the unlock's token guards it.
+
+## Clipboard
+
+kpa's own Wayland client (`src/clipboard/wayland/`), in-process — **not** by
+spawning `wl-copy`. The Wayland clipboard is pull-based: the owning client must
+stay alive to serve bytes on paste, and kpa is already long-lived, so it owns the
+offer. It speaks `ext-data-control`, falling back to `wlr-data-control`, so it
+needs no keyboard focus, which a daemon never has.
+
+**Which compositor.** The daemon usually starts before the compositor, so each
+`copy` reads `WAYLAND_DISPLAY` from the service manager's environment, where the
+compositor exports it, and checks the socket it names before any secret is sent.
+A compositor that doesn't export it to the service manager can't be copied to.
+
+Two MIME types are offered: `text/plain;charset=utf-8` and
+`x-kde-passwordManagerHint` with value `secret`, which clipboard-history
+managers check to skip passwords. **`copy` needs a desktop requester on an
+active, unlocked display session** ([`headless.md`](./headless.md) § 5);
+anything else fails with `no_display` and the clipboard is never touched.
+
+**Expiry is correct by construction because we own the source.** After
+`clipboard_timeout`, an expiry thread ends the offer. If the user copied
+something else meanwhile, the compositor already replaced our source and ending
+it does nothing: no content comparison, no race, no risk of wiping someone
+else's clipboard. A lock of the unlock the offer came from ends it earlier.
+
+## Secrets
+
+**Boundary: the user account.** Inside it, optimise for blast radius and time,
+not caller identity: anything running as the user can already read the `.kdbx`
+or log keystrokes, so checking which program asks stops nothing that targets
+the user. Held while unlocked:
+the decrypted database, the real exposure, same as any KeePass client. Not held:
+the master password and the keyfile's contents, whose copies kpa makes are
+zeroized after key derivation. The password arrives from the prompt command or a
+terminal the daemon reads, into a fixed-size `Zeroizing` buffer that never grows,
+and the CLI never holds it.
+
+**What a lock clears.** Every copy kpa itself makes (protected field values,
+`DatabaseKey`'s copies of the password and keyfile, the prompt's output buffer,
+`list` entries, the serialized response buffer, the agent's private keys) is
+zeroized on drop, and the unlock's clipboard offers are ended. Not cleared,
+upstream: unprotected field values, `keepass`'s decrypted payload buffers, its
+key-derivation intermediates and its XML keyfile parser's working copies persist
+in freed heap pages until the allocator reuses them. Lock stops serving the
+database and clears what kpa owns; it does not promise that no trace of the
+plaintext remains in the process's memory.
+
+**The core has no output channel**: it writes no file and no socket. So the
+places a secret can reach disk, a log or another process are the front ends and
+the clipboard, and the audit of "nothing persisted" (G-4) is a search for the
+call sites of `Open`'s and `Entry`'s read methods, and for `keepass::` outside
+`databases` (there are none). [`threat-model.md`](./threat-model.md) has the
+goals.
+
+**Hardening.** Every kpa process sets `PR_SET_DUMPABLE=0` at startup, before
+dispatching to any subcommand and before `kpa serve` reads its config: a crash
+writes no user-readable core dump, and `/proc/<pid>/mem` is root-owned, which
+blocks same-uid ptrace regardless of Yama. Whether swap or hibernation can page
+key material to disk, and `fs.suid_dumpable`, are properties of the machine, not
+of kpa.
+
+**What a log line may contain.** The operation, the database name, the error
+kind, and for a copy the field name and the entry's title (so the log says which
+secret left). For a signature: the key's fingerprint and the `name` its
+`[[database.ssh_key]]` override gives it, never the entry's title; its purpose,
+connection class and destination fingerprint; and the outcome. Never passwords,
+protected fields (a protected title is replaced by the entry's uuid), usernames,
+URLs or any other vault content, at any level: a log outlives the unlocked
+session and ends up somewhere far less guarded than the socket (threat model
+TB-7). Reads (`status`, `list`, the agent's `REQUEST_IDENTITIES`) are not
+logged, and control characters are escaped, so a crafted name can't forge a
+second line.
+Every line goes through `log::log`, the one function to audit.
+
+**Non-goals:** kpa does not defend against an attacker who already has code
+execution as the user running it (threat model NG-1). It reduces casual exposure
+— clipboard leakage into history managers, an unlocked vault overnight, secrets
+in shell scrollback — and that is the whole claim.
+
+## Configuration and logging
+
+`$XDG_CONFIG_HOME/kpa/config.toml`. Every setting is a plain TOML value, so the
+file can be generated rather than hand-edited; [`config.example.toml`](../config.example.toml)
+documents every key.
 
 ```toml
 idle_timeout = "30m"
@@ -84,561 +419,14 @@ name = "work"
 path = "~/vault/work.kdbx"
 ```
 
-A leading `~/` in `path` or `keyfile` expands to `$HOME` when the daemon
-starts; `~user/` is refused rather than taken literally, and other relative
-paths resolve against the daemon's working directory.
-
-**`prompt` runs exactly as configured.** What the unlock is about —
-`"Unlock personal"`, for `personal` above — reaches the program through
-`KPA_PROMPT_MESSAGE` in its environment instead of its argv, escaped the
-way the CLI escapes its own terminal output, plus tab and newline so it
-stays one line, and capped in length,
-since a later request-derived message (an SSH key name, once the agent's
-approval prompt exists) carries text this daemon didn't author. A program
-that only takes its prompt text as an argument, as `fuzzel` does, needs a
-wrapper that reads the variable and passes it on — the `sh -c` line above.
-One thing the variable doesn't buy: a wrapper puts the message right back
-into its own argv, so it's visible to other uids via `/proc/<pid>/cmdline`
-either way. Only a program that reads the variable itself avoids that.
-
-If you manage your system declaratively (Nix, Ansible, whatever), this shape
-is meant to be generated rather than hand-edited — every setting is a plain
-TOML value, nothing requires clicking through a GUI.
-
-## Logging
-
-`serve` writes one line per event to stderr, at one of four levels:
-`error`, `warn`, `info` (the default) and `debug`. `log_level` in the config
-sets it and `serve --log-level` overrides it. Under systemd, where stderr is
-the journal, each line carries a `<N>` syslog priority prefix so
-`journalctl -p warning` filters by level; the daemon decides that by
-comparing `$JOURNAL_STREAM` against its own stderr. Elsewhere a line reads
-`<local timestamp> <LEVEL> <message>` (RFC 3339 with the UTC offset), with the timestamp dimmed and the level
-coloured when stderr is a terminal (not when `NO_COLOR` is set or `TERM` is
-`dumb`). Under journald there is no timestamp of kpa's own: the journal
-stamps its own.
-
-| Level   | What it carries                                                           |
-| ------- | ------------------------------------------------------------------------- |
-| `info`  | Every unlock, lock (including idle, screen-lock and suspend), and copy (field, entry title, database); the tray registering, losing its host and re-registering |
-| `warn`  | Failed or refused requests and connections, and logind failing, or a tray failure beyond a missing host (no session bus, or an unexpected D-Bus error) |
-| `debug` | Why: prompt launches, logind subscription, sleep inhibitor, tray start    |
-
-**What a line may contain.** The operation, the database name, the error
-kind, and for a copy the field name and the entry's title (so the log says
-which secret left, not just which field). Never passwords, protected fields
-(a protected title is replaced by the entry's uuid), usernames, URLs or any
-other vault content, at any level: a log outlives the unlocked session and
-ends up somewhere far less guarded than the socket (threat model TB-7).
-Reads (`status`, `list`) are not logged at all.
-Control characters in a line are escaped, so a crafted name in a request
-can't forge a second line. Every line goes through `log::log`, so that is
-the one function to audit.
-
-## Protocol
-
-Line-delimited JSON over `$XDG_RUNTIME_DIR/kpa/sock`, mode `0600`.
-
-**Exactly one request and one response per connection, then the connection
-closes.** This is deliberate, not a limitation to work around later:
-multiplexing multiple requests over one long-lived connection would need a
-request-ID field so responses could be matched back to their requests, plus
-ordering and partial-read handling. One-shot connections make that whole
-class of problem not exist — "which response is this?" is answered by which
-socket it arrived on. Unix-socket connects are cheap enough (no handshake,
-no meaningful round-trip cost) that there's no performance reason to keep a
-connection open across multiple requests either. A client that wants to
-issue several ops just opens several connections.
-
-Both requests and responses carry `"v": 2`. On the request side, a mismatch
-is rejected rather than negotiated — the daemon's response still carries its
-own `v`, which is how the client learns which version the daemon is
-actually running without a separate pair of fields for it. This is
-deliberate too: rather than engineer backward compatibility, we make skew
-impossible to ignore. The daemon holds only a cache of decrypted data, so
-restarting it costs one re-unlock.
-
-### Requests
-
-```json
-{"v":2,"op":"status"}
-{"v":2,"op":"unlock","db":"personal"}
-{"v":2,"preferred_prompt":"terminal","op":"unlock","db":"personal"}
-{"v":2,"op":"lock","db":"personal"}          // db omitted = lock all
-{"v":2,"op":"list"}                          // db omitted = all unlocked
-{"v":2,"op":"copy","db":"personal","uuid":"…","field":"password"}
-{"v":2,"op":"copy","db":"personal","uuid":"…","field":"custom:Password"}
-{"v":2,"op":"ssh_keys"}                     // db omitted = all unlocked
-{"v":2,"op":"ssh_keys","db":"personal"}     // the SSH keys the vault holds
-```
-
-No request carries the master password. An `unlock` is asked for it by the
-daemon, on screen or on the terminal the request passed.
-
-**A request may pass one terminal.** Any request may attach one file
-descriptor, as `SCM_RIGHTS` ancillary data on the `sendmsg` that sends its
-line. The JSON declares nothing. The daemon refuses a request with more than
-one descriptor, or with one that isn't a terminal (`isatty`), as
-`malformed_request`, and keeps the descriptor in the request's `Requester`
-for the daemon to use if it has to ask. Only `unlock` can ask. `kpa unlock`
-passes its controlling terminal, and no other command passes anything.
-
-**Where an `unlock` asks.** On screen when the requester is on the desktop
-and the screen isn't known to be locked, otherwise on the passed terminal. A
-top-level `preferred_prompt` beside `v` and `op` names a place instead:
-`"terminal"` (`kpa unlock --tty`) asks on the terminal even where the daemon
-could ask on screen, and `"screen"` asks on screen or nowhere, never on the
-terminal. The daemon answers `no_prompt` when it has nowhere to ask
-(`headless.md` § 4).
-
-`field` accepts any name `list`'s `fields` array returns for that entry
-(below): `username`, `password`, `url`, `notes`, `totp`, or a custom
-(user-defined) field by its KeePass key. Decoding never rejects a `field`
-value — any string is accepted, and one that doesn't resolve to anything on
-the entry asked about fails with `field_empty`, the same as an empty or
-absent field.
-
-**Collision rule.** `username`, `password`, `url`, `notes`, `totp`, and
-KeePass's own reserved `title` are matched case-insensitively and always
-mean the built-in (`title` has no built-in `copy` serves, so a bare request
-for it never resolves to anything). A custom field is legal in KeePass even
-when its key collides with one of these only in case (e.g. a custom `Password`
-field alongside the real one) — that field is still listed and copyable, but
-only via the `custom:` prefix (`custom:Password`), never its bare key, so a
-bare request always means the built-in. Any other custom field is addressed
-by its bare key.
-
-`ssh_keys` scans the unlocked databases' attachments for SSH keys
-([`ssh-agent.md`](./ssh-agent.md) § 6.4), the scan behind `kpa ssh keys`.
-Like `list`, a request with no `db` covers every unlocked database, and each
-key and skipped attachment says which database it is in: a key two databases
-hold is reported once for each. `locked` names the databases such a request
-could not scan, and is left out when there are none. A request that names a
-locked database fails with `locked` instead, as it does with `unknown_db` or
-`stale`; it never answers from the key cache. Like `list`, it returns entry
-titles to the caller and keeps them out of the daemon's log.
-
-**CLI output.** The protocol is what the CLI speaks; what it prints is a
-separate choice. A subcommand with a text output (`kpa ssh keys` so far)
-renders the response for a person, with every string the vault supplied
-escaped (T-13). `--json`, a flag every client subcommand takes, prints the
-daemon's response line instead, so a script keeps a stable shape whatever
-text a command grows. The subcommands without a text output yet print the
-response line with or without it.
-
-### Responses
-
-```json
-{"ok":true,"v":2,"databases":[{"name":"personal","locked":false,"entries":341},
-                              {"name":"work","locked":true}],"version":"1.2.3"}
-
-{"ok":true,"v":2,"entries":[{"db":"personal","uuid":"…","title":"GitHub",
-                             "username":"alice","url":"https://github.com",
-                             "group":"Dev",
-                             "fields":["username","password","totp","custom:Password"]}]}
-
-{"ok":true,"v":2,"copied":"password","expires_in":30}
-
-{"ok":true,"v":2,"keys":[{"db":"personal","type":"ssh-ed25519",
-                          "fingerprint":"SHA256:…","title":"Deploy",
-                          "attachment":"id_ed25519"}],
-                "skipped":[{"db":"personal","title":"Old","attachment":"id_rsa",
-                            "reason":"PEM format; …"}],
-                "locked":["work"]}
-
-{"ok":false,"v":2,"error":"locked","db":"personal"}
-{"ok":false,"v":2,"error":"unlock_in_progress","db":"personal"}
-{"ok":false,"v":2,"error":"stale","db":"personal","detail":"database changed on disk"}
-{"ok":false,"v":2,"error":"no_prompt","detail":"no screen or terminal to prompt on"}
-{"ok":false,"v":2,"error":"no_display","detail":"no active, unlocked display session for the requester to paste into"}
-
-{"ok":false,"v":2,"error":"version_mismatch","detail":"client sent v1; restart the daemon or upgrade the client"}
-```
-
-The last one is the version-skew rejection: the client sent `"v":1`, the
-daemon is actually on `2`, and its own `v` in the response is what makes
-that visible — no extra `client_v`/`daemon_v` fields needed. `v` is the
-*protocol* version, not the build: `status`'s `version` field is the
-running daemon's build version (the same string `kpa version` prints for
-the CLI itself), piggybacked on `status` rather than given its own op since
-it's the one extra thing `kpa version` needs and `status` is already the
-no-argument "what's the daemon's state" round trip. `kpa version` sends it
-and prints both, labelled `client:`/`server:`, so an upgrade that replaces
-the binary but leaves the old daemon running still shows up as a mismatch
-rather than silently serving the previous build. No daemon reachable
-(`server: not running`) and an older daemon that predates this field
-(`server: unknown (daemon predates version reporting)`) are both reported
-rather than treated as failures — `kpa version` always exits `0`.
-
-Two `unlock` errors exist because unlocking is slow (it waits on a human
-and a KDF) and happens outside the vault mutex:
-
-- **`unlock_in_progress`** — an `unlock` for the same database is already
-  prompting. The second request is refused rather than opening a second
-  prompt; retry once the first resolves.
-- **`locked`** from `unlock` — a `lock` arrived while this `unlock` was
-  prompting or deriving. The lock wins: the database the unlock opened is
-  discarded rather than silently reopening a vault the user just locked,
-  and a prompt still open is killed.
-
-An `unlock` fails with `no_prompt`, without prompting, when nobody could
-answer a prompt: the request can't be asked on screen, because it comes from
-outside the desktop (below) or the screen is known to be locked (§ Lock
-policy), or because it asked for the terminal, and it passed no terminal.
-It names no database: the refusal is about where the request can be
-answered, not about the database. `no_display` is `copy`'s, for a request
-with no clipboard to paste into.
-
-On the terminal the daemon writes the prompt's message with echo off, reads
-one line and puts the terminal back, so the master password goes from the
-user's keyboard to the daemon without crossing the socket or passing through
-the CLI. Like a screen prompt, any lock ends it, `prompt_timeout` applies,
-and so does the requester closing its connection. It doesn't wait in the
-screen prompt queue, and each database still allows one unlock at a time.
-`kpa unlock` waits for the daemon to close the connection after `^C`, so the
-daemon has put the terminal back before the shell takes it
-([`headless.md`](./headless.md) § 4). The tray's menu is clicked at the desk,
-so its unlocks count as from the desktop.
-
-A request line is capped at 64 KiB and must arrive within 5 seconds; a
-line over the cap is answered `malformed_request`, and a connection that
-sends nothing is dropped.
-
-**Every connection is classified by where it comes from**
-([`headless.md`](./headless.md) § 3). `authn.rs` identifies the caller as a
-`Requester`: its uid, the peer's pidfd (`SO_PEERPIDFD`, or the
-`SO_PEERCRED` pid on kernels without it) read for its
-`/proc/<pid>/cgroup` once when the connection is accepted, and its command
-name. `authz.rs` holds the decisions, pure functions of a
-`Requester` and the display session: only the daemon's own uid may connect
-(`authz::may_connect`), and the cgroup is classified against the display
-session each time a decision asks, not once at connect, so a connection
-that outlives a login session stops counting as the desktop with it. The peer is **on the
-desktop** when the user has a
-display session (`User.Display` is not `/`, § Lock policy) and the unified hierarchy's
-path is under `/user.slice/user-<uid>.slice/`, in `user@<uid>.service` or
-in the display session's `session-<id>.scope`. Everything else is
-**outside**: another session's scope (an SSH login, or a terminal server
-that registers each connection as a remote logind session), a system
-service (a cron job, a terminal server's shells), no display session at
-all, and any
-peer whose cgroup can't be read or parsed, including one that exited
-first. Whether the peer is on the desktop is logged at `debug` when the connection is accepted, and
-decides whether `unlock` may prompt on screen (`authz::choose_unlock_prompt`) and
-which session `copy` may put on the clipboard of (`authz::authorize_copy`, § Clipboard). It decides where to ask, not
-who may ask: a same-uid process can start work in another cgroup.
-
-**`list` never returns secrets** — it is an index. That holds for any field
-the user marked protected in their KeePass client, not just `Password`: a
-protected `Title`/`UserName`/`URL` is omitted, not de-protected — protection
-is a property of the field, not of which field name it happens to be. A
-field counts as protected when its XML carries `Protected="True"` or
-`ProtectInMemory="True"`, matching KeePassXC. The pinned `keepass` crate
-(0.15.0) reads only `Protected`, so until it reads `ProtectInMemory` too,
-`list` can return a field that carries only that marker; the threat model
-(A-2, G-3) records this as a known gap. The launcher does its own fuzzy
-matching; kpa stays dumb and returns everything else.
-
-**`fields` is the one exception, because it carries names, never values.**
-Each entry's `fields` array names every field `copy` can be asked for on
-it: the built-ins present and non-empty on the entry, in the order
-`username`, `password`, `url`, `notes`, `totp`, then its custom fields by their
-KeePass key (sorted — `keepass`'s own field storage is an unordered map, so
-the database's own field order isn't recoverable), `custom:`-prefixed per
-the collision rule above. Protectedness never hides a field's *name* here,
-unlike `title`/`username`/`url` above: a protected `Password` still lists
-`password`, and a custom field colliding with a protected built-in still
-lists `custom:<key>`. `fields` is omitted from the wire when empty, like
-the other optional fields.
-
-## Concurrency and file freshness
-
-A KeePass client and kpa can both have the file open at once. The
-specifics below were checked against KeePassXC 2.7.12's source specifically
-(it's what this design was developed against) — worth re-verifying against
-a different client, though most modern KeePass clients follow the same
-general pattern: open, decrypt into memory, and save through a temp-file-plus-
-rename rather than an in-place write.
-
-- **There is no per-database lock file** in KeePassXC. Its only `QLockFile` is
-  a single-instance lock in `/tmp` (`gui/Application.cpp:79-84`), not next to
-  the `.kdbx`. Nothing to contend with.
-- **Saves are atomic.** KeePassXC writes through `QSaveFile`
-  (`core/Database.cpp:361`); the non-atomic fallback for cloud-sync directories
-  still ends in a rename (`:409`). A reader never sees a half-written file.
-
-Rules:
-
-1. **Never create a lock file. Never hold an fd.** Open, read whole file, close,
-   parse. A few MB, once per unlock. One known exception, upstream: a file
-   with pathological KDF parameters can make `keepass` hang mid-unlock, and
-   that unlock holds its fd (and a core) for as long as it hangs.
-2. **Never write.** Guaranteed by the `Op` enum in `src/proto/request.rs`.
-3. **Freshness guard** (`docs/threat-model.md` T-12): record
-   `(dev, ino, size, mtime, ctime)`, with nanoseconds on both times, by `fstat`
-   on the fd that was read. Take it before the read and again after it; if the
-   two differ, the unlock fails with `stale`. Before each use of an unlocked
-   database, re-check by `stat` on the path. Any difference drops the in-memory
-   database and returns `stale`, requiring re-unlock (`list` of all databases
-   fails naming the stale one; `status` reports it as locked). Another client saving, or
-   a sync tool landing a new copy, both cause this. Serving stale entries
-   silently is the worse failure. Anyone syncing their vault across machines
-   makes this a real case, not a theoretical one.
-
-   ctime catches a restored mtime, since user space cannot set ctime. The
-   `fstat` on the read fd, rather than a `stat` by path, closes the window
-   between the read and the stat. ctime is only as reliable as the filesystem
-   reports it. On coarse-timestamp, FUSE or network mounts the guard is best
-   effort. A chmod, a link change, or a backup tool that hard-links the file
-   also moves ctime and causes a spurious `stale`, which fails safe.
-
-   **Not caught:**
-   - A same-size write that leaves mtime and ctime equal to the recorded values.
-     A tool that sets times cannot set ctime, and ctime moves on every write
-     and every time change. So the tuple misses such a write only if the
-     kernel's timestamp for that write equals the recorded one. That needs a
-     filesystem with coarse timestamps, where the write lands in the same tick
-     as the recorded one, or a writer that sets the system clock back, which
-     requires root.
-   - Substitution or rollback while the database is locked. The tuple is taken
-     at unlock, so a file replaced with an older copy of the same vault, or
-     with another vault sharing the password, before the next unlock is never
-     compared against anything. This is T-17, and it is not addressed.
-4. **Concurrency:** accept connections concurrently (bounded — a flood is
-   refused rather than turned into unbounded threads, and a failed thread
-   spawn drops that one connection instead of the daemon), serialize vault
-   access behind a `Mutex`. Most requests are sub-millisecond. `unlock` is
-   the exception — milliseconds to seconds, waiting on the prompt and the
-   KDF — and it deliberately releases the mutex for that slow part so other
-   requests keep being answered. That window is what the per-database lock
-   epoch guards: every `lock` bumps it, and an `unlock` only installs its
-   database if the epoch is unchanged since it started.
-
-## Clipboard
-
-kpa's own Wayland client (`src/wayland/`), in-process — **not** by
-spawning `wl-copy`.
-
-The Wayland clipboard is pull-based: the owning client must stay alive to serve
-bytes on paste, which is why `wl-copy` forks. Since kpa is already long-lived it
-should own the offer itself. The client speaks `ext-data-control`, falling
-back to `wlr-data-control` (advertised by compositors like niri and sway), so
-it can own the clipboard without ever holding keyboard focus — which a daemon
-never has. Each offer has its own connection and serving thread.
-
-**Which compositor.** The daemon usually starts before the compositor, and a
-process's environment never changes after it starts, so its own
-`WAYLAND_DISPLAY` is no use. Each `copy` reads `WAYLAND_DISPLAY` from the
-service manager's environment instead (`org.freedesktop.systemd1.Manager`'s
-`Environment`, on the session bus), where the compositor exports it. The
-name is a hint, checked before any secret is sent:
-
-- it must be a bare socket name, resolved in the daemon's own
-  `$XDG_RUNTIME_DIR`; a path is refused;
-- the process listening on that socket must be the daemon's uid, and on
-  the desktop as § Protocol judges a requester: in `user@<uid>.service`
-  or the display session's scope.
-
-The copy then runs over the connection that was checked. A failure is an
-`io` error naming what failed. A compositor that doesn't export
-`WAYLAND_DISPLAY` to the service manager can't be copied to.
-
-Two MIME types are offered: `text/plain;charset=utf-8` and
-`x-kde-passwordManagerHint` with value `secret`. That's what clipboard-history
-managers check to skip passwords. (`wl-copy --sensitive` offers exactly this —
-`wl-clipboard/src/types/copy-action.c:76-80` — so the CLI is a viable stage-1
-shortcut.)
-
-**`copy` needs a desktop requester on an active, unlocked display
-session** (`docs/headless.md` § 5): the requester is classified as on the
-desktop the same way `unlock` is (§ Protocol), and the display session's state
-(§ Lock policy) must be an active display session with `LockedHint`
-false. Anything else — outside the desktop, no session, inactive, or
-locked — fails with `no_display`, and the clipboard is never touched.
-`active` is logind's `Active` session property, published alongside
-`LockedHint` but never treated as a lock trigger: counting an inactive
-session (a VT switch away from it) as locked would make kpa lock the
-vault just for that.
-
-**Expiry is correct by construction because we own the source.** After
-`clipboard_timeout`, drop it. If the user copied something else meanwhile, the
-compositor already replaced our source and the drop is a no-op — no content
-comparison, no race, no risk of wiping someone else's clipboard. This is the
-strongest argument for owning it natively rather than shelling out.
-
-## Lock policy
-
-Locking means: drop the `Database`, zeroize what can be zeroized, end any
-clipboard offer that database's `copy` started, and update the tray icon.
-A lock also cancels any `unlock` still in flight for that database (see §
-Protocol), and ends its prompt if one is still open, on screen or on a
-terminal.
-
-Prompts are bounded too:
-
-- **Timeout.** A prompt left unanswered for `prompt_timeout` (default
-  60 s) is ended, and the unlock fails with `prompt_cancelled`.
-- **No prompt on screen while the screen is known to be locked**, that is
-  while the display session's `LockedHint` is true. The unlock is asked on
-  the terminal the request passed, or fails with `no_prompt` without one. A
-  locker that only sends the `Lock` signal never reports the unlock (threat
-  model ASM-7), so kpa doesn't know the screen is locked, and the timeout
-  bounds the cost.
-
-`session_watch.rs` is the OS side of these triggers, and only reports: it
-knows nothing about databases or locking. Its events are the display
-session's state, a lock request (the `Lock` signal), suspend and a lost
-watch, and the daemon reacts to them in one place,
-`AutoLock::run`. They come on one channel of `Event`s with one
-reader, which also hears from the databases, after every change, whether
-anything is unlocked. The reader reacts to each event first, then tells an
-`Inhibitor` whether to hold the sleep inhibitor: held exactly while
-something is unlocked and never while the machine sleeps. A thread of
-`logind` of its own holds or releases it, so no request ever waits on
-D-Bus.
-
-The logind watch reports **the display session's state** to the server: no display
-session, or the display session's id with its `LockedHint` (locked or
-unlocked) and its `Active`. It is read on subscribing, whenever
-`User.Display` changes, and on each `LockedHint` or `Active` change, and
-is "no display session" while the watch is down. The classification in §
-Protocol reads the session's id, the prompt gate reads the session and
-`LockedHint`: a prompt only for a requester on the desktop, and not while
-the display session is locked. `copy`'s gate (§ Clipboard) also reads `Active`.
-`Active` never feeds the prompt gate and never locks anything on its
-own — only `LockedHint` does.
-
-The prompt runs in its own process group, and killing it kills the whole
-group, so a wrapper script's own prompt window goes too.
-
-**Only one prompt is on screen at a time.** Concurrent unlocks across
-different databases share a queue; a database's prompt still waiting its
-turn is cancelled the instant a lock lands on it, rather than waiting for
-its turn to come up first.
-
-"What can be zeroized" is narrower than it sounds:
-
-- **Cleared:** protected field values (`secrecy` types), `DatabaseKey`'s
-  own copies of the password and keyfile, and every copy kpa itself makes
-  — the prompt's output buffer, `list` entries, and the serialized
-  response buffer are all zeroized on drop. A clipboard offer still being
-  served by the database being locked is ended immediately rather than
-  left to its own `clipboard_timeout`; a lock of a different database, or
-  of none while nothing is on the clipboard, leaves the clipboard alone.
-- **Not cleared, upstream:** unprotected field values (plain `String`s
-  inside `keepass`), the decrypted and decompressed payload buffers
-  `keepass` parses from, its key-derivation intermediates, its XML
-  keyfile parser's working copies. These persist in freed heap pages until
-  the allocator reuses them. The clipboard's copy of an offered secret is
-  kpa's own, zeroized when its serving thread ends.
-
-Lock stops serving the database and clears what kpa owns; it is not a
-guarantee that no trace of the plaintext remains in the process's memory.
-
-| Trigger      | Source                                                                        |
-| ------------ | ----------------------------------------------------------------------------- |
-| Screen lock  | logind session `Lock` signal, or `LockedHint` becoming true, on the user's display session (`User.Display` of `Manager.GetUser(uid)`), via `zbus`. Covers `loginctl lock-session` and `IdleAction=lock`; a locker that calls neither is invisible (threat model ASM-7) |
-| Suspend      | logind `PrepareForSleep(true)`: lock everything, then release the `delay` sleep inhibitor. kpa holds it while anything is unlocked. Logind allows `InhibitDelayMaxUSec` (5 s default) before sleeping regardless |
-| Bus loss     | every database locks; the subscription is re-established with backoff        |
-| Idle         | per database: no successful `list` of it (`list` of all counts for each database it reads), and no `copy` or unlock that installs it, for `idle_timeout` (default 30m); `status` and `lock` don't count |
-| Explicit     | `kpa lock`, or the tray menu                                                  |
-| File changed | freshness guard (above)                                                       |
-
-## Tray
-
-`ksni` — StatusNotifierItem over D-Bus, with menus, dynamic icons and
-tooltips. Any StatusNotifierItem host (waybar, quickshell, a KDE/GNOME panel,
-...) picks it up with no extra work on kpa's side.
-
-- Icon reflects aggregate state: all locked / some unlocked / error.
-- Tooltip lists each database and its state.
-- Menu: a per-database submenu (Lock, Unlock), then Lock all, then Quit.
-
-This satisfies "autostarts, lives in the background until needed" directly
-rather than by proxy through another application's tray.
-
-No tray host at all — including `kpa serve` starting before one exists, or
-one disappearing and coming back later — is a normal, non-fatal state: kpa
-keeps running and registers (or re-registers) as soon as a host is there.
-
-## Security
-
-**Boundary: the user account.** Inside it, optimise for blast radius and
-time, not caller identity — see `background.md` § "Security boundary".
-
-Held while unlocked:
-
-| Item               | Held?                                                    |
-| ------------------ | --------------------------------------------------------- |
-| Master password    | No — kpa's copies zeroized after key derivation¹          |
-| Keyfile path       | Yes (a path; harmless)                                     |
-| Keyfile contents   | No — kpa's buffer zeroized; `keepass`'s parse copies not²  |
-| Decrypted database | **Yes** — the real exposure, same as any KeePass client    |
-
-¹The password arrives on the prompt command's stdout, or from a terminal the
-daemon reads, and kpa reads it into a fixed-size `Zeroizing` buffer that
-never grows (a growing buffer would leave unwiped copies behind each time it
-reallocates), then into a `Zeroizing<String>`. The CLI never holds it, and
-it is in no request or response. The buffer is wiped once the prompt has
-answered. `DatabaseKey` zeroizes its own copy. Two copies are outside kpa's
-reach: whatever the prompt program itself held, and `keepass`'s
-key-derivation intermediates (e.g. the SHA-256 of the password, which is
-password-equivalent), which are not zeroized upstream.
-
-²`DatabaseKey`'s keyfile bytes are zeroized, but `keepass`'s XML keyfile
-parser makes several unzeroized intermediate copies, which together can
-cover the whole key and can survive a lock. Upstream.
-
-Two Linux properties that help here, worth verifying on the machine
-running kpa:
-
-- **`/proc/sys/kernel/yama/ptrace_scope` is `1`** on most modern distros —
-  only a parent can ptrace a child, so a random same-uid process cannot
-  attach to kpa.
-- **zram swap** (RAM-backed, compressed) reduces the chance that key
-  material is paged to disk, but doesn't eliminate it — hibernation, a zram
-  writeback device, or any secondary disk-backed swap all defeat it. This is
-  a property of the machine's configuration, not one kpa's process can
-  guarantee about itself.
-
-Every kpa process sets `PR_SET_DUMPABLE=0` at startup, before dispatching to
-any subcommand — before `kpa serve` reads its config. That keeps a crash
-from writing a user-readable core dump of whatever secret the process
-holds — the decrypted database in the daemon — and also makes
-`/proc/<pid>/mem` root-owned, which blocks same-uid ptrace regardless of the
-Yama setting above. One host caveat, like the two bullets above: with
-`fs.suid_dumpable = 2` the kernel still writes a root-owned dump.
-
-**Non-goals, stated explicitly:** kpa does not defend against an attacker who
-already has code execution as the user running it. Nothing at this layer can. It reduces
-casual exposure — clipboard leakage into history managers, an unlocked vault
-overnight, secrets in shell scrollback — and that is the whole claim.
-
-## Dependencies
-
-`keepass` (KDBX + Argon2 + TOTP via its `totp` feature;
-`challenge_response` feature off in v1), `serde`/`serde_json`, `toml`,
-`clap`, `zbus` (logind, the service manager's environment), `ksni` (tray),
-`wayland-client` with `wayland-protocols`/`wayland-protocols-wlr`
-(clipboard), `zeroize`, `rustix`
-and `libc` (`SO_PEERPIDFD`, which `rustix` lacks).
-Threads over async unless `ksni`'s runtime choice makes tokio simpler.
-
-## Deferred
-
-- YubiKey challenge-response (note for whenever this lands: don't reuse the
-  key's own PIN as a vault credential — it collapses a two-factor property
-  into one)
-- `kpa get` behind an explicit flag
-- `pinentry` as the prompt
-- Attachments (binary content; out of scope for a line-delimited JSON
-  protocol)
-- The legacy KeeOtp `TimeOtp-*` fields: a different, older convention from
-  the de-facto-standard `otp` field, which `keepass`'s `totp` feature does
-  not parse
-
-## Open questions
-
-None blocking. Which launcher or frontend you build on top of kpa is
-independent of this design — anything that can shell out to `kpa` or speak
-the socket protocol works.
+`prompt` runs exactly as configured; what the unlock is about reaches it through
+`KPA_PROMPT_MESSAGE` in its environment, not its argv. A leading `~/` in `path`
+or `keyfile` expands to `$HOME`; `~user/` is refused, and other relative paths
+resolve against the daemon's working directory.
+
+`serve` writes one line per event to stderr at `error`, `warn`, `info` (the
+default) or `debug`; `log_level` sets it and `serve --log-level` overrides it.
+`info` carries every unlock, lock, copy and signature, and the tray starting
+and its host coming and going; `warn` failed or refused requests; `debug` why. Under systemd
+each line carries a `<N>` syslog priority prefix, so `journalctl -p warning`
+filters by level. What a line may contain is under § Secrets.

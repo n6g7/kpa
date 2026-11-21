@@ -21,6 +21,9 @@ Roadmap, in release order. Each item gets its design written before its implemen
 Unscheduled:
 
 - [ ] Document assumptions (Linux only, logind, etc)
+- [ ] A desktop notification on each `copy` and SSH signature, so a read you didn't make gets noticed (`docs/threat-model.md` T-16)
+- [ ] YubiKey challenge-response as a vault credential, without reusing the key's PIN as one
+- [ ] The legacy KeeOtp `TimeOtp-*` fields, which `keepass`'s `totp` feature doesn't parse
 
 ## Done
 

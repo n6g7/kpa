@@ -102,7 +102,7 @@ enum ResponseLine<T> {
     Success(T),
 }
 
-/// The fields of a failure response (`docs/design.md` § Protocol).
+/// The fields of a failure response (`docs/protocol.md` § Errors).
 #[derive(Deserialize)]
 struct Failure {
     error: ErrorCode,

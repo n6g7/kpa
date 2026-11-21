@@ -107,11 +107,12 @@ fn fixture_entry_uuid(daemon: &InProcessDaemon) -> String {
         .to_string()
 }
 
-/// `docs/design.md` § Clipboard explicitly plans for a daemon run without
-/// Wayland reachable — logind-less hosts get the analogous treatment in
-/// `frontends/auto_lock/logind.rs`. `copy` must answer with a clean error, not hang the
-/// connection or take the daemon down, so every other request still gets
-/// answered afterward.
+/// A daemon runs without a Wayland compositor reachable (`docs/design.md`
+/// § Clipboard: one that doesn't export `WAYLAND_DISPLAY` to the service
+/// manager can't be copied to) — logind-less hosts get the analogous
+/// treatment in `frontends/auto_lock/logind.rs`. `copy` must answer with a
+/// clean error, not hang the connection or take the daemon down, so every
+/// other request still gets answered afterward.
 #[test]
 fn copy_fails_cleanly_without_a_wayland_compositor() {
     if compositor().is_some() {

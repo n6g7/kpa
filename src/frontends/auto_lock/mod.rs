@@ -1,6 +1,6 @@
 //! The front end that locks without a request: when the screen locks, the
 //! machine suspends, the watch on the display session is lost, or a
-//! database sits idle (`docs/design.md` § Lock policy).
+//! database sits idle (`docs/design.md` § Locking).
 //!
 //! This file is OS-neutral and names no D-Bus type. [`logind`] watches the OS
 //! and sends what it sees as [`Event`]s; [`SleepHold`] sends the other one,

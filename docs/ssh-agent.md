@@ -5,12 +5,13 @@ client's SSH agent integration. The client remains a vault editor if
 wanted, but stops handling SSH. Linux only, like the rest of kpa: a machine without kpa keeps
 its own KeePass client's agent over the same synced vault (§ 2).
 
-It reverses one line of [`design.md`](./design.md) § Scope ("Is not: … an
-SSH agent") and extends [`threat-model.md`](./threat-model.md); § 10 lists
-those edits. It builds on [`headless.md`](./headless.md) for prompt routing,
-prompt timeouts and unlocking from a terminal.
+[`design.md`](./design.md) § Scope covers it: kpa serves SSH keys under the
+same read-only rule as everything else. Its claims are in
+[`threat-model.md`](./threat-model.md) (A-6, ACT-11, TB-8, G-13 to G-15,
+T-20 to T-23), and it builds on [`headless.md`](./headless.md) for prompt
+routing, prompt timeouts and unlocking from a terminal.
 
-## 1. Recommendation
+## 1. Overview
 
 - **kpa is the agent.** `kpa serve` listens on a second socket,
   `$XDG_RUNTIME_DIR/kpa/ssh-agent`, speaks the SSH agent protocol
@@ -34,7 +35,9 @@ prompt timeouts and unlocking from a terminal.
   `ssh -A`. The first forwarded signature per key, forwarding session,
   forwarding host and destination asks on this machine's screen. Over a
   forwarded connection kpa signs SSH logins only, never arbitrary data. A
-  key can be kept off forwarding entirely.
+  key can be kept off forwarding entirely. **Not built yet:** kpa tells
+  forwarded connections apart and lists them only the keys allowed on them,
+  but refuses every forwarded signature.
 - **No prompt where nobody can see it.** A request from outside the desktop
   (an SSH login, a terminal-server shell), or while the screen is locked,
   never raises a prompt on screen. If it only lacks an approval, kpa
@@ -67,8 +70,8 @@ What the agent has to serve, and what it leaves to something else.
 - **Keys outside the vault.** A key file on disk keeps working through
   `IdentityFile`: `ssh` reads it directly and needs no agent. A vault-only
   agent can't take such a key through `ssh-add`, so it can't forward it
-  either. Hardware tokens and other agents' keys sharing one socket is what
-  approach C (§ 4) would add.
+  either. The same goes for a hardware token's keys and another agent's:
+  kpa relays nothing to another agent.
 - **Consumers of the key itself.** Some tools need the private key rather
   than a signature, such as converting an SSH key into an age identity to
   decrypt secrets. An agent never hands out keys. Such tools need their own
@@ -102,42 +105,34 @@ machine's screen.
   forwarded, which destination, what is being signed). An agent that only
   receives keys at unlock time sees none of that.
 
-## 4. Approaches
+## 4. Why kpa is the agent
 
-**A. Push keys into an existing agent**, as KeePass clients do. On unlock, kpa
-parses each key and sends it to `$SSH_AUTH_SOCK` with
-`SSH_AGENTC_ADD_ID_CONSTRAINED` (lifetime, confirm). On lock it sends
-`SSH_AGENTC_REMOVE_IDENTITY`.
+KeePass clients push keys into an existing agent: on unlock they send each
+key to `$SSH_AUTH_SOCK` with `SSH_AGENTC_ADD_ID_CONSTRAINED` (lifetime,
+confirm), and on lock `SSH_AGENTC_REMOVE_IDENTITY`. kpa answers the agent
+protocol itself instead:
 
-**B. kpa is the agent** ← recommended.
+|                        | Pushing keys into an agent                                                                     | kpa as the agent                                   |
+| ---------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Private key leaves kpa | Yes, into the agent's memory                                                                   | No, only signatures                                |
+| Lock revokes the key   | Only if the `REMOVE` arrives. A crash or an agent restart leaves keys until their lifetime runs out | Always: a locked database has nothing to sign with |
+| Use before unlock      | Impossible: the agent has no key yet                                                           | Unlock prompt at the first signature               |
+| Sees each use          | No. Cannot log, approve by context, or apply per-request policy                                | Yes                                                |
+| Local vs forwarded     | Only via destination constraints, fixed when the key is added                                  | Decided per request                                |
+| Idle timer             | kpa cannot see SSH use, so the idle lock removes keys mid-session                              | kpa decides what counts as activity (§ 6.9)        |
+| Crypto in kpa          | Parse the OpenSSH key file, which the agent needs in its own wire format                       | The same, plus calling `sign`                      |
+| Compatible agents      | OpenSSH's `ssh-agent`. Not `gpg-agent`, which cannot remove added keys                         | Any agent-protocol client                          |
 
-**C. kpa in front of another agent.** kpa answers for its own keys and relays
-everything else to an upstream agent. This only matters if keys from
-outside the vault (a hardware token, say) must share one `SSH_AUTH_SOCK`.
-Deferred, and nothing in B prevents adding it later.
+kpa implements no cryptography. Its agent code is protocol framing,
+parsing and policy. Signatures come from RustCrypto's `ssh-key` (backed by
+`ed25519-dalek`, `p256`, `p384`, `rsa`). Pushing keys would need the same
+parse of the key file, so all it saves is the call to `sign`.
 
-**D. Leave the vault out.** Passphrase-protected key files on disk, with
-OpenSSH's `ssh-agent` and `AddKeysToAgent`. It needs no kpa code and works
-in any session. But the keys become a second store with its own
-passphrase, copied to each machine separately and not tied to any lock.
-Rejected. It stays the answer for keys that can't live in the vault (§ 2).
-
-|                             | A: push into an agent                                                                                                                        | B: kpa is the agent                                       |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| Private key leaves kpa      | Yes, into the agent's memory                                                                                                                 | No, only signatures                                       |
-| Lock revokes the key        | Only if the `REMOVE` arrives. A crash or an agent restart leaves keys until their lifetime runs out                                          | Always: a locked database has nothing to sign with        |
-| Use before unlock           | Impossible: the agent has no key yet                                                                                                         | Unlock prompt at the first signature                      |
-| Sees each use               | No. Cannot log, approve by context, or apply per-request policy                                                                              | Yes                                                       |
-| Local vs forwarded          | Only via destination constraints, fixed when the key is added                                                                                | Decided per request                                       |
-| Idle timer                  | kpa cannot see SSH use, so the idle lock removes keys mid-session                                                                            | kpa decides what counts as activity (§ 6.9)               |
-| Crypto in kpa               | Parse the OpenSSH key file, which the agent needs in its own wire format                                                                     | The same, plus calling `sign`                             |
-| Compatible agents           | OpenSSH's `ssh-agent`. Not `gpg-agent`, which cannot remove added keys                                                                       | Any agent-protocol client                                 |
-
-The "Write UI, not crypto" rule in [`background.md`](./background.md) still
-holds under B. The new code is protocol framing, parsing and policy.
-Signatures come from RustCrypto's `ssh-key` (backed by `ed25519-dalek`,
-`p256`, `p384`, `rsa`), and kpa implements no primitives. Both A and B have
-to parse the key file, so all A saves is the call to `sign`.
+Passphrase-protected key files on disk, with OpenSSH's `ssh-agent` and
+`AddKeysToAgent`, need no kpa at all and work in any session. But the keys
+become a second store with its own passphrase, copied to each machine
+separately and not tied to any lock. They remain the answer for keys that
+can't live in the vault (§ 2).
 
 ## 5. Situations
 
@@ -149,7 +144,7 @@ once per key and destination until lock by default.
 | --- | ------------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
 | S1  | At the desk: `ssh`, `git push`, an IDE                       | No binding, or an authentication binding from the local `ssh`           | Unlock prompt naming the key and destination, then the confirm prompt for a key that needs one | Sign if the key is approved for that destination. Otherwise a confirm prompt first                          |
 | S2  | Commit or tag signing (`ssh-keygen -Y sign`)                 | `SSHSIG` data, no binding                                               | As S1                                                                    | As S1                                                                                      |
-| S3  | `ssh -A` from here; the remote host uses the key             | First binding has `is_forwarding` (§ 6.2)                               | Unlock prompt naming the forwarding host and destination, then the confirm prompt for the forwarding session | Sign if this forwarding session is approved for the key and destination. Otherwise a confirm prompt first. SSH logins only. A key with `forwarded = false` is neither listed nor used |
+| S3  | `ssh -A` from here; the remote host uses the key (not built yet, § 1) | First binding has `is_forwarding` (§ 6.2)                               | Unlock prompt naming the forwarding host and destination, then the confirm prompt for the forwarding session | Sign if this forwarding session is approved for the key and destination. Otherwise a confirm prompt first. SSH logins only. A key with `forwarded = false` is neither listed nor used |
 | S4  | Working on this machine from elsewhere, with no agent forwarded: an SSH login, a terminal-server shell | The requester runs outside the desktop (§ 6.8) | Refused, no prompt. `kpa unlock` in that shell asks on the terminal (§ 6.10) | Sign if approved for that destination. Otherwise refused and remembered; `kpa ssh pending` lists it and `kpa ssh approve <id>` approves it, and the retry signs (§ 6.8). An `ssh -A` started from that shell works the same way |
 | S5  | Screen locked or machine suspended                           | logind (existing lock policy)                                           | Everything is already locked. No prompt                                  | Not possible: a screen lock locks every database                                           |
 | S6  | Background jobs: user timers, IDE auto-fetch                 | Indistinguishable from S1. Jobs outside the user manager (cron, system services) fall under S4 | Unlock prompt, with backoff after a cancel (§ 6.6)    | As S1: one confirm prompt per key per destination per unlock, with backoff after a cancel |
@@ -443,7 +438,7 @@ Two per-key settings decide when a signature needs approval:
     database locks.
   - `"always"`: every signature asks, forwarded ones included.
   - `"never"`: local signatures never ask.
-- **`forwarded`**, for use through `ssh -A`:
+- **`forwarded`**, for use through `ssh -A` (approvals not built yet, § 1):
   - `true` (default): the first signature per (key, forwarding session,
     forwarding host, destination) asks. The approval holds until the
     database locks or the forwarding session ends, whichever comes first.
@@ -644,10 +639,9 @@ runs kpa, with no agent forwarded, used to pull a git repository over SSH.
 The agent socket takes no terminal. A signature's unlock on demand (§ 6.6)
 asks on screen, where § 6.8 allows a prompt, and nowhere else.
 
-The agent adds one rejected alternative: **agent `UNLOCK`
-(`ssh-add -X`)**. The agent socket is reachable from forwarded hosts, so
-any forwarding kpa failed to recognize would make it a remote
-password-guessing oracle.
+Nor does the agent socket take a password: agent `UNLOCK` (`ssh-add -X`)
+fails. The socket is reachable from forwarded hosts, so any forwarding kpa
+failed to recognize would make it a remote password-guessing oracle.
 
 ## 7. Configuration
 
@@ -719,7 +713,7 @@ With this config:
 - `prod-root` asks on every signature and is invisible to forwarded hosts;
 - nothing in `work` is served, even while it is unlocked.
 
-The home-manager module gains `services.kpa.sshAgent.enable`, which wires
+The home-manager module has `services.kpa.sshAgent.enable`, which wires
 the agent into the session (§ 8). Databases and keys stay in
 `services.kpa.settings`:
 
@@ -765,7 +759,7 @@ The setup kpa replaces, on a typical NixOS desktop with a KeePass client:
   whenever the client is locked, and the client can't be unlocked without
   its GUI.
 
-**Changes**
+**Steps**
 
 1. **Run kpa and opt the databases in** with `serve_ssh_keys = true`. Add a
    `[[database.ssh_key]]` override for a key that must stay off forwarding
@@ -830,242 +824,3 @@ programs' settings.
 - **The approval program has to return a choice.** Tray menus and
   notification actions only work where the desktop renders them, so a
   dmenu-style program is the portable choice.
-
-## 9. Threat model changes
-
-**§ 1 System**
-
-- Adds the agent socket and the key cache.
-- "There is no operation that returns a secret to the caller" still holds:
-  a signature is not the key.
-
-**Assets**
-
-- **A-2** gains SSH private keys held in attachments.
-- **A-6 (new) · Signing capability: a signature the user didn't intend.**
-  It authenticates as the user elsewhere, or signs commits and files.
-  Sensitivity: High.
-- Public keys are not assets. They are public by design, which is what
-  lets the key cache hold them.
-
-**Actors**
-
-- **ACT-11 (new) · A host the user forwards the agent to.** This means its
-  root, or anything there that can reach the forwarded socket. In scope,
-  for keys allowed on forwarded connections.
-
-**Boundaries**
-
-- **TB-8 (new) · The agent socket.**
-  - Same-uid clients reach it directly.
-  - Remote hosts reach it through a forwarding channel the user opened.
-  - Untrusted inputs: request bytes, session-bind contents, and the data to
-    be signed.
-
-**Goals**
-
-- **G-3** gains: "SSH private keys never leave the process. Only
-  signatures do, only on the agent socket, only for keys in databases
-  that opt in."
-- **G-4** is unchanged. The key cache holds public keys under config
-  database names, which are none of A-1–A-3.
-- **G-5** gains: "A successful local signature is activity for its
-  database. A forwarded signature never is. Approvals and pending requests
-  end on lock."
-- **G-11** extends to the agent socket.
-- **G-12** extends to confirm prompts. A request from outside the desktop
-  that needs one is refused and kept pending for `kpa ssh approve`.
-- **G-13 (new) · Signatures need an unlocked database that opts in, and an
-  approval when the key's policy asks for one.** An on-demand unlock is a
-  prompt the user answers. Vault content cannot change a key's policy.
-- **G-14 (new) · Forwarded signatures are confined.**
-  - A key with `forwarded = false` is never listed or used over a
-    forwarded connection.
-  - The others sign SSH logins only, for a session the destination has
-    bound, after an approval for that (key, forwarding session, forwarding
-    host, destination).
-  - Only the JSON socket can approve, and forwarding never reaches it.
-- **G-15 (new) · The agent never accepts a key or a secret.** Add, remove,
-  `LOCK` and `UNLOCK` all fail.
-
-**Threats**
-
-- **T-2** is amended. Forwarding is the one path from the network. It is
-  reached only through the user's own `ssh` client, and G-14 confines it.
-- **T-18** is extended. While a database is unlocked, ACT-10 can sign with
-  any key already approved. It can also get its own local requests
-  approved: on screen its request looks like the user's own, and from
-  outside the desktop it can send `ssh_approve` itself. This is
-  accepted, on the same terms as `copy`, and is less severe than `copy`
-  because the key itself doesn't leave.
-- **T-20 (new) · Forwarded-agent abuse** (S, E) — ACT-11 · TB-8 · A-6 → G-14.
-  - Response: logins only, approval scoped to the forwarding session and
-    destination, `forwarded = false` per key, no approval path over the
-    agent socket.
-  - In scope:
-    - signing over a forwarded connection without a matching approval;
-    - forwarded signing of non-login data;
-    - a session-bind accepted without verification;
-    - an approval reused across forwarding sessions or destinations;
-    - a denied key listed or used over a forwarded connection;
-    - a forwarded signature resetting the idle timer.
-  - Residual: during an approved forwarding session, the remote host can
-    use the key for that destination; this is inherent to forwarding.
-    Forwarding that bypasses the OpenSSH client looks local.
-- **T-21 (new) · Malformed agent traffic** (D, T) — ACT-5, ACT-11 · TB-8 →
-  G-11.
-  - Covers frames, lengths, session-bind contents and the data to be signed.
-  - Fuzzed like `decode_request`.
-- **T-22 (new) · Key material in memory** (I) — ACT-7, ACT-11 · TB-7 ·
-  A-2 → G-6.
-  - Private keys are cached only while unlocked, and zeroized on lock.
-  - Private-key operations must be constant-time, so a forwarded host
-    cannot recover a key from signature timing. This is why kpa needs
-    `rsa` 0.10 or later (§ 6.5).
-- **T-23 (new) · Prompts on demand** (S) — ACT-10, ACT-11.
-  - Anything that can reach the agent can raise an unlock or approval
-    prompt.
-  - Response: the prompt names its reason, backoff after a cancel, one
-    prompt at a time, timeouts, no prompts while locked or outside the
-    desktop.
-  - Residual: NG-7 (nuisance) and NG-8 (look-alike prompts).
-
-## 10. Changes to existing docs
-
-- **`design.md`**
-  - § Scope: replace "an SSH agent" in **Is not**, and say kpa serves SSH
-    keys under the same read-only rule.
-  - § Architecture: add the agent socket and the key cache.
-  - § Lock policy: lock drops cached keys and approvals, and kills open
-    prompts. Local signatures are activity.
-  - Settled decisions: one row for "kpa is the agent, databases opt in,
-    approval once per key per destination per unlock".
-- **`background.md`**: the "SSH agent" row of the gap table changes. A
-  full client covers SSH, but only while it runs, and only by pushing keys
-  into a separate agent.
-- **`threat-model.md`**: § 9 above.
-- **`config.example.toml`**: an `[ssh_agent]` section, `serve_ssh_keys = true`
-  on one fixture database, and one `[[database.ssh_key]]` against a fixture key.
-- **`nix/hm-module.nix`**: `services.kpa.sshAgent.enable` (§ 8).
-
-## 11. Implementation
-
-**Modules** (`src/frontends/ssh_agent/`, plus `src/ssh/` for `keys.rs` and `approvals/`, which the daemon's own socket shares):
-
-| File          | Role                                                                                                                                            |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `wire.rs`     | Frame decode and encode into `enum AgentRequest` and `enum AgentResponse`. Pure, fuzzed                                                         |
-| `bind.rs`     | session-bind verification and per-connection binding state                                                                                      |
-| `classify.rs` | Data to be signed → `Purpose::{Login, SshSig, Other}`. Pure, fuzzed                                                                             |
-| `authz.rs`    | (key settings, connection class, purpose, login session) → what the request needs (nothing, or an approval for a scope, kept until lock or not) or why it is refused. Pure and stateless: whether an approval already covers the scope, and whether a prompt may appear, are the sign flow's questions |
-| `ssh/keys.rs` | Attachment scan, public-key cache file, overrides, the parse of a private key                                                                    |
-| `ssh/approvals/` | Approvals and pending requests: their scopes, limits and expiry, per database and unlock                                                                              |
-| `serve.rs`    | Listener, per-connection thread, connection cap, and the `Agent` it answers each request with                                                    |
-| `agent/`      | The agent's own logic, crate-private: per-database key state and the scan at unlock, as an observer of the core (`state.rs`, `SshState`), one database as the agent reads it (`hold.rs`, `Hold`), identities (`identities.rs`), the sign flow (`sign.rs`), one `SIGN_REQUEST` (`request.rs`), prompting the user (`prompts.rs`), what its prompts say (`message.rs`) and signing (`signer.rs`). `Agent` holds the core, `SshState`, `ssh::approvals`, the display session and the prompts |
-
-**Daemon changes**
-
-- `daemon` registers `SshState` and the approvals state as observers of the
-  core, builds the `Agent` on the core, and runs `ssh_agent::serve` on the
-  agent's socket. `SshState` scans a database under the core's guard when it
-  unlocks and drops its keys, private keys included, when the lock that ends
-  that unlock tells it. Its prompt backoff outlives a lock, and an unlock of
-  the database ends it. The unlock a state belongs to is the core's token for
-  it, so a late notice about an old unlock leaves a newer one's state, and a
-  lock that came in since a prompt was raised cancels the token the prompt
-  and the signature that follows it hold.
-- The agent reads a database through a `Hold`: the core's guard, then
-  `SshState`'s lock, then the approvals' calls, which take the guard. The
-  freshness guard runs when the hold is taken. A locked database, or an
-  unlocked one whose scan isn't in yet, is held without the guard: it lists
-  from the cache, and a signature is refused as locked.
-- The approval prompt goes through the daemon's prompt queue, so only one
-  prompt is ever on screen, unlock's included. The agent's unlock on demand
-  is its own steps on the core (begin, `may_prompt_on_screen`, ask with its
-  message, finish) and its own refusals; the screen unlock prompt is the one
-  `kpa unlock` asks on. Unlock waiters wait for the agent's per-database
-  turn, so the daemon needs no condvar for them.
-- The prompt and approval runner gains `KPA_PROMPT_MESSAGE` and the shared
-  queue. The timeout and lock-kills-prompt come from
-  [`headless.md`](./headless.md).
-- The JSON protocol gains three requests: `ssh_keys` (the scan behind
-  `kpa ssh keys`), `ssh_pending` and `ssh_approve`. The CLI gains
-  `kpa ssh keys`, `kpa ssh pending` and `kpa ssh approve`.
-- Each signature request gets one log line: the key by fingerprint, and
-  by the `name` its `[[database.ssh_key]]` override gives it if there is
-  one; its database; purpose; connection class; destination fingerprint;
-  and outcome. Never the entry's title, which a key without an override is
-  named by elsewhere: it is vault content, and kpa keeps vault content out
-  of its own output (threat model G-4). An override's name is config. Like
-  `list`, `REQUEST_IDENTITIES` is not logged.
-
-**Tests**
-
-- **Fixture**: `tests/fixture.sh` adds entries with an Ed25519 key, an ECDSA
-  key, an RSA key, and two keys that must be skipped: a passphrase-protected
-  one and a PEM one (generated with `ssh-keygen`, imported as
-  attachments).
-- **`tests/ssh_agent_serve.rs`** runs the daemon in-process
-  (`common::InProcessDaemon`), serves the agent on its own socket through
-  `Daemon::serve_agent`, and drives it with the real OpenSSH tools and
-  raw agent-protocol frames:
-  - `ssh-add -L` lists the keys from the cache while the database is
-    locked, by entry title once it's unlocked, and nothing on a first run
-    without a cache;
-  - `ssh-keygen -Y sign` succeeds after unlock and approval, and
-    `ssh-keygen -Y verify` accepts the result, for each key type;
-  - a second signature doesn't prompt, and neither does `confirm =
-    "never"`; `confirm = "always"` does, and so does a different
-    destination;
-  - a lock makes signing fail again, clears approvals and kills an open
-    confirm prompt;
-  - forwarded signatures are refused;
-  - `ssh-add <key>`, `ssh-add -D` and `ssh-add -x` fail.
-- **`tests/control.rs`** spawns `kpa serve`: once a database serves SSH
-  keys, the agent's socket appears and `ssh-add -l` reaches it, and
-  otherwise there is no agent socket.
-- **Phase 2** (unlock on demand, requests from outside the desktop) adds:
-  `ssh-keygen -Y sign` failing when the scripted prompt cancels, and, from
-  outside the desktop (`authn::assume_cgroup`), a refused signature that
-  `ssh_pending` lists and whose retry signs after `ssh_approve`.
-- **Forwarding** (phase 3): an unprivileged `sshd` on a high port with a temporary
-  host key, then `ssh -A` to localhost. This covers session-bind for real:
-  a forwarded login approved by a scripted confirm, a second `ssh -A`
-  session asking again, a `forwarded = false` key absent from the
-  forwarded listing, and forwarded `SSHSIG` refused.
-- **Fuzzing**: `fuzz_targets/agent_request.rs` covers `wire`, the
-  session-bind parser and `classify`.
-
-**Size**: roughly 1,500–2,000 lines of Rust plus tests. That is about as
-much as kpa's existing code, so it warrants its own security-audit pass
-once it lands.
-
-**Phases**, each leaving a usable state. The SSH release ships all three.
-
-1. **Local agent.**
-   - Socket, identities, signing (Ed25519, ECDSA, RSA), database opt-in,
-     discovery, the key cache, overrides, lock coupling, idle activity.
-   - Approvals on screen, with the approval program.
-   - session-bind parsing, with every forwarded request refused.
-   - `kpa ssh keys`, logging, fixtures, fuzz target, threat-model and
-     design edits, `services.kpa.sshAgent.enable`.
-   - The user unlocks from the launcher or tray first.
-   - Enough to switch off a KeePass client's agent on Linux.
-2. **Unlock on demand, and requests from outside the desktop.**
-   - `KPA_PROMPT_MESSAGE`, backoff, unlock waiters.
-   - Pending requests, `kpa ssh pending`, `kpa ssh approve`, the hints in
-     key comments.
-3. **Forwarding.**
-   - `forwarded`, forwarded listing, forwarding-session approvals.
-   - `known_hosts` names, the end-to-end `sshd` test.
-
-Later, if needed: read notifications covering both `copy` and signatures
-(T-16), and an upstream agent relay (approach C).
-
-## 12. Open questions
-
-1. **Shared terminal servers.** [`headless.md`](./headless.md) open
-   question 1 asks whether config should name a terminal server whose
-   shells count as the desktop. If it does, the same override decides
-   whether those shells get on-screen confirm prompts or
-   `kpa ssh approve`.

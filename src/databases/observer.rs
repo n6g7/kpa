@@ -11,7 +11,18 @@ use crate::cancel::CancelToken;
 ///
 /// Each observer tags what it holds with the token of the unlock it belongs
 /// to and compares on every use, so a late notification for an old unlock
-/// can't touch the state of a new one.
+/// can't touch the state of a new one: `locked(db, unlock)` drops the state
+/// tagged with `unlock` and nothing else, and a use that finds state tagged
+/// with another unlock's token starts afresh.
+///
+/// Observers are told in the order they were registered, each told of every
+/// database a lock covered before the next is told anything, so what holds a
+/// secret is registered before what releases the sleep delay. Lock order: the
+/// core's lock, then the agent's state, then approvals. `locked` takes only
+/// its observer's own lock; `unlocked` may take the core's lock first
+/// (the agent's state does, to scan under it) and its own second. Nothing
+/// takes them the other way round, and a guard from `open` must not outlive a
+/// call that needs the core.
 pub trait Observer: Send + Sync {
     /// `db` was unlocked; `unlock` is the unlock's token.
     fn unlocked(&self, _databases: &Databases, _db: &str, _unlock: &CancelToken) {}

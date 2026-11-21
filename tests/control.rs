@@ -290,7 +290,7 @@ fn version_mismatch_is_rejected() {
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"], "version_mismatch");
         // The response always carries the daemon's own version, not the
-        // client's claimed one — that's the whole point (docs/design.md).
+        // client's claimed one — that's the whole point (docs/protocol.md § Version).
         assert_eq!(response["v"], kpa::frontends::control::proto::VERSION);
         // A version mismatch is "a clear error naming both versions".
         let detail = response["detail"]

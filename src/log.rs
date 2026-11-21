@@ -2,7 +2,7 @@
 //!
 //! Everything the daemon says about itself goes through [`log`], so there is
 //! one place to audit for what may reach a log. The rule (`docs/design.md`
-//! § Logging): a line names the operation, the database and the error kind,
+//! § Secrets): a line names the operation, the database and the error kind,
 //! never what was in a database. No level is exempt, `debug` included: a log
 //! outlives the unlocked session that produced it and lands somewhere far
 //! less guarded than the socket (`docs/threat-model.md` TB-7).

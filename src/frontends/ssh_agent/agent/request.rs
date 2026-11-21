@@ -1,5 +1,5 @@
 //! [`Request`]: one `SIGN_REQUEST` as the sign flow sees it, and the log
-//! line it ends in (`docs/ssh-agent.md` § 11).
+//! line it ends in (`docs/design.md` § Secrets).
 
 use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg, PublicKey};
@@ -81,8 +81,8 @@ fn capped(text: &str, max_len: usize) -> &str {
     &text[..end]
 }
 
-/// One line per `SIGN_REQUEST` for a served key (`docs/ssh-agent.md`
-/// § 11), as [`sign_line`] words it. A signature is `info`, everything else
+/// One line per `SIGN_REQUEST` for a served key (`docs/design.md`
+/// § Secrets), as [`sign_line`] words it. A signature is `info`, everything else
 /// `warn`.
 pub(super) fn log_sign(
     db: &str,

@@ -431,7 +431,7 @@ fn fallback_icon(databases: &[Snapshot], has_error: bool) -> Vec<ksni::Icon> {
     pngs.iter().map(|png| decode_icon(png)).collect()
 }
 
-/// `docs/design.md` § Tray: one submenu per database (Lock, Unlock —
+/// `docs/design.md` § Front ends (the tray): one submenu per database (Lock, Unlock —
 /// only the applicable one enabled), then Lock all, then Quit. A free
 /// function so it's testable against a plain `&[Snapshot]`.
 fn build_menu(

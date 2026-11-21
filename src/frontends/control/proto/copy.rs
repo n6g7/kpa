@@ -1,6 +1,6 @@
 //! `copy`: hand one field of one entry to the clipboard. The secret itself
 //! never rides the wire back out — the response says which field and for
-//! how long, never the value (`docs/design.md` § Clipboard: "the daemon
+//! how long, never the value (`docs/design.md` decision #4: "the daemon
 //! owns the clipboard, so the secret never enters the client's address
 //! space").
 
@@ -24,7 +24,7 @@ pub struct CopyRequest {
 /// KeePass's own keys are exact-case, so a same-spelled custom key is a
 /// distinct, genuine field) needs the `custom:` prefix to be addressed by
 /// its key; a bare name among these always means the built-in instead
-/// (`docs/design.md` § Protocol's collision rule).
+/// (`docs/protocol.md`'s collision rule).
 const RESERVED_NAMES: [&str; 6] = ["username", "password", "url", "notes", "totp", "title"];
 
 /// The fields `copy` can be asked for: the four it always could, `totp`
@@ -46,7 +46,7 @@ pub enum Field {
     Url,
     Notes,
     /// The code generated from the entry's `otp` field at the moment of
-    /// the `copy` — never the seed itself. `docs/design.md` § Protocol.
+    /// the `copy` — never the seed itself. `docs/protocol.md`.
     Totp,
     /// A custom (user-defined) field, addressed by its literal KeePass
     /// key: either a bare name that doesn't collide with a reserved one,
@@ -233,7 +233,7 @@ mod tests {
     use super::*;
 
     /// Every name `copy` recognizes without a `custom:` prefix, both
-    /// directions — this is the wire vocabulary `docs/design.md` documents.
+    /// directions — this is the wire vocabulary `docs/protocol.md` documents.
     #[test]
     fn builtin_names_round_trip() {
         let cases = [

@@ -9,7 +9,7 @@ use super::error::{ErrorCode, ErrorFields};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockRequest {
     /// `None` locks every database. Omitted from the wire rather than
-    /// sent as `null`, matching `docs/design.md`'s "db omitted = lock
+    /// sent as `null`, matching `docs/protocol.md`'s "db omitted = lock
     /// all"; an incoming explicit `null` still reads as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db: Option<String>,

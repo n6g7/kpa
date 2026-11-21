@@ -1,6 +1,15 @@
 //! Wiring: builds the core and the front ends on it, registers what reacts
 //! to a lock, and starts the threads. Nothing else decides what reacts to a
 //! lock or in which order.
+//!
+//! Threads: the main thread accepts on kpa's socket and spawns a thread per
+//! connection, capped, where a failed spawn drops that connection and nothing
+//! else; the agent socket, if a database serves SSH keys, has its own accept
+//! thread and per-connection threads; `auto_lock` has four (the logind watcher,
+//! the sleep inhibitor's, the loop that reacts to events, the idle tick); the
+//! tray has its service's thread and the loop that refreshes it; each
+//! clipboard offer has a serving thread and an expiry thread. The core has
+//! none: it is plain calls, so a test drives it from one.
 
 use std::os::unix::net::UnixListener;
 use std::sync::Arc;

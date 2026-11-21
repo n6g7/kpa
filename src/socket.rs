@@ -92,8 +92,8 @@ fn bind_owner_only(path: &Path) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// Bind the daemon's Unix socket at `path`, mode `0600` (`docs/design.md`
-/// § Protocol).
+/// Bind the daemon's Unix socket at `path`, mode `0600` (`docs/protocol.md`
+/// § Connections).
 ///
 /// The parent directory is checked by `ensure_socket_dir`: it is created with
 /// mode `0700` if missing, and an existing one is never changed. So

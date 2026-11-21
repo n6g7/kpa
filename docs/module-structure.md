@@ -82,4 +82,94 @@ are the dependency graph; there is no arrow between two front ends.
 
 Apply these to code a task already touches, like the
 [portability rules](./portability.md). Don't restructure other code only
-to follow them. The graph above has no cycles today.
+to follow them. The graph above has no cycles.
+
+## Layout
+
+kpa is one Cargo package with two crates: the library (`src/lib.rs`), which
+holds every module above but `main`, and the binary (`src/main.rs`), which
+parses arguments, hardens the process and dispatches: `kpa serve` goes to
+`daemon::serve`, and every client subcommand goes to `control`'s client.
+
+```
+src/
+  main.rs               arguments, hardening, dispatch
+  lib.rs
+  daemon.rs             wiring: builds everything, starts the threads
+  databases/            the core
+    mod.rs              Databases and its slots; Open, the guard with the read methods
+    unlock.rs           begin_unlock, Unlocking, finish
+    observer.rs         Observer, and telling observers in their order
+    freshness.rs        the freshness guard: a changed file locks the database
+    vault.rs            reading a .kdbx (private to databases)
+    testing.rs          in-memory databases, and files to unlock, for other subsystems' tests
+  frontends/
+    mod.rs
+    control/            kpa's own socket
+      mod.rs            Api (what the handlers share) and the small handlers:
+                        status, lock, list, ssh keys / pending / approve
+      serve.rs          listener, connection cap, read one request, write one response
+      unlock.rs         the unlock handler: begin, choose where to ask, ask, finish
+      copy.rs           the copy handler, and CopyState (ends offers on lock)
+      authz.rs          authorize_copy, choose_unlock_prompt
+      proto/            the wire types
+      client/           the CLI's side: mod.rs, tty.rs, ssh_keys_report.rs,
+                        ssh_requests_report.rs
+    ssh_agent/          the agent socket: wire, bind, classify, authz, serve
+      agent/            the agent's logic: SshState (state.rs), Hold (hold.rs),
+                        identities, the sign flow, prompts, signing
+    tray.rs             the status icon: Tray, and Changed, its observer
+    auto_lock/
+      mod.rs            react, watch_idle, SleepHold (OS-neutral)
+      logind.rs         the logind watcher and the sleep inhibitor
+  ssh/                  what control and ssh_agent share about SSH
+    keys.rs             finding keys, their config, the public-key cache
+    approvals/          approvals and pending requests, and their state per unlock
+      mod.rs            Approvals (the state and its observer), Scope,
+                        SignatureApproval, RequestDetails, PendingRequest
+      granted.rs        GrantedApprovals: what is approved
+      pending.rs        PendingRequests: what was refused
+  display_session.rs    DisplaySession, DisplayWriter, DisplayHandle
+  clipboard/            mod.rs (Backend, Offer), and wayland/
+  authn.rs  authz.rs  prompt/  config.rs  paths.rs  socket.rs
+  cancel.rs  log.rs  output/
+tests/                  integration tests, each named for what it drives
+                        (control.rs, databases.rs, logind.rs, ssh_agent_serve.rs, ...)
+fuzz/                   the fuzz targets, their own package
+```
+
+There is no `states/`, `util/` or `os/` directory. It is one package rather
+than a workspace: the dependency rules between subsystems are kept by review
+rather than by crate boundaries, and the test fakes (`prompt::Scripted`,
+`clipboard::RecordingBackend`, `Databases::for_test`) stay usable from every
+subsystem's unit tests, which separate crates would put behind a feature or a
+test-support crate.
+
+## Testing
+
+- **`databases` is tested alone**: the state machine (a lock beats an unlock, a
+  token is cancelled when its unlock's lock happens, idle expiry per database,
+  the freshness guard, `InProgress`), with in-memory databases installed through
+  `install_for_test`, a real KDBX4 file written by `write_for_test` where a test
+  unlocks, and observers that record what they are told and call back into the
+  core.
+- **No front-end test uses a mock of `Databases`.** A mock needs a trait in
+  front of the core and a second implementation of its lock and token
+  semantics, which can drift from the real one. The stand-in sits at the
+  lowest seam, the file: the real core holding an in-memory database, or reading
+  a real file the test wrote.
+  Likewise the prompts are `prompt::Scripted`, the clipboard is
+  `clipboard::RecordingBackend`, and the display session is a writer the test
+  sets.
+- **`ssh::approvals`, `ssh_agent`, `control` and `tray`** are tested against a
+  real `Databases` with their own state registered as observers. The races each
+  has to survive are tests: a lock while a prompt is up, a lock and a fresh
+  unlock after the answer, a file that changes between two reads, two concurrent
+  signers, two overlapping copies. The tray's menu callback is tested behind a
+  mutex standing in for the service's lock, since a unit test has no session bus.
+- **`auto_lock`** is tested by unit tests of `react`, `watch_idle` and
+  `SleepHold` on a `Databases` with an `Event` channel the test reads; the logind
+  watcher and `auto_lock::start` by `tests/logind.rs` against a private bus,
+  under the system bus's stock default policy.
+- **Integration tests** build the daemon with `daemon::build` and put the real
+  CLI and the OpenSSH tools in front of it.

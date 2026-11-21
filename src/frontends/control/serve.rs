@@ -248,7 +248,7 @@ fn read_request(stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<RequestL
 }
 
 /// One connection: read exactly one request line, respond with exactly one
-/// response line, done (`docs/design.md` § Protocol — one-shot connections
+/// response line, done (`docs/protocol.md` § Connections — one-shot connections
 /// by design, not a limitation).
 ///
 /// A request that doesn't fit — longer than `MAX_REQUEST_LEN` without a
