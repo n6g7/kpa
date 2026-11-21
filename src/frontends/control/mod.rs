@@ -252,15 +252,20 @@ impl Api {
         let mut pending = Vec::new();
         for config in self.databases.configs().iter().filter(|c| c.serve_ssh_keys) {
             if let Ok(open) = self.databases.open(&config.name) {
-                pending.extend(self.approvals.pending(&open, now));
+                for request in self.approvals.pending(&open, now) {
+                    let session = self
+                        .approvals
+                        .forwarding_session(&open, &request.approval.scope);
+                    pending.push((request, session));
+                }
             }
         }
         pending
             .into_iter()
-            .map(|pending| WirePending {
+            .map(|(pending, session)| WirePending {
                 id: pending.id,
                 refused_at: unix_seconds(pending.refused_at),
-                scope: wire_scope(&pending.approval.scope, pending.forwarding_session),
+                scope: wire_scope(&pending.approval.scope, session),
                 remember: pending.approval.remember,
                 request: WireRequestDetails {
                     purpose: pending.request.purpose.to_string(),
@@ -288,9 +293,10 @@ impl Api {
                     GrantSource::Cli => "cli",
                 };
                 let expires_in = grant.time_left(now).map(|left| left.as_secs());
+                let session = self.approvals.forwarding_session(&open, &grant.scope);
                 grants.push(WireGrant {
                     granted_at: unix_seconds(grant.granted_at),
-                    scope: wire_scope(&grant.scope, grant.forwarding_session),
+                    scope: wire_scope(&grant.scope, session),
                     remember: grant.lasts == Lasts::UntilLock,
                     expires_in,
                     by: by.to_string(),

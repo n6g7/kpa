@@ -11,7 +11,7 @@ mod granted;
 mod pending;
 mod sessions;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -168,8 +168,6 @@ pub struct PendingRequest {
     /// another request, and says nothing about the scope.
     pub id: Uuid,
     pub approval: SignatureApproval,
-    /// The number of its forwarding session, if it is forwarded.
-    pub forwarding_session: Option<u32>,
     pub request: RequestDetails,
     /// When it was last refused.
     pub refused_at: SystemTime,
@@ -208,12 +206,9 @@ impl Held {
     /// Forgets the numbers of forwarding sessions that no grant and no
     /// pending request refers to.
     fn drop_unused_sessions(&mut self) {
-        let in_use: HashSet<u32> = self
-            .granted
-            .sessions()
-            .chain(self.pending.sessions())
-            .collect();
-        self.sessions.retain(&in_use);
+        let (granted, pending) = (&self.granted, &self.pending);
+        self.sessions
+            .retain(|forwarding| granted.refers_to(forwarding) || pending.refers_to(forwarding));
     }
 }
 
@@ -255,8 +250,8 @@ impl Approvals {
     pub fn grant(&self, open: &Open, scope: Scope, by: GrantSource, wall: SystemTime) {
         let mut held = self.held();
         let state = Self::fresh(&mut held, open);
-        let session = state.sessions.number(&scope);
-        state.granted.grant(scope, session, by, wall);
+        state.sessions.note(&scope);
+        state.granted.grant(scope, by, wall);
         state.drop_unused_sessions();
     }
 
@@ -277,6 +272,15 @@ impl Approvals {
             .unwrap_or_default()
     }
 
+    /// The number of the forwarding session `scope` is for, 1, 2, … in the
+    /// order this unlock's grants and pending requests first referred to
+    /// them. `None` for a scope that isn't forwarded.
+    pub fn forwarding_session(&self, open: &Open, scope: &Scope) -> Option<u32> {
+        Self::current(&mut self.held(), open)?
+            .sessions
+            .number(scope)
+    }
+
     /// Records that `request` was refused for want of `approval`: identical
     /// requests merge, at most 16 are kept, each for five minutes.
     pub fn record(
@@ -288,8 +292,8 @@ impl Approvals {
     ) {
         let mut held = self.held();
         let state = Self::fresh(&mut held, open);
-        let session = state.sessions.number(&approval.scope);
-        state.pending.record(approval, session, request, now);
+        state.sessions.note(&approval.scope);
+        state.pending.record(approval, request, now);
         state.drop_unused_sessions();
     }
 
@@ -316,8 +320,8 @@ impl Approvals {
         let state = Self::current(&mut held, open)?;
         let approval = state.pending.take(id, wall)?;
         let approved = approval.scope.key().fingerprint;
-        let session = state.sessions.number(&approval.scope);
-        state.granted.approve(approval, session, now, wall, window);
+        state.sessions.note(&approval.scope);
+        state.granted.approve(approval, now, wall, window);
         state.drop_unused_sessions();
         Some(approved)
     }
@@ -607,31 +611,20 @@ mod tests {
         approvals.record(&open, forwarded(2), requested("ssh"), wall);
         approvals.record(&open, forwarded(1), requested("scp"), wall);
 
-        let granted = approvals.granted(&open, now);
-        assert_eq!(
-            granted
-                .iter()
-                .map(|g| g.forwarding_session)
-                .collect::<Vec<_>>(),
-            [Some(1), None]
-        );
+        let number = |scope: &Scope| approvals.forwarding_session(&open, scope);
+        assert_eq!(number(&forwarded(1).scope), Some(1));
+        assert_eq!(number(&forwarded(2).scope), Some(2));
+        assert_eq!(number(&approval(1, None, true).scope), None);
         let pending = approvals.pending(&open, wall);
-        assert_eq!(
-            pending
-                .iter()
-                .map(|p| p.forwarding_session)
-                .collect::<Vec<_>>(),
-            [Some(2), Some(1)]
-        );
 
         // Approving session 2's request grants it under its number, and using
         // that one-signature grant leaves nothing referring to session 2.
         approvals.approve(&open, pending[0].id, now, wall, WINDOW);
-        let approved = approvals.granted(&open, now);
-        assert_eq!(approved[2].forwarding_session, Some(2));
+        assert_eq!(number(&forwarded(2).scope), Some(2));
         approvals.used(&open, &forwarded(2).scope, wall);
+        assert_eq!(number(&forwarded(2).scope), None);
         approvals.record(&open, forwarded(2), requested("ssh"), wall);
-        let again = approvals.pending(&open, wall);
-        assert_eq!(again.last().unwrap().forwarding_session, Some(3));
+        assert_eq!(number(&forwarded(2).scope), Some(3));
+        assert_eq!(number(&forwarded(1).scope), Some(1));
     }
 }

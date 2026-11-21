@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
-use super::{Scope, SignatureApproval};
+use super::{Forwarding, Scope, SignatureApproval};
 
 /// At most this many forwarded scopes are approved until lock at once. Every
 /// `ssh -A` is a new forwarding session that no later one reuses, so without
@@ -35,8 +35,6 @@ pub enum GrantSource {
 #[derive(Debug, Clone)]
 pub struct Grant {
     pub scope: Scope,
-    /// The number of its forwarding session, if it is forwarded.
-    pub forwarding_session: Option<u32>,
     pub lasts: Lasts,
     /// When it was given, by the wall clock, so a client can tell its age.
     pub granted_at: SystemTime,
@@ -88,21 +86,16 @@ impl GrantedApprovals {
         self.0.iter().filter(move |grant| !grant.expired(now))
     }
 
-    /// The forwarding sessions the grants kept refer to.
-    pub fn sessions(&self) -> impl Iterator<Item = u32> {
-        self.0.iter().filter_map(|grant| grant.forwarding_session)
+    /// Whether a grant kept is for `forwarding`'s session.
+    pub fn refers_to(&self, forwarding: &Forwarding) -> bool {
+        self.0
+            .iter()
+            .any(|grant| grant.scope.forwarding.as_deref() == Some(forwarding))
     }
 
-    /// Approves `scope`, which is forwarding session number
-    /// `forwarding_session` if it is forwarded, until lock. A scope that is
-    /// approved until lock already keeps its grant.
-    pub fn grant(
-        &mut self,
-        scope: Scope,
-        forwarding_session: Option<u32>,
-        by: GrantSource,
-        wall: SystemTime,
-    ) {
+    /// Approves `scope` until lock. A scope that is approved until lock
+    /// already keeps its grant.
+    pub fn grant(&mut self, scope: Scope, by: GrantSource, wall: SystemTime) {
         if self
             .0
             .iter()
@@ -120,7 +113,6 @@ impl GrantedApprovals {
         }
         self.0.push(Grant {
             scope,
-            forwarding_session,
             lasts: Lasts::UntilLock,
             granted_at: wall,
             by,
@@ -136,19 +128,17 @@ impl GrantedApprovals {
     pub fn approve(
         &mut self,
         approval: SignatureApproval,
-        forwarding_session: Option<u32>,
         now: Instant,
         wall: SystemTime,
         window: Duration,
     ) {
         if approval.remember {
-            self.grant(approval.scope, forwarding_session, GrantSource::Cli, wall);
+            self.grant(approval.scope, GrantSource::Cli, wall);
         } else {
             self.0
                 .retain(|grant| grant.scope != approval.scope && !grant.expired(now));
             self.0.push(Grant {
                 scope: approval.scope,
-                forwarding_session,
                 lasts: Lasts::OneSignature {
                     until: now + window,
                 },
@@ -182,11 +172,11 @@ mod tests {
     const WINDOW: Duration = Duration::from_secs(60);
 
     fn grant(approvals: &mut GrantedApprovals, scope: Scope) {
-        approvals.grant(scope, None, GrantSource::OnScreen, SystemTime::now());
+        approvals.grant(scope, GrantSource::OnScreen, SystemTime::now());
     }
 
     fn approve(approvals: &mut GrantedApprovals, ask: SignatureApproval, now: Instant) {
-        approvals.approve(ask, None, now, SystemTime::now(), WINDOW);
+        approvals.approve(ask, now, SystemTime::now(), WINDOW);
     }
 
     #[test]
@@ -252,13 +242,12 @@ mod tests {
         let mut approvals = GrantedApprovals::default();
         let (now, wall) = (Instant::now(), SystemTime::now());
         let scope = Scope::local(&served_key(1), None);
-        approvals.grant(scope.clone(), None, GrantSource::OnScreen, wall);
+        approvals.grant(scope.clone(), GrantSource::OnScreen, wall);
         approvals.used(&scope, SystemTime::now());
         approvals.used(&scope, SystemTime::now());
         // Granting again keeps the first grant, its time and its count.
         approvals.grant(
             scope.clone(),
-            None,
             GrantSource::Cli,
             wall + Duration::from_secs(5),
         );
