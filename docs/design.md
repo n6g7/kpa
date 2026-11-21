@@ -380,11 +380,15 @@ of kpa.
 
 **What a log line may contain.** The operation, the database name, the error
 kind, and for a copy the field name and the entry's title (so the log says which
-secret left). Never passwords, protected fields (a protected title is replaced
-by the entry's uuid), usernames, URLs or any other vault content, at any level: a
-log outlives the unlocked session and ends up somewhere far less guarded than
-the socket (threat model TB-7). Reads (`status`, `list`) are not logged, and
-control characters are escaped, so a crafted name can't forge a second line.
+secret left). For a signature: the key's fingerprint and the `name` its
+`[[database.ssh_key]]` override gives it, never the entry's title; its purpose,
+connection class and destination fingerprint; and the outcome. Never passwords,
+protected fields (a protected title is replaced by the entry's uuid), usernames,
+URLs or any other vault content, at any level: a log outlives the unlocked
+session and ends up somewhere far less guarded than the socket (threat model
+TB-7). Reads (`status`, `list`, the agent's `REQUEST_IDENTITIES`) are not
+logged, and control characters are escaped, so a crafted name can't forge a
+second line.
 Every line goes through `log::log`, the one function to audit.
 
 **Non-goals:** kpa does not defend against an attacker who already has code
@@ -422,7 +426,7 @@ resolve against the daemon's working directory.
 
 `serve` writes one line per event to stderr at `error`, `warn`, `info` (the
 default) or `debug`; `log_level` sets it and `serve --log-level` overrides it.
-`info` carries every unlock, lock and copy, and the tray starting and its host
-coming and going; `warn` failed or refused requests; `debug` why. Under systemd
+`info` carries every unlock, lock, copy and signature, and the tray starting
+and its host coming and going; `warn` failed or refused requests; `debug` why. Under systemd
 each line carries a `<N>` syslog priority prefix, so `journalctl -p warning`
 filters by level. What a line may contain is under § Secrets.
