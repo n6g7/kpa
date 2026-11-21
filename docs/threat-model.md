@@ -733,38 +733,53 @@ Explicitly not defended. A finding that reduces to one of these is out of
 scope, or at most hardening.
 
 - **NG-1 Persistent malicious same-uid code (ACT-8).** It can wait for an
-  unlock, connect to the socket and copy any secret, read the clipboard,
-  read the `.kdbx`, log keystrokes, replace the prompt program or the
-  `kpa` binary, and edit the config. There is deliberately no per-caller
-  authorization: inside the uid boundary it would be theater. This
-  includes "a same-uid process can list/copy/lock/unlock" and "the socket
-  has no authentication". Short-lived code (ACT-10) gets the same access
-  but only while a database is unlocked (T-18).
+  unlock, connect to either socket, copy any secret, sign with any served
+  key and approve its own requests, read the clipboard, read the `.kdbx`,
+  log keystrokes, replace a prompt program or the `kpa` binary, and edit
+  the config. There is deliberately no per-caller authorization: inside
+  the uid boundary it would be theater. This includes "a same-uid process
+  can list/copy/sign/lock/unlock", "the sockets have no authentication"
+  and "a same-uid process can approve a signature". Short-lived code
+  (ACT-10) gets the same access but only while a database is unlocked
+  (T-18).
 - **NG-2 root, kernel, firmware, hardware (ACT-9)**, including cold-boot and
   DMA attacks on RAM.
-- **NG-3 Host configuration (ASM-6).** Hibernation, zram writeback, swap
-  beyond what kpa can lock, ptrace scope, `suid_dumpable`, unencrypted
-  disks.
+- **NG-3 Host configuration (ASM-6).** Swap, hibernation, zram writeback,
+  ptrace scope, `suid_dumpable`, unencrypted disks, a process list that
+  shows other users' command lines.
 - **NG-4 Plaintext inside dependencies' memory.** `keepass` keeps
   unprotected fields as plain strings, and does not zeroize its decrypted
   payload buffers, KDF intermediates, or keyfile parser copies; these can
-  survive a lock. This covers memory hygiene only: parser bugs are in
-  scope (G-9, ASM-5). A finding that kpa could avoid such a copy (a
+  survive a lock. So can whatever `ssh-key` allocates while it decodes a
+  private key. This covers memory hygiene only: parser bugs are in scope
+  (G-9, G-11, ASM-5). A finding that kpa could avoid such a copy (a
   different API, not cloning) is hardening.
 - **NG-5 What other programs do with data kpa handed them**: the prompt
-  program's memory, the compositor, clipboard managers ignoring the tag,
-  a launcher's display or storage of the `list` index.
+  programs' memory and command lines, the compositor, clipboard managers
+  ignoring the tag, a launcher's display or storage of the `list` index,
+  what an SSH client shows of a key's name, what a server does with a
+  signature.
 - **NG-6 Offline attacks on the `.kdbx`.** KDF strength, password quality,
   and the format's cryptography are the KeePass ecosystem's concern; kpa
   reads files with whatever parameters the user's client wrote, and cannot
   tell a validly encrypted older or substituted copy from the current one
-  (T-17).
+  (T-17). kpa doesn't slow password guesses down either: whoever can ask
+  it can read the file and guess offline.
 - **NG-7 Denial of service by anything already at the same uid** — killing
-  the daemon, flooding it, locking databases, opening prompts.
-- **NG-8 Trusted path for the prompt.** kpa cannot prove to the user that a
-  password prompt is its own; a compositor client can draw a look-alike.
-  Prompt authenticity is the prompt program's and the compositor's concern
-  (ASM-3, ASM-4).
+  the daemon, quitting it from the tray, flooding it, holding its
+  connections, locking databases, opening prompts.
+- **NG-8 Trusted path for the prompts.** kpa cannot prove to the user that
+  a prompt is its own, nor to itself that the user gave the answer: a
+  compositor client can draw a look-alike, and one the compositor lets
+  synthesize input can answer the real one. Prompt authenticity is the
+  prompt programs' and the compositor's concern (ASM-3, ASM-4).
+- **NG-9 Forwarding kpa cannot see.** kpa knows a connection is forwarded
+  only because the user's `ssh` says so (ASM-8). Anything else that relays
+  the agent socket — an OpenSSH older than 8.9, another SSH
+  implementation, a container or tool handed the socket — is a local
+  client: it gets what local use gets, under local approvals, for as long
+  as it holds the connection. Deciding what to hand the socket to is the
+  user's (`docs/ssh-agent.md` § 8).
 
 ## 9. Triage
 
@@ -780,16 +795,19 @@ Classify each finding into exactly one bucket, citing IDs:
 
 Severity follows the asset and the actor's reach, not CVSS:
 
-- **Critical** — A-1/A-2 to ACT-1/ACT-2; any write to the vault (G-1);
-  code execution from a crafted file (G-9).
+- **Critical** — A-1/A-2 to ACT-1/ACT-2; a signature for ACT-1 or ACT-2;
+  any write to the vault (G-1); code execution from a crafted file or from
+  agent traffic (G-9, G-11).
 - **High** — A-1/A-2 to a passive channel or disk (G-3, G-4); a lock that
-  doesn't happen or doesn't hold (G-5); a signature without the approval
-  its key's policy asks for (G-13, G-14); memory corruption from file input.
+  doesn't happen or doesn't hold (G-5), a signature from a locked database
+  included; a signature without the approval its key's policy asks for
+  (G-13, G-14); memory corruption from file or socket input.
 - **Medium** — A-3 across the uid boundary or to disk; kpa-owned secret
   copies surviving lock (G-6); stale or tampered data served (G-8, G-9);
-  entry content breaking out of its field (G-10); clipboard missing its
-  tag (G-7).
+  entry content breaking out of its field (G-10), a prompt that misstates
+  what is being approved included; clipboard missing its tag (G-7).
 - **Low** — crash, hang, or resource exhaustion from file or socket input;
-  anything reachable only by ACT-6 that can't read data.
+  a prompt raised where G-12 forbids one; anything reachable only by ACT-6
+  that can neither read data nor sign.
 
 Model gaps are the most useful findings: update this file alongside the fix.
