@@ -9,6 +9,7 @@
 
 mod granted;
 mod pending;
+mod sessions;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -19,8 +20,10 @@ use ssh_key::{Fingerprint, HashAlg};
 use uuid::Uuid;
 
 use granted::GrantedApprovals;
+pub use granted::{Grant, GrantSource, Lasts};
 pub use pending::PENDING_TTL;
 use pending::PendingRequests;
+use sessions::ForwardingSessions;
 
 use super::keys::ServedKey;
 use crate::cancel::CancelToken;
@@ -36,9 +39,15 @@ use crate::databases::{Databases, Observer, Open};
 /// destination reached through another forwarding host (`docs/ssh-agent.md`
 /// § 6.7). Computed once, by `ssh_agent::authz::authorize_sign`, and carried
 /// to the lookup and the grant.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// The scope holds the key as the open database serves it, so whatever shows
+/// an approval can name the key. Two scopes are the same when their keys have
+/// the same fingerprint and their destination and forwarding session match:
+/// the key's other fields (its name, title, database) describe it, and don't
+/// change within an unlock.
+#[derive(Debug, Clone)]
 pub struct Scope {
-    key: Fingerprint,
+    key: ServedKey,
     /// The destination's host key, by its SHA-256 fingerprint.
     destination: Option<Fingerprint>,
     /// The forwarding session, for a forwarded connection.
@@ -54,11 +63,30 @@ struct Forwarding {
     host: Fingerprint,
 }
 
+impl PartialEq for Scope {
+    fn eq(&self, other: &Scope) -> bool {
+        self.key.fingerprint == other.key.fingerprint
+            && self.destination == other.destination
+            && self.forwarding == other.forwarding
+    }
+}
+
+impl Eq for Scope {}
+
+impl std::hash::Hash for Scope {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key.fingerprint.hash(state);
+        self.destination.hash(state);
+        self.forwarding.hash(state);
+    }
+}
+
 impl Scope {
-    /// A local connection's scope, for `destination` if it is bound to one.
-    pub fn local(key: Fingerprint, destination: Option<&KeyData>) -> Scope {
+    /// A local connection's scope for `key`, and for `destination` if it is
+    /// bound to one.
+    pub fn local(key: &ServedKey, destination: Option<&KeyData>) -> Scope {
         Scope {
-            key,
+            key: key.clone(),
             destination: destination.map(|dest| dest.fingerprint(HashAlg::Sha256)),
             forwarding: None,
         }
@@ -67,13 +95,13 @@ impl Scope {
     /// A forwarded connection's scope: forwarding session `session`, to
     /// `host`, signing for `destination`.
     pub fn forwarded(
-        key: Fingerprint,
+        key: &ServedKey,
         session: &[u8],
         host: &KeyData,
         destination: &KeyData,
     ) -> Scope {
         Scope {
-            key,
+            key: key.clone(),
             destination: Some(destination.fingerprint(HashAlg::Sha256)),
             forwarding: Some(Box::new(Forwarding {
                 session: session.to_vec(),
@@ -82,8 +110,9 @@ impl Scope {
         }
     }
 
-    pub fn key(&self) -> Fingerprint {
-        self.key
+    /// The key the approval is for, as the open database serves it.
+    pub fn key(&self) -> &ServedKey {
+        &self.key
     }
 
     pub fn destination(&self) -> Option<Fingerprint> {
@@ -139,8 +168,6 @@ pub struct PendingRequest {
     /// another request, and says nothing about the scope.
     pub id: Uuid,
     pub approval: SignatureApproval,
-    /// The key the approval is for, as the open database serves it.
-    pub key: ServedKey,
     pub request: RequestDetails,
     /// When it was last refused.
     pub refused_at: SystemTime,
@@ -163,6 +190,26 @@ struct Held {
     unlock: CancelToken,
     granted: GrantedApprovals,
     pending: PendingRequests,
+    sessions: ForwardingSessions,
+}
+
+impl Held {
+    fn new(unlock: CancelToken) -> Held {
+        Held {
+            unlock,
+            granted: GrantedApprovals::default(),
+            pending: PendingRequests::default(),
+            sessions: ForwardingSessions::default(),
+        }
+    }
+
+    /// Forgets the numbers of forwarding sessions that no grant and no
+    /// pending request refers to.
+    fn drop_unused_sessions(&mut self) {
+        let (granted, pending) = (&self.granted, &self.pending);
+        self.sessions
+            .retain(|forwarding| granted.refers_to(forwarding) || pending.refers_to(forwarding));
+    }
 }
 
 impl Approvals {
@@ -185,17 +232,11 @@ impl Approvals {
     /// The state of `open`'s unlock, replacing another unlock's.
     fn fresh<'a>(held: &'a mut HashMap<String, Held>, open: &Open) -> &'a mut Held {
         let unlock = open.unlock_token();
-        let state = held.entry(open.name().to_string()).or_insert_with(|| Held {
-            unlock: unlock.clone(),
-            granted: GrantedApprovals::default(),
-            pending: PendingRequests::default(),
-        });
+        let state = held
+            .entry(open.name().to_string())
+            .or_insert_with(|| Held::new(unlock.clone()));
         if state.unlock != unlock {
-            *state = Held {
-                unlock,
-                granted: GrantedApprovals::default(),
-                pending: PendingRequests::default(),
-            };
+            *state = Held::new(unlock);
         }
         state
     }
@@ -206,32 +247,54 @@ impl Approvals {
     }
 
     /// Approves `scope` until the lock that ends this unlock.
-    pub fn grant(&self, open: &Open, scope: Scope) {
-        Self::fresh(&mut self.held(), open).granted.grant(scope);
+    pub fn grant(&self, open: &Open, scope: Scope, by: GrantSource, wall: SystemTime) {
+        let mut held = self.held();
+        let state = Self::fresh(&mut held, open);
+        state.sessions.note(&scope);
+        state.granted.grant(scope, by, wall);
+        state.drop_unused_sessions();
     }
 
-    /// Uses up `scope`'s one-signature approval, if it has one. An approval
-    /// kept until lock stays.
-    pub fn spend(&self, open: &Open, scope: &Scope) {
+    /// Records a signature `scope`'s approval covered at `wall`, once it is
+    /// made: a one-signature approval is used up, and one kept until lock
+    /// counts it.
+    pub fn used(&self, open: &Open, scope: &Scope, wall: SystemTime) {
         if let Some(state) = Self::current(&mut self.held(), open) {
-            state.granted.spend(scope);
+            state.granted.used(scope, wall);
+            state.drop_unused_sessions();
         }
     }
 
-    /// Records that `request` was refused for want of `approval`, which is
-    /// for `key`: identical requests merge, at most 16 are kept, each for
-    /// five minutes.
+    /// This database's grants at `now`, oldest first.
+    pub fn granted(&self, open: &Open, now: Instant) -> Vec<Grant> {
+        Self::current(&mut self.held(), open)
+            .map(|state| state.granted.list(now).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The number of the forwarding session `scope` is for, 1, 2, … in the
+    /// order this unlock's grants and pending requests first referred to
+    /// them. `None` for a scope that isn't forwarded.
+    pub fn forwarding_session(&self, open: &Open, scope: &Scope) -> Option<u32> {
+        Self::current(&mut self.held(), open)?
+            .sessions
+            .number(scope)
+    }
+
+    /// Records that `request` was refused for want of `approval`: identical
+    /// requests merge, at most 16 are kept, each for five minutes.
     pub fn record(
         &self,
         open: &Open,
         approval: SignatureApproval,
-        key: ServedKey,
         request: RequestDetails,
         now: SystemTime,
     ) {
-        Self::fresh(&mut self.held(), open)
-            .pending
-            .record(approval, key, request, now);
+        let mut held = self.held();
+        let state = Self::fresh(&mut held, open);
+        state.sessions.note(&approval.scope);
+        state.pending.record(approval, request, now);
+        state.drop_unused_sessions();
     }
 
     /// This database's pending requests at `now`, oldest first.
@@ -256,9 +319,11 @@ impl Approvals {
         let mut held = self.held();
         let state = Self::current(&mut held, open)?;
         let approval = state.pending.take(id, wall)?;
-        let key = approval.scope.key();
-        state.granted.approve(approval, now, window);
-        Some(key)
+        let approved = approval.scope.key().fingerprint;
+        state.sessions.note(&approval.scope);
+        state.granted.approve(approval, now, wall, window);
+        state.drop_unused_sessions();
+        Some(approved)
     }
 }
 
@@ -279,7 +344,7 @@ mod tests {
 
     use super::*;
     use crate::databases::testing::TestEntry;
-    use crate::ssh::testing::{approval, database, key, requested};
+    use crate::ssh::testing::{approval, database, host_key, key, requested};
 
     const WINDOW: Duration = Duration::from_secs(60);
     const IDLE: Duration = Duration::from_secs(3600);
@@ -297,6 +362,11 @@ mod tests {
         (databases, approvals)
     }
 
+    /// Grants `scope` on screen, as of now.
+    fn grant(approvals: &Approvals, open: &Open, scope: Scope) {
+        approvals.grant(open, scope, GrantSource::OnScreen, SystemTime::now());
+    }
+
     fn unlock_again(databases: &Databases, db: &str) {
         databases.lock(db).expect("configured");
         databases.install_for_test(db, vec![TestEntry::new("github")]);
@@ -307,7 +377,11 @@ mod tests {
         let (databases, approvals) = fixture();
         let now = Instant::now();
         let scope = approval(1, None, true).scope;
-        approvals.grant(&databases.open("personal").unwrap(), scope.clone());
+        grant(
+            &approvals,
+            &databases.open("personal").unwrap(),
+            scope.clone(),
+        );
 
         let open = databases.open("personal").unwrap();
         assert!(approvals.covers(&open, &scope, now + WINDOW * 100));
@@ -325,7 +399,6 @@ mod tests {
         approvals.record(
             &databases.open("personal").unwrap(),
             ask.clone(),
-            key(),
             requested("ssh"),
             wall,
         );
@@ -333,12 +406,12 @@ mod tests {
         let id = approvals.pending(&open, wall)[0].id;
         assert_eq!(
             approvals.approve(&open, id, t0, wall, WINDOW),
-            Some(ask.scope.key())
+            Some(ask.scope.key().fingerprint)
         );
 
         assert!(approvals.covers(&open, &ask.scope, t0 + WINDOW - Duration::from_millis(1)));
         assert!(!approvals.covers(&open, &ask.scope, t0 + WINDOW));
-        approvals.spend(&open, &ask.scope);
+        approvals.used(&open, &ask.scope, SystemTime::now());
         assert!(!approvals.covers(&open, &ask.scope, t0));
     }
 
@@ -348,15 +421,9 @@ mod tests {
         let (now, wall) = (Instant::now(), SystemTime::now());
         let open = databases.open("personal").unwrap();
         let ask = approval(1, None, true);
-        approvals.record(&open, ask.clone(), key(), requested("ssh"), wall);
-        approvals.record(&open, ask.clone(), key(), requested("git"), wall);
-        approvals.record(
-            &open,
-            approval(2, None, true),
-            key(),
-            requested("ssh"),
-            wall,
-        );
+        approvals.record(&open, ask.clone(), requested("ssh"), wall);
+        approvals.record(&open, ask.clone(), requested("git"), wall);
+        approvals.record(&open, approval(2, None, true), requested("ssh"), wall);
         let pending = approvals.pending(&open, wall);
         assert_eq!(pending.len(), 3);
 
@@ -385,7 +452,6 @@ mod tests {
             approvals.record(
                 &databases.open(db).unwrap(),
                 approval(1, None, true),
-                key(),
                 requested(command),
                 now,
             );
@@ -410,13 +476,11 @@ mod tests {
                 title: Some("a secret title".to_string()),
                 ..key()
             };
-            approvals.record(
-                &open,
-                approval(1, None, false),
-                titled,
-                requested("ssh"),
-                now,
-            );
+            let ask = SignatureApproval {
+                scope: Scope::local(&titled, None),
+                remember: false,
+            };
+            approvals.record(&open, ask, requested("ssh"), now);
         }
         databases.lock("personal").unwrap();
         assert!(approvals.held().get("personal").is_none());
@@ -429,7 +493,10 @@ mod tests {
         );
         let work = approvals.pending(&databases.open("work").unwrap(), now);
         assert_eq!(work.len(), 1);
-        assert_eq!(work[0].key.title.as_deref(), Some("a secret title"));
+        assert_eq!(
+            work[0].approval.scope.key().title.as_deref(),
+            Some("a secret title")
+        );
     }
 
     #[test]
@@ -439,13 +506,7 @@ mod tests {
         unlock_again(&databases, "personal");
         let now = SystemTime::now();
         let open = databases.open("personal").unwrap();
-        approvals.record(
-            &open,
-            approval(1, None, false),
-            key(),
-            requested("ssh"),
-            now,
-        );
+        approvals.record(&open, approval(1, None, false), requested("ssh"), now);
 
         approvals.locked(&databases, "personal", &old);
         assert_eq!(approvals.pending(&open, now).len(), 1);
@@ -456,7 +517,11 @@ mod tests {
         let (databases, approvals) = fixture();
         let (now, wall) = (Instant::now(), SystemTime::now());
         let scope = approval(1, None, true).scope;
-        approvals.grant(&databases.open("personal").unwrap(), scope.clone());
+        grant(
+            &approvals,
+            &databases.open("personal").unwrap(),
+            scope.clone(),
+        );
         // The old unlock's state is still in the map, as if its notice were late.
         let stale = approvals.held().remove("personal").unwrap();
         unlock_again(&databases, "personal");
@@ -464,15 +529,102 @@ mod tests {
 
         let open = databases.open("personal").unwrap();
         assert!(!approvals.covers(&open, &scope, now));
-        approvals.spend(&open, &scope);
-        approvals.record(
-            &open,
-            approval(2, None, true),
-            key(),
-            requested("ssh"),
-            wall,
-        );
+        approvals.used(&open, &scope, SystemTime::now());
+        approvals.record(&open, approval(2, None, true), requested("ssh"), wall);
         assert!(!approvals.covers(&open, &scope, now));
         assert_eq!(approvals.pending(&open, wall).len(), 1);
+    }
+
+    #[test]
+    fn grants_are_listed_per_database_with_their_uses_and_gone_with_the_lock() {
+        let (databases, approvals) = fixture();
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        let scope = approval(1, None, true).scope;
+        let open = databases.open("personal").unwrap();
+        approvals.grant(&open, scope.clone(), GrantSource::OnScreen, wall);
+        approvals.used(&open, &scope, SystemTime::now());
+
+        let granted = approvals.granted(&open, now);
+        assert_eq!(granted.len(), 1);
+        assert_eq!((granted[0].uses, granted[0].granted_at), (1, wall));
+        drop(open);
+        assert!(
+            approvals
+                .granted(&databases.open("work").unwrap(), now)
+                .is_empty()
+        );
+
+        unlock_again(&databases, "personal");
+        assert!(
+            approvals
+                .granted(&databases.open("personal").unwrap(), now)
+                .is_empty()
+        );
+    }
+
+    /// A scope is its key's fingerprint, destination and forwarding session:
+    /// the key's other fields describe it and take no part.
+    #[test]
+    fn scopes_are_told_apart_by_fingerprint_destination_and_session_only() {
+        let renamed = ServedKey {
+            name: "another name".to_string(),
+            title: Some("a title".to_string()),
+            ..key()
+        };
+        let scope = approval(1, None, true).scope;
+        assert_eq!(scope, Scope::local(&renamed, None));
+        assert_ne!(scope, Scope::local(&key(), Some(&host_key(2))));
+        assert_ne!(scope, approval(3, None, true).scope);
+        let (host, dest) = (host_key(4), host_key(5));
+        assert_ne!(
+            Scope::forwarded(&key(), &[1], &host, &dest),
+            Scope::forwarded(&key(), &[2], &host, &dest)
+        );
+        let hashed = |scope: &Scope| {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            scope.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hashed(&scope), hashed(&Scope::local(&renamed, None)));
+    }
+
+    /// Forwarding sessions are numbered in the order a grant or a pending
+    /// request first refers to them, and a number is dropped once neither
+    /// does: the session gets a new one if it comes back.
+    #[test]
+    fn forwarding_sessions_are_numbered_while_a_grant_or_a_pending_request_has_them() {
+        let (databases, approvals) = fixture();
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        let open = databases.open("personal").unwrap();
+        let forwarded = |session: u8| {
+            let scope = Scope::forwarded(&key(), &[session], &host_key(2), &host_key(3));
+            SignatureApproval {
+                scope,
+                remember: false,
+            }
+        };
+        let local = approval(1, None, true).scope;
+
+        approvals.grant(&open, forwarded(1).scope, GrantSource::OnScreen, wall);
+        approvals.grant(&open, local, GrantSource::OnScreen, wall);
+        approvals.record(&open, forwarded(2), requested("ssh"), wall);
+        approvals.record(&open, forwarded(1), requested("scp"), wall);
+
+        let number = |scope: &Scope| approvals.forwarding_session(&open, scope);
+        assert_eq!(number(&forwarded(1).scope), Some(1));
+        assert_eq!(number(&forwarded(2).scope), Some(2));
+        assert_eq!(number(&approval(1, None, true).scope), None);
+        let pending = approvals.pending(&open, wall);
+
+        // Approving session 2's request grants it under its number, and using
+        // that one-signature grant leaves nothing referring to session 2.
+        approvals.approve(&open, pending[0].id, now, wall, WINDOW);
+        assert_eq!(number(&forwarded(2).scope), Some(2));
+        approvals.used(&open, &forwarded(2).scope, wall);
+        assert_eq!(number(&forwarded(2).scope), None);
+        approvals.record(&open, forwarded(2), requested("ssh"), wall);
+        assert_eq!(number(&forwarded(2).scope), Some(3));
+        assert_eq!(number(&forwarded(1).scope), Some(1));
     }
 }

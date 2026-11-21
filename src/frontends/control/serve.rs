@@ -161,7 +161,8 @@ fn log_response(response: &Response) {
         Response::Status { .. }
         | Response::List(_)
         | Response::SshKeys(_)
-        | Response::SshPending(_) => {}
+        | Response::SshPending(_)
+        | Response::SshGrants(_) => {}
     }
 }
 

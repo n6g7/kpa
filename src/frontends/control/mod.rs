@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 use self::proto::{
     DatabaseStatus, ListError, ListRequest, LockError, LockRequest, Op, Request, Response,
     SshApproveError, SshApproveRequest, SshKeysError, SshKeysReport, SshKeysRequest, WireEntry,
-    WirePending, WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
+    WireGrant, WirePending, WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
 };
 use crate::authn::Requester;
 use crate::config::Config;
@@ -29,7 +29,8 @@ use crate::databases::{Databases, EntrySummary, Open, OpenError, UnknownDb};
 use crate::display_session::DisplayHandle;
 use crate::log;
 use crate::prompt::{self, PromptQueue};
-use crate::ssh::{approvals::Approvals, keys};
+use crate::ssh::approvals::{Approvals, GrantSource, Lasts, Scope};
+use crate::ssh::keys;
 
 pub use copy::CopyState;
 pub use serve::serve;
@@ -92,6 +93,7 @@ impl Api {
             Op::SshKeys(keys) => Response::SshKeys(self.ssh_keys(keys)),
             Op::SshPending => Response::SshPending(self.ssh_pending()),
             Op::SshApprove(approve) => Response::SshApprove(self.ssh_approve(approve)),
+            Op::SshGrants => Response::SshGrants(self.ssh_grants()),
         }
     }
 
@@ -250,27 +252,20 @@ impl Api {
         let mut pending = Vec::new();
         for config in self.databases.configs().iter().filter(|c| c.serve_ssh_keys) {
             if let Ok(open) = self.databases.open(&config.name) {
-                pending.extend(self.approvals.pending(&open, now));
+                for request in self.approvals.pending(&open, now) {
+                    let session = self
+                        .approvals
+                        .forwarding_session(&open, &request.approval.scope);
+                    pending.push((request, session));
+                }
             }
         }
         pending
             .into_iter()
-            .map(|pending| WirePending {
+            .map(|(pending, session)| WirePending {
                 id: pending.id,
                 refused_at: unix_seconds(pending.refused_at),
-                scope: WireScope {
-                    key: WireSshKey {
-                        db: pending.key.database,
-                        key_type: pending.key.public_key.algorithm().to_string(),
-                        fingerprint: pending.key.fingerprint.to_string(),
-                        name: pending.key.name,
-                        entry: pending.key.entry_uuid,
-                        title: pending.key.title,
-                        attachment: pending.key.attachment.unwrap_or_default(),
-                    },
-                    destination: pending.approval.scope.destination(),
-                    forwarding_host: pending.approval.scope.forwarding_host(),
-                },
+                scope: wire_scope(&pending.approval.scope, session),
                 remember: pending.approval.remember,
                 request: WireRequestDetails {
                     purpose: pending.request.purpose.to_string(),
@@ -281,6 +276,37 @@ impl Api {
                 },
             })
             .collect()
+    }
+
+    /// Every unlocked database's approvals, in config order, oldest first.
+    fn ssh_grants(&self) -> Vec<WireGrant> {
+        let now = Instant::now();
+        let mut grants = Vec::new();
+        for config in self.databases.configs().iter().filter(|c| c.serve_ssh_keys) {
+            let Ok(open) = self.databases.open(&config.name) else {
+                continue;
+            };
+            let idle_lock_in = open.idle_left(now).as_secs();
+            for grant in self.approvals.granted(&open, now) {
+                let by = match grant.by {
+                    GrantSource::OnScreen => "on_screen",
+                    GrantSource::Cli => "cli",
+                };
+                let expires_in = grant.time_left(now).map(|left| left.as_secs());
+                let session = self.approvals.forwarding_session(&open, &grant.scope);
+                grants.push(WireGrant {
+                    granted_at: unix_seconds(grant.granted_at),
+                    scope: wire_scope(&grant.scope, session),
+                    remember: grant.lasts == Lasts::UntilLock,
+                    expires_in,
+                    by: by.to_string(),
+                    uses: grant.uses,
+                    last_used_at: grant.last_used_at.map(unix_seconds),
+                    idle_lock_in,
+                });
+            }
+        }
+        grants
     }
 
     /// Approves what the pending request `id` asked for, in whichever
@@ -303,6 +329,26 @@ impl Api {
             }
         }
         Err(SshApproveError::NotPending)
+    }
+}
+
+/// What an approval covers, as the wire shows it: the key it is for, and
+/// where the signature goes.
+fn wire_scope(scope: &Scope, forwarding_session: Option<u32>) -> WireScope {
+    let key = scope.key().clone();
+    WireScope {
+        key: WireSshKey {
+            db: key.database,
+            key_type: key.public_key.algorithm().to_string(),
+            fingerprint: key.fingerprint.to_string(),
+            name: key.name,
+            entry: key.entry_uuid,
+            title: key.title,
+            attachment: key.attachment.unwrap_or_default(),
+        },
+        destination: scope.destination(),
+        forwarding_host: scope.forwarding_host(),
+        forwarding_session,
     }
 }
 
@@ -336,7 +382,7 @@ mod tests {
     use super::*;
     use crate::databases::testing::TestEntry;
     use crate::frontends::control::testing::{Fixture, fixture, fixture_with};
-    use crate::ssh::testing::{approval, key, requested, test_key};
+    use crate::ssh::testing::{approval, requested, test_key};
 
     const HOUR: Duration = Duration::from_secs(3600);
 
@@ -520,7 +566,6 @@ mod tests {
             fx.api.approvals.record(
                 &open,
                 approval(1, None, true),
-                key(),
                 requested("ssh"),
                 SystemTime::now(),
             );
@@ -544,12 +589,46 @@ mod tests {
             fx.api.approvals.record(
                 &open,
                 approval(2, None, true),
-                key(),
                 requested("scp"),
                 SystemTime::now(),
             );
         }
         fx.databases.lock_all();
         assert!(fx.api.ssh_pending().is_empty());
+    }
+
+    /// An approval a request got by `ssh approve` is listed with how it was
+    /// given, and a lock drops it.
+    #[test]
+    fn a_grant_is_listed_with_its_source_and_dropped_by_a_lock() {
+        let fx = fixture_with(
+            &[],
+            "[[database]]\nname = \"personal\"\npath = \"p.kdbx\"\nserve_ssh_keys = true\n",
+        );
+        assert!(fx.api.ssh_grants().is_empty());
+        fx.databases.install_for_test("personal", vec![]);
+        {
+            let open = fx.databases.open("personal").ok().unwrap();
+            fx.api.approvals.record(
+                &open,
+                approval(1, None, true),
+                requested("ssh"),
+                SystemTime::now(),
+            );
+        }
+        let id = fx.api.ssh_pending()[0].id;
+        fx.api
+            .ssh_approve(&SshApproveRequest { id })
+            .expect("approves");
+
+        let grants = fx.api.ssh_grants();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].by, "cli");
+        assert!(grants[0].remember);
+        assert_eq!((grants[0].uses, grants[0].expires_in), (0, None));
+        assert!(grants[0].idle_lock_in > 0);
+
+        fx.databases.lock_all();
+        assert!(fx.api.ssh_grants().is_empty());
     }
 }

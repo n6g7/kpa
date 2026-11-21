@@ -135,7 +135,7 @@ mod tests {
     use crate::config::{SshKeyConfig, SshKeyConfirm};
     use crate::frontends::ssh_agent::testing::{Fixture, Options, outside, requester, serving};
     use crate::ssh::approvals::{Scope, SignatureApproval};
-    use crate::ssh::testing::{database, key_entry, requested, test_key};
+    use crate::ssh::testing::{database, key_entry, requested, served, test_key};
 
     fn cached(seed: u64) -> PublicKey {
         test_key(seed).public_key().clone()
@@ -352,7 +352,7 @@ mod tests {
     }
 
     fn scope(key: &PrivateKey) -> Scope {
-        Scope::local(key.public_key().fingerprint(HashAlg::Sha256), None)
+        Scope::local(&served(key.public_key()), None)
     }
 
     /// A requester outside the desktop is told what to run, and only while
@@ -382,16 +382,10 @@ mod tests {
         };
         for (window, hinted) in [(Duration::from_secs(3600), false), (Duration::ZERO, true)] {
             let fx = Fixture::unlocked(&key, SshKeyConfirm::Always);
-            let served = fx.agent.find_key(asked.scope.key()).expect("served");
             {
                 let open = fx.databases.open("personal").expect("unlocked");
-                fx.approvals.record(
-                    &open,
-                    asked.clone(),
-                    served,
-                    requested("ssh"),
-                    SystemTime::now(),
-                );
+                fx.approvals
+                    .record(&open, asked.clone(), requested("ssh"), SystemTime::now());
             }
             let id = fx.pending()[0].id;
             assert!(fx.approve(id, window).is_some());

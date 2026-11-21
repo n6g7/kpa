@@ -59,6 +59,7 @@ always exits `0`.
 {"v":2,"op":"ssh_keys","db":"personal"}     // the SSH keys the vault holds
 {"v":2,"op":"ssh_pending"}
 {"v":2,"op":"ssh_approve","id":"6f1c0a52-3d8e-4c11-9a4b-0e5d2f7b8a31"}
+{"v":2,"op":"ssh_grants"}
 ```
 
 No request carries the master password. An `unlock` is asked for it by the
@@ -74,6 +75,7 @@ daemon, on screen or on the terminal the request passed.
 | `ssh_keys` | the SSH keys the unlocked databases hold ([`ssh-agent.md`](./ssh-agent.md) § 6.4) | yes, for each database read |
 | `ssh_pending` | the SSH requests refused for want of an approval (§ 6.8) | no |
 | `ssh_approve` | approves one of them by its id | no |
+| `ssh_grants` | the signature approvals currently granted (§ 6.8) | no |
 
 A `list` or `ssh_keys` for every database reads each one under its own guard
 of the core, one after another, so a lock can land between two of them. A
@@ -151,7 +153,10 @@ visible — no extra `client_v` and `daemon_v` fields needed.
 was last refused, in Unix seconds, from which a client works out the age),
 the `scope` the approval covers, `remember` (whether approving grants the
 scope until lock) and the `request` that was refused; the shape is in
-[`ssh-agent.md`](./ssh-agent.md) § 6.8. `ssh_approve` answers `{"ok":true,"v":2}`.
+[`ssh-agent.md`](./ssh-agent.md) § 6.8. `ssh_approve` answers
+`{"ok":true,"v":2}`. `ssh_grants` answers `{"ok":true,"v":2,"grants":[…]}`,
+each grant as `ssh-agent.md` § 6.8 shows it; like `ssh_pending` it has no
+failure, and nothing is logged for it.
 
 ### Errors
 

@@ -305,6 +305,14 @@ impl Open<'_> {
         self.slot().source.token()
     }
 
+    /// How long, as of `now`, before the core locks this database for being
+    /// idle, if nothing uses it. A read: it doesn't reset the idle timer.
+    pub fn idle_left(&self, now: Instant) -> Duration {
+        self.databases
+            .idle_timeout
+            .saturating_sub(now.saturating_duration_since(self.loaded().last_activity))
+    }
+
     /// Counts as activity: resets the idle timer.
     pub fn touch(&mut self) {
         let index = self.index;

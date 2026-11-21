@@ -148,6 +148,8 @@ cargo run -- ssh pending       # SSH requests from outside the desktop that
                                 # wait for an approval, each with its id
 cargo run -- ssh approve <id>  # approve one; the refused command then signs
                                 # on its next try
+cargo run -- ssh grants        # the signature approvals currently granted, how
+                                # long each lasts and how often it was used
 cargo run -- version           # the CLI's build version, and the running daemon's
 ```
 

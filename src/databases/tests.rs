@@ -336,6 +336,28 @@ fn idle_expiry_is_per_database_and_touch_resets_it() {
 }
 
 #[test]
+fn the_idle_time_left_counts_down_from_the_last_activity_and_reading_it_resets_nothing() {
+    let databases = databases(&["work"]);
+    databases.install_for_test("work", vec![]);
+    let after_install = Instant::now();
+
+    let open = databases.open("work").ok().unwrap();
+    assert!(open.idle_left(after_install) <= HOUR);
+    assert!(open.idle_left(after_install) > HOUR - Duration::from_secs(5));
+    assert_eq!(
+        open.idle_left(after_install + HOUR / 2) + HOUR / 2,
+        open.idle_left(after_install)
+    );
+    assert_eq!(open.idle_left(after_install + HOUR * 2), Duration::ZERO);
+    drop(open);
+
+    // Reading it above counted as no activity: the timer still ends at the
+    // timeout since the install.
+    databases.expire_idle(after_install + HOUR);
+    assert!(!databases.any_unlocked());
+}
+
+#[test]
 fn an_unlock_still_in_progress_is_not_idle_locked() {
     let databases = databases(&["work"]);
     let unlocking = started(&databases, "work");

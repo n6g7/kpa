@@ -62,13 +62,11 @@ impl Agent {
         };
         if !may_prompt_on_screen(requester, &self.display.get()) {
             if let Lacking::Approval(asked) = &lacking
-                && let Ok(served) = hold.served(request.fingerprint)
                 && let Some(open) = hold.open()
             {
                 self.approvals.record(
                     open,
                     asked.approval.clone(),
-                    served.clone(),
                     request.requested(requester),
                     hold.wall(),
                 );
@@ -112,7 +110,7 @@ impl Agent {
             return Ok(None);
         };
         self.prompt_to_confirm(key, request, &asked)?;
-        Ok(Some(asked))
+        Ok(Some(*asked))
     }
 
     /// Shows the confirm prompt for signing `request` with `key`, which ends

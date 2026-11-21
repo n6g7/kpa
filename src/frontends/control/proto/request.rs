@@ -63,6 +63,7 @@ pub enum Op {
     SshKeys(SshKeysRequest),
     SshPending,
     SshApprove(SshApproveRequest),
+    SshGrants,
 }
 
 /// Why `decode_request` gave up. Deliberately one bucket for every JSON/shape

@@ -5,8 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use uuid::Uuid;
 
-use super::{PendingRequest, RequestDetails, SignatureApproval};
-use crate::ssh::keys::ServedKey;
+use super::{Forwarding, PendingRequest, RequestDetails, SignatureApproval};
 
 /// How long a pending request is kept after it was last refused.
 pub const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
@@ -21,14 +20,12 @@ const MAX_PENDING: usize = 16;
 pub struct PendingRequests(Vec<PendingRequest>);
 
 impl PendingRequests {
-    /// Records that `request` was refused for want of `approval`, which is for
-    /// `key`. A request identical to a pending one is merged into it, which
-    /// keeps it and its id another [`PENDING_TTL`]. Past [`MAX_PENDING`] the
-    /// oldest goes.
+    /// Records that `request` was refused for want of `approval`. A request
+    /// identical to a pending one is merged into it, which keeps it and its
+    /// id another [`PENDING_TTL`]. Past [`MAX_PENDING`] the oldest goes.
     pub fn record(
         &mut self,
         approval: SignatureApproval,
-        key: ServedKey,
         request: RequestDetails,
         now: SystemTime,
     ) {
@@ -47,10 +44,16 @@ impl PendingRequests {
         self.0.push(PendingRequest {
             id,
             approval,
-            key,
             request,
             refused_at: now,
         });
+    }
+
+    /// Whether a request kept is for `forwarding`'s session.
+    pub fn refers_to(&self, forwarding: &Forwarding) -> bool {
+        self.0
+            .iter()
+            .any(|pending| pending.approval.scope.forwarding.as_deref() == Some(forwarding))
     }
 
     /// The requests still pending at `now`, oldest first.
@@ -60,19 +63,14 @@ impl PendingRequests {
 
     /// Answers the request `id` names: removes it, and every other request
     /// pending for its scope, and returns the approval it recorded. `None` if
-    /// none has that id at `now`: it expired, a lock dropped it, or `id`
-    /// never named one.
+    /// none has that id at `now`: it expired, a lock dropped it, or `id` never
+    /// named one.
     pub fn take(&mut self, id: Uuid, now: SystemTime) -> Option<SignatureApproval> {
         self.0.retain(|pending| !expired(pending, now));
-        let approval = self
-            .0
-            .iter()
-            .find(|pending| pending.id == id)?
-            .approval
-            .clone();
+        let taken = self.0.iter().find(|pending| pending.id == id)?.clone();
         self.0
-            .retain(|pending| pending.approval.scope != approval.scope);
-        Some(approval)
+            .retain(|pending| pending.approval.scope != taken.approval.scope);
+        Some(taken.approval)
     }
 }
 
@@ -84,23 +82,21 @@ fn expired(pending: &PendingRequest, now: SystemTime) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssh::testing::{approval, key, requested};
+    use crate::ssh::testing::{approval, requested};
 
     #[test]
     fn identical_requests_merge_keeping_the_id_and_the_latest_time() {
         let mut pending = PendingRequests::default();
         let t0 = SystemTime::now();
-        pending.record(approval(1, None, true), key(), requested("ssh"), t0);
+        pending.record(approval(1, None, true), requested("ssh"), t0);
         let id = pending.list(t0).next().expect("pending").id;
         pending.record(
             approval(1, None, true),
-            key(),
             requested("ssh"),
             t0 + Duration::from_secs(200),
         );
         pending.record(
             approval(1, None, true),
-            key(),
             requested("git"),
             t0 + Duration::from_secs(200),
         );
@@ -119,7 +115,7 @@ mod tests {
     fn a_request_is_kept_for_five_minutes() {
         let mut pending = PendingRequests::default();
         let t0 = SystemTime::now();
-        pending.record(approval(1, None, true), key(), requested("ssh"), t0);
+        pending.record(approval(1, None, true), requested("ssh"), t0);
         let id = pending.list(t0).next().expect("pending").id;
 
         assert_eq!(
@@ -137,12 +133,7 @@ mod tests {
         let mut pending = PendingRequests::default();
         let t0 = SystemTime::now();
         for command in 0..=MAX_PENDING {
-            pending.record(
-                approval(1, None, true),
-                key(),
-                requested(&command.to_string()),
-                t0,
-            );
+            pending.record(approval(1, None, true), requested(&command.to_string()), t0);
         }
 
         let commands: Vec<_> = pending
@@ -161,9 +152,9 @@ mod tests {
     fn taking_an_id_removes_its_scopes_requests_and_returns_the_recorded_ask() {
         let mut pending = PendingRequests::default();
         let now = SystemTime::now();
-        pending.record(approval(1, None, false), key(), requested("ssh"), now);
-        pending.record(approval(1, None, false), key(), requested("git"), now);
-        pending.record(approval(2, None, true), key(), requested("ssh"), now);
+        pending.record(approval(1, None, false), requested("ssh"), now);
+        pending.record(approval(1, None, false), requested("git"), now);
+        pending.record(approval(2, None, true), requested("ssh"), now);
         let ids: Vec<_> = pending.list(now).map(|listed| listed.id).collect();
 
         assert_eq!(pending.take(Uuid::new_v4(), now), None);
