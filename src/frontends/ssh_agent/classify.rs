@@ -193,7 +193,6 @@ mod tests {
 
     fn string(bytes: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
-        #[allow(clippy::cast_possible_truncation)]
         out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
         out.extend_from_slice(bytes);
         out
@@ -219,7 +218,6 @@ mod tests {
         type Error = std::convert::Infallible;
 
         fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-            #[allow(clippy::cast_possible_truncation)]
             Ok(self.next() as u32)
         }
 
