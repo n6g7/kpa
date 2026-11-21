@@ -652,10 +652,8 @@ mod tests {
     fn the_unlock_is_asked_first_and_the_approval_after() {
         let key = test_key(1);
         let fingerprint = key.public_key().fingerprint(HashAlg::Sha256);
-        // The key's fallback name, cut to the message's budget for a name.
-        let shown = &format!("personal {fingerprint}")[..40];
-        let named = format!("Unlock database personal to use key \"{shown}\"?");
-        let approval = format!("Approve use of key \"{shown}\"?");
+        let named = format!("Unlock database personal to use key \"personal {fingerprint}\"?");
+        let approval = format!("Approve use of key \"personal {fingerprint}\"?");
         for (confirm, asked, kept) in [
             (SshKeyConfirm::Once, true, true),
             (SshKeyConfirm::Always, true, false),

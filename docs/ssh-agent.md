@@ -399,9 +399,9 @@ confirm prompt's words (§ 6.7): "Unlock database personal to use key
 database personal to use key "github" to log in to git@github.com?" for
 one bound to a destination. A key without a `name` override is named
 `<database> <fingerprint>` there, since the vault is locked and its entry
-titles are unknown, cut to the key name's length budget. Answering it approves nothing: the confirm prompt
-follows it for a key that needs one (§ 6.7). `prompt` runs exactly as configured; kpa sets
-`KPA_PROMPT_MESSAGE` in its environment instead, so a prompt program that
+titles are unknown. Answering it approves nothing: the confirm prompt follows
+it for a key that needs one (§ 6.7). `prompt` runs exactly as configured; kpa
+sets `KPA_PROMPT_MESSAGE` in its environment instead, so a prompt program that
 reads it — directly, or through a wrapper script — can show the reason:
 
 ```toml
@@ -485,13 +485,13 @@ host name `~/.ssh/known_hosts` has an unhashed entry for, else by its
 fingerprint. On a forwarded connection the forwarding host, the first
 binding's host key, is named the same way after the key, and the unlock
 prompt (§ 6.6) says the same: `Unlock database personal to use key "github"
-on build-box to log in to git@github.com?`. Every piece that comes from outside kpa's own text (the key
-name, the database name, the remote user, the namespace, the host name)
-passes through the escaping the CLI uses for terminal output (T-13), with
+on build-box to log in to git@github.com?`. Every piece that comes from
+outside kpa's own text (the key name, the database name, the remote user, the
+namespace, the host name) passes through the escaping the CLI uses for terminal output (T-13), with
 tab and newline escaped too so the message stays one line, and gets its
 own length budget, so no piece can push the destination past the prompt's
-cap (the worst message is 251 bytes). The key name's quotes are escaped, so a name can't end its quotation
-and carry on the sentence.
+cap. The key name's quotes are escaped, so a name can't end its quotation and
+carry on the sentence.
 
 Approvals live in memory only and are dropped on lock. A forwarded
 approval is remembered under (key, forwarding session identifier,
