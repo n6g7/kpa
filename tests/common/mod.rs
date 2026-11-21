@@ -344,6 +344,28 @@ impl InProcessDaemon {
     }
 }
 
+/// The running SSH agent socket for a `daemon`, in its own
+/// tempdir. The key cache is the daemon's own, under its tempdir
+/// (`InProcessDaemon::paths`), never this process's real
+/// `$XDG_CACHE_HOME`.
+pub struct SshAgent {
+    pub socket: PathBuf,
+    _socket_dir: tempfile::TempDir,
+}
+
+pub fn start_ssh_agent(daemon: &InProcessDaemon) -> SshAgent {
+    let socket_dir = tempfile::tempdir().expect("tempdir");
+    let socket = socket_dir.path().join("agent.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind ssh agent socket");
+    kpa::authn::assume_cgroup(&socket, &daemon.cgroup);
+    let serving = std::sync::Arc::clone(&daemon.daemon);
+    std::thread::spawn(move || serving.serve_agent(listener));
+    SshAgent {
+        socket,
+        _socket_dir: socket_dir,
+    }
+}
+
 /// A pseudo-terminal, for driving `kpa unlock`'s terminal prompt
 /// (`docs/headless.md` § 4) the way a real shell would: a spawned process
 /// attaches the slave as its controlling terminal (`attach`), and the test
