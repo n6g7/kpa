@@ -118,24 +118,6 @@ impl Requester {
             preferred: None,
         })
     }
-
-    /// This process as a requester: what the tray's menu acts as, since a
-    /// click has no peer. Its uid is [`process_uid`], its cgroup this
-    /// process's own, its command `kpa`.
-    pub fn of_this_process() -> Requester {
-        let cgroup = read_bounded("/proc/self/cgroup")
-            .inspect_err(|err| {
-                crate::log::debug(format_args!("could not read the daemon's cgroup: {err}"));
-            })
-            .ok();
-        Requester {
-            uid: process_uid(),
-            cgroup,
-            command: Some("kpa".to_string()),
-            terminal: None,
-            preferred: None,
-        }
-    }
 }
 
 /// The contents of the peer's `/proc/<pid>/cgroup`: see [`peer_proc_file`].
@@ -289,18 +271,6 @@ mod tests {
         );
         let own = std::fs::read_to_string("/proc/self/comm").expect("own comm");
         assert_eq!(requester.command.as_deref(), Some(own.trim_end()));
-    }
-
-    #[test]
-    fn this_process_as_a_requester_has_its_own_uid_cgroup_and_the_name_kpa() {
-        let requester = Requester::of_this_process();
-
-        assert_eq!(requester.uid, process_uid());
-        assert_eq!(
-            requester.cgroup,
-            Some(std::fs::read_to_string("/proc/self/cgroup").expect("own cgroup"))
-        );
-        assert_eq!(requester.command.as_deref(), Some("kpa"));
     }
 
     #[test]

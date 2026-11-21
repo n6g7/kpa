@@ -3,8 +3,10 @@
 //! (`docs/headless.md` §§ 2, 3 and 5).
 //!
 //! These are the checks every front end shares (`may_connect`, `on_desktop`,
-//! `may_prompt_on_screen`). Each front end builds its own policy on them:
-//! `control::authz` for kpa's own socket, `ssh_agent::authz` for the agent.
+//! `display_allows_prompt`, `may_prompt_on_screen`). Each front end builds its
+//! own policy on them: `control::authz` for kpa's own socket,
+//! `ssh_agent::authz` for the agent, and the tray (which has no requester)
+//! asks `display_allows_prompt` alone.
 //!
 //! A requester holds facts read from its socket. Whether it runs on the
 //! desktop is not one of them: it depends on which session is the display
@@ -34,11 +36,17 @@ pub fn on_desktop(requester: &Requester, display_session: &DisplaySession) -> bo
         .is_some_and(|session| in_desktop_cgroup(requester, session))
 }
 
+/// Whether a prompt may be raised on screen at all: there is a display
+/// session, and it isn't known to be locked. Never reads `active`: an
+/// inactive display session (a VT switch) still shows a prompt.
+pub fn display_allows_prompt(display_session: &DisplaySession) -> bool {
+    matches!(display_session, DisplaySession::Unlocked { .. })
+}
+
 /// Whether a prompt may be raised on screen for `requester`: it runs on the
-/// desktop, and the display session isn't known to be locked. Never reads
-/// `active`: an inactive display session (a VT switch) still shows a prompt.
+/// desktop, and the display session allows a prompt.
 pub fn may_prompt_on_screen(requester: &Requester, display_session: &DisplaySession) -> bool {
-    on_desktop(requester, display_session) && !display_session.is_locked()
+    on_desktop(requester, display_session) && display_allows_prompt(display_session)
 }
 
 /// Whether the requester's cgroup is the desktop of the logind session
@@ -241,6 +249,16 @@ mod tests {
             &requester(DESKTOP),
             &unlocked("3", false)
         ));
+        assert!(display_allows_prompt(&unlocked("3", false)));
+    }
+
+    /// A prompt needs a display session that isn't known to be locked, and
+    /// that is all the tray asks: it has no requester to place.
+    #[test]
+    fn a_prompt_needs_a_display_session_that_is_not_locked() {
+        assert!(display_allows_prompt(&unlocked("3", true)));
+        assert!(!display_allows_prompt(&locked("3")));
+        assert!(!display_allows_prompt(&DisplaySession::None));
     }
 
     #[test]
