@@ -4,11 +4,10 @@
 
 mod common;
 
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::InProcessDaemon;
+use common::{InProcessDaemon, SshAgent, start_ssh_agent};
 
 /// A config with one database, `personal`, pointed at `db_path`, serving
 /// SSH keys. `prompt` always answers with `common::PASSWORD` — these tests
@@ -26,28 +25,6 @@ fn config(db_path: &Path) -> String {
         password = common::PASSWORD,
         path = db_path.display(),
     )
-}
-
-/// The running SSH agent socket for a `daemon`, in its own
-/// tempdir. The key cache is the daemon's own, under its tempdir
-/// (`InProcessDaemon::paths`), never this process's real
-/// `$XDG_CACHE_HOME`.
-struct SshAgent {
-    socket: PathBuf,
-    _socket_dir: tempfile::TempDir,
-}
-
-fn start_ssh_agent(daemon: &InProcessDaemon) -> SshAgent {
-    let socket_dir = tempfile::tempdir().expect("tempdir");
-    let socket = socket_dir.path().join("agent.sock");
-    let listener = UnixListener::bind(&socket).expect("bind ssh agent socket");
-    kpa::authn::assume_cgroup(&socket, &daemon.cgroup);
-    let serving = std::sync::Arc::clone(&daemon.daemon);
-    std::thread::spawn(move || serving.serve_agent(listener));
-    SshAgent {
-        socket,
-        _socket_dir: socket_dir,
-    }
 }
 
 fn ssh_add<'a>(agent: &SshAgent, args: impl IntoIterator<Item = &'a str>) -> std::process::Output {
