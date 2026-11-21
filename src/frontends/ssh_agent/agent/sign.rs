@@ -23,7 +23,8 @@
 //!
 //! Every hold runs behind the core's freshness guard, so a database whose
 //! file changed is locked, and its token cancelled, before the hold sees it.
-//! Forwarded connections are refused outright.
+//! A forwarded signature is made like any other, with an approval of its own
+//! forwarding session, and never resets the idle timer.
 
 use ssh_key::Fingerprint;
 
@@ -289,8 +290,9 @@ impl Agent {
     }
 }
 
-/// Signs `request` with the hold's key and resets the database's idle
-/// timer.
+/// Signs `request` with the hold's key and, if the connection is local,
+/// resets the database's idle timer. A forwarded signature is a remote
+/// host's, and doesn't keep the database unlocked (`docs/ssh-agent.md` § 6.9).
 fn sign_and_touch(hold: &mut Hold<'_>, request: &Request<'_>) -> Result<Vec<u8>, Refused> {
     let signature = signer::sign(
         hold,
@@ -298,7 +300,9 @@ fn sign_and_touch(hold: &mut Hold<'_>, request: &Request<'_>) -> Result<Vec<u8>,
         &request.sign.data,
         request.sign.flags,
     )?;
-    hold.touch();
+    if !request.class.is_forwarded() {
+        hold.touch();
+    }
     Ok(signature)
 }
 
@@ -317,7 +321,7 @@ mod tests {
     use crate::databases::testing::PASSWORD;
     use crate::display_session::DisplaySession;
     use crate::frontends::ssh_agent::testing::{
-        Fixture, IDLE, Options, SESSION, outside, outside_running, requester,
+        Fixture, IDLE, Options, SESSION, login_data, outside, outside_running, requester,
     };
     use crate::frontends::ssh_agent::wire::SignFlags;
     use crate::prompt::{ConfirmAnswer, PromptOutcome, Step};
@@ -375,7 +379,7 @@ mod tests {
     }
 
     fn scope(key: &PrivateKey) -> Scope {
-        Scope::new(key.public_key().fingerprint(HashAlg::Sha256), None)
+        Scope::local(key.public_key().fingerprint(HashAlg::Sha256), None)
     }
 
     /// Whether `key` is approved for unbound use in `personal`.
@@ -1183,18 +1187,209 @@ mod tests {
         assert!(fx.unlocks.shown().is_empty());
     }
 
+    /// The forwarded connection of `ssh -A` session `session` through host
+    /// key 9, bound to host key 8.
+    fn forwarded(session: u8) -> ConnectionClass {
+        ConnectionClass::Forwarded {
+            host: test_key(9).public_key().key_data().clone(),
+            session: vec![session],
+            dest: Some(test_key(8).public_key().key_data().clone()),
+        }
+    }
+
+    /// `key`'s login on a connection whose last binding is `session`, as
+    /// requested by `requester`.
+    fn forwarded_login(
+        fx: &Fixture,
+        key: &PrivateKey,
+        class: &ConnectionClass,
+        session: &[u8],
+        requester: &Requester,
+    ) -> AgentResponse {
+        let sign = SignRequest {
+            data: login_data(key, session, "git"),
+            ..request_with(key, 0)
+        };
+        fx.agent.sign(class, &sign, Some(session), requester)
+    }
+
+    /// A forwarded login asks even for a `never` key, once per forwarding
+    /// session, and says through which host and to where.
     #[test]
-    fn a_forwarded_request_is_refused() {
+    fn a_forwarded_login_asks_once_per_forwarding_session_even_for_a_never_key() {
+        let key = test_key(1);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let known_hosts = dir.path().join("known_hosts");
+        std::fs::write(
+            &known_hosts,
+            format!(
+                "build-box {}\ngithub.com {}\n",
+                test_key(9).public_key().to_openssh().expect("encodes"),
+                test_key(8).public_key().to_openssh().expect("encodes"),
+            ),
+        )
+        .expect("write known_hosts");
+        let fx = Fixture::unlocked_with(
+            &key,
+            SshKeyConfirm::Never,
+            Options {
+                known_hosts: Some(known_hosts),
+                ..Options::default()
+            },
+        );
+        for _ in 0..2 {
+            fx.confirms.push(Step::allow());
+        }
+        let login =
+            |session: u8| forwarded_login(&fx, &key, &forwarded(session), &[session], &requester());
+
+        assert!(signed(&login(1)));
+        assert!(signed(&login(1)));
+        assert!(signed(&login(2)));
+
+        let ask = "Approve use of key \"github\" on build-box to log in to git@github.com?";
+        assert_eq!(fx.confirms.shown(), [ask, ask]);
+        // Neither session's approval covers local use of the key.
+        assert!(!approved(&fx, &key));
+    }
+
+    #[test]
+    fn a_forwarded_always_key_asks_every_time() {
+        let key = test_key(1);
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Always);
+        for _ in 0..2 {
+            fx.confirms.push(Step::allow());
+        }
+
+        for _ in 0..2 {
+            assert!(signed(&forwarded_login(
+                &fx,
+                &key,
+                &forwarded(1),
+                &[1],
+                &requester()
+            )));
+        }
+        assert_eq!(fx.confirms.shown().len(), 2);
+    }
+
+    /// Only a login, from a key allowed on forwarded connections, to a
+    /// destination, that matches the connection's session is signed.
+    #[test]
+    fn a_forwarded_request_that_may_not_be_signed_is_refused_without_a_prompt() {
         let key = test_key(1);
         let fx = Fixture::unlocked(&key, SshKeyConfirm::Never);
-        let forwarded = ConnectionClass::Forwarded {
+
+        let sshsig = SignRequest {
+            data: [b"SSHSIG".as_slice(), &[0, 0, 0, 3], b"git"].concat(),
+            ..request_with(&key, 0)
+        };
+        assert!(!signed(&fx.agent.sign(
+            &forwarded(1),
+            &sshsig,
+            Some(&[1]),
+            &requester()
+        )));
+        assert!(!signed(&sign_as(&fx, &key, &forwarded(1))));
+        let unbound = ConnectionClass::Forwarded {
             host: test_key(9).public_key().key_data().clone(),
             session: vec![1],
-            dest: Some(test_key(8).public_key().key_data().clone()),
+            dest: None,
         };
-
-        assert!(!signed(&sign_as(&fx, &key, &forwarded)));
+        assert!(!signed(&forwarded_login(
+            &fx,
+            &key,
+            &unbound,
+            &[1],
+            &requester()
+        )));
+        let sign = SignRequest {
+            data: login_data(&key, &[2], "git"),
+            ..request_with(&key, 0)
+        };
+        assert!(!signed(&fx.agent.sign(
+            &forwarded(1),
+            &sign,
+            Some(&[1]),
+            &requester()
+        )));
         assert!(fx.confirms.shown().is_empty());
+    }
+
+    #[test]
+    fn a_key_kept_off_forwarding_is_refused_on_a_forwarded_connection() {
+        let key = test_key(1);
+        let settings = SshKeyConfig {
+            fingerprint: key.public_key().fingerprint(HashAlg::Sha256),
+            name: None,
+            confirm: SshKeyConfirm::Never,
+            forwarded: false,
+            serve: true,
+        };
+        let fx = Fixture::new(
+            vec![database("personal", vec![settings])],
+            Options::default(),
+        );
+        fx.unlock(&key);
+
+        assert!(!signed(&forwarded_login(
+            &fx,
+            &key,
+            &forwarded(1),
+            &[1],
+            &requester()
+        )));
+        assert!(signed(&sign(&fx, &key)));
+        assert!(fx.confirms.shown().is_empty());
+    }
+
+    /// A forwarded request from outside the desktop is pending, scoped to
+    /// its forwarding session: approving it lets that session's retry sign,
+    /// and no other.
+    #[test]
+    fn a_forwarded_request_from_outside_is_pending_and_approved_for_its_session() {
+        let key = test_key(1);
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Once);
+        let outside = outside_running("ssh");
+        let login =
+            |session: u8| forwarded_login(&fx, &key, &forwarded(session), &[session], &outside);
+
+        assert!(!signed(&login(1)));
+        let pending = fx.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request.class, "forwarded");
+        assert_eq!(
+            pending[0].approval.scope.forwarding_host(),
+            Some(test_key(9).public_key().fingerprint(HashAlg::Sha256))
+        );
+        assert!(approve_from_terminal(&fx, &key));
+
+        assert!(signed(&login(1)));
+        assert!(!signed(&login(2)));
+        assert_eq!(fx.pending().len(), 1);
+        assert!(fx.confirms.shown().is_empty());
+    }
+
+    /// A forwarded signature is a remote host's: it doesn't keep the
+    /// database unlocked.
+    #[test]
+    fn a_forwarded_signature_leaves_the_idle_timer_alone() {
+        let key = test_key(1);
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Never);
+        fx.confirms.push(Step::allow());
+        let installed = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+
+        assert!(signed(&forwarded_login(
+            &fx,
+            &key,
+            &forwarded(1),
+            &[1],
+            &requester()
+        )));
+
+        fx.databases.expire_idle(installed + IDLE);
+        assert!(!fx.is_unlocked(), "the signature reset the timer");
     }
 
     #[test]

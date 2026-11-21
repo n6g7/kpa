@@ -49,6 +49,7 @@ pub fn render(answer: &Pending, now: SystemTime) -> String {
         "FROM",
         "AGE",
         "DESTINATION",
+        "FORWARDING HOST",
     ]);
     for request in &answer.pending {
         table.row([
@@ -62,6 +63,10 @@ pub fn render(answer: &Pending, now: SystemTime) -> String {
                 .scope
                 .destination
                 .map_or_else(|| NONE.to_string(), |destination| destination.to_string()),
+            &request
+                .scope
+                .forwarding_host
+                .map_or_else(|| NONE.to_string(), |host| host.to_string()),
         ]);
     }
     format!(
@@ -125,6 +130,7 @@ mod tests {
                     attachment: "id_ed25519".to_string(),
                 },
                 destination: Some(DESTINATION.parse().expect("a fingerprint")),
+                forwarding_host: None,
             },
             remember: true,
             request: WireRequestDetails {
@@ -175,9 +181,9 @@ mod tests {
             text,
             format!(
                 "\
-ID                                    KEY         DATABASE  REQUEST         FROM  AGE  DESTINATION
-00000000-0000-0000-0000-000000000001  github      personal  login as alice  ssh   1m   {DESTINATION}
-00000000-0000-0000-0000-000000000002  deploy-key  personal  sign (git)      -     4s   -
+ID                                    KEY         DATABASE  REQUEST         FROM  AGE  DESTINATION                                         FORWARDING HOST
+00000000-0000-0000-0000-000000000001  github      personal  login as alice  ssh   1m   {DESTINATION}  -
+00000000-0000-0000-0000-000000000002  deploy-key  personal  sign (git)      -     4s   -                                                   -
 
 Approve one with `kpa ssh approve <id>`. A request left alone expires after 5 minutes, and nothing is blocked meanwhile.
 "

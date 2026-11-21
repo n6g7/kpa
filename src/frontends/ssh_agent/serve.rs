@@ -20,7 +20,7 @@ use crate::authz;
 use crate::log;
 
 use super::Agent;
-use super::bind::{self, BindOutcome, SessionBindState};
+use super::bind::{BindOutcome, SessionBindState};
 use super::wire::{self, AgentRequest, AgentResponse, Frame};
 
 /// Connections handled at once — separate from the JSON socket's own cap
@@ -139,9 +139,7 @@ fn handle_connection(agent: &Agent, mut stream: UnixStream, owner: u32, limits: 
                     let response = dispatch(agent, &mut bindings, &request, &requester);
                     buf.drain(..consumed);
                     frame_deadline = None;
-                    if forwarded_slot.is_none()
-                        && matches!(bindings.class(), bind::ConnectionClass::Forwarded { .. })
-                    {
+                    if forwarded_slot.is_none() && bindings.class().is_forwarded() {
                         let Some(slot) =
                             CapSlot::acquire(&limits.forwarded, MAX_FORWARDED_CONNECTIONS)
                         else {
