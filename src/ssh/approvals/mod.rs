@@ -18,8 +18,9 @@ use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg};
 use uuid::Uuid;
 
-pub use granted::GrantedApprovals;
-pub use pending::{PENDING_TTL, PendingRequests};
+use granted::GrantedApprovals;
+pub use pending::PENDING_TTL;
+use pending::PendingRequests;
 
 use super::keys::ServedKey;
 use crate::cancel::CancelToken;

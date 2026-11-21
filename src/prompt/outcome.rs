@@ -47,8 +47,17 @@ impl PromptOutcome {
 }
 
 impl<T> PromptOutcome<T> {
+    /// The answer, or how the prompt ended without one.
+    pub fn answered(self) -> Result<T, Declined> {
+        match self {
+            PromptOutcome::Answer(answer) => Ok(answer),
+            PromptOutcome::Cancelled => Err(Declined::Cancelled),
+            PromptOutcome::TimedOut => Err(Declined::TimedOut),
+            PromptOutcome::Interrupted => Err(Declined::Interrupted),
+        }
+    }
+
     /// Interprets an answer, leaving the other outcomes as they are.
-    #[allow(dead_code, reason = "the SSH agent is off until it runs on the core")]
     pub(super) fn map<U>(self, f: impl FnOnce(T) -> U) -> PromptOutcome<U> {
         match self {
             PromptOutcome::Cancelled => PromptOutcome::Cancelled,
@@ -80,7 +89,7 @@ pub enum ConfirmAnswer {
     Deny,
 }
 
-/// How a confirm prompt ended without allowing, as a log line says it.
+/// How a prompt ended without a yes or an answer, as a log line says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Declined {
     #[error("denied")]
@@ -96,12 +105,9 @@ pub enum Declined {
 impl PromptOutcome<ConfirmAnswer> {
     /// `Ok` for an `Allow`, and how the prompt declined otherwise.
     pub fn allowed(self) -> Result<(), Declined> {
-        match self {
-            PromptOutcome::Answer(ConfirmAnswer::Allow) => Ok(()),
-            PromptOutcome::Answer(ConfirmAnswer::Deny) => Err(Declined::Denied),
-            PromptOutcome::Cancelled => Err(Declined::Cancelled),
-            PromptOutcome::TimedOut => Err(Declined::TimedOut),
-            PromptOutcome::Interrupted => Err(Declined::Interrupted),
+        match self.answered()? {
+            ConfirmAnswer::Allow => Ok(()),
+            ConfirmAnswer::Deny => Err(Declined::Denied),
         }
     }
 }
@@ -126,6 +132,18 @@ mod tests {
             PromptOutcome::<&str>::Cancelled.map(|a| a == "Allow"),
             PromptOutcome::Cancelled
         ));
+    }
+
+    #[test]
+    fn an_answer_is_answered_and_every_other_end_says_how_it_declined() {
+        assert_eq!(PromptOutcome::Answer(7).answered(), Ok(7));
+        for (outcome, declined) in [
+            (PromptOutcome::<u8>::Cancelled, Declined::Cancelled),
+            (PromptOutcome::TimedOut, Declined::TimedOut),
+            (PromptOutcome::Interrupted, Declined::Interrupted),
+        ] {
+            assert_eq!(outcome.answered(), Err(declined));
+        }
     }
 
     #[test]

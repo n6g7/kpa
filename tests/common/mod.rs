@@ -191,6 +191,9 @@ pub struct InProcessDaemon {
     /// The cgroup its connections are taken to have, on this socket and on
     /// an agent socket a test starts (`kpa::authn::assume_cgroup`).
     pub cgroup: String,
+    /// What serves the sockets: a test that wants the SSH agent's starts it
+    /// with `serve_agent`.
+    pub daemon: Arc<kpa::daemon::Daemon>,
     pub databases: Arc<kpa::databases::Databases>,
     /// The display session as the daemon's front ends read it. Written by
     /// the test, or by the logind watch of `on_bus` (then `None`).
@@ -271,7 +274,13 @@ impl InProcessDaemon {
         };
         let idle_timeout = config.idle_timeout;
         let backends = kpa::daemon::Backends::real(&config);
-        let daemon = kpa::daemon::build(config, backends, display, sleep_hold);
+        let daemon = Arc::new(kpa::daemon::build(
+            config,
+            paths.clone(),
+            backends,
+            display,
+            sleep_hold,
+        ));
         let databases = Arc::clone(&daemon.databases);
         match auto_lock {
             Some(auto_lock) => {
@@ -300,10 +309,12 @@ impl InProcessDaemon {
         // would come out without its search bit.
         let listener =
             std::os::unix::net::UnixListener::bind(&socket).expect("failed to bind socket");
-        std::thread::spawn(move || daemon.serve_control(listener));
+        let serving = Arc::clone(&daemon);
+        std::thread::spawn(move || serving.serve_control(listener));
         InProcessDaemon {
             socket,
             cgroup,
+            daemon,
             databases,
             display: writer.map(Arc::new),
             paths,

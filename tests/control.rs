@@ -577,7 +577,6 @@ fn ssh_agent_config(socket: &Path, serve_ssh_keys: bool) -> String {
 /// keys, and the agent answers on it: `ssh-add -l` connects and hears
 /// there are no identities (exit 1; 2 would mean it couldn't connect).
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn kpa_serve_runs_the_ssh_agent_when_a_database_serves_keys() {
     let dir = tempfile::tempdir().expect("tempdir");
     let agent_socket = dir.path().join("ssh-agent");

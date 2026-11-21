@@ -13,8 +13,8 @@
 //!   [`SecretTerminal`] asks on a terminal a requester passed
 //!   (`docs/headless.md` § 4).
 //! - [`PromptOutcome`]: how a prompt ended, generic over its answer;
-//!   [`ConfirmAnswer`] is a confirm prompt's, and [`Declined`] says how one
-//!   that didn't allow ended.
+//!   [`ConfirmAnswer`] is a confirm prompt's, and [`Declined`] says how a
+//!   prompt that ended without an answer, or without an allow, ended.
 //! - [`CancelSource`](crate::cancel::CancelSource) and [`CancelToken`]: how a
 //!   lock ends the prompts it no longer wants answered.
 //! - `message`: display sanitization for the untrusted text in a prompt's
@@ -42,18 +42,8 @@ use crate::cancel::CancelToken;
 
 #[cfg(test)]
 pub(crate) use fake::{Scripted, Step};
-#[allow(
-    unused_imports,
-    reason = "the SSH agent is off until it runs on the core"
-)]
-pub use outcome::Declined;
-pub use outcome::{ConfirmAnswer, PromptOutcome};
-#[allow(
-    unused_imports,
-    reason = "the SSH agent is off until it runs on the core"
-)]
-pub use program::ConfirmProgram;
-pub use program::SecretProgram;
+pub use outcome::{ConfirmAnswer, Declined, PromptOutcome};
+pub use program::{ConfirmProgram, SecretProgram};
 pub use question::Prompt;
 pub use queue::PromptQueue;
 pub use terminal::{SecretTerminal, Terminal};

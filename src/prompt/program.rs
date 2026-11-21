@@ -28,7 +28,6 @@ use crate::cancel::CancelToken;
 const PROMPT_MESSAGE_ENV: &str = "KPA_PROMPT_MESSAGE";
 
 /// What a confirm prompt is offered, one choice per line.
-#[allow(dead_code, reason = "the SSH agent is off until it runs on the core")]
 const APPROVAL_CHOICES: &[u8] = b"Allow\nDeny\n";
 
 /// Asks for a secret by running a dmenu-style program (`docs/design.md`
@@ -76,13 +75,11 @@ impl Backend<Zeroizing<String>> for SecretProgram {
 /// `Deny` go to its stdin one per line, and exactly `Allow` on stdout is
 /// [`ConfirmAnswer::Allow`]; anything else it prints is [`ConfirmAnswer::Deny`].
 /// Otherwise run as [`SecretProgram`] runs its own.
-#[allow(dead_code, reason = "the SSH agent is off until it runs on the core")]
 pub struct ConfirmProgram {
     argv: Vec<String>,
 }
 
 impl ConfirmProgram {
-    #[allow(dead_code, reason = "the SSH agent is off until it runs on the core")]
     pub fn new(argv: Vec<String>) -> ConfirmProgram {
         ConfirmProgram { argv }
     }

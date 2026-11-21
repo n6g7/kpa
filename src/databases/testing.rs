@@ -5,10 +5,15 @@
 use std::io::Write;
 use std::time::Duration;
 
+use keepass::DatabaseKey;
+use keepass::config::KdfConfig;
 use keepass::db::{Value, fields};
 
 use super::{Databases, Slot, vault};
 use crate::config::DatabaseConfig;
+
+/// The password of the databases [`Databases::write_for_test`] writes.
+pub(crate) const PASSWORD: &str = "hunter2";
 
 /// One entry of an in-memory database.
 pub(crate) struct TestEntry {
@@ -101,6 +106,18 @@ impl Databases {
             token
         };
         self.installed(index, &token);
+    }
+
+    /// Writes a real database holding `entries` to `name`'s file, which
+    /// [`PASSWORD`] opens: an unlock reads it as it reads any file. Its key
+    /// derivation is a single round, so reading it is quick.
+    pub(crate) fn write_for_test(&self, name: &str, entries: Vec<TestEntry>) {
+        let index = self.index(name).expect("a configured database");
+        let mut db = build(entries);
+        db.config.kdf_config = KdfConfig::Aes { rounds: 1 };
+        let mut file = std::fs::File::create(&self.configs[index].path).expect("the file");
+        db.save(&mut file, DatabaseKey::new().with_password(PASSWORD))
+            .expect("saves");
     }
 
     /// Rewrites the placeholder file, so the freshness guard sees a change.

@@ -2,10 +2,9 @@
 //! driving `kpa`'s agent socket with the real OpenSSH tools against the
 //! `fixture-ssh.kdbx` fixture.
 
-#![allow(dead_code, reason = "the SSH agent runs on the core in a later change")]
-
 mod common;
 
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -39,8 +38,16 @@ struct SshAgent {
 }
 
 fn start_ssh_agent(daemon: &InProcessDaemon) -> SshAgent {
-    let _ = daemon;
-    unimplemented!("the SSH agent runs on the core in a later change")
+    let socket_dir = tempfile::tempdir().expect("tempdir");
+    let socket = socket_dir.path().join("agent.sock");
+    let listener = UnixListener::bind(&socket).expect("bind ssh agent socket");
+    kpa::authn::assume_cgroup(&socket, &daemon.cgroup);
+    let serving = std::sync::Arc::clone(&daemon.daemon);
+    std::thread::spawn(move || serving.serve_agent(listener));
+    SshAgent {
+        socket,
+        _socket_dir: socket_dir,
+    }
 }
 
 fn ssh_add<'a>(agent: &SshAgent, args: impl IntoIterator<Item = &'a str>) -> std::process::Output {
@@ -61,7 +68,6 @@ fn stdout(output: &std::process::Output) -> String {
 /// (`docs/ssh-agent.md` § 6.1): adding a key, removing every key and
 /// locking the agent all fail.
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn ssh_add_lists_nothing_without_a_cache_and_never_takes_a_key() {
     use std::os::unix::fs::OpenOptionsExt as _;
 
@@ -105,7 +111,6 @@ fn public_key_line(listed: &str, title: &str) -> String {
 }
 
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn identities_list_from_the_cache_while_locked_and_live_once_unlocked() {
     let daemon = InProcessDaemon::start(&config(&common::ssh_db()));
     let agent = start_ssh_agent(&daemon);
@@ -206,7 +211,6 @@ fn sign_and_verify(agent: &SshAgent, dir: &Path, listed: &str, title: &str, coun
 /// Every served key type (`docs/ssh-agent.md` § 6.5) can sign and the
 /// result verifies, both through the real OpenSSH tools.
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn signing_and_verifying_works_after_unlock_and_approval() {
     let dir = tempfile::tempdir().expect("tempdir");
     let counter = dir.path().join("prompts");
@@ -249,7 +253,6 @@ fn config_with_cancelling_unlock(
 /// prompt follows: answering the unlock approves nothing (`docs/ssh-agent.md`
 /// § 6.6, § 6.7).
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn a_signature_for_a_locked_database_unlocks_it_and_then_asks_for_the_approval() {
     let counters = tempfile::tempdir().expect("tempdir");
     let (unlocks, approvals) = (
@@ -290,7 +293,6 @@ fn a_signature_for_a_locked_database_unlocks_it_and_then_asks_for_the_approval()
 /// once, without a prompt, until the backoff has passed or the database is
 /// unlocked. Locking doesn't end it.
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn a_cancelled_unlock_prompt_holds_back_the_next_one() {
     let counters = tempfile::tempdir().expect("tempdir");
     let (flag, unlocks, approvals) = (
@@ -367,7 +369,6 @@ fn count_lines(path: &Path) -> usize {
 /// three signatures with the same key and destination each raise their own
 /// prompt (`docs/ssh-agent.md` § 6.7).
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn confirm_always_prompts_every_signature() {
     let fingerprint = common::ssh_fixture_fingerprint("Ed25519");
     let counter_dir = tempfile::tempdir().expect("tempdir");
@@ -405,7 +406,6 @@ fn confirm_always_prompts_every_signature() {
 /// would fail the test outright if it were ever invoked, so a successful
 /// signature already proves it wasn't.
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn confirm_never_never_prompts() {
     let fingerprint = common::ssh_fixture_fingerprint("Ed25519");
     let marker_dir = tempfile::tempdir().expect("tempdir");
@@ -451,7 +451,6 @@ fn confirm_never_never_prompts() {
 /// (`docs/ssh-agent.md` § 6.9): re-unlocking the same database asks again,
 /// rather than remembering the approval across the lock.
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn locking_clears_approvals() {
     let fingerprint = common::ssh_fixture_fingerprint("Ed25519");
     let counter_dir = tempfile::tempdir().expect("tempdir");
@@ -498,7 +497,6 @@ fn locking_clears_approvals() {
 /// `ssh-keygen -Y sign` fails quickly rather than waiting out the whole
 /// (deliberately long) prompt.
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn locking_kills_an_open_approval_prompt() {
     let marker_dir = tempfile::tempdir().expect("tempdir");
     let marker = marker_dir.path().join("prompt-up");
@@ -708,7 +706,6 @@ fn config_counting_prompts(db_path: &Path, counter: &Path) -> String {
 /// bound to a different host key — prompts again
 /// (`docs/ssh-agent.md` § 6.7).
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn a_different_destination_prompts_again_but_the_same_one_does_not() {
     use base64::Engine as _;
 
@@ -772,7 +769,6 @@ fn a_different_destination_prompts_again_but_the_same_one_does_not() {
 /// connection gets `FAILURE` (`docs/ssh-agent.md` § 6.3), even a
 /// well-formed, approvable login.
 #[test]
-#[ignore = "the SSH agent runs on the core in a later change"]
 fn forwarded_signatures_are_refused() {
     use base64::Engine as _;
 
@@ -877,7 +873,6 @@ mod pending {
     }
 
     #[test]
-    #[ignore = "the SSH agent runs on the core in a later change"]
     fn a_refused_request_is_listed_approved_by_its_id_and_the_retry_signs() {
         let daemon = outside_daemon();
         let agent = start_ssh_agent(&daemon);
@@ -922,7 +917,6 @@ mod pending {
     /// Without an approval the retry is still refused, and the repeated
     /// request is the one pending request, with the same id.
     #[test]
-    #[ignore = "the SSH agent runs on the core in a later change"]
     fn an_unapproved_request_stays_pending_and_refused() {
         let daemon = outside_daemon();
         let agent = start_ssh_agent(&daemon);
@@ -941,7 +935,6 @@ mod pending {
     }
 
     #[test]
-    #[ignore = "the SSH agent runs on the core in a later change"]
     fn approving_what_is_not_pending_is_an_error() {
         let daemon = outside_daemon();
 
@@ -961,7 +954,6 @@ mod pending {
     /// refused request with its id, `kpa ssh approve <id>` approves it, and
     /// the retry signs.
     #[test]
-    #[ignore = "the SSH agent runs on the core in a later change"]
     fn kpa_lists_a_refused_request_and_approves_it_by_its_id() {
         let daemon = outside_daemon();
         let agent = start_ssh_agent(&daemon);
@@ -997,7 +989,6 @@ mod pending {
     /// `--json` is the daemon's line for both commands, and the exit status
     /// follows its `ok`.
     #[test]
-    #[ignore = "the SSH agent runs on the core in a later change"]
     fn json_is_the_daemons_response_line() {
         let daemon = outside_daemon();
         let agent = start_ssh_agent(&daemon);
@@ -1027,7 +1018,6 @@ mod pending {
     }
 
     #[test]
-    #[ignore = "the SSH agent runs on the core in a later change"]
     fn approving_what_is_not_pending_is_a_sentence() {
         let daemon = outside_daemon();
         let id = "00000000-0000-4000-8000-000000000000";
@@ -1046,7 +1036,6 @@ mod pending {
     /// A requester outside the desktop is told what to run in the key's
     /// comment, until the key is approved.
     #[test]
-    #[ignore = "the SSH agent runs on the core in a later change"]
     fn the_key_comment_names_the_remedy_until_the_key_is_approved() {
         let daemon = outside_daemon();
         let agent = start_ssh_agent(&daemon);

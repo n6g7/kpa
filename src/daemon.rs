@@ -13,22 +13,27 @@ use crate::databases::{Databases, Observer};
 use crate::display_session::{self, DisplayHandle};
 use crate::frontends::auto_lock::{self, Source};
 use crate::frontends::control::{self, Api, CopyState};
-use crate::prompt::{self, PromptQueue, SecretProgram};
+use crate::frontends::ssh_agent::{self, Agent, SshState};
+use crate::paths::Paths;
+use crate::prompt::{self, ConfirmAnswer, ConfirmProgram, Prompt, PromptQueue, SecretProgram};
 use crate::ssh::approvals::Approvals;
+use crate::ssh::keys;
 
-/// What tests replace: the clipboard, and how the unlock prompt asks on
-/// screen.
+/// What tests replace: the clipboard, and how the unlock and confirm
+/// prompts ask on screen.
 pub struct Backends {
     pub clipboard: Box<dyn clipboard::Backend>,
     pub unlock_prompt: Arc<dyn prompt::Backend<Zeroizing<String>>>,
+    pub confirm_prompt: Arc<dyn prompt::Backend<ConfirmAnswer>>,
 }
 
 impl Backends {
-    /// The Wayland clipboard and the configured prompt program.
+    /// The Wayland clipboard and the configured prompt programs.
     pub fn real(config: &Config) -> Backends {
         Backends {
             clipboard: Box::new(WaylandBackend),
             unlock_prompt: Arc::new(SecretProgram::new(config.prompt.clone())),
+            confirm_prompt: Arc::new(ConfirmProgram::new(config.ssh_agent.confirm_prompt.clone())),
         }
     }
 }
@@ -37,57 +42,108 @@ impl Backends {
 pub struct Daemon {
     pub databases: Arc<Databases>,
     api: Arc<Api>,
+    agent: Arc<Agent>,
 }
 
 /// Builds the core with its observers registered, in this order: what holds
-/// a secret (the clipboard offer, the approvals), then `sleep_hold`, so that
-/// when a suspend's lock has let the sleep delay go, every offer has ended.
+/// a secret (the clipboard offer, the approvals, the agent's keys), then
+/// `sleep_hold`, so that when a suspend's lock has let the sleep delay go,
+/// every offer has ended and every private key is gone.
 pub fn build(
     config: Config,
+    paths: Paths,
     backends: Backends,
     display: DisplayHandle,
     sleep_hold: Arc<dyn Observer>,
 ) -> Daemon {
     let copies = Arc::new(CopyState::new(backends.clipboard));
     let approvals = Arc::new(Approvals::new());
+    let ssh = Arc::new(SshState::new(
+        keys::cache_dir(&paths),
+        config.ssh_agent.backoff,
+    ));
     let mut databases = Databases::new(config.databases.clone(), config.idle_timeout);
     databases.observe(copies.clone());
     databases.observe(approvals.clone());
+    databases.observe(ssh.clone());
     databases.observe(sleep_hold);
     let databases = Arc::new(databases);
+
+    // One prompt on screen at a time, whoever asks.
+    let prompts = Arc::new(PromptQueue::new());
+    let screen_unlock = Arc::new(Prompt::new(
+        Arc::clone(&prompts),
+        Arc::clone(&backends.unlock_prompt),
+        config.prompt_timeout,
+    ));
     let api = Arc::new(Api::new(
         Arc::clone(&databases),
-        display,
-        approvals,
+        display.clone(),
+        Arc::clone(&approvals),
         copies,
-        Arc::new(PromptQueue::new()),
+        Arc::clone(&prompts),
         backends.unlock_prompt,
         &config,
     ));
-    Daemon { databases, api }
+    let agent = Arc::new(Agent::new(
+        Arc::clone(&databases),
+        ssh,
+        approvals,
+        display,
+        screen_unlock,
+        Prompt::new(
+            prompts,
+            backends.confirm_prompt,
+            config.confirm_prompt_timeout(),
+        ),
+        paths.known_hosts,
+    ));
+    Daemon {
+        databases,
+        api,
+        agent,
+    }
 }
 
 impl Daemon {
     /// Serves kpa's own socket on the calling thread, forever.
-    pub fn serve_control(self, listener: UnixListener) {
-        control::serve(self.api, listener);
+    pub fn serve_control(&self, listener: UnixListener) {
+        control::serve(Arc::clone(&self.api), listener);
+    }
+
+    /// Serves the SSH agent's socket on the calling thread, forever.
+    pub fn serve_agent(&self, listener: UnixListener) {
+        ssh_agent::serve(Arc::clone(&self.agent), listener);
     }
 }
 
-/// Runs the daemon: the lock triggers on a thread of their own, kpa's own
-/// socket on this one.
-pub fn serve(config: Config, control: UnixListener, source: Source) {
+/// Runs the daemon: the lock triggers, and the SSH agent's socket if there
+/// is one, on threads of their own, kpa's own socket on this one.
+pub fn serve(
+    config: Config,
+    paths: Paths,
+    control: UnixListener,
+    agent: Option<UnixListener>,
+    source: Source,
+) {
     let (writer, display) = display_session::channel();
     let (sleep_hold, auto_lock) = auto_lock::start(source, writer);
     let idle_timeout = config.idle_timeout;
     let backends = Backends::real(&config);
-    let daemon = build(config, backends, display, Arc::new(sleep_hold));
+    let daemon = build(config, paths, backends, display, Arc::new(sleep_hold));
 
     let databases = Arc::clone(&daemon.databases);
     std::thread::Builder::new()
         .name("auto-lock".to_string())
         .spawn(move || auto_lock.run(databases, idle_timeout))
         .expect("spawn the auto-lock thread");
+    if let Some(listener) = agent {
+        let agent = Arc::clone(&daemon.agent);
+        std::thread::Builder::new()
+            .name("ssh-agent".to_string())
+            .spawn(move || ssh_agent::serve(agent, listener))
+            .expect("spawn the ssh-agent thread");
+    }
     daemon.serve_control(control);
 }
 
@@ -134,6 +190,7 @@ mod tests {
         let backends = Backends {
             clipboard: Box::new(backend),
             unlock_prompt: Arc::new(prompt::Scripted::<Zeroizing<String>>::new()),
+            confirm_prompt: Arc::new(prompt::Scripted::<ConfirmAnswer>::new()),
         };
         let (display, handle) = display_session::channel();
         display.set(DisplaySession::Unlocked {
@@ -144,7 +201,7 @@ mod tests {
             offers,
             live_when_told: Mutex::new(Vec::new()),
         });
-        let daemon = build(config, backends, handle, probe.clone());
+        let daemon = build(config, Paths::default(), backends, handle, probe.clone());
         daemon.databases.install_for_test(
             "personal",
             vec![TestEntry::new("site").field("Password", "secret")],

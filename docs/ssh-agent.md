@@ -957,31 +957,33 @@ programs' settings.
 | `bind.rs`     | session-bind verification and per-connection binding state                                                                                      |
 | `classify.rs` | Data to be signed → `Purpose::{Login, SshSig, Other}`. Pure, fuzzed                                                                             |
 | `authz.rs`    | (key settings, connection class, purpose, login session) → what the request needs (nothing, or an approval for a scope, kept until lock or not) or why it is refused. Pure and stateless: whether an approval already covers the scope, and whether a prompt may appear, are the sign flow's questions |
-| `ssh/keys.rs` | Attachment scan, public-key cache file, overrides, lazy key loading, the per-`Slot` key cache                                                   |
+| `ssh/keys.rs` | Attachment scan, public-key cache file, overrides, the parse of a private key                                                                    |
 | `ssh/approvals/` | Approvals and pending requests: their scopes, limits and expiry, per database and unlock                                                                              |
-| `serve.rs`    | Listener, per-connection thread, connection cap, and the `SshSign` trait it answers each request through                                         |
-| `agent/`      | The agent's own logic, crate-private: per-database key state and the scan at unlock (`state.rs`), identities (`identities.rs`), the sign flow (`sign.rs`), one `SIGN_REQUEST` (`request.rs`), prompting the user (`prompts.rs`), what its prompts say (`message.rs`) and signing (`signer.rs`). `Agent` implements `SshSign` over `SshHost`, the database access the daemon implements |
+| `serve.rs`    | Listener, per-connection thread, connection cap, and the `Agent` it answers each request with                                                    |
+| `agent/`      | The agent's own logic, crate-private: per-database key state and the scan at unlock, as an observer of the core (`state.rs`, `SshState`), one database as the agent reads it (`hold.rs`, `Hold`), identities (`identities.rs`), the sign flow (`sign.rs`), one `SIGN_REQUEST` (`request.rs`), prompting the user (`prompts.rs`), what its prompts say (`message.rs`) and signing (`signer.rs`). `Agent` holds the core, `SshState`, `ssh::approvals`, the display session and the prompts |
 
-**Server changes**
+**Daemon changes**
 
-- `Slot` gains the agent's `SshSlot`: the served keys, the private keys
-  read and the approvals, all dropped in `Slot::lock()`. Its lock signal,
-  replaced by every lock, ends a confirm prompt in flight the way it
-  ends unlock's, and tells the signing hold whether a lock came in since
-  the request was decided.
-- `Server` implements `SshHost` as a thin adapter over its database
-  slots (the configured databases, slot access under the mutex behind the
-  freshness guard, the display session `authz` decides prompts against). The approval
-  prompt goes through the daemon's prompt queue, so only one prompt is
-  ever on screen, unlock's included. `server::serve_ssh_agent` runs the
-  agent with that queue, and is all the binary needs. `ssh_agent` never
-  imports `server`.
-- `Slot` gains the agent's backoff deadline, kept outside `SshSlot` so a
-  lock leaves it be, and cleared by `Slot::install`. `SshHost`
-  requires `Unlock`, the one unlock behind both `kpa unlock` and the
-  agent; only the prompt's message differs. `SlotView` carries the time of
-  its hold. Unlock waiters wait for the agent's per-database turn, so the
-  daemon needs no condvar for them.
+- `daemon` registers `SshState` and the approvals state as observers of the
+  core, builds the `Agent` on the core, and runs `ssh_agent::serve` on the
+  agent's socket. `SshState` scans a database under the core's guard when it
+  unlocks and drops its keys, private keys included, when the lock that ends
+  that unlock tells it. Its prompt backoff outlives a lock, and an unlock of
+  the database ends it. The unlock a state belongs to is the core's token for
+  it, so a late notice about an old unlock leaves a newer one's state, and a
+  lock that came in since a prompt was raised cancels the token the prompt
+  and the signature that follows it hold.
+- The agent reads a database through a `Hold`: the core's guard, then
+  `SshState`'s lock, then the approvals' calls, which take the guard. The
+  freshness guard runs when the hold is taken. A locked database, or an
+  unlocked one whose scan isn't in yet, is held without the guard: it lists
+  from the cache, and a signature is refused as locked.
+- The approval prompt goes through the daemon's prompt queue, so only one
+  prompt is ever on screen, unlock's included. The agent's unlock on demand
+  is its own steps on the core (begin, `may_prompt_on_screen`, ask with its
+  message, finish) and its own refusals; the screen unlock prompt is the one
+  `kpa unlock` asks on. Unlock waiters wait for the agent's per-database
+  turn, so the daemon needs no condvar for them.
 - The prompt and approval runner gains `KPA_PROMPT_MESSAGE` and the shared
   queue. The timeout and lock-kills-prompt come from
   [`headless.md`](./headless.md).
@@ -1004,7 +1006,7 @@ programs' settings.
   attachments).
 - **`tests/ssh_agent_serve.rs`** runs the daemon in-process
   (`common::InProcessDaemon`), serves the agent on its own socket through
-  `server::serve_ssh_agent`, and drives it with the real OpenSSH tools and
+  `Daemon::serve_agent`, and drives it with the real OpenSSH tools and
   raw agent-protocol frames:
   - `ssh-add -L` lists the keys from the cache while the database is
     locked, by entry title once it's unlocked, and nothing on a first run
@@ -1018,7 +1020,7 @@ programs' settings.
     confirm prompt;
   - forwarded signatures are refused;
   - `ssh-add <key>`, `ssh-add -D` and `ssh-add -x` fail.
-- **`tests/server.rs`** spawns `kpa serve`: once a database serves SSH
+- **`tests/control.rs`** spawns `kpa serve`: once a database serves SSH
   keys, the agent's socket appears and `ssh-add -l` reaches it, and
   otherwise there is no agent socket.
 - **Phase 2** (unlock on demand, requests from outside the desktop) adds:

@@ -6,11 +6,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::testing::{TestEntry, build};
+use super::testing::{PASSWORD, TestEntry, build};
 use super::vault::Fingerprint;
 use super::{
     Begin, BeginError, Databases, Observer, OpenError, UnknownDb, UnlockFailure, Unlocking,
+    VaultError,
 };
+use zeroize::Zeroizing;
+
 use crate::cancel::CancelToken;
 use crate::config::DatabaseConfig;
 
@@ -432,4 +435,35 @@ fn open_reads_entries_fields_and_attachments() {
         .unwrap()
         .for_each_attachment(|_| none += 1);
     assert_eq!(none, 0);
+}
+
+/// A database written for a test is read by `finish` as any file is: the
+/// right password installs it and tells the observers, a wrong one is
+/// refused, and a lock beats it as it beats any unlock.
+#[test]
+fn a_written_database_is_read_by_finish_like_any_file() {
+    let (databases, _recorder, log) = observed(&["work"]);
+    databases.write_for_test("work", vec![TestEntry::new("site")]);
+    let typed = |password: &str| Some(Zeroizing::new(password.to_string()));
+
+    let wrong = typed("not it");
+    assert!(matches!(
+        started(&databases, "work").finish(wrong.as_ref()),
+        Err(UnlockFailure::Vault(VaultError::WrongCredentials))
+    ));
+    assert!(!is_unlocked(&databases, "work"));
+
+    let right = typed(PASSWORD);
+    started(&databases, "work").finish(right.as_ref()).unwrap();
+    assert_eq!(databases.open("work").ok().unwrap().entry_count(), 1);
+    assert_eq!(*log.lock().unwrap(), ["a:unlocked:work"]);
+
+    databases.lock("work").unwrap();
+    let unlocking = started(&databases, "work");
+    databases.lock("work").unwrap();
+    assert!(matches!(
+        unlocking.finish(right.as_ref()),
+        Err(UnlockFailure::LockedMeanwhile)
+    ));
+    assert!(!is_unlocked(&databases, "work"));
 }

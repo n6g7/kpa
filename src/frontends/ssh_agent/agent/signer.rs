@@ -4,15 +4,14 @@
 
 use std::collections::hash_map::Entry;
 
-use keepass::Database;
 use ssh_key::encoding::{Decode, Encode, Reader};
 use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg, PrivateKey};
 use uuid::Uuid;
 
-use super::SlotView;
+use super::hold::Hold;
 use super::sign::Refused;
-use crate::databases::vault;
+use crate::databases::Open;
 use crate::frontends::ssh_agent::wire::SignFlags;
 use crate::ssh::keys;
 
@@ -32,28 +31,28 @@ pub(super) fn supported(key: &KeyData, flags: SignFlags) -> bool {
     !matches!(key, KeyData::Rsa(_)) || rsa_hash(flags).is_some()
 }
 
-/// Signs `data` with the key the slot's database serves under
-/// `fingerprint`, reading it from the database first if this is its first
-/// signature since unlock and keeping it in the slot until lock. Whether
-/// the request may be signed at all is not asked here.
+/// Signs `data` with the key the held database serves under `fingerprint`,
+/// reading it from the database first if this is its first signature since
+/// unlock and keeping it in the state until lock. Whether the request may be
+/// signed at all is not asked here.
 ///
-/// The key is found in the slot's own scan: only that one knows the entry
-/// it came from. Refused as [`Refused::Locked`] for a locked database,
+/// The key is found in the hold's own scan: only that one knows the entry it
+/// came from. Refused as [`Refused::Locked`] for a locked database,
 /// [`Refused::NotServed`] for a key its scan didn't find, and
 /// [`Refused::SigningFailed`] if the key's attachment is gone or doesn't
 /// parse, or the signature fails.
 pub(super) fn sign(
-    slot: &mut SlotView<'_>,
+    hold: &mut Hold<'_>,
     fingerprint: Fingerprint,
     data: &[u8],
     flags: SignFlags,
 ) -> Result<Vec<u8>, Refused> {
-    let entry_uuid = slot.served(fingerprint)?.entry_uuid;
-    let db = slot.db.ok_or(Refused::Locked)?;
-    let private_key = match slot.ssh.private_keys.entry(fingerprint) {
+    let entry_uuid = hold.served(fingerprint)?.entry_uuid;
+    let (open, scanned) = hold.unlocked_mut().ok_or(Refused::Locked)?;
+    let private_key = match scanned.private_keys.entry(fingerprint) {
         Entry::Occupied(cached) => cached.into_mut(),
         Entry::Vacant(vacant) => vacant
-            .insert(read_private_key(db, entry_uuid, fingerprint).ok_or(Refused::SigningFailed)?),
+            .insert(read_private_key(open, entry_uuid, fingerprint).ok_or(Refused::SigningFailed)?),
     };
     sign_with(private_key, data, flags).ok_or(Refused::SigningFailed)
 }
@@ -62,12 +61,12 @@ pub(super) fn sign(
 /// a key with `fingerprint`. Each attachment is parsed once, straight from
 /// the database's bytes.
 fn read_private_key(
-    db: &Database,
+    open: &Open<'_>,
     entry_uuid: Uuid,
     fingerprint: Fingerprint,
 ) -> Option<PrivateKey> {
     let mut found = None;
-    vault::for_each_entry_attachment(db, entry_uuid, |attachment| {
+    open.entry(entry_uuid)?.for_each_attachment(|attachment| {
         if found.is_some() {
             return;
         }
@@ -107,54 +106,36 @@ fn sign_with(key: &PrivateKey, data: &[u8], flags: SignFlags) -> Option<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Instant, SystemTime};
-
     use ssh_key::{Algorithm, Signature};
 
-    use super::super::SshSlot;
     use super::*;
-    use crate::cancel::CancelSource;
-    use crate::ssh::testing::{RSA_3072, database, key_database, test_key};
+    use crate::config::SshKeyConfirm;
+    use crate::frontends::ssh_agent::testing::Fixture;
+    use crate::ssh::testing::{RSA_3072, test_key};
 
-    /// `key`'s fingerprint, and a database serving it, scanned.
-    fn scanned(key: &PrivateKey) -> (Fingerprint, Database, SshSlot) {
-        let db = key_database(&[("github", key)]);
-        let ssh = SshSlot::scan(&db, &database("personal", vec![]));
-        (key.public_key().fingerprint(HashAlg::Sha256), db, ssh)
+    fn fingerprint(key: &PrivateKey) -> Fingerprint {
+        key.public_key().fingerprint(HashAlg::Sha256)
     }
 
-    /// Signs as `sign` does under the host's lock, on a slot whose
-    /// database is `db`.
-    fn sign_on(
-        db: Option<&Database>,
-        ssh: &mut SshSlot,
-        fingerprint: Fingerprint,
-        flags: u32,
-    ) -> Result<Vec<u8>, Refused> {
-        let mut last_activity = Instant::now();
-        let lock_signal = CancelSource::new();
-        let mut backoff = None;
-        let mut slot = SlotView::new(
-            Instant::now(),
-            SystemTime::now(),
-            db,
-            ssh,
-            &mut last_activity,
-            &lock_signal,
-            &mut backoff,
-        );
-        sign(&mut slot, fingerprint, b"data", SignFlags::new(flags))
+    /// Signs as the sign flow does, in one hold of `personal`.
+    fn sign_in(fx: &Fixture, fingerprint: Fingerprint, flags: u32) -> Result<Vec<u8>, Refused> {
+        let mut hold = fx.agent.hold("personal")?;
+        sign(&mut hold, fingerprint, b"data", SignFlags::new(flags))
     }
 
     #[test]
     fn a_signature_verifies_and_the_key_is_kept_for_the_next() {
         let key = test_key(1);
-        let (fingerprint, db, mut ssh) = scanned(&key);
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Never);
 
-        let raw = sign_on(Some(&db), &mut ssh, fingerprint, 0).expect("signs");
+        let raw = sign_in(&fx, fingerprint(&key), 0).expect("signs");
         let signature = Signature::decode(&mut raw.as_slice()).expect("signature decodes");
         signature::Verifier::verify(key.public_key(), b"data", &signature).expect("verifies");
-        assert!(ssh.private_keys.contains_key(&fingerprint));
+        assert!(
+            fx.state.inner().scanned["personal"]
+                .private_keys
+                .contains_key(&fingerprint(&key))
+        );
     }
 
     /// An RSA key signs with the SHA-2 algorithm the request asks for, and
@@ -162,11 +143,11 @@ mod tests {
     #[test]
     fn an_rsa_key_signs_with_sha2_only() {
         let key = PrivateKey::from_openssh(RSA_3072).expect("test vector");
-        let (fingerprint, db, mut ssh) = scanned(&key);
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Never);
 
         assert!(!supported(key.public_key().key_data(), SignFlags::new(0)));
         assert!(matches!(
-            sign_on(Some(&db), &mut ssh, fingerprint, 0),
+            sign_in(&fx, fingerprint(&key), 0),
             Err(Refused::SigningFailed)
         ));
         for (flags, hash) in [(2, HashAlg::Sha256), (4, HashAlg::Sha512)] {
@@ -174,7 +155,7 @@ mod tests {
                 key.public_key().key_data(),
                 SignFlags::new(flags)
             ));
-            let raw = sign_on(Some(&db), &mut ssh, fingerprint, flags).expect("signs");
+            let raw = sign_in(&fx, fingerprint(&key), flags).expect("signs");
             let signature = Signature::decode(&mut raw.as_slice()).expect("signature decodes");
             assert_eq!(signature.algorithm(), Algorithm::Rsa { hash: Some(hash) });
             signature::Verifier::verify(key.public_key(), b"data", &signature).expect("verifies");
@@ -192,29 +173,35 @@ mod tests {
     #[test]
     fn a_key_whose_entry_is_gone_does_not_sign() {
         let key = test_key(1);
-        let (fingerprint, db, mut ssh) = scanned(&key);
-        ssh.served[0].entry_uuid = Uuid::new_v4();
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Never);
+        fx.state
+            .inner()
+            .scanned
+            .get_mut("personal")
+            .expect("scanned")
+            .served[0]
+            .entry_uuid = Uuid::new_v4();
 
         assert!(matches!(
-            sign_on(Some(&db), &mut ssh, fingerprint, 0),
+            sign_in(&fx, fingerprint(&key), 0),
             Err(Refused::SigningFailed)
         ));
     }
 
-    /// Only a key the slot's own scan found signs, and only while its
-    /// database is open.
+    /// Only a key the hold's own scan found signs, and only while its
+    /// database is unlocked.
     #[test]
     fn a_key_outside_the_scan_or_a_locked_database_does_not_sign() {
         let key = test_key(1);
-        let (fingerprint, db, mut ssh) = scanned(&key);
-        let other = test_key(2).public_key().fingerprint(HashAlg::Sha256);
-
+        let fx = Fixture::unlocked(&key, SshKeyConfirm::Never);
         assert!(matches!(
-            sign_on(Some(&db), &mut ssh, other, 0),
+            sign_in(&fx, fingerprint(&test_key(2)), 0),
             Err(Refused::NotServed)
         ));
+
+        let locked = Fixture::locked(&key, SshKeyConfirm::Never);
         assert!(matches!(
-            sign_on(None, &mut ssh, fingerprint, 0),
+            sign_in(&locked, fingerprint(&key), 0),
             Err(Refused::Locked)
         ));
     }

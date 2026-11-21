@@ -38,8 +38,8 @@ and the rest of the crate sees only the API it exports.
   `frontends::control::authz::authorize_copy` do.
   When a callback can't be avoided, or a test needs a fake, the lower
   subsystem defines a trait for exactly what it needs, and the higher one
-  implements it (`frontends::ssh_agent::agent::SshHost`). Don't add a trait with one implementation
-  and no test using a second.
+  implements it (`databases::Observer`). Don't add a trait with one
+  implementation and no test using a second.
 
 ## Within a subsystem
 

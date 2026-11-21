@@ -30,6 +30,8 @@ ssh-key = { version = "=0.7.0-rc.12", default-features = false, features = ["ed2
 signature = { version = "3", default-features = false }
 
 [dev-dependencies]
+# Tests write real databases (`databases::testing`); kpa itself never saves.
+keepass = { version = "0.15.0", default-features = false, features = ["totp", "save_kdbx4"] }
 tempfile = "3"
 rustix = { version = "1", features = ["stdio", "pty"] }
 

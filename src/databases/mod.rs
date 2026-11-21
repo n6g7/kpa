@@ -18,7 +18,7 @@ pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
 mod unlock;
-pub mod vault;
+mod vault;
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
