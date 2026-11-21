@@ -27,7 +27,7 @@ use crate::paths::Paths;
 use crate::prompt::{ConfirmAnswer, Prompt, PromptQueue, Scripted};
 use crate::ssh::approvals::{Approvals, Grant, GrantSource, PendingRequest, Scope};
 use crate::ssh::keys;
-use crate::ssh::testing::{database, key, key_entry};
+use crate::ssh::testing::{database, key_entry};
 
 /// A real `session-bind@openssh.com` message for `session_id`, signed by
 /// `host`.
@@ -291,13 +291,8 @@ impl Fixture {
     /// Approves `scope` in `personal` until it locks.
     pub(super) fn grant(&self, scope: Scope) {
         let open = self.databases.open("personal").expect("unlocked");
-        self.approvals.grant(
-            &open,
-            scope,
-            key(),
-            GrantSource::OnScreen,
-            SystemTime::now(),
-        );
+        self.approvals
+            .grant(&open, scope, GrantSource::OnScreen, SystemTime::now());
     }
 }
 

@@ -30,7 +30,7 @@ use crate::display_session::DisplayHandle;
 use crate::log;
 use crate::prompt::{self, PromptQueue};
 use crate::ssh::approvals::{Approvals, GrantSource, Lasts, Scope};
-use crate::ssh::keys::{self, ServedKey};
+use crate::ssh::keys;
 
 pub use copy::CopyState;
 pub use serve::serve;
@@ -260,7 +260,7 @@ impl Api {
             .map(|pending| WirePending {
                 id: pending.id,
                 refused_at: unix_seconds(pending.refused_at),
-                scope: wire_scope(&pending.approval.scope, pending.key),
+                scope: wire_scope(&pending.approval.scope),
                 remember: pending.approval.remember,
                 request: WireRequestDetails {
                     purpose: pending.request.purpose.to_string(),
@@ -290,7 +290,7 @@ impl Api {
                 let expires_in = grant.time_left(now).map(|left| left.as_secs());
                 grants.push(WireGrant {
                     granted_at: unix_seconds(grant.granted_at),
-                    scope: wire_scope(&grant.scope, grant.key),
+                    scope: wire_scope(&grant.scope),
                     remember: grant.lasts == Lasts::UntilLock,
                     expires_in,
                     by: by.to_string(),
@@ -327,7 +327,8 @@ impl Api {
 
 /// What an approval covers, as the wire shows it: the key it is for, and
 /// where the signature goes.
-fn wire_scope(scope: &Scope, key: ServedKey) -> WireScope {
+fn wire_scope(scope: &Scope) -> WireScope {
+    let key = scope.key().clone();
     WireScope {
         key: WireSshKey {
             db: key.database,
@@ -373,7 +374,7 @@ mod tests {
     use super::*;
     use crate::databases::testing::TestEntry;
     use crate::frontends::control::testing::{Fixture, fixture, fixture_with};
-    use crate::ssh::testing::{approval, key, requested, test_key};
+    use crate::ssh::testing::{approval, requested, test_key};
 
     const HOUR: Duration = Duration::from_secs(3600);
 
@@ -557,7 +558,6 @@ mod tests {
             fx.api.approvals.record(
                 &open,
                 approval(1, None, true),
-                key(),
                 requested("ssh"),
                 SystemTime::now(),
             );
@@ -581,7 +581,6 @@ mod tests {
             fx.api.approvals.record(
                 &open,
                 approval(2, None, true),
-                key(),
                 requested("scp"),
                 SystemTime::now(),
             );
@@ -605,7 +604,6 @@ mod tests {
             fx.api.approvals.record(
                 &open,
                 approval(1, None, true),
-                key(),
                 requested("ssh"),
                 SystemTime::now(),
             );

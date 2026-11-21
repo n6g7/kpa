@@ -68,7 +68,7 @@ pub fn authorize_sign(
             }
             // Whatever `confirm` says, a forwarded login needs an approval.
             return Ok(Some(SignatureApproval {
-                scope: Scope::forwarded(key.fingerprint, session, host, dest),
+                scope: Scope::forwarded(key, session, host, dest),
                 remember: key.confirm != SshKeyConfirm::Always,
             }));
         }
@@ -78,10 +78,10 @@ pub fn authorize_sign(
             {
                 return Err(Refusal::SessionMismatch);
             }
-            Scope::local(key.fingerprint, Some(dest))
+            Scope::local(key, Some(dest))
         }
         // Any purpose, no binding to check a login's session against.
-        ConnectionClass::LocalUnbound => Scope::local(key.fingerprint, None),
+        ConnectionClass::LocalUnbound => Scope::local(key, None),
     };
     let remember = match key.confirm {
         SshKeyConfirm::Never => return Ok(None),
@@ -168,7 +168,7 @@ mod tests {
         remember: bool,
     ) -> Option<SignatureApproval> {
         Some(SignatureApproval {
-            scope: Scope::local(key.fingerprint, destination),
+            scope: Scope::local(key, destination),
             remember,
         })
     }
@@ -220,7 +220,7 @@ mod tests {
 
     fn forwarded_approval(key: &ServedKey, remember: bool) -> Option<SignatureApproval> {
         Some(SignatureApproval {
-            scope: Scope::forwarded(key.fingerprint, &[1], &host_key(9), &host_key(8)),
+            scope: Scope::forwarded(key, &[1], &host_key(9), &host_key(8)),
             remember,
         })
     }

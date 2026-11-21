@@ -3,7 +3,7 @@
 //! keys.
 
 use ssh_key::public::KeyData;
-use ssh_key::{Algorithm, Fingerprint, LineEnding, PrivateKey};
+use ssh_key::{Algorithm, LineEnding, PrivateKey};
 
 use crate::config::{DatabaseConfig, SshKeyConfig};
 use crate::databases::testing::TestEntry;
@@ -112,27 +112,31 @@ iGYuBTxUVNJpDeKmPMVV4aAQ4toK4wfRwR+FKpx1aOAvk9SbKo+Se3mUOykgytMhqiCEEJ
 -----END OPENSSH PRIVATE KEY-----
 ";
 
-pub(crate) fn fingerprint(seed: u64) -> Fingerprint {
-    test_key(seed)
-        .public_key()
-        .fingerprint(ssh_key::HashAlg::Sha256)
-}
-
 pub(crate) fn host_key(seed: u64) -> KeyData {
     test_key(seed).public_key().key_data().clone()
 }
 
 pub(crate) fn approval(key: u64, destination: Option<u64>, remember: bool) -> SignatureApproval {
     SignatureApproval {
-        scope: Scope::local(fingerprint(key), destination.map(host_key).as_ref()),
+        scope: Scope::local(&served_key(key), destination.map(host_key).as_ref()),
         remember,
     }
 }
 
+/// `key` as an open database serves it.
+pub(crate) fn served(key: &ssh_key::PublicKey) -> ServedKey {
+    let cfg = database("personal", vec![]);
+    keys::resolve_cached(&cfg, vec![key.clone()]).remove(0)
+}
+
+/// The key of `test_key(seed)`, as an open database serves it.
+pub(crate) fn served_key(seed: u64) -> ServedKey {
+    served(test_key(seed).public_key())
+}
+
 /// The key `approval(1, ..)` is for, as an open database serves it.
 pub(crate) fn key() -> ServedKey {
-    let cfg = database("personal", vec![]);
-    keys::resolve_cached(&cfg, vec![test_key(1).public_key().clone()]).remove(0)
+    served_key(1)
 }
 
 pub(crate) fn requested(command: &str) -> RequestDetails {

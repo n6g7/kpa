@@ -3,7 +3,6 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use super::{Scope, SignatureApproval};
-use crate::ssh::keys::ServedKey;
 
 /// At most this many forwarded scopes are approved until lock at once. Every
 /// `ssh -A` is a new forwarding session that no later one reuses, so without
@@ -36,8 +35,6 @@ pub enum GrantSource {
 #[derive(Debug, Clone)]
 pub struct Grant {
     pub scope: Scope,
-    /// The key the scope is for, as the open database serves it.
-    pub key: ServedKey,
     pub lasts: Lasts,
     /// When it was given, by the wall clock, so a client can tell its age.
     pub granted_at: SystemTime,
@@ -85,9 +82,9 @@ impl GrantedApprovals {
         self.0.iter().filter(move |grant| !grant.expired(now))
     }
 
-    /// Approves `scope`, for `key`, until lock. A scope that is approved
-    /// until lock already keeps its grant.
-    pub fn grant(&mut self, scope: Scope, key: ServedKey, by: GrantSource, wall: SystemTime) {
+    /// Approves `scope` until lock. A scope that is approved until lock
+    /// already keeps its grant.
+    pub fn grant(&mut self, scope: Scope, by: GrantSource, wall: SystemTime) {
         if self
             .0
             .iter()
@@ -105,7 +102,6 @@ impl GrantedApprovals {
         }
         self.0.push(Grant {
             scope,
-            key,
             lasts: Lasts::UntilLock,
             granted_at: wall,
             by,
@@ -113,26 +109,24 @@ impl GrantedApprovals {
         });
     }
 
-    /// Grants what `approval` asked for, for `key`, as the user's `Allow` on
+    /// Grants what `approval` asked for, as the user's `Allow` on
     /// screen would, except that an approval for one signature is kept for
     /// `window` rather than ending with a prompt: the retry is a separate
     /// request that comes later. It is given by `kpa ssh approve`.
     pub fn approve(
         &mut self,
         approval: SignatureApproval,
-        key: ServedKey,
         now: Instant,
         wall: SystemTime,
         window: Duration,
     ) {
         if approval.remember {
-            self.grant(approval.scope, key, GrantSource::Cli, wall);
+            self.grant(approval.scope, GrantSource::Cli, wall);
         } else {
             self.0
                 .retain(|grant| grant.scope != approval.scope && !grant.expired(now));
             self.0.push(Grant {
                 scope: approval.scope,
-                key,
                 lasts: Lasts::OneSignature {
                     until: now + window,
                 },
@@ -159,23 +153,23 @@ impl GrantedApprovals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssh::testing::{approval, fingerprint, host_key, key};
+    use crate::ssh::testing::{approval, host_key, served_key};
 
     const WINDOW: Duration = Duration::from_secs(60);
 
     fn grant(approvals: &mut GrantedApprovals, scope: Scope) {
-        approvals.grant(scope, key(), GrantSource::OnScreen, SystemTime::now());
+        approvals.grant(scope, GrantSource::OnScreen, SystemTime::now());
     }
 
     fn approve(approvals: &mut GrantedApprovals, ask: SignatureApproval, now: Instant) {
-        approvals.approve(ask, key(), now, SystemTime::now(), WINDOW);
+        approvals.approve(ask, now, SystemTime::now(), WINDOW);
     }
 
     #[test]
     fn nothing_is_covered_before_a_grant() {
         assert!(
             !GrantedApprovals::default()
-                .covers(&Scope::local(fingerprint(1), None), Instant::now())
+                .covers(&Scope::local(&served_key(1), None), Instant::now())
         );
     }
 
@@ -184,22 +178,22 @@ mod tests {
         let (dest, other) = (host_key(2), host_key(3));
         let mut approvals = GrantedApprovals::default();
         let now = Instant::now();
-        grant(&mut approvals, Scope::local(fingerprint(1), Some(&dest)));
+        grant(&mut approvals, Scope::local(&served_key(1), Some(&dest)));
 
-        assert!(approvals.covers(&Scope::local(fingerprint(1), Some(&dest)), now));
-        assert!(!approvals.covers(&Scope::local(fingerprint(1), Some(&other)), now));
-        assert!(!approvals.covers(&Scope::local(fingerprint(1), None), now));
-        assert!(!approvals.covers(&Scope::local(fingerprint(4), Some(&dest)), now));
+        assert!(approvals.covers(&Scope::local(&served_key(1), Some(&dest)), now));
+        assert!(!approvals.covers(&Scope::local(&served_key(1), Some(&other)), now));
+        assert!(!approvals.covers(&Scope::local(&served_key(1), None), now));
+        assert!(!approvals.covers(&Scope::local(&served_key(4), Some(&dest)), now));
     }
 
     #[test]
     fn an_unbound_approval_does_not_cover_bound_use() {
         let mut approvals = GrantedApprovals::default();
         let now = Instant::now();
-        grant(&mut approvals, Scope::local(fingerprint(1), None));
+        grant(&mut approvals, Scope::local(&served_key(1), None));
 
-        assert!(approvals.covers(&Scope::local(fingerprint(1), None), now));
-        assert!(!approvals.covers(&Scope::local(fingerprint(1), Some(&host_key(2))), now));
+        assert!(approvals.covers(&Scope::local(&served_key(1), None), now));
+        assert!(!approvals.covers(&Scope::local(&served_key(1), Some(&host_key(2))), now));
     }
 
     #[test]
@@ -233,14 +227,13 @@ mod tests {
     fn a_grant_remembers_its_source_its_time_and_its_uses() {
         let mut approvals = GrantedApprovals::default();
         let (now, wall) = (Instant::now(), SystemTime::now());
-        let scope = Scope::local(fingerprint(1), None);
-        approvals.grant(scope.clone(), key(), GrantSource::OnScreen, wall);
+        let scope = Scope::local(&served_key(1), None);
+        approvals.grant(scope.clone(), GrantSource::OnScreen, wall);
         approvals.used(&scope);
         approvals.used(&scope);
         // Granting again keeps the first grant, its time and its count.
         approvals.grant(
             scope.clone(),
-            key(),
             GrantSource::Cli,
             wall + Duration::from_secs(5),
         );
@@ -273,7 +266,7 @@ mod tests {
     }
 
     fn forwarded(session: u8) -> Scope {
-        Scope::forwarded(fingerprint(1), &[session], &host_key(2), &host_key(3))
+        Scope::forwarded(&served_key(1), &[session], &host_key(2), &host_key(3))
     }
 
     #[test]
@@ -284,8 +277,8 @@ mod tests {
 
         assert!(approvals.covers(&forwarded(1), now));
         assert!(!approvals.covers(&forwarded(2), now));
-        assert!(!approvals.covers(&Scope::local(fingerprint(1), Some(&host_key(3))), now));
-        let other_host = Scope::forwarded(fingerprint(1), &[1], &host_key(4), &host_key(3));
+        assert!(!approvals.covers(&Scope::local(&served_key(1), Some(&host_key(3))), now));
+        let other_host = Scope::forwarded(&served_key(1), &[1], &host_key(4), &host_key(3));
         assert!(!approvals.covers(&other_host, now));
     }
 
@@ -293,7 +286,7 @@ mod tests {
     fn past_the_cap_the_oldest_forwarded_approval_goes() {
         let mut approvals = GrantedApprovals::default();
         let now = Instant::now();
-        let local = Scope::local(fingerprint(1), None);
+        let local = Scope::local(&served_key(1), None);
         grant(&mut approvals, local.clone());
         for session in 0..=MAX_FORWARDED as u8 {
             grant(&mut approvals, forwarded(session));

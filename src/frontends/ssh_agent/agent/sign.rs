@@ -91,7 +91,7 @@ pub(super) enum Lacking {
     /// The database is locked.
     Unlock,
     /// The approval the request needs, which nothing covers.
-    Approval(Asked),
+    Approval(Box<Asked>),
 }
 
 /// An approval a request needs, and the unlock the database was in when
@@ -140,10 +140,10 @@ impl Hold<'_> {
         needed
             .filter(|approval| !approvals.covers(open, &approval.scope, self.now()))
             .map(|approval| {
-                Lacking::Approval(Asked {
+                Lacking::Approval(Box::new(Asked {
                     approval: approval.clone(),
                     unlock: open.unlock_token(),
-                })
+                }))
             })
     }
 }
@@ -267,12 +267,11 @@ impl Agent {
         }
         let signature = sign_and_touch(&mut hold, request)?;
         if allowed.approval.remember {
-            let key = hold.served(request.fingerprint)?.clone();
             let wall = hold.wall();
             let open = hold.open().ok_or(Refused::Locked)?;
             let scope = allowed.approval.scope;
             self.approvals
-                .grant(open, scope.clone(), key, GrantSource::OnScreen, wall);
+                .grant(open, scope.clone(), GrantSource::OnScreen, wall);
             // The signature the user allowed is the first one it covers.
             self.approvals.used(open, &scope);
         }
@@ -330,7 +329,7 @@ mod tests {
     use crate::frontends::ssh_agent::wire::SignFlags;
     use crate::prompt::{ConfirmAnswer, PromptOutcome, Step};
     use crate::ssh::approvals::{GrantSource, Scope};
-    use crate::ssh::testing::{RSA_3072, database, key_entry, requested, test_key};
+    use crate::ssh::testing::{RSA_3072, database, key_entry, requested, served, test_key};
 
     /// A fixture whose cancelled prompts hold nothing back: the backoff has
     /// passed by the next request.
@@ -383,7 +382,7 @@ mod tests {
     }
 
     fn scope(key: &PrivateKey) -> Scope {
-        Scope::local(key.public_key().fingerprint(HashAlg::Sha256), None)
+        Scope::local(&served(key.public_key()), None)
     }
 
     /// Whether `key` is approved for unbound use in `personal`.
@@ -933,7 +932,7 @@ mod tests {
         let fingerprint = key.public_key().fingerprint(HashAlg::Sha256);
         fx.pending()
             .iter()
-            .find(|pending| pending.key.fingerprint == fingerprint)
+            .find(|pending| pending.approval.scope.key().fingerprint == fingerprint)
             .is_some_and(|pending| fx.approve(pending.id, window).is_some())
     }
 
@@ -952,7 +951,7 @@ mod tests {
         assert!(!signed(&sign_from_outside(&fx, &key)));
         let pending = fx.pending();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].key.name, "github");
+        assert_eq!(pending[0].approval.scope.key().name, "github");
         assert!(pending[0].approval.remember);
         assert_eq!(pending[0].request.purpose, "other");
         assert_eq!(pending[0].request.class, "local");
@@ -1670,12 +1669,10 @@ mod tests {
             let fx = Fixture::unlocked(&key, SshKeyConfirm::Once);
             let needed = asked(&key, remember);
             {
-                let served = found(&fx, &key);
                 let open = fx.databases.open("personal").expect("unlocked");
                 fx.approvals.record(
                     &open,
                     needed.clone(),
-                    served,
                     requested("ssh"),
                     std::time::SystemTime::now(),
                 );
