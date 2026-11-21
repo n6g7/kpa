@@ -13,18 +13,18 @@ use crate::output::escape_one_line;
 use crate::ssh::keys::ServedKey;
 
 /// The most bytes (escaped) each piece of a message may take. The message
-/// is one line the prompt caps at 256 bytes, and the destination comes last,
+/// is one line the prompt caps at 320 bytes, and the destination comes last,
 /// so every variable piece is cut well short of that: the worst message,
 /// an unlock prompt for a login forwarded through a host `known_hosts`
-/// doesn't name to one it doesn't name either, is 251 bytes
+/// doesn't name to one it doesn't name either, is 291 bytes
 /// (`the_worst_message_fits_the_prompt_cap`), and the destination is always
 /// whole.
-const MAX_DATABASE_LEN: usize = 16;
-const MAX_KEY_NAME_LEN: usize = 40;
+const MAX_DATABASE_LEN: usize = 24;
+const MAX_KEY_NAME_LEN: usize = 64;
 /// The login user or `SSHSIG` namespace, from the request.
-const MAX_REQUESTED_LEN: usize = 24;
+const MAX_REQUESTED_LEN: usize = 32;
 /// A host name from `known_hosts`.
-const MAX_HOST_NAME_LEN: usize = 48;
+const MAX_HOST_NAME_LEN: usize = 56;
 
 /// A host a message names: its host key, and the name `known_hosts` gives
 /// it, if it has one.
@@ -352,7 +352,7 @@ mod tests {
                             host(Some(&dest), name).as_ref(),
                             via.as_ref(),
                         );
-                        assert!(text.len() <= 256, "{} bytes: {text}", text.len());
+                        assert!(text.len() <= 320, "{} bytes: {text}", text.len());
                         longest = longest.max(text.len());
                         let end = match name {
                             Some(_) => format!("{}?", "w".repeat(MAX_HOST_NAME_LEN)),
@@ -363,7 +363,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(longest, 251);
+        assert_eq!(longest, 291);
     }
 
     /// A key name can't close its quotes and carry on the sentence, nor
