@@ -487,11 +487,11 @@ binding's host key, is named the same way after the key, and the unlock
 prompt (§ 6.6) says the same: `Unlock database personal to use key "github"
 on build-box to log in to git@github.com?`. Every piece that comes from
 outside kpa's own text (the key name, the database name, the remote user, the
-namespace, the host name) passes through the escaping the CLI uses for terminal output (T-13), with
-tab and newline escaped too so the message stays one line, and gets its
-own length budget, so no piece can push the destination past the prompt's
-cap. The key name's quotes are escaped, so a name can't end its quotation and
-carry on the sentence.
+namespace, the host name) passes through the escaping the CLI uses for
+terminal output (T-13), with tab and newline escaped too so the message stays
+one line, and gets its own length budget, so no piece can push the destination
+past the prompt's cap. The key name's quotes are escaped, so a name can't end
+its quotation and carry on the sentence.
 
 Approvals live in memory only and are dropped on lock. A forwarded
 approval is remembered under (key, forwarding session identifier,
