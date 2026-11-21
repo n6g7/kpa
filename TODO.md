@@ -21,13 +21,8 @@ Roadmap, in release order. Each item gets its design written before its implemen
 Unscheduled:
 
 - [ ] Document assumptions (Linux only, logind, etc)
-- [ ] Read notifications that cover both `copy` and SSH signatures (`docs/threat-model.md` T-16)
-- [ ] An upstream agent relay: kpa answers for its own keys and relays the rest, so a hardware token can share `SSH_AUTH_SOCK`
-- [ ] Let config name a terminal server whose shells count as the desktop (`docs/headless.md` § 3, Limits)
-- [ ] Ask a caller in a remote desktop session on its own screen, not the desk's (`docs/headless.md` § 3, Limits)
+- [ ] A desktop notification on each `copy` and SSH signature, so a read you didn't make gets noticed (`docs/threat-model.md` T-16)
 - [ ] YubiKey challenge-response as a vault credential, without reusing the key's PIN as one
-- [ ] `kpa get` behind an explicit flag
-- [ ] `pinentry` as the prompt
 - [ ] The legacy KeeOtp `TimeOtp-*` fields, which `keepass`'s `totp` feature doesn't parse
 
 ## Done

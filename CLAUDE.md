@@ -43,7 +43,9 @@ subsystem or a dependency between two.
 
 ## `docs/` holds reference docs
 
-Each doc in `docs/` describes how kpa works and why, in the present tense.
+Each doc in `docs/` is permanent: it describes how kpa works and why, in
+the present tense, never as a list of changes to make to kpa or to another
+doc.
 
 - No recommendations, proposals, options left to choose between, or open
   questions. Work still to do, and ideas kpa might take up, go in

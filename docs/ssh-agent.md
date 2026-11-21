@@ -6,10 +6,10 @@ wanted, but stops handling SSH. Linux only, like the rest of kpa: a machine with
 its own KeePass client's agent over the same synced vault (§ 2).
 
 [`design.md`](./design.md) § Scope covers it: kpa serves SSH keys under the
-same read-only rule as everything else. It extends
-[`threat-model.md`](./threat-model.md) (§ 9 says how), and builds on
-[`headless.md`](./headless.md) for prompt routing, prompt timeouts and
-unlocking from a terminal.
+same read-only rule as everything else. Its claims are in
+[`threat-model.md`](./threat-model.md) (A-6, ACT-11, TB-8, G-13 to G-15,
+T-20 to T-23), and it builds on [`headless.md`](./headless.md) for prompt
+routing, prompt timeouts and unlocking from a terminal.
 
 ## 1. Overview
 
@@ -825,106 +825,7 @@ programs' settings.
   notification actions only work where the desktop renders them, so a
   dmenu-style program is the portable choice.
 
-## 9. Threat model changes
-
-**§ 1 System**
-
-- Adds the agent socket and the key cache.
-- "There is no operation that returns a secret to the caller" still holds:
-  a signature is not the key.
-
-**Assets**
-
-- **A-2** gains SSH private keys held in attachments.
-- **A-6 (new) · Signing capability: a signature the user didn't intend.**
-  It authenticates as the user elsewhere, or signs commits and files.
-  Sensitivity: High.
-- Public keys are not assets. They are public by design, which is what
-  lets the key cache hold them.
-
-**Actors**
-
-- **ACT-11 (new) · A host the user forwards the agent to.** This means its
-  root, or anything there that can reach the forwarded socket. In scope,
-  for keys allowed on forwarded connections.
-
-**Boundaries**
-
-- **TB-8 (new) · The agent socket.**
-  - Same-uid clients reach it directly.
-  - Remote hosts reach it through a forwarding channel the user opened.
-  - Untrusted inputs: request bytes, session-bind contents, and the data to
-    be signed.
-
-**Goals**
-
-- **G-3** gains: "SSH private keys never leave the process. Only
-  signatures do, only on the agent socket, only for keys in databases
-  that opt in."
-- **G-4** is unchanged. The key cache holds public keys under config
-  database names, which are none of A-1–A-3.
-- **G-5** gains: "A successful local signature is activity for its
-  database. A forwarded signature never is. Approvals and pending requests
-  end on lock."
-- **G-11** extends to the agent socket.
-- **G-12** extends to confirm prompts. A request from outside the desktop
-  that needs one is refused and kept pending for `kpa ssh approve`.
-- **G-13 (new) · Signatures need an unlocked database that opts in, and an
-  approval when the key's policy asks for one.** An on-demand unlock is a
-  prompt the user answers. Vault content cannot change a key's policy.
-- **G-14 (new) · Forwarded signatures are confined.**
-  - A key with `forwarded = false` is never listed or used over a
-    forwarded connection.
-  - The others sign SSH logins only, for a session the destination has
-    bound, after an approval for that (key, forwarding session, forwarding
-    host, destination).
-  - Only the JSON socket can approve, and forwarding never reaches it.
-- **G-15 (new) · The agent never accepts a key or a secret.** Add, remove,
-  `LOCK` and `UNLOCK` all fail.
-
-**Threats**
-
-- **T-2** is amended. Forwarding is the one path from the network. It is
-  reached only through the user's own `ssh` client, and G-14 confines it.
-- **T-18** is extended. While a database is unlocked, ACT-10 can sign with
-  any key already approved. It can also get its own local requests
-  approved: on screen its request looks like the user's own, and from
-  outside the desktop it can send `ssh_approve` itself. This is
-  accepted, on the same terms as `copy`, and is less severe than `copy`
-  because the key itself doesn't leave.
-- **T-20 (new) · Forwarded-agent abuse** (S, E) — ACT-11 · TB-8 · A-6 → G-14.
-  - Response: logins only, approval scoped to the forwarding session and
-    destination, `forwarded = false` per key, no approval path over the
-    agent socket.
-  - In scope:
-    - signing over a forwarded connection without a matching approval;
-    - forwarded signing of non-login data;
-    - a session-bind accepted without verification;
-    - an approval reused across forwarding sessions or destinations;
-    - a denied key listed or used over a forwarded connection;
-    - a forwarded signature resetting the idle timer.
-  - Residual: during an approved forwarding session, the remote host can
-    use the key for that destination; this is inherent to forwarding.
-    Forwarding that bypasses the OpenSSH client looks local.
-- **T-21 (new) · Malformed agent traffic** (D, T) — ACT-5, ACT-11 · TB-8 →
-  G-11.
-  - Covers frames, lengths, session-bind contents and the data to be signed.
-  - Fuzzed like `decode_request`.
-- **T-22 (new) · Key material in memory** (I) — ACT-7, ACT-11 · TB-7 ·
-  A-2 → G-6.
-  - Private keys are cached only while unlocked, and zeroized on lock.
-  - Private-key operations must be constant-time, so a forwarded host
-    cannot recover a key from signature timing. This is why kpa needs
-    `rsa` 0.10 or later (§ 6.5).
-- **T-23 (new) · Prompts on demand** (S) — ACT-10, ACT-11.
-  - Anything that can reach the agent can raise an unlock or approval
-    prompt.
-  - Response: the prompt names its reason, backoff after a cancel, one
-    prompt at a time, timeouts, no prompts while locked or outside the
-    desktop.
-  - Residual: NG-7 (nuisance) and NG-8 (look-alike prompts).
-
-## 10. Code and tests
+## 9. Code and tests
 
 **Modules** (`src/frontends/ssh_agent/`, plus `src/ssh/` for `keys.rs` and `approvals/`, which the daemon's own socket shares):
 
