@@ -66,7 +66,7 @@ pub struct PromptData {
     pub database: Option<String>,
     /// The key a signature asks to use.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub key: Option<KeyData>,
+    pub key: Option<PromptKey>,
     /// What the key is for: `login`, `sshsig` or `other`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
@@ -78,10 +78,10 @@ pub struct PromptData {
     pub namespace: Option<String>,
     /// Where the signature is accepted, if the connection is bound to a host.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub destination: Option<HostData>,
+    pub destination: Option<PromptHost>,
     /// The host a forwarded connection comes through.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub forwarding_host: Option<HostData>,
+    pub forwarding_host: Option<PromptHost>,
 }
 
 impl PromptData {
@@ -103,7 +103,7 @@ impl PromptData {
 
 /// A key, as a prompt names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct KeyData {
+pub struct PromptKey {
     /// Its name: an override's, else its entry's title, else `<database>
     /// <fingerprint>` for a locked database's.
     pub name: String,
@@ -115,7 +115,7 @@ pub struct KeyData {
 
 /// A host, as a prompt names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct HostData {
+pub struct PromptHost {
     /// The name `known_hosts` gives its host key, if it does.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -156,14 +156,14 @@ mod tests {
     #[test]
     fn pieces_that_do_not_apply_are_left_out() {
         let mut data = PromptData::new(PromptKind::Confirm);
-        data.key = Some(KeyData {
+        data.key = Some(PromptKey {
             name: "github".to_string(),
             fingerprint: "SHA256:abc".to_string(),
             key_type: "ssh-ed25519".to_string(),
         });
         data.purpose = Some("sshsig".to_string());
         data.namespace = Some("git".to_string());
-        data.forwarding_host = Some(HostData {
+        data.forwarding_host = Some(PromptHost {
             name: None,
             fingerprint: "SHA256:def".to_string(),
         });

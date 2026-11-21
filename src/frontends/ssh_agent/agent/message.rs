@@ -12,7 +12,7 @@ use ssh_key::public::KeyData;
 
 use crate::frontends::ssh_agent::classify::Purpose;
 use crate::output::escape_one_line;
-use crate::prompt::{HostData, PromptData, PromptKind, Question};
+use crate::prompt::{PromptData, PromptHost, PromptKey, PromptKind, Question};
 use crate::ssh::keys::ServedKey;
 
 /// The most bytes (escaped) each piece of a message may take. The message
@@ -39,8 +39,8 @@ pub(super) struct Host<'a> {
 impl Host<'_> {
     /// The host as the data names it: its name, escaped and cut, and its
     /// host key's fingerprint.
-    fn data(&self) -> HostData {
-        HostData {
+    fn data(&self) -> PromptHost {
+        PromptHost {
             name: self
                 .name
                 .as_deref()
@@ -106,7 +106,7 @@ fn data(
 ) -> PromptData {
     let mut data = PromptData::new(kind);
     data.database = Some(escape_one_line(&served.database, MAX_DATABASE_LEN));
-    data.key = Some(crate::prompt::KeyData {
+    data.key = Some(PromptKey {
         name: escape_one_line(&served.name, MAX_KEY_NAME_LEN),
         fingerprint: served.fingerprint.to_string(),
         key_type: served.public_key.algorithm().to_string(),
@@ -154,7 +154,7 @@ fn message(lead: &str, data: &PromptData) -> String {
 }
 
 /// The host's name, else its host key's fingerprint.
-fn shown(host: &HostData) -> String {
+fn shown(host: &PromptHost) -> String {
     match &host.name {
         Some(name) => name.clone(),
         None => format!("host key {}", host.fingerprint),
@@ -162,7 +162,7 @@ fn shown(host: &HostData) -> String {
 }
 
 /// " on <host>" for a host, nothing without one.
-fn on(host: Option<&HostData>) -> String {
+fn on(host: Option<&PromptHost>) -> String {
     host.map(|host| format!(" on {}", shown(host)))
         .unwrap_or_default()
 }
