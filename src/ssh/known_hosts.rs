@@ -22,13 +22,14 @@ pub struct HostNames {
 
 impl HostNames {
     /// The names `path` gives. A missing path or a file that can't be read
-    /// gives none.
+    /// gives none. A line that doesn't parse (a key type this build doesn't
+    /// know, say) is skipped: the other lines still give theirs.
     pub fn read(path: Option<&Path>) -> HostNames {
-        let Some(entries) = path.and_then(|path| KnownHosts::read_file(path).ok()) else {
+        let Some(input) = path.and_then(|path| std::fs::read_to_string(path).ok()) else {
             return HostNames::default();
         };
-        let named = entries
-            .into_iter()
+        let named = KnownHosts::new(&input)
+            .filter_map(Result::ok)
             .filter(|entry| entry.marker().is_none())
             .filter_map(|entry| {
                 let name = match entry.host_patterns() {
@@ -115,6 +116,31 @@ mod tests {
         assert_eq!(names.name(&fingerprint(2)), Some("github.com"));
         assert_eq!(names.name(&fingerprint(3)), None);
         assert_eq!(names.name(&fingerprint(4)), None);
+    }
+
+    /// One line the parser can't read doesn't take the rest of the file's
+    /// names with it.
+    #[test]
+    fn a_line_that_does_not_parse_leaves_the_other_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("known_hosts");
+        std::fs::write(
+            &path,
+            format!(
+                "first.example {}\n\
+                 odd.example ssh-unknown AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\
+                 not a known_hosts line at all\n\
+                 second.example {}\n",
+                test_key(2).public_key().to_openssh().expect("encodes"),
+                test_key(3).public_key().to_openssh().expect("encodes"),
+            ),
+        )
+        .expect("write known_hosts");
+
+        let names = HostNames::read(Some(&path));
+
+        assert_eq!(names.name(&fingerprint(2)), Some("first.example"));
+        assert_eq!(names.name(&fingerprint(3)), Some("second.example"));
     }
 
     #[test]
