@@ -108,28 +108,30 @@ impl Agent {
             // refused as locked.
             lacking = self.check_may_prompt(key, request, requester, needed)?;
         }
-        let Some(Lacking::Approval(asked)) = lacking else {
+        let Some(Lacking::Approval(mut asked)) = lacking else {
             return Ok(None);
         };
-        self.prompt_to_confirm(key, request, &asked)?;
+        // The database is unlocked now. The key this request found may be the
+        // cache's, which names a key without an override `<database>
+        // <fingerprint>`: the scan names it as the unlocked database does, so
+        // the confirm prompt and the approval it gives (what `kpa ssh grants`
+        // lists) take that name.
+        let fresh = self
+            .hold(&key.database)?
+            .served(request.fingerprint)?
+            .clone();
+        asked.approval.scope = asked.approval.scope.rekeyed(&fresh);
+        self.prompt_to_confirm(request, &asked)?;
         Ok(Some(*asked))
     }
 
-    /// Shows the confirm prompt for signing `request` with `key`, which ends
-    /// when the unlock `asked` was found lacking in is locked.
-    ///
-    /// `key` is the key as the cache or the scan listed it when the request
-    /// came in, so a prompt raised after someone else unlocked the database
-    /// names it as the cache does, not by its entry's title.
-    fn prompt_to_confirm(
-        &self,
-        key: &ServedKey,
-        request: &Request<'_>,
-        asked: &Asked,
-    ) -> Result<(), Refused> {
+    /// Shows the confirm prompt for signing `request` with the key `asked`'s
+    /// approval is for, which ends when the unlock `asked` was found lacking
+    /// in is locked.
+    fn prompt_to_confirm(&self, request: &Request<'_>, asked: &Asked) -> Result<(), Refused> {
         let (destination, forwarding) = self.hosts(request);
         let message = message::approval(
-            key,
+            asked.approval.scope.key(),
             &request.purpose,
             destination.as_ref(),
             forwarding.as_ref(),
