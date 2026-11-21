@@ -144,14 +144,18 @@ cargo run -- ssh keys          # the SSH keys every unlocked database holds, and
                                 # the attachments skipped (--database <name>
                                 # for one; --toml prints a config block per
                                 # key instead)
+cargo run -- ssh pending       # SSH requests from outside the desktop that
+                                # wait for an approval, each with its id
+cargo run -- ssh approve <id>  # approve one; the refused command then signs
+                                # on its next try
 cargo run -- version           # the CLI's build version, and the running daemon's
 ```
 
 Each client subcommand prints the daemon's raw JSON response and exits
-non-zero when `ok` is `false`. `ssh keys` is the exception: it prints text,
-and a refusal as an error on stderr. `--json`, which every client command
-takes, before or after the subcommand, prints the raw JSON response line
-for it too; the commands without a text output yet print it either way,
+non-zero when `ok` is `false`. The `ssh` commands are the exception: they
+print text, and a refusal as an error on stderr. `--json`, which every
+client command takes, before or after the subcommand, prints the raw JSON
+response line for them too; the commands without a text output yet print it either way,
 and `version`, which has no JSON form, ignores it. The
 socket defaults to `$XDG_RUNTIME_DIR/kpa/sock`; pass `--socket <path>` to
 both sides to use a different one.

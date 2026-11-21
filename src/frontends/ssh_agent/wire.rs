@@ -105,7 +105,6 @@ pub fn next_frame(buf: &[u8]) -> Result<Frame<'_>, Oversize> {
 /// or lying about a response's length.
 pub fn encode_frame(message: &[u8]) -> Vec<u8> {
     assert!(message.len() <= MAX_FRAME_LEN, "built an oversize frame");
-    #[allow(clippy::cast_possible_truncation)] // just asserted <= MAX_FRAME_LEN
     let len = message.len() as u32;
     let mut framed = Vec::with_capacity(4 + message.len());
     framed.extend_from_slice(&len.to_be_bytes());
@@ -295,8 +294,7 @@ pub fn encode_response(response: &AgentResponse) -> Vec<u8> {
     match response {
         AgentResponse::IdentitiesAnswer(identities) => {
             message.push(response_type::IDENTITIES_ANSWER);
-            #[allow(clippy::cast_possible_truncation)] // bounded by MAX_FRAME_LEN below
-            let count = identities.len() as u32;
+            let count = identities.len() as u32; // bounded by MAX_FRAME_LEN below
             message.extend_from_slice(&count.to_be_bytes());
             for identity in identities {
                 identity.key_blob.encode(&mut message).expect(INFALLIBLE);
@@ -328,7 +326,6 @@ mod tests {
     /// RFC 4251 §5 `string`: a `uint32` length, then the bytes.
     fn string(bytes: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
-        #[allow(clippy::cast_possible_truncation)]
         out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
         out.extend_from_slice(bytes);
         out
