@@ -7,9 +7,10 @@ its own KeePass client's agent over the same synced vault (§ 2).
 
 [`design.md`](./design.md) § Scope covers it: kpa serves SSH keys under the
 same read-only rule as everything else. Its claims are in
-[`threat-model.md`](./threat-model.md) (A-6, ACT-11, TB-8, G-13 to G-15,
-T-20 to T-23), and it builds on [`headless.md`](./headless.md) for prompt
-routing, prompt timeouts and unlocking from a terminal.
+[`threat-model.md`](./threat-model.md) (A-6, ACT-11, ACT-12, TB-8, ASM-8,
+G-13 to G-15, T-20 to T-25, NG-9), and it builds on
+[`headless.md`](./headless.md) for prompt routing, prompt timeouts and
+unlocking from a terminal.
 
 ## 1. Overview
 
@@ -287,7 +288,7 @@ the connection forwarded. Failure always errs toward the strict side.
 Limit: forwarding that bypasses the OpenSSH client looks local. That covers
 an `ssh` older than 8.9, and tools that relay `SSH_AUTH_SOCK` themselves
 (container runtimes, Eternal Terminal). nixpkgs ships a newer OpenSSH, so
-this is a threat-model note, not a blocker.
+this is a threat-model note (ASM-8, NG-9), not a blocker.
 
 ### 6.3 What is being signed
 
@@ -456,7 +457,7 @@ prompt = ["sh", "-c", "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MES
 
 A wrapper puts the message right back into its own argv, so it's visible
 to other uids via `/proc/<pid>/cmdline` either way. Only a program that
-reads the variable itself avoids that.
+reads the variable itself avoids that (threat model T-24).
 
 **Timeouts and cancels.** Prompts time out after `prompt_timeout`, the
 confirm prompt after `ssh_agent.confirm_prompt_timeout` if that is set,
