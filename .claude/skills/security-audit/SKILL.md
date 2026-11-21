@@ -1,6 +1,6 @@
 ---
 name: security-audit
-description: Full security audit of kpa against docs/threat-model.md — fans out parallel subagents, one per group of threat-model goals (socket and uid isolation, secret flow and persistence, file input and vault integrity, lock lifecycle, clipboard and entry content, claims and model gaps), verifies each finding independently, and writes one report in a fixed structure that humans can read and remediation agents can act on finding by finding. Use when asked for a security audit, a security review, a pentest-style pass, or to check the code against the threat model. Supersedes secret-hygiene-audit; robustness-audit remains the deep method for file-input crashes and hangs.
+description: Full security audit of kpa against docs/threat-model.md — fans out parallel subagents, one per group of threat-model goals (sockets and uid isolation, secret flow and persistence, file input and vault integrity, lock lifecycle and prompt routing, clipboard and entry content, claims and model gaps, SSH agent policy), verifies each finding independently, and writes one report in a fixed structure that humans can read and remediation agents can act on finding by finding. Use when asked for a security audit, a security review, a pentest-style pass, or to check the code against the threat model. Supersedes secret-hygiene-audit; robustness-audit remains the deep method for file-input crashes and hangs.
 ---
 
 # Security audit
@@ -15,6 +15,11 @@ boundary (`TB-n`), and which bucket of §9 it falls in. Read the whole of
 `docs/threat-model.md` before anything else, and have every subagent read
 it too.
 
+Two parts of §6 shape the work. The table at its head says where each
+asset may go: an asset anywhere else is a finding. And the goals that make
+several claims are lists of clauses: test them, and report on them, one
+clause at a time.
+
 ## Rules
 
 - **Prove it, don't read it.** Every finding is labelled **verified** (you
@@ -25,13 +30,32 @@ it too.
   sockets and daemons live in the scratchpad. `git status --porcelain` must
   be unchanged at the end (the report is git-ignored).
 - **Never touch the user's real setup.** Always pass `--socket` and
-  `--config` pointing into the scratchpad. Never connect to the default
-  socket, read the default config, or open a real vault.
+  `--config` pointing into the scratchpad, and set `ssh_agent.socket` in
+  that config. Never connect to the default sockets, read the default
+  config, or open a real vault. More of the user's setup is within a
+  daemon's reach than its sockets:
+  - A spawned `kpa serve` writes its key cache under `$XDG_CACHE_HOME` and
+    reads `$HOME/.ssh/known_hosts`: start it with both variables set into
+    the scratchpad.
+  - It also talks to the real logind and session bus: it shows a tray icon
+    and holds a sleep inhibitor while something is unlocked. Where the
+    test isn't about `kpa serve` itself, build the daemon in-process
+    instead, as `tests/common/mod.rs` does: the harness hands it its file
+    locations, the display session and each requester's cgroup, and a
+    private bus if it wants lock triggers.
+  - `ssh` reads the user's own config, which can send it to their real
+    agent: give it `SSH_AUTH_SOCK` on the scratch socket, `-F` with a
+    config of your own and a `UserKnownHostsFile` in the scratchpad, and
+    log in only to an `sshd` you started on localhost.
+  - The live clipboard tests take the user's real clipboard: run them only
+    if the user agreed to it.
 - **Leave no processes behind.** Start every daemon under `timeout`, and
   record its PID under your work directory. Kill everything you started,
   including anything inside user namespaces you created, before you
   reply. A run that skipped this left about 170 daemons running. The
-  orchestrator checks `pgrep -a kpa` before finishing.
+  orchestrator checks `pgrep -a kpa` before finishing, against the list it
+  took in phase 0: the user's own `kpa serve` may be running, and is never
+  to be stopped, signalled or connected to.
 - **Write the report as if it will be shared.** Reports are git-ignored
   (`docs/audits/`) while their findings are open, but they get passed to
   other agents and people. Mask absolute paths outside the repo (write
@@ -41,6 +65,12 @@ it too.
   finding stays out of scope however alarming it looks (NG-1 especially).
   When the model itself seems wrong, that is a *model gap* finding, not a
   reason to re-rate.
+- **A known gap or an unbuilt design is not a finding.** The model records
+  the gaps it knows of (under G-3), and the docs say at the spot what isn't
+  built yet (forwarded signing, under G-14). Check that the gap still
+  stands and that what the doc says happens instead does happen, give the
+  clause its status, and move on. A gap that has closed, or a "not built
+  yet" that has been built, is a model gap: the doc is out of date.
 
 ## Phase 0: setup (orchestrator, before fanning out)
 
@@ -51,6 +81,8 @@ it too.
    If `git status --porcelain` shows changes to `src/`, `Cargo.*` or
    `docs/threat-model.md`, the audit covers the working tree, not the
    commit; say so in the report.
+   Record `pgrep -a kpa` too: whatever it lists before the audit starts is
+   the user's, and stays as it is.
 2. **Resume, don't redo.** If `<scratch>/audit/RUN` exists and its `commit`
    and `threat_model` lines match the values from step 1, a previous run was
    interrupted. Keep its setup and skip every workstream whose `w<n>.md`
@@ -67,8 +99,14 @@ it too.
      `[profile.release] debug = true` (see `robustness-audit`'s Setup).
      Each workstream adds only its own `src/bin/w<n>_*.rs`. A workstream
      that needs another dependency creates its own crate, `harness-w<n>/`,
-     rather than editing the shared `Cargo.toml`.
-   - `fixtures/`: run `tests/fixture.sh <scratch>/audit/fixtures`. If you
+     rather than editing the shared `Cargo.toml`. `tests/common/mod.rs`
+     has the in-process daemon to copy from: `daemon::build` with its own
+     `Paths`, a `DisplayWriter` to set the display session,
+     `authn::assume_cgroup` to place requesters on or outside the desktop,
+     and `auto_lock::Source::at` for a private bus.
+   - `fixtures/`: run `tests/fixture.sh <scratch>/audit/fixtures`. It
+     builds a vault per concern, among them one with hostile entry text,
+     one with custom fields and TOTP, and one with SSH keys. If you
      need a crafted vault the script can't make, generate it from a
      *separate* crate with `keepass`'s `save_kdbx4` feature on. Turning that
      feature on in the harness would unify it into the audited `kpa` build
@@ -77,13 +115,13 @@ it too.
    `CARGO_TARGET_DIR=<scratch>/audit/target cargo build --release`
    (prefix `nix develop -c` outside the dev shell).
 5. Re-read §6 and §7 of the threat model. Assign every `G-` and `T-` to a
-   workstream using the table below. Anything new since this skill was
-   written goes to W6. Don't drop it.
+   workstream using the table below. Anything the table doesn't list goes
+   to W6. Don't drop it.
 
 ## Phase 1: fan out
 
-Launch all six workstreams **in one message**, as parallel `general-purpose`
-subagents. Give each this prompt, filled in:
+Launch all seven workstreams **in one message**, as parallel
+`general-purpose` subagents. Give each this prompt, filled in:
 
 > You are workstream W<n> (<name>) of a security audit of the kpa repo at
 > <repo>. Read `docs/threat-model.md` in full, then
@@ -103,12 +141,17 @@ subagents. Give each this prompt, filled in:
 
 | WS | Name | Goals | Threats | Boundaries |
 | -- | ---- | ----- | ------- | ---------- |
-| W1 | Socket and uid isolation | G-2, G-11 | T-1, T-2, T-14, T-15 | TB-1 |
-| W2 | Secret flow and persistence | G-3, G-4, G-6 | T-4, T-5, T-9 | TB-5, TB-7 |
-| W3 | File input and vault integrity | G-1, G-8, G-9 | T-3, T-11, T-12 | TB-2 |
-| W4 | Lock lifecycle | G-5 | T-8, T-10 | TB-6 |
+| W1 | Sockets and uid isolation | G-2, G-11 | T-1, T-2, T-14, T-15, T-21 | TB-1, TB-8 |
+| W2 | Secret flow and persistence | G-3, G-4, G-6 | T-4, T-5, T-9, T-22, T-24 | TB-5, TB-7 |
+| W3 | File input and vault integrity | G-1, G-8, G-9 | T-3, T-11, T-12, T-17 | TB-2 |
+| W4 | Lock lifecycle and prompt routing | G-5, G-12 | T-8, T-10, T-19 | TB-6 |
 | W5 | Clipboard and entry content | G-7, G-10 | T-6, T-7, T-13 | TB-3, TB-4 |
-| W6 | Claims and model gaps | all (cross-check) | T-16, anything unassigned | all |
+| W6 | Claims and model gaps | all (cross-check) | T-16, T-18, anything unassigned | all |
+| W7 | SSH agent policy | G-13, G-14, G-15 | T-20, T-23, T-25 | TB-8 |
+
+Both sockets are W1's as transports: who may connect, and what malformed
+traffic does. What the agent signs, for whom and after which prompt, is
+W7's.
 
 ## Workstreams
 
@@ -116,47 +159,76 @@ Each section lists where to look and the methods that have found real bugs
 here before. They are starting points, not the limit of scope: test every
 "in scope" clause of your threats.
 
-### W1: Socket and uid isolation
+### W1: Sockets and uid isolation
 
-- Socket creation path in `src/socket.rs` (`bind_socket`) and default-path
-  resolution in `src/main.rs`. Test with `$XDG_RUNTIME_DIR` unset, empty,
-  relative, pointing at a world-writable dir, and at a dir owned by
-  another uid you can simulate. Test a pre-existing path that is a
-  symlink, a regular file, a live socket, or a dead one. Test the parent
-  directory's mode and creation.
+- Both sockets are bound by `bind_socket` in `src/socket.rs`. The control
+  socket's default path is resolved in `src/main.rs`, the agent's in
+  `config::SshAgentConfig::socket_path`. Test each with
+  `$XDG_RUNTIME_DIR` unset, empty, relative, pointing at a world-writable
+  dir, and at a dir owned by another uid you can simulate. Test a
+  pre-existing path that is a symlink, a regular file, a live socket, or a
+  dead one. Test the parent directory's mode and creation, and a
+  user-supplied `--socket` and `ssh_agent.socket`.
 - The bind-then-chmod window: check the umask around `bind`, and whether
-  the socket is ever briefly connectable with wider permissions
+  either socket is ever briefly connectable with wider permissions
   (`strace -f -e trace=bind,chmod,fchmod,umask`).
+- Peer checks: the daemon's on both sockets (`src/authn.rs`,
+  `authz::may_connect`), and the CLI's on whoever answers at its path.
 - Network surface: run the daemon on a fixture, then
   `ss -xlp; ss -tunap | grep <pid>`, and `strace -f -e trace=network` across
-  unlock/list/lock. Also look for any abstract-namespace (`@`) address.
-- Protocol abuse: a line of exactly 64 KiB and one byte over, no newline,
-  a slow drip under the 5 s deadline, more than the connection cap at
-  once (does the next client get refused or hang?), invalid UTF-8, deeply
-  nested JSON, unknown `v`, duplicate keys, and a client that never
-  reads its response. Measure whether one abusive client starves a
-  well-behaved one.
+  unlock/list/lock and a signature. Also look for any abstract-namespace
+  (`@`) address.
+- Control protocol abuse (`src/frontends/control/serve.rs`): a line of
+  exactly 64 KiB and one byte over, no newline, a slow drip under the 5 s
+  deadline, more than the connection cap at once (does the next client get
+  refused or hang?), invalid UTF-8, deeply nested JSON, unknown `v`,
+  duplicate keys, and a client that never reads its response. A request
+  can pass a descriptor: send one that isn't a terminal, two, and more
+  than the control buffer holds. Measure whether one abusive client
+  starves a well-behaved one.
+- Agent protocol abuse (`src/frontends/ssh_agent/`: `serve.rs`, `wire.rs`,
+  `bind.rs`, `classify.rs`): a frame of exactly 256 KiB and one byte over,
+  a frame that stalls after its first byte, a connection that sits idle,
+  a client that never reads, more connections than the cap, more forwarded
+  ones than theirs, more bindings than a connection may hold, unknown
+  messages and extensions. A session-bind's host key and signature are an
+  SSH server's to choose (ACT-12): send malformed, oversized and
+  mismatched ones, and time the verification. Run the fuzz targets in
+  `fuzz/` for a bounded time (`nix develop .#fuzz`).
+- T-15 is split: what a process holding only the agent socket gets is
+  W7's, and what the tray shows a session-bus peer is W4's. Here, check
+  that nothing else reaches either socket.
 
 ### W2: Secret flow and persistence
 
-Follow every password, keyfile byte and protected field from entry to rest.
+Follow every password, keyfile byte, protected field, TOTP seed and private
+key from entry to rest, and check where each ends up against the table at
+the head of §6.
 
-1. **Map the lifecycle first**, before any test. Entry points: the prompt
-   program's stdout pipe (`src/prompt/program.rs`), keyfile bytes, and the
-   decrypted database. List every copy (`clone`, `to_owned`, `to_string`,
-   `String::from`, `format!`, serde) and every sink (stdout, stderr,
-   socket, logs, error `Display`, protocol `detail` fields, panic
-   messages, a child's argv and env). A signature that takes `&str` for a
-   secret forces its caller to hold an unzeroizable `String`, so flag the
-   signature as well as the call.
+1. **Map the lifecycle first**, before any test. Entry points: the unlock
+   prompt program's stdout pipe (`src/prompt/program.rs`), a terminal a
+   request passed (`src/prompt/terminal.rs`), keyfile bytes, the decrypted
+   database, and the private keys the agent parses out of attachments
+   (`src/ssh/keys.rs`, `src/frontends/ssh_agent/agent/`). Vault content is
+   read only through `Open`'s and `Entry`'s methods in
+   `src/databases/mod.rs`, and nothing outside `src/databases/` names
+   `keepass`: start from those call sites, and treat an exception as a
+   finding. List every copy (`clone`, `to_owned`, `to_string`,
+   `String::from`, `format!`, serde) and every sink (stdout, stderr, both
+   sockets, identity comments, the log, error `Display`, protocol `detail`
+   fields, panic messages, a prompt's message, a child's argv and env, the
+   key cache). A signature that takes `&str` for a secret forces its
+   caller to hold an unzeroizable `String`, so flag the signature as well
+   as the call.
 2. **Heap-residue scan** for G-6. Scan the process's own writable mappings
    (`/proc/self/maps` rw regions via `/proc/self/mem`) before unlock, while
-   unlocked, and after lock. Use three needles: a protected field, an
-   unprotected field, and the master password. **Pre-allocate the scan
-   buffer and the maps string before the vault is loaded, and do a warm-up
-   scan.** A scanner that allocates while scanning reuses the very chunks
-   it's looking for, which produces false "cleared" results. Classify each
-   surviving copy as kpa-owned (G-6, in scope) or inside `keepass` (NG-4,
+   unlocked, and after lock. Use four needles: a protected field, an
+   unprotected field, the master password, and a private key's bytes once
+   it has signed. **Pre-allocate the scan buffer and the maps string
+   before the vault is loaded, and do a warm-up scan.** A scanner that
+   allocates while scanning reuses the very chunks it's looking for, which
+   produces false "cleared" results. Classify each surviving copy as
+   kpa-owned (G-6, in scope) or inside `keepass` or `ssh-key` (NG-4,
    hardening at most).
 3. **De-protecting getters.** In `keepass`, `Entry::get` and therefore
    `get_title`/`get_username`/`get_url` call `expose_secret()` on
@@ -168,20 +240,33 @@ Follow every password, keyfile byte and protected field from entry to rest.
    decrypted content) ever reaches a client, stderr, or a log. Grep the
    dependency for `format!` inside error constructors.
 5. **Persistence.** Confirm `PR_SET_DUMPABLE=0` takes effect before the
-   config is read or any unlock (`grep Dumpable`-equivalent: call
-   `prctl(PR_GET_DUMPABLE)` from the harness, or check that `/proc/<pid>`
-   files become root-owned). Check that nothing writes secrets to a file,
-   and look at what the prompt child inherits (env, fds, argv).
+   config is read or any unlock, in the daemon and in a CLI process
+   (`grep Dumpable`-equivalent: call `prctl(PR_GET_DUMPABLE)` from the
+   harness, or check that `/proc/<pid>` files become root-owned). Check
+   that nothing writes secrets to a file. The one file kpa creates besides
+   its sockets is the key cache: read what an unlock wrote there, and its
+   mode.
+6. **What the prompt children get** (T-24). Look at the environment, fds
+   and argv of the unlock prompt and of the confirm prompt. The message is
+   in `KPA_PROMPT_MESSAGE` and in no argv that kpa builds; a wrapper that
+   copies it onto a command line is the residual T-24 accepts, not a
+   finding. A terminal a request passed is not inherited.
+7. **The log** (G-4). Run every operation, signatures included, at `debug`
+   against a vault whose titles, usernames, URLs and field values are
+   recognizable strings, then search the log for them. G-4 names the few
+   things a line may carry.
 
 ### W3: File input and vault integrity
 
-- **G-1.** Run unlock, list and lock under
+- **G-1.** Run unlock, list, lock and a signature under
   `strace -f -e trace=openat,open,creat,rename,unlink,truncate,ftruncate,flock,fcntl,chmod,utimensat,write`
   against fixtures in a directory you snapshot before and after
   (`find -printf '%p %m %T@ %s\n'`). Any open with write intent, any new
   file, any changed timestamp, and any fd on the vault that outlives the
-  read is a finding. Confirm in `Cargo.lock`/`cargo tree -e features` that
-  `keepass` is built without save support.
+  read is a finding. The key cache is the one file kpa creates: check that
+  it lands under the cache directory, wherever the vault is. Confirm in
+  `Cargo.lock`/`cargo tree -e features` that `keepass` is built without
+  save support.
 - **G-9.** Follow `robustness-audit` checks 1–5: unsafe inventory
   including the dependency tree (`rust-argon2` has `unsafe` driven by KDF
   parameters), panic inventory, recursion depth on a 2 MiB thread stack,
@@ -193,68 +278,159 @@ Follow every password, keyfile byte and protected field from entry to rest.
   way a sync tool might: atomic rename, in-place rewrite at the same size,
   a rewrite followed by `touch -d` to restore the mtime, a same-second
   write against filesystem mtime granularity, a hardlink swap, and a
-  delete. Note the order of `stat` versus read at unlock time: a change
-  that lands between the two is a TOCTOU.
+  delete. Follow each with a `list`, a `status` and a signature. Note the
+  order of `stat` versus read at unlock time: a change that lands between
+  the two is a TOCTOU.
+- **T-17.** Nothing addresses it: record its current state.
 
-### W4: Lock lifecycle
+### W4: Lock lifecycle and prompt routing
 
 - **Races.** Lock during an in-flight unlock (while the prompt is open,
   and during the KDF), a double unlock, and lock-all against a concurrent
-  `list`. A request served after lock, or an unlock installing after a
-  lock, breaks G-5. Use a fake prompt program that sleeps, so the timing
-  is deterministic.
-- **Idle timer.** What resets it? Only a request should. Check whether a
-  failed, malformed or `status` request counts as activity, and whether
-  the timer is per-database.
-- **D-Bus and logind.** If implemented: introspect what kpa exports
-  (`busctl --user introspect`), test whether any method or signal can
-  unlock, read, or *suppress* a lock, test re-subscription after the bus
-  reconnects, and test `PrepareForSleep(true)` handling. A spoofed signal
-  that only locks is out of scope (NG-7).
-- **Not yet implemented** is a goal status, not a finding, unless the
-  README or `design.md` presents the feature as existing. Check
-  `TODO.md` to tell planned from forgotten.
+  `list`, `copy` and signature. A request served or a signature made after
+  lock, or an unlock installing after a lock, breaks G-5. Use a fake
+  prompt program that sleeps, so the timing is deterministic.
+- **What a lock ends.** Clipboard offers, approvals, pending requests, the
+  agent's private keys and any prompt in flight, for every kind of lock:
+  explicit, idle, screen lock, suspend, a lost watch, a file found
+  changed. On suspend, check that they are gone before the sleep inhibitor
+  is released.
+- **Idle timer.** G-5 names the activity that resets it. Check that
+  nothing else does (a failed, malformed or `status` request,
+  `ssh_pending`, `ssh_approve`, listing identities, a refused signature),
+  and that the timer is per database.
+- **D-Bus and logind** (`src/frontends/auto_lock/`). On a private bus with
+  a mock logind, as `tests/logind.rs` runs one: signals from a peer that
+  doesn't own logind's name, sent straight to kpa's connection; a
+  subscription that drops and comes back, and a database unlocked while
+  there was none; `PrepareForSleep(true)`; a display session that changes.
+  A spoofed signal that only locks is out of scope (NG-7).
+- **The tray** (`src/frontends/tray.rs`). Introspect what it exports
+  (`busctl --user introspect`, on a session bus of your own), and test
+  whether any method can unlock without a prompt, read entry data, or
+  *suppress* a lock. T-15's residual says what it may show.
+- **Prompt routing** (G-12, T-19; `src/authz.rs` and each front end's own
+  `authz`). Four prompts can be raised: the unlock prompt from the control
+  socket, from the tray and from the agent, and the agent's confirm
+  prompt. Try each with a requester on and outside the desktop, against a
+  display session that is absent, locked, unlocked and inactive, and with
+  a screen lock landing just before and just after the prompt goes up. For
+  the terminal prompt (`src/prompt/terminal.rs`): a descriptor that isn't
+  a terminal, the requester leaving, a hang-up, and the terminal's modes
+  after each way out.
+- **Not built yet** is a goal status, not a finding, where the docs say so
+  at that spot (see Rules). A feature the docs present as built and the
+  code lacks is a finding.
 
 ### W5: Clipboard and entry content
 
-- **Clipboard** (if implemented): check the offered MIME types for the
+- **Clipboard** (`src/clipboard/`): check the offered MIME types for the
   `x-kde-passwordManagerHint: secret` tag on every copy path, expiry
   timing, expiry after another client replaced the selection (must be a
-  no-op), and an offer outliving its database's lock. Without a Wayland
-  session, mark the result reasoned and say so.
+  no-op), an offer outliving its database's lock, and what the compositor
+  check refuses: a socket outside the runtime directory, served by another
+  uid, or from outside the desktop. The live tests
+  (`cargo test --test clipboard -- --ignored`) need a Wayland session and
+  take its clipboard. Without a session, or without the user's agreement,
+  mark the result reasoned and say so.
 - **Entry content as data.** Build entries in memory containing ESC/CSI/OSC
   sequences, BEL, `\r`, `\n`, NUL, bidi overrides, invalid surrogates, a
-  JSON-looking string, and 1 MiB titles. Run them through `list` and
-  through the CLI's actual terminal output. Raw control bytes reaching a
-  terminal break G-10. Check whether framing can be broken and whether
-  `copy` addressing can be confused by duplicate titles or UUIDs across two
-  databases.
+  JSON-looking string, and 1 MiB titles. Run them through every place
+  entry content is shown: `list` and the CLI's actual terminal output,
+  `kpa ssh keys` and `kpa ssh pending`, an SSH identity comment
+  (`ssh-add -l`), a prompt's message (a scripted prompt that records
+  `KPA_PROMPT_MESSAGE`), and the log. Raw control bytes reaching a
+  terminal or a prompt break G-10. Check whether framing can be broken and
+  whether `copy` addressing can be confused by duplicate titles or UUIDs
+  across two databases.
+- **Attachments as keys** (T-13). An attachment that starts like an
+  OpenSSH private key is parsed when a database that serves keys unlocks,
+  and on `ssh_keys`. Feed the scan truncated, oversized and malformed
+  ones, and watch the unlock they run in.
+- **Request text as data.** A database name, a login's user, an `SSHSIG`
+  namespace and the requester's command name are shown too: put the same
+  hostile strings in each.
 
 ### W6: Claims and model gaps
 
 W6 covers what falls *between* the other workstreams, not their ground
-again. A claim or gap that belongs to a goal W1–W5 owns is theirs. Note it
-in one line under "Handed off", and don't test it or write a record. A
-first run that skipped this rule produced eight duplicates with conflicting
-triage.
+again. A claim or gap that belongs to a goal another workstream owns is
+theirs. Note it in one line under "Handed off", and don't test it or write
+a record. A first run that skipped this rule produced eight duplicates with
+conflicting triage.
 
-- **Claims versus code.** Grep `README.md`, `docs/design.md`,
-  `config.example.toml` and source comments for
+- **Claims versus code.** Grep `README.md`, every doc in `docs/`,
+  `config.example.toml`, `nix/hm-module.nix` and source comments for
   `never|always|cannot|guaranteed|zeroiz|only|no code path`. Test the
   assertions no goal covers, and the ones that span several goals. When
   code and doc disagree, decide which one is wrong and say so. An accurate
   doc is a valid fix.
+- **Built or not.** The docs say at the spot what isn't built yet. Check
+  that each such mark is still true, and that nothing else is described
+  as built that isn't.
 - **Configuration.** Check settings that are accepted but ignored, and
   conflicting or duplicate entries.
 - **Dependency posture.** List `unsafe` in the full dependency tree's
   crates that touch untrusted bytes or secrets. Check zeroization coverage
-  in `keepass`. If `cargo audit` is available offline, run it. Pinned
-  versions that are out of upstream support are a finding (see ASM-5).
+  in `keepass` and `ssh-key`. If `cargo audit` is available offline, run
+  it. Pinned versions that are out of upstream support, or not yet in it,
+  are a finding (see ASM-5).
+- **The unit's sandbox** (`nix/hm-module.nix`). No goal rests on it (§5),
+  so a weakness there is hardening. Check each directive against what the
+  daemon and its prompt children do.
 - **Model gaps.** Do one STRIDE pass per trust boundary looking for threats
   that §7 lacks, and for any entry that is wrong, too broad, or rated at
   the wrong severity. Each becomes a *Model gap* finding with the exact
   proposed text for `docs/threat-model.md`.
-- **T-16.** Record its current state. Findings here are hardening.
+- **T-16, T-18.** Record T-16's current state; findings there are
+  hardening. T-18 is an accepted risk with an in-scope list: test each
+  item on it, the daemon's memory read by the same uid among them.
+
+### W7: SSH agent policy
+
+Which signatures the agent makes, for whom, and after which prompt
+(`docs/ssh-agent.md` has the design). The socket as a transport is W1's,
+key material in memory is W2's, and how a hostile title looks in a prompt
+is W5's.
+
+Drive the agent the way `tests/ssh_agent_serve.rs` does, with the real
+OpenSSH tools (`ssh-add -l`, `ssh-keygen -Y sign`, `ssh` to an `sshd` of
+your own on localhost) and with raw frames where a tool can't say what you
+need, such as a session-bind signed by a throwaway host key. A scripted
+confirm prompt that records `KPA_PROMPT_MESSAGE` and answers `Allow`,
+`Deny`, something else or nothing gives every outcome on demand.
+
+- **G-13.** A database that doesn't opt in, and a `serve = false` key:
+  neither listed nor signed with. A locked database: listed from the key
+  cache, nothing signed. Unlock on demand: the unlock prompt, then the
+  confirm prompt, and no signature if the second is refused. Each
+  `confirm` setting. What an approval covers: try another key, another
+  destination, bound against unbound, another purpose, and the same
+  request after a lock. `ssh_approve` with an unknown id, an expired one,
+  one from before a lock, and the one-signature window of a
+  `confirm = "always"` key. A login whose session isn't the one its
+  connection is bound to. A SHA-1 RSA request.
+- **Policy is config's.** Vault content that might steer it: per-entry
+  agent settings a KeePass client stores, a key present in two databases,
+  a key in the recycle bin or in an entry's history.
+- **G-14.** Mark a connection forwarded with a first session-bind that
+  claims it, verified and not, then try to unmark it with a later one. On
+  it: which keys are listed, that every signature is refused (signing
+  there is not built yet), that the idle timer doesn't move, and that
+  nothing sent on the agent socket approves, unlocks or locks.
+- **G-15.** Add, remove, remove-all, smartcard, lock, unlock and unknown
+  extensions: each fails, and changes nothing.
+- **T-23.** Count prompts. Several signers at once for one key raise one
+  confirm prompt. A cancelled or timed-out prompt holds the database's
+  prompts back, a `Deny` doesn't. Unlock and confirm prompts never share
+  the screen. A confirm prompt that fails, is killed, times out or prints
+  anything but `Allow` approves nothing.
+- **T-25.** Read what each prompt says, for a login, an `SSHSIG` and
+  anything else, bound and unbound, against what is then signed. Give the
+  destination a `known_hosts` line that names it, a hashed one, a revoked
+  one, a certificate authority's and a wildcard.
+- **T-15.** From a process that holds the agent socket and nothing else:
+  what it lists, and what it can get signed without the control socket.
 
 ## Phase 2: verify
 
