@@ -10,37 +10,41 @@ were enumerated per trust boundary with STRIDE. The ID prefixes (`A-`,
 `ACT-`, `TB-`, `ASM-`, `G-`, `T-`, `NG-`) are local to this document — cite
 them in findings. IDs are stable: retire an entry rather than renumber.
 
-Mechanisms and their rationale live in [`design.md`](./design.md). This
+Mechanisms and their rationale live in [`design.md`](./design.md),
+[`headless.md`](./headless.md) and [`ssh-agent.md`](./ssh-agent.md). This
 file states *claims*, not implementation status — whether the code meets a
 claim is exactly what a review checks.
 
 ## 1. System
 
 kpa is a long-lived daemon (`kpa serve`) that holds one or more `.kdbx`
-files decrypted in memory, plus short-lived clients (`kpa <subcommand>`,
-or anything speaking the socket protocol). Clients can ask for status,
-unlock, lock, an entry index (`list`), and to copy one field of one entry
-to the clipboard (`copy`). They can also list the SSH agent's keys
-(`ssh_keys`) and the signatures it holds pending (`ssh_pending`), and
-approve one (`ssh_approve`). A request can pass a terminal along with it,
-for the daemon to ask for the master password on, instead of prompting on
-screen.
+files decrypted in memory. It has four front ends:
 
-A second socket speaks the SSH agent protocol: it lists the SSH keys stored
-in databases that opt in, and signs with them. kpa caches those keys' public
-halves on disk, so they are listed while their database is locked.
+| Front end | What it carries |
+| --- | --- |
+| Control socket | One JSON request per connection, from the CLI (`kpa <subcommand>`) or anything else speaking the protocol: `status`, `unlock`, `lock`, an entry index (`list`), one field of one entry to the clipboard (`copy`), the SSH keys a database holds (`ssh_keys`), and the signatures waiting for an approval (`ssh_pending`, `ssh_approve`). A request can pass a terminal along with it, for the daemon to ask for the master password on, instead of prompting on screen |
+| SSH agent socket | The SSH agent protocol, from `ssh`, `git` and whatever else is pointed at it: list the SSH keys stored in databases that opt in, sign with them, bind a connection to an SSH session. It exists only while a database opts in. A remote host reaches it when the user forwards the agent |
+| Tray | A status icon on the session bus: lock state, and a menu to lock and unlock |
+| Lock triggers | logind on the system bus (screen lock, suspend), an idle timer per database, and a vault file that changed on disk |
+
+The daemon asks the user two things: the master password, on screen through
+a configured prompt program or on the terminal a request passed, and whether
+a signature may be made, on screen through a second program.
 
 There is no operation that returns a secret to the caller (a signature is
-not the key), and none that writes a database.
+not the key), and none that writes a database. Besides its two sockets, the
+one file kpa creates is a cache of the SSH keys' public halves, so they are
+listed while their database is locked.
 
 ```mermaid
 graph LR
-    client["client<br/>(CLI, your launcher)"] -->|"TB-1 unix socket,<br/>a terminal fd"| serve["kpa serve"]
-    ssh["ssh, git<br/>(local or forwarded)"] -->|"TB-8 agent socket"| serve
+    client["client<br/>(CLI, your launcher)"] -->|"TB-1 control socket,<br/>a terminal fd"| serve["kpa serve"]
+    ssh["ssh, git"] -->|"TB-8 agent socket"| serve
+    remote["forwarded host,<br/>SSH server"] -.->|"through the user's ssh"| ssh
     file[".kdbx / keyfile"] -->|"TB-2 read once per unlock"| serve
-    prompt["prompt program"] -->|"TB-5 stdout pipe"| serve
+    serve <-->|"TB-5 message in,<br/>answer out"| prompt["prompt programs"]
     serve -->|"TB-4 data-control"| clip["clipboard"]
-    serve <-->|"TB-6 D-Bus"| bus["tray host / logind"]
+    serve <-->|"TB-6 D-Bus"| bus["tray host, logind,<br/>service manager"]
     serve -.->|"TB-7 must not cross"| disk["disk: swap, cores, logs"]
     serve -->|"public keys only"| cache["key cache"]
     serve -->|"TB-3 entry content"| client
@@ -51,8 +55,8 @@ graph LR
 | ID  | Asset                                                                           | Sensitivity |
 | --- | ------------------------------------------------------------------------------- | ----------- |
 | A-1 | Credentials: master password, keyfile contents, anything password-equivalent (e.g. derived keys) | Highest |
-| A-2 | Protected field values: passwords, any field whose value carries `Protected="True"` or `ProtectInMemory="True"` (KeePassXC honours both), Notes whether or not protected, and SSH private keys held in attachments | High |
-| A-3 | Entry metadata: titles, usernames, URLs, groups, custom field *names* (`list`'s `fields` array — never a custom field's *value*, which is A-2 like any other field value), and the database's own name and description stored in the `.kdbx`. kpa's config `name` labels are not A-3 | Medium |
+| A-2 | Secret entry content. Every field value except an unprotected title, username or URL: passwords, Notes, custom fields, TOTP seeds and the codes made from them, and any field whose value carries `Protected="True"` or `ProtectInMemory="True"` (KeePass clients honour both). Every attachment, the SSH private keys the agent signs with among them. Old versions of entries | High |
+| A-3 | Entry metadata: titles, usernames, URLs, groups, custom field *names* (`list`'s `fields` array — never a custom field's *value*, which is A-2 like any other field value), attachment names, and the database's own name and description stored in the `.kdbx`. kpa's config `name` labels are not A-3 | Medium |
 | A-4 | Integrity of the `.kdbx` and keyfile on disk, and of their directories          | High        |
 | A-5 | The user's clipboard contents that kpa didn't put there                         | Low         |
 | A-6 | Signing capability: a signature the user didn't intend. It authenticates as the user elsewhere, or signs commits and files | High |
@@ -65,36 +69,39 @@ The keyfile is plaintext at rest: its protection is the filesystem's
 (ASM-1, ASM-6), not kpa's.
 
 Public keys are not assets. They are public by design, which is what lets
-the key cache hold them.
+the key cache hold them. Lock state, entry counts and entry UUIDs are not
+assets either: the tray shows the first two, and the log names an entry by
+its UUID.
 
 ## 3. Actors
 
 | ID     | Actor                                                                                                                 | In scope? |
 | ------ | --------------------------------------------------------------------------------------------------------------------- | --------- |
 | ACT-1  | Another local uid (other user, system service account)                                                                | Yes       |
-| ACT-2  | Network attacker                                                                                                      | Yes — kpa has no network surface, and must not gain one |
+| ACT-2  | Network attacker                                                                                                      | Yes — kpa has no network surface of its own, and must not gain one. What a remote party sends reaches kpa only inside the agent protocol, through the user's own `ssh` (ACT-11, ACT-12) |
 | ACT-3  | Whoever can write the `.kdbx` or keyfile but doesn't know the key: a sync service or sync peer, a backup restore, a shared drive | Yes |
-| ACT-4  | Author of entry content in a database the user can open: a colleague in a shared vault, an imported file              | Yes       |
+| ACT-4  | Author of entry content in a database the user can open — titles, fields, attachments: a colleague in a shared vault, an imported file | Yes |
 | ACT-5  | Careless same-uid software: clipboard-history managers, shell history, terminal scrollback, log collectors, crash reporters, backup/indexing tools — records what passes by, doesn't target kpa | Yes |
-| ACT-6  | Same-uid code running in a sandbox (Flatpak-style, container, browser renderer) that hasn't been granted the socket   | Yes       |
+| ACT-6  | Same-uid code running in a sandbox (Flatpak-style, container, browser renderer) that has been granted neither socket, or the agent socket alone | Yes |
 | ACT-7  | Someone with physical access: to a locked session, an unattended unlocked session (without the master password), a suspended machine, or a powered-off disk | Yes |
 | ACT-8  | Malicious code running unsandboxed as the user, persistently: it can wait for an unlock, log keystrokes, replace binaries | **No** — NG-1 |
 | ACT-9  | root, the kernel, firmware, hardware                                                                                  | **No** — NG-2 |
 | ACT-10 | Short-lived malicious code running unsandboxed as the user: a package install script, a one-off exploited process. It runs once, briefly, and doesn't persist | Partly — T-18 |
 | ACT-11 | A host the user forwards the agent to: its root, or anything there that can reach the forwarded socket | Yes, for keys allowed on forwarded connections |
+| ACT-12 | An SSH server the user's `ssh` connects to, from this machine or from a forwarded host. It chooses the host key, session identifier and signature that reach kpa in a session-bind, and which of the offered keys it asks a signature from | Yes |
 
 ## 4. Trust boundaries
 
 | ID   | Boundary                                                                                       | Untrusted side |
 | ---- | ---------------------------------------------------------------------------------------------- | -------------- |
-| TB-1 | The Unix socket under `$XDG_RUNTIME_DIR`: uid separation via filesystem permissions. It accepts one inbound file descriptor with a request, a terminal, which the daemon writes a prompt to and reads A-1 from | Request bytes and the descriptor (ACT-1, ACT-6 must not reach it; ACT-5 clients may be buggy, and a same-uid client can pass any terminal it can open); for a client, whoever answers at the path (ACT-1 must not) |
+| TB-1 | The control socket under `$XDG_RUNTIME_DIR`: uid separation via filesystem permissions. It accepts one inbound file descriptor with a request, a terminal, which the daemon writes a prompt to and reads A-1 from | Request bytes and the descriptor (ACT-1, ACT-6 must not reach it; ACT-5 clients may be buggy, and a same-uid client can pass any terminal it can open); for a client, whoever answers at the path (ACT-1 must not) |
 | TB-2 | Reading `.kdbx` and keyfile: header and KDF parameters before authentication, payload after     | File bytes (ACT-3) |
-| TB-3 | Decrypted entry content flowing out to clients, terminals, launchers, the tray                 | Entry content (ACT-4) |
+| TB-3 | Decrypted entry content flowing out: to control clients and what they print, to agent clients as identity comments, into prompt messages, into the log | Entry content (ACT-4) |
 | TB-4 | The clipboard (Wayland data-control): visible to every client of the compositor                | Readers (ACT-5) |
-| TB-5 | The prompt subprocess: password arrives on its stdout                                          | The user's view of the prompt: anything that can draw on screen (ACT-6) can imitate it (NG-8). The program itself is trusted (ASM-3) |
-| TB-6 | D-Bus: session bus (tray menu), system bus (logind `Lock`, `PrepareForSleep`)                  | Callers and signal senders (ACT-6) |
+| TB-5 | The prompt subprocesses: each is handed a message; the unlock prompt's stdout carries the password, the confirm prompt's an `Allow` or a `Deny` | The user's view of a prompt: anything that can draw on screen (ACT-6) can imitate it (NG-8). The programs themselves are trusted (ASM-3) |
+| TB-6 | D-Bus: session bus (the tray menu, the service manager's environment naming the compositor), system bus (logind `Lock`, `LockedHint`, `PrepareForSleep`) | Callers and signal senders (ACT-6) |
 | TB-7 | Process memory → anything persistent: files, logs (including kpa's own operation log, which a supervisor may persist), stderr, swap, core dumps, child argv/env | Everything persistent (ACT-5, ACT-7) |
-| TB-8 | The agent socket under `$XDG_RUNTIME_DIR/kpa/`, bound and checked like TB-1. Same-uid clients reach it directly; remote hosts reach it through a forwarding channel the user opened | Request bytes, session-bind contents, and the data to be signed (ACT-5, ACT-11) |
+| TB-8 | The agent socket under `$XDG_RUNTIME_DIR/kpa/`, bound and checked like TB-1. Same-uid clients reach it directly; remote hosts reach it through a forwarding channel the user opened | Request bytes, session-bind contents, and the data to be signed (ACT-5, ACT-6, ACT-10, ACT-11; inside a session-bind, ACT-12) |
 
 ## 5. Assumptions
 
@@ -105,12 +112,15 @@ kpa (see §9).
   process isolation between uids.
 - **ASM-2** — `$XDG_RUNTIME_DIR` is per-user, owned by the user, mode
   `0700`, and on a non-persistent filesystem.
-- **ASM-3** — The config file, the prompt program it names (or the
-  built-in default), every `$PATH` directory searched to find that
-  program, and the paths the config points to are chosen by the user and
-  writable only by them. The prompt program is trusted with the master
-  password: it doesn't store or send it. Where its output channels lead is
-  kpa's responsibility, not the prompt's (T-4).
+- **ASM-3** — The config file, the prompt programs it names (`prompt`, or
+  the built-in default, and `ssh_agent.confirm_prompt`), every `$PATH`
+  directory searched to find them, the paths the config points to,
+  `~/.ssh/known_hosts` and kpa's cache directory are chosen by the user and
+  writable only by them. The prompt programs are trusted: the unlock prompt
+  with the master password, which it doesn't store or send, and the confirm
+  prompt to report the answer the user gave. Where their output channels
+  lead is kpa's responsibility, not theirs (T-4). What they do with the
+  message kpa hands them is theirs (T-24).
 - **ASM-4** — The compositor is trusted. Clipboard contents are visible to
   the session by design; kpa can only tag and expire them. The compositor
   is the one named by `WAYLAND_DISPLAY` in the service manager's
@@ -124,9 +134,14 @@ kpa (see §9).
   through kpa is a bug in kpa. Only their memory-hygiene limits are
   accepted (NG-4). `keepass` documents no security properties and fixes
   only its current major version, so tracking it is part of keeping these
-  claims.
-- **ASM-6** — Host hardening is the user's: hibernation, zram writeback,
-  `kernel.yama.ptrace_scope`, `fs.suid_dumpable`, full-disk encryption.
+  claims. The agent's key parsing and signatures are RustCrypto's
+  (`ssh-key` and the crates behind it): kpa implements no cryptographic
+  primitive, and releases the agent only on a stable `ssh-key`
+  (`docs/ssh-agent.md` § 6.5). A dependency or toolchain that is itself
+  malicious is out of scope.
+- **ASM-6** — Host hardening is the user's: swap, hibernation, zram
+  writeback, `kernel.yama.ptrace_scope`, `fs.suid_dumpable`, full-disk
+  encryption, and what `/proc` shows one user of another's processes.
 - **ASM-7** — logind sees the user's screen lock in one of two ways, and
   kpa relies on both properties:
   (a) the locker asks logind to lock, through `Manager.LockSession`,
@@ -140,7 +155,21 @@ kpa (see §9).
   logind, is invisible to kpa, and so is the screen lock it draws. kpa
   also relies on logind's `PrepareForSleep(true)` being emitted before the
   machine sleeps, and on logind's delay inhibitors holding sleep for at most
-  `InhibitDelayMaxUSec` (5 s by default).
+  `InhibitDelayMaxUSec` (5 s by default). Without logind, no screen lock or
+  suspend reaches kpa; without a display session, no screen lock does. The
+  idle timer, an explicit lock and the freshness guard depend on neither
+  (`docs/headless.md` § 7).
+- **ASM-8** — The user's `ssh` is OpenSSH 8.9 or later and says what it is
+  doing with the agent: it binds a connection it opens for a forwarded
+  channel with `is_forwarding` before a byte from the remote side crosses
+  it, and binds a connection it authenticates on to that session. kpa tells
+  forwarded use from local use by those bindings alone (NG-9).
+
+Not assumed: the sandbox of the systemd unit the home-manager module
+installs (no network address families, no new privileges, a read-only
+system, no core file). No goal rests on it: every claim is about
+`kpa serve` however it is started, and a weakness in the sandbox alone is
+hardening.
 
 ## 6. Security goals
 
