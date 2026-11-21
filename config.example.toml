@@ -45,6 +45,11 @@ log_level = "info"
 # in /proc/<pid>/cmdline; only a program that reads the variable itself
 # avoids that.
 #
+# The pieces the message is made of (the database, and for the agent's
+# prompts the key and where it is used) are in $KPA_PROMPT_DATA as JSON, for
+# a program that renders more than a line. See docs/design.md, "Configuration
+# and logging". The confirm prompt below gets both variables too.
+#
 # An empty stdout means "no password" — which is how a keyfile-only
 # database (tests/fixtures/fixture-kf.kdbx) gets unlocked. `prompt` is a
 # single global setting, so one prompt can't serve both that and a

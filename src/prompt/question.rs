@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::message::sanitize_message;
-use super::{Backend, PromptOutcome, PromptQueue};
+use super::{Backend, PromptOutcome, PromptQueue, Question};
 use crate::cancel::CancelToken;
 
 /// One kind of question whose answer is a `T`: `unlock`'s password, say.
@@ -33,13 +33,17 @@ impl<T> Prompt<T> {
         }
     }
 
-    /// Shows `message`, plain text, and brings back the answer. The message
-    /// is sanitized for display (`message`), and the prompt gets `timeout`
-    /// from the moment its turn comes. It ends as
+    /// Shows `question` and brings back the answer. Its message, plain text,
+    /// is sanitized for display (`message`); its data is shown as it is, its
+    /// builder having made it display-safe. The prompt gets `timeout` from
+    /// the moment its turn comes. It ends as
     /// [`PromptOutcome::Interrupted`] once `cancel` is cancelled: killed if
     /// it is on screen, never shown if it is still queued.
-    pub fn ask(&self, message: &str, cancel: &CancelToken) -> io::Result<PromptOutcome<T>> {
-        let message = sanitize_message(message);
+    pub fn ask(&self, question: &Question, cancel: &CancelToken) -> io::Result<PromptOutcome<T>> {
+        let question = Question {
+            message: sanitize_message(&question.message),
+            data: question.data.clone(),
+        };
         let _turn = if self.backend.is_queued() {
             let Some(turn) = self.queue.enter(cancel)? else {
                 return Ok(PromptOutcome::Interrupted);
@@ -51,7 +55,7 @@ impl<T> Prompt<T> {
         // `None` for a timeout too large to add: a deadline that never
         // arrives.
         let deadline = Instant::now().checked_add(self.timeout);
-        self.backend.show(&message, deadline, cancel)
+        self.backend.show(&question, deadline, cancel)
     }
 }
 
@@ -62,6 +66,7 @@ mod tests {
     use super::super::{Scripted, Step};
     use super::*;
     use crate::cancel::CancelSource;
+    use crate::prompt::testing::question;
 
     fn prompt() -> (Prompt<Zeroizing<String>>, Scripted<Zeroizing<String>>) {
         let prompts = Scripted::new();
@@ -83,7 +88,7 @@ mod tests {
         ))));
         let source = CancelSource::new();
 
-        let outcome = prompt.ask("Unlock personal\u{202e}evil", &source.token());
+        let outcome = prompt.ask(&question("Unlock personal\u{202e}evil"), &source.token());
 
         assert!(matches!(outcome, Ok(PromptOutcome::Answer(a)) if a.as_str() == "hunter2"));
         assert_eq!(prompts.shown(), ["Unlock personal\\u202eevil"]);
@@ -97,7 +102,7 @@ mod tests {
         let token = CancelSource::new().token();
 
         assert!(matches!(
-            prompt.ask("Unlock personal", &token),
+            prompt.ask(&question("Unlock personal"), &token),
             Ok(PromptOutcome::Interrupted)
         ));
         assert!(prompts.shown().is_empty());
@@ -120,8 +125,8 @@ mod tests {
         first.push(Step::new(PromptOutcome::Cancelled));
         second.push(Step::new(PromptOutcome::Answer(true)));
         std::thread::scope(|scope| {
-            let unlocking = scope.spawn(|| unlock.ask("Unlock personal", &token));
-            let asking = scope.spawn(|| other.ask("Something else", &token));
+            let unlocking = scope.spawn(|| unlock.ask(&question("Unlock personal"), &token));
+            let asking = scope.spawn(|| other.ask(&question("Something else"), &token));
             std::thread::sleep(Duration::from_millis(50));
             assert!(first.shown().is_empty() && second.shown().is_empty());
             drop(turn);

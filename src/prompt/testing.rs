@@ -1,4 +1,5 @@
-//! What tests of the code that asks on a terminal share.
+//! What tests of the code that asks share: a question that is only its
+//! message, and a pseudo-terminal for what asks on one.
 
 use std::fs::File;
 use std::io::Read;
@@ -9,6 +10,16 @@ use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{Mode, OFlags, open};
 use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 use rustix::termios::{LocalModes, tcgetattr};
+
+use super::{PromptData, PromptKind, Question};
+
+/// A question that is only `message`: its data says nothing but its kind.
+pub(crate) fn question(message: &str) -> Question {
+    Question {
+        message: message.to_string(),
+        data: PromptData::new(PromptKind::Unlock),
+    }
+}
 
 /// A pseudo-terminal: the master end stands for the user's keyboard and
 /// screen, the slave end for what a client's `/dev/tty` opens to.

@@ -425,6 +425,45 @@ path = "~/vault/work.kdbx"
 or `keyfile` expands to `$HOME`; `~user/` is refused, and other relative paths
 resolve against the daemon's working directory.
 
+**What a prompt program is given.** Every prompt kpa runs as a program (`prompt`,
+for `kpa unlock`, the tray and an unlock the SSH agent raises, and
+`ssh_agent.confirm_prompt`) runs with two environment variables, and never with
+anything in its argv:
+
+- `KPA_PROMPT_MESSAGE`: the question as one line of text.
+- `KPA_PROMPT_DATA`: the pieces the message is made of, as one line of JSON, for
+  a program that renders more than a line. kpa builds the message from the same
+  pieces, so the two agree. A prompt on a terminal runs no program and gets
+  neither.
+
+The data is an object with these members, each absent when it doesn't apply:
+
+| Member | What it is |
+| --- | --- |
+| `v` | Always `1`. A change a consumer can't ignore bumps it; a new member doesn't. |
+| `kind` | `"unlock"` or `"confirm"`. |
+| `database` | The database the prompt is about. |
+| `key` | The key a signature asks to use: `name`, `fingerprint` and `type` (its algorithm, `ssh-ed25519` for one). |
+| `purpose` | What the key is for: `"login"`, `"sshsig"` or `"other"`. |
+| `user` | The remote user of a login. |
+| `namespace` | The namespace of an `SSHSIG` request. |
+| `destination`, `forwarding_host` | Where the signature is accepted, and the host a forwarded connection comes through: each `{"name"?, "fingerprint"}`, `name` being the host name `known_hosts` gives its host key, when it gives one. |
+
+A plain `kpa unlock personal` is `{"v":1,"kind":"unlock","database":"personal"}`.
+A confirm prompt for a forwarded login is
+`{"v":1,"kind":"confirm","database":"personal","key":{"name":"github","fingerprint":"SHA256:…","type":"ssh-ed25519"},"purpose":"login","user":"git","destination":{"name":"github.com","fingerprint":"SHA256:…"},"forwarding_host":{"name":"build-box","fingerprint":"SHA256:…"}}`.
+
+Some of the text isn't kpa's own (a key's name, a login user, a host name), so
+each string is made display-safe the way the message's pieces are: control,
+bidi and zero-width characters are written as `\uXXXX`, and it is cut to the
+same length budget as its piece in the message. Strings are not quoted for the
+sentence: a `"` in a name is a `"`, as a JSON string holds it, where the message
+writes it `\"` so a name can't end its own quotation.
+
+Both variables are in the program's environment, readable by processes of the
+same user; a wrapper that puts a piece into its own argv makes it visible to
+every user through `/proc/<pid>/cmdline`.
+
 `serve` writes one line per event to stderr at `error`, `warn`, `info` (the
 default) or `debug`; `log_level` sets it and `serve --log-level` overrides it.
 `info` carries every unlock, lock, copy and signature, and the tray starting

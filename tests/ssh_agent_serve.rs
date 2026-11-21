@@ -677,6 +677,59 @@ fn config_counting_prompts(db_path: &Path, counter: &Path) -> String {
     )
 }
 
+/// Both prompt programs get the data behind their message as JSON in
+/// `KPA_PROMPT_DATA`: the unlock prompt about the database, the confirm
+/// prompt about the key and what it signs (`docs/design.md`, "Configuration
+/// and logging").
+#[test]
+fn the_prompt_programs_get_the_data_behind_their_message() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (unlock_data, confirm_data) = (dir.path().join("unlock"), dir.path().join("confirm"));
+    let daemon = InProcessDaemon::start(&format!(
+        "prompt = [\"/bin/sh\", \"-c\", \"printf %s \\\"$KPA_PROMPT_DATA\\\" > '{unlock_data}'; printf {password}\"]\n\n\
+         [ssh_agent]\n\
+         confirm_prompt = [\"/bin/sh\", \"-c\", \"printf %s \\\"$KPA_PROMPT_DATA\\\" > '{confirm_data}'; head -n1\"]\n\n\
+         [[database]]\n\
+         name = \"personal\"\n\
+         path = \"{path}\"\n\
+         serve_ssh_keys = true\n",
+        unlock_data = unlock_data.display(),
+        confirm_data = confirm_data.display(),
+        password = common::PASSWORD,
+        path = common::ssh_db().display(),
+    ));
+    let agent = start_ssh_agent(&daemon);
+
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let json = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("the prompt ran"))
+            .expect("JSON data")
+    };
+    assert_eq!(
+        json(&unlock_data),
+        serde_json::json!({"v": 1, "kind": "unlock", "database": "personal"})
+    );
+
+    let listed = stdout(&ssh_add(&agent, ["-L"]));
+    let pubkey = write_pubkey(dir.path(), "key.pub", &public_key_line(&listed, "Ed25519"));
+    let data = dir.path().join("data");
+    std::fs::write(&data, "hello").expect("write data");
+    assert!(sign(&agent, &pubkey, &data).status.success());
+
+    let confirm = json(&confirm_data);
+    assert_eq!(confirm["kind"], "confirm");
+    assert_eq!(confirm["database"], "personal");
+    assert_eq!(confirm["key"]["name"], "Ed25519");
+    assert_eq!(confirm["key"]["type"], "ssh-ed25519");
+    assert!(
+        confirm["key"]["fingerprint"]
+            .as_str()
+            .is_some_and(|f| f.starts_with("SHA256:"))
+    );
+    assert_eq!(confirm["purpose"], "sshsig");
+    assert_eq!(confirm["namespace"], "test");
+}
+
 /// A local, bound connection's first signature for a destination prompts;
 /// a second signature to that *same* destination, over the same
 /// connection, doesn't; a *different* destination — a fresh connection

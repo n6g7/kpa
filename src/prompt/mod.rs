@@ -20,6 +20,7 @@
 //! - `message`: display sanitization for the untrusted text in a prompt's
 //!   message, applied by [`Prompt::ask`], so callers pass plain text.
 
+mod data;
 #[cfg(test)]
 mod fake;
 mod message;
@@ -40,6 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cancel::CancelToken;
 
+pub use data::{HostData, KeyData, PromptData, PromptKind, Question};
 #[cfg(test)]
 pub(crate) use fake::{Scripted, Step};
 pub use outcome::{ConfirmAnswer, Declined, PromptOutcome};
@@ -64,7 +66,8 @@ pub enum PromptOn {
 }
 
 /// How a prompt whose answer is a `T` is shown. A [`Prompt`] calls it once
-/// the prompt's turn has come, with a `message` that is safe to display.
+/// the prompt's turn has come, with a `question` whose message is safe to
+/// display.
 /// It ends as [`PromptOutcome::Interrupted`] as soon as `cancel` is
 /// cancelled, and as [`PromptOutcome::TimedOut`] at `deadline` (`None`:
 /// never).
@@ -75,7 +78,7 @@ pub trait Backend<T>: Send + Sync {
 
     fn show(
         &self,
-        message: &str,
+        question: &Question,
         deadline: Option<Instant>,
         cancel: &CancelToken,
     ) -> io::Result<PromptOutcome<T>>;
@@ -89,11 +92,11 @@ impl<T, B: Backend<T> + ?Sized> Backend<T> for Arc<B> {
 
     fn show(
         &self,
-        message: &str,
+        question: &Question,
         deadline: Option<Instant>,
         cancel: &CancelToken,
     ) -> io::Result<PromptOutcome<T>> {
-        (**self).show(message, deadline, cancel)
+        (**self).show(question, deadline, cancel)
     }
 }
 

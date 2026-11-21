@@ -1,12 +1,18 @@
 //! What the unlock and confirm prompts say (`docs/ssh-agent.md` § 6.6,
 //! § 6.7): the key, what it is for and where the signature goes, as one
-//! question.
+//! question, and the pieces it is made of, for a prompt program that wants
+//! them (`KPA_PROMPT_DATA`, `docs/design.md`).
+//!
+//! Each prompt's [`PromptData`] is filled first, with every piece escaped and
+//! cut to its budget, and the message is formatted from that data and
+//! nothing else, so the two can't disagree.
 
 use ssh_key::HashAlg;
 use ssh_key::public::KeyData;
 
 use crate::frontends::ssh_agent::classify::Purpose;
 use crate::output::escape_one_line;
+use crate::prompt::{HostData, PromptData, PromptKind, Question};
 use crate::ssh::keys::ServedKey;
 
 /// The most bytes (escaped) each piece of a message may take. The message
@@ -31,16 +37,20 @@ pub(super) struct Host<'a> {
 }
 
 impl Host<'_> {
-    /// The host's name, escaped and cut, else its host key's fingerprint.
-    fn shown(&self) -> String {
-        match &self.name {
-            Some(name) => escape_one_line(name, MAX_HOST_NAME_LEN),
-            None => format!("host key {}", self.key.fingerprint(HashAlg::Sha256)),
+    /// The host as the data names it: its name, escaped and cut, and its
+    /// host key's fingerprint.
+    fn data(&self) -> HostData {
+        HostData {
+            name: self
+                .name
+                .as_deref()
+                .map(|name| escape_one_line(name, MAX_HOST_NAME_LEN)),
+            fingerprint: self.key.fingerprint(HashAlg::Sha256).to_string(),
         }
     }
 }
 
-/// The confirm prompt's message, a question the user answers yes or no to:
+/// The confirm prompt's question, which the user answers yes or no to:
 /// "Approve use of key "github" to log in to git@github.com?". The key is
 /// shown by its name, quoted. What follows says what it is for and, for a
 /// connection bound to a `destination`, where: the host name `known_hosts`
@@ -54,76 +64,132 @@ pub(super) fn approval(
     purpose: &Purpose,
     destination: Option<&Host<'_>>,
     forwarding: Option<&Host<'_>>,
-) -> String {
-    let lead = format!("Approve use of {}", key(served));
-    question(&lead, purpose, destination, forwarding)
+) -> Question {
+    let data = data(
+        PromptKind::Confirm,
+        served,
+        purpose,
+        destination,
+        forwarding,
+    );
+    let message = message(&format!("Approve use of {}", key(&data)), &data);
+    Question { message, data }
 }
 
-/// The unlock prompt's message, a question about unlocking that says what
-/// for: "Unlock database personal to use key "github" to log in as git?". It
+/// The unlock prompt's question, about unlocking, which says what for:
+/// "Unlock database personal to use key "github" to log in as git?". It
 /// doesn't ask to approve the key; the confirm prompt does.
 pub(super) fn unlock(
     served: &ServedKey,
     purpose: &Purpose,
     destination: Option<&Host<'_>>,
     forwarding: Option<&Host<'_>>,
-) -> String {
+) -> Question {
+    let data = data(PromptKind::Unlock, served, purpose, destination, forwarding);
     let lead = format!(
         "Unlock database {} to use {}",
-        escape_one_line(&served.database, MAX_DATABASE_LEN),
-        key(served)
+        data.database.as_deref().unwrap_or_default(),
+        key(&data)
     );
-    question(&lead, purpose, destination, forwarding)
+    let message = message(&lead, &data);
+    Question { message, data }
+}
+
+/// The pieces of a prompt about `served` and a request for `purpose`, each
+/// escaped and cut to its budget.
+fn data(
+    kind: PromptKind,
+    served: &ServedKey,
+    purpose: &Purpose,
+    destination: Option<&Host<'_>>,
+    forwarding: Option<&Host<'_>>,
+) -> PromptData {
+    let mut data = PromptData::new(kind);
+    data.database = Some(escape_one_line(&served.database, MAX_DATABASE_LEN));
+    data.key = Some(crate::prompt::KeyData {
+        name: escape_one_line(&served.name, MAX_KEY_NAME_LEN),
+        fingerprint: served.fingerprint.to_string(),
+        key_type: served.public_key.algorithm().to_string(),
+    });
+    data.purpose = Some(purpose.label().to_string());
+    match purpose {
+        Purpose::Login(login) => {
+            data.user = Some(escape_one_line(&login.user, MAX_REQUESTED_LEN));
+        }
+        Purpose::SshSig { namespace } => {
+            data.namespace = Some(escape_one_line(namespace, MAX_REQUESTED_LEN));
+        }
+        Purpose::Other => {}
+    }
+    data.destination = destination.map(Host::data);
+    data.forwarding_host = forwarding.map(Host::data);
+    data
 }
 
 /// `key "github"`, the key's name quoted.
-fn key(served: &ServedKey) -> String {
-    format!("key \"{}\"", quoted(&served.name))
+fn key(data: &PromptData) -> String {
+    let name = data.key.as_ref().map_or("", |key| key.name.as_str());
+    format!("key \"{}\"", quoted(name))
 }
 
 /// `lead`, then which host the request is forwarded through, then what the
 /// key is for and where, as a question.
-fn question(
-    lead: &str,
-    purpose: &Purpose,
-    destination: Option<&Host<'_>>,
-    forwarding: Option<&Host<'_>>,
-) -> String {
-    let through = on(forwarding);
-    let what = match (purpose, destination) {
-        (Purpose::Login(login), Some(dest)) => {
-            let user = escape_one_line(&login.user, MAX_REQUESTED_LEN);
-            match &dest.name {
-                Some(_) => format!(" to log in to {user}@{}", dest.shown()),
-                None => format!(" to log in as {user} to {}", dest.shown()),
-            }
-        }
-        (Purpose::Login(login), None) => {
-            format!(
-                " to log in as {}",
-                escape_one_line(&login.user, MAX_REQUESTED_LEN)
-            )
-        }
-        (Purpose::SshSig { namespace }, destination) => format!(
+fn message(lead: &str, data: &PromptData) -> String {
+    let through = on(data.forwarding_host.as_ref());
+    let user = data.user.as_deref().unwrap_or_default();
+    let what = match (data.purpose.as_deref(), data.destination.as_ref()) {
+        (Some("login"), Some(dest)) => match &dest.name {
+            Some(_) => format!(" to log in to {user}@{}", shown(dest)),
+            None => format!(" to log in as {user} to {}", shown(dest)),
+        },
+        (Some("login"), None) => format!(" to log in as {user}"),
+        (Some("sshsig"), destination) => format!(
             " to sign for namespace {}{}",
-            escape_one_line(namespace, MAX_REQUESTED_LEN),
+            data.namespace.as_deref().unwrap_or_default(),
             on(destination)
         ),
-        (Purpose::Other, destination) => on(destination),
+        (_, destination) => on(destination),
     };
     format!("{lead}{through}{what}?")
 }
 
+/// The host's name, else its host key's fingerprint.
+fn shown(host: &HostData) -> String {
+    match &host.name {
+        Some(name) => name.clone(),
+        None => format!("host key {}", host.fingerprint),
+    }
+}
+
 /// " on <host>" for a host, nothing without one.
-fn on(host: Option<&Host<'_>>) -> String {
-    host.map(|host| format!(" on {}", host.shown()))
+fn on(host: Option<&HostData>) -> String {
+    host.map(|host| format!(" on {}", shown(host)))
         .unwrap_or_default()
 }
 
-/// A key's name for the message: escaped, cut, and with its quotes
-/// escaped, so it can't end its own quotation and continue the sentence.
+/// A key's name for the message, with its quotes escaped, so it can't end
+/// its own quotation and continue the sentence. The name is cut again to its
+/// budget after, between whole characters and whole escapes, so quoting
+/// can't push the message's other pieces out.
 fn quoted(name: &str) -> String {
-    escape_one_line(&name.replace('"', "\\\""), MAX_KEY_NAME_LEN)
+    let mut quoted = String::new();
+    let mut rest = name;
+    while let Some(next) = rest.chars().next() {
+        let len = escape_len(rest).unwrap_or(next.len_utf8());
+        let piece = if next == '"' { "\\\"" } else { &rest[..len] };
+        if quoted.len() + piece.len() > MAX_KEY_NAME_LEN {
+            break;
+        }
+        quoted.push_str(piece);
+        rest = &rest[len..];
+    }
+    quoted
+}
+
+/// The length of the `\uXXXX` escape `text` starts with, if it does.
+fn escape_len(text: &str) -> Option<usize> {
+    let escape = text.strip_prefix("\\u")?.get(..4)?;
+    escape.chars().all(|c| c.is_ascii_hexdigit()).then_some(6)
 }
 
 #[cfg(test)]
@@ -187,17 +253,17 @@ mod tests {
     }
 
     fn approved(purpose: &Purpose, dest: Option<&KeyData>, name: Option<&str>) -> String {
-        approval(&served("github"), purpose, host(dest, name).as_ref(), None)
+        approval(&served("github"), purpose, host(dest, name).as_ref(), None).message
     }
 
     fn unlocked(purpose: &Purpose, dest: Option<&KeyData>, name: Option<&str>) -> String {
-        unlock(&served("github"), purpose, host(dest, name).as_ref(), None)
+        unlock(&served("github"), purpose, host(dest, name).as_ref(), None).message
     }
 
     /// The same questions for a login forwarded through `via`, named
     /// `via_name`, to `dest`, named `dest_name`.
     fn forwarded(
-        message: fn(&ServedKey, &Purpose, Option<&Host<'_>>, Option<&Host<'_>>) -> String,
+        message: fn(&ServedKey, &Purpose, Option<&Host<'_>>, Option<&Host<'_>>) -> Question,
         via_name: Option<&str>,
         dest_name: Option<&str>,
     ) -> String {
@@ -208,6 +274,7 @@ mod tests {
             host(Some(&dest), dest_name).as_ref(),
             host(Some(&via), via_name).as_ref(),
         )
+        .message
     }
 
     /// A forwarded login says which host it comes through, and where it
@@ -328,7 +395,8 @@ mod tests {
                             &purpose,
                             host(Some(&dest), name).as_ref(),
                             via.as_ref(),
-                        );
+                        )
+                        .message;
                         assert!(text.len() <= 320, "{} bytes: {text}", text.len());
                         longest = longest.max(text.len());
                         let end = match name {
@@ -347,15 +415,105 @@ mod tests {
     /// hold a newline or a bidi override.
     #[test]
     fn a_hostile_key_name_stays_inside_its_quotes() {
-        let message = approval(
+        let question = approval(
             &served("x\" to log in as root\n\u{202e}"),
             &Purpose::Other,
             None,
             None,
         );
         assert_eq!(
-            message,
+            question.message,
             "Approve use of key \"x\\\" to log in as root\\u000a\\u202e\"?"
         );
+    }
+
+    /// The data holds the name escaped for display and not quoted for the
+    /// sentence: a `"` is a `"`, as JSON holds it.
+    #[test]
+    fn the_data_escapes_a_key_name_without_quoting_it() {
+        let question = approval(&served("say \"hi\"\n\u{202e}"), &Purpose::Other, None, None);
+
+        let key = question.data.key.expect("a key");
+        assert_eq!(key.name, "say \"hi\"\\u000a\\u202e");
+        assert!(question.message.contains("say \\\"hi\\\""));
+    }
+
+    /// Quoting a name can't push it past its budget, nor cut a `\uXXXX`
+    /// escape or leave a `\` that would escape the closing quote.
+    #[test]
+    fn quoting_keeps_a_key_name_within_its_budget_between_whole_pieces() {
+        for name in ["\"".repeat(100), "\u{202e}\"".repeat(100)] {
+            let question = approval(&served(&name), &Purpose::Other, None, None);
+
+            let quoted = question
+                .message
+                .strip_prefix("Approve use of key \"")
+                .and_then(|rest| rest.strip_suffix("\"?"))
+                .expect("a quoted key");
+            assert!(quoted.len() <= MAX_KEY_NAME_LEN, "{quoted}");
+            assert!(
+                !quoted.ends_with('\\') || quoted.ends_with("\\\\"),
+                "{quoted}"
+            );
+            assert!(!quoted.rsplit('\\').next().is_some_and(|tail| {
+                tail.starts_with('u')
+                    && tail.len() < 5
+                    && tail.chars().all(|c| c.is_ascii_hexdigit() || c == 'u')
+            }));
+        }
+    }
+
+    /// The data names every piece the message does, and the message is made
+    /// of the data: they agree on a forwarded login.
+    #[test]
+    fn the_data_has_the_pieces_the_message_names() {
+        let (dest, via) = (dest(), via());
+        let question = approval(
+            &served("github"),
+            &login("git"),
+            host(Some(&dest), Some("github.com")).as_ref(),
+            host(Some(&via), None).as_ref(),
+        );
+
+        assert_eq!(
+            serde_json::to_value(&question.data).expect("serializes"),
+            serde_json::json!({
+                "v": 1,
+                "kind": "confirm",
+                "database": "personal",
+                "key": {
+                    "name": "github",
+                    "fingerprint": served("github").fingerprint.to_string(),
+                    "type": "ssh-ed25519",
+                },
+                "purpose": "login",
+                "user": "git",
+                "destination": {
+                    "name": "github.com",
+                    "fingerprint": fingerprint(),
+                },
+                "forwarding_host": {"fingerprint": via_fingerprint()},
+            })
+        );
+        assert_eq!(
+            question.message,
+            format!(
+                "Approve use of key \"github\" on host key {} to log in to git@github.com?",
+                via_fingerprint()
+            )
+        );
+    }
+
+    /// An unlock on demand is the confirm's data with the kind of an unlock;
+    /// an `SSHSIG` carries its namespace and no user.
+    #[test]
+    fn the_unlock_and_sshsig_data_say_what_they_are() {
+        let unlocked = unlock(&served("github"), &sshsig("git"), None, None);
+
+        assert_eq!(unlocked.data.kind, PromptKind::Unlock);
+        assert_eq!(unlocked.data.purpose.as_deref(), Some("sshsig"));
+        assert_eq!(unlocked.data.namespace.as_deref(), Some("git"));
+        assert_eq!(unlocked.data.user, None);
+        assert_eq!(unlocked.data.destination, None);
     }
 }

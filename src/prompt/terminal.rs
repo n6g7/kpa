@@ -20,7 +20,7 @@ use rustix::io::Errno;
 use rustix::termios::{LocalModes, OptionalActions, Termios, tcgetattr, tcsetattr};
 use zeroize::Zeroizing;
 
-use super::{Backend, MAX_ANSWER_LEN, PromptOutcome, poll_timeout};
+use super::{Backend, MAX_ANSWER_LEN, PromptOutcome, Question, poll_timeout};
 use crate::cancel::CancelToken;
 
 /// A terminal the peer passed along with its request, and the connection it
@@ -92,7 +92,7 @@ impl Backend<Zeroizing<String>> for SecretTerminal {
 
     fn show(
         &self,
-        message: &str,
+        question: &Question,
         deadline: Option<Instant>,
         cancel: &CancelToken,
     ) -> io::Result<PromptOutcome> {
@@ -107,7 +107,7 @@ impl Backend<Zeroizing<String>> for SecretTerminal {
             deadline,
         };
         let _mode = TerminalMode::set(tty)?;
-        let answer = asking.ask(message);
+        let answer = asking.ask(&question.message);
         // With echo off the user's Enter was never shown, so the line the
         // prompt is on is still open.
         let _ = rustix::io::write(tty, b"\n");
@@ -293,7 +293,7 @@ mod tests {
     use super::super::{Prompt, PromptQueue};
     use super::*;
     use crate::cancel::CancelSource;
-    use crate::prompt::testing::{echoing, pty, read_until};
+    use crate::prompt::testing::{echoing, pty, question, read_until};
 
     const MESSAGE: &str = "Unlock personal";
 
@@ -340,7 +340,7 @@ mod tests {
         assert!(echoing(&master));
 
         let outcome = std::thread::scope(|scope| {
-            let asking = scope.spawn(|| backend.show(MESSAGE, None, &token));
+            let asking = scope.spawn(|| backend.show(&question(MESSAGE), None, &token));
             let screen = read_until(&mut master, "Unlock personal: ");
             assert!(!echoing(&master), "echo is off while the prompt is up");
             type_line(&mut master, "hunter2\n");
@@ -365,7 +365,7 @@ mod tests {
         let token = source.token();
 
         let outcome = std::thread::scope(|scope| {
-            let asking = scope.spawn(|| backend.show(MESSAGE, None, &token));
+            let asking = scope.spawn(|| backend.show(&question(MESSAGE), None, &token));
             read_until(&mut master, "Unlock personal: ");
             type_line(&mut master, "\n");
             asking.join().expect("prompt thread")
@@ -381,7 +381,7 @@ mod tests {
         let started = Instant::now();
 
         let outcome = rig.backend.show(
-            MESSAGE,
+            &question(MESSAGE),
             Some(Instant::now() + Duration::from_millis(200)),
             &source.token(),
         );
@@ -402,7 +402,7 @@ mod tests {
         let started = Instant::now();
 
         let outcome = std::thread::scope(|scope| {
-            let asking = scope.spawn(|| rig.backend.show(MESSAGE, None, &token));
+            let asking = scope.spawn(|| rig.backend.show(&question(MESSAGE), None, &token));
             std::thread::sleep(Duration::from_millis(200));
             drop(source);
             asking.join().expect("prompt thread")
@@ -424,7 +424,7 @@ mod tests {
         let token = source.token();
         drop(source);
 
-        let outcome = rig.backend.show(MESSAGE, None, &token);
+        let outcome = rig.backend.show(&question(MESSAGE), None, &token);
 
         assert!(
             matches!(outcome, Ok(PromptOutcome::Interrupted)),
@@ -444,7 +444,7 @@ mod tests {
         let started = Instant::now();
 
         let outcome = std::thread::scope(|scope| {
-            let asking = scope.spawn(|| rig.backend.show(MESSAGE, None, &token));
+            let asking = scope.spawn(|| rig.backend.show(&question(MESSAGE), None, &token));
             std::thread::sleep(Duration::from_millis(200));
             // What a client that caught `^C` does: shut its end and wait.
             rig.client.shutdown(Shutdown::Write).expect("shutdown");
@@ -470,7 +470,7 @@ mod tests {
         let token = source.token();
 
         let outcome = std::thread::scope(|scope| {
-            let asking = scope.spawn(|| backend.show(MESSAGE, None, &token));
+            let asking = scope.spawn(|| backend.show(&question(MESSAGE), None, &token));
             std::thread::sleep(Duration::from_millis(200));
             drop(master);
             asking.join().expect("prompt thread")
@@ -501,7 +501,7 @@ mod tests {
         let started = Instant::now();
 
         let outcome = rig.backend.show(
-            MESSAGE,
+            &question(MESSAGE),
             Some(Instant::now() + Duration::from_millis(300)),
             &source.token(),
         );
@@ -573,7 +573,7 @@ mod tests {
         let prompt = Prompt::new(Arc::clone(&queue), backend, Duration::from_secs(60));
 
         let outcome = std::thread::scope(|scope| {
-            let asking = scope.spawn(|| prompt.ask(MESSAGE, &token));
+            let asking = scope.spawn(|| prompt.ask(&question(MESSAGE), &token));
             read_until(&mut master, "Unlock personal: ");
             type_line(&mut master, "hunter2\n");
             asking.join().expect("prompt thread")
@@ -599,7 +599,7 @@ mod tests {
         );
 
         std::thread::scope(|scope| {
-            let asking = scope.spawn(|| prompt.ask("Unlock\u{1b}[2Jevil", &token));
+            let asking = scope.spawn(|| prompt.ask(&question("Unlock\u{1b}[2Jevil"), &token));
             let screen = read_until(&mut master, "evil: ");
             assert!(!screen.contains('\u{1b}'), "{screen:?}");
             assert!(screen.contains("\\u001b"), "{screen:?}");

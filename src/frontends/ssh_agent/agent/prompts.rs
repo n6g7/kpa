@@ -130,14 +130,14 @@ impl Agent {
     /// in is locked.
     fn prompt_to_confirm(&self, request: &Request<'_>, asked: &Asked) -> Result<(), Refused> {
         let (destination, forwarding) = self.hosts(request);
-        let message = message::approval(
+        let question = message::approval(
             asked.approval.scope.key(),
             &request.purpose,
             destination.as_ref(),
             forwarding.as_ref(),
         );
         self.confirm_prompt
-            .ask(&message, &asked.unlock)
+            .ask(&question, &asked.unlock)
             .map_err(Refused::PromptFailed)?
             .allowed()
             .map_err(Refused::Declined)
@@ -166,7 +166,7 @@ impl Agent {
             return Err(Refused::Locked);
         }
         let (destination, forwarding) = self.hosts(request);
-        let message = message::unlock(
+        let question = message::unlock(
             key,
             &request.purpose,
             destination.as_ref(),
@@ -174,7 +174,7 @@ impl Agent {
         );
         let password = self
             .screen_unlock
-            .ask(&message, unlocking.unlock_token())
+            .ask(&question, unlocking.unlock_token())
             .map_err(Refused::PromptFailed)?
             .answered()
             .map_err(Refused::UnlockDeclined)?;

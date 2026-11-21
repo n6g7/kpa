@@ -9,7 +9,7 @@ use super::{Api, authz};
 use crate::authn::Requester;
 use crate::databases::{Begin, BeginError, UnlockFailure, VaultError};
 use crate::log;
-use crate::prompt::{self, Prompt, PromptOn, PromptOutcome, SecretTerminal};
+use crate::prompt::{self, Prompt, PromptOn, PromptOutcome, Question, SecretTerminal};
 
 impl Api {
     /// The unlock `kpa unlock` runs for `requester`. The token comes before
@@ -40,7 +40,7 @@ impl Api {
             };
         log::debug(format_args!("prompting for {name:?}"));
         let outcome = Prompt::new(Arc::clone(&self.prompts), backend, self.prompt_timeout)
-            .ask(&format!("Unlock {name}"), unlocking.unlock_token());
+            .ask(&Question::unlock(name), unlocking.unlock_token());
         let password = match outcome {
             Ok(PromptOutcome::Answer(password)) => password,
             Ok(PromptOutcome::Cancelled) => return Err(UnlockError::PromptCancelled { db: db() }),

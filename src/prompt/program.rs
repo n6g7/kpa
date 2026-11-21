@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use zeroize::Zeroizing;
 
-use super::{Backend, ConfirmAnswer, MAX_ANSWER_LEN, PromptOutcome, poll_timeout};
+use super::{Backend, ConfirmAnswer, MAX_ANSWER_LEN, PromptOutcome, Question, poll_timeout};
 use crate::cancel::CancelToken;
 
 /// The environment variable a prompt program finds its message in
@@ -26,6 +26,9 @@ use crate::cancel::CancelToken;
 /// Either way the argv itself runs exactly as configured — kpa never
 /// rewrites it.
 const PROMPT_MESSAGE_ENV: &str = "KPA_PROMPT_MESSAGE";
+
+/// Where the JSON of a prompt's [`PromptData`] reaches it, next to the message.
+const PROMPT_DATA_ENV: &str = "KPA_PROMPT_DATA";
 
 /// What a confirm prompt is offered, one choice per line.
 const APPROVAL_CHOICES: &[u8] = b"Allow\nDeny\n";
@@ -61,11 +64,11 @@ impl Backend<Zeroizing<String>> for SecretProgram {
     /// ones inside the prompt program itself.
     fn show(
         &self,
-        message: &str,
+        question: &Question,
         deadline: Option<Instant>,
         cancel: &CancelToken,
     ) -> std::io::Result<PromptOutcome> {
-        run(&self.argv, message, deadline, cancel, None)
+        run(&self.argv, question, deadline, cancel, None)
     }
 }
 
@@ -91,13 +94,13 @@ impl Backend<ConfirmAnswer> for ConfirmProgram {
 
     fn show(
         &self,
-        message: &str,
+        question: &Question,
         deadline: Option<Instant>,
         cancel: &CancelToken,
     ) -> std::io::Result<PromptOutcome<ConfirmAnswer>> {
         let outcome = run(
             &self.argv,
-            message,
+            question,
             deadline,
             cancel,
             Some(APPROVAL_CHOICES),
@@ -112,12 +115,12 @@ impl Backend<ConfirmAnswer> for ConfirmProgram {
     }
 }
 
-/// Runs `argv` with `message` in its environment, and reads what it
-/// prints. `stdin`, when given, is written before anything is read — a
+/// Runs `argv` with `question`'s message and data in its environment, and
+/// reads what it prints. `stdin`, when given, is written before anything is read — a
 /// prompt that picks among choices gets them this way, one per line.
 fn run(
     argv: &[String],
-    message: &str,
+    question: &Question,
     deadline: Option<Instant>,
     cancel: &CancelToken,
     stdin: Option<&[u8]>,
@@ -131,9 +134,11 @@ fn run(
     let Some(cancel) = cancel.watch()? else {
         return Ok(PromptOutcome::Interrupted);
     };
+    let data = serde_json::to_string(&question.data).map_err(Error::other)?;
     let mut child = Command::new(program)
         .args(args)
-        .env(PROMPT_MESSAGE_ENV, message)
+        .env(PROMPT_MESSAGE_ENV, &question.message)
+        .env(PROMPT_DATA_ENV, data)
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -260,6 +265,7 @@ mod tests {
     use super::super::{Prompt, PromptQueue};
     use super::*;
     use crate::cancel::CancelSource;
+    use crate::prompt::testing::question;
 
     /// Held by every test here: each spawns a prompt, and spawning a child
     /// briefly duplicates every open file descriptor into it until it
@@ -290,7 +296,7 @@ mod tests {
     fn shown(script: &str, message: &str, deadline: Duration) -> std::io::Result<PromptOutcome> {
         let source = CancelSource::new();
         SecretProgram::new(sh(script)).show(
-            message,
+            &question(message),
             Some(Instant::now() + deadline),
             &source.token(),
         )
@@ -306,7 +312,7 @@ mod tests {
     /// Runs `script` as the confirm prompt.
     fn approval(script: &str) -> std::io::Result<PromptOutcome<ConfirmAnswer>> {
         let source = CancelSource::new();
-        ConfirmProgram::new(sh(script)).show("test message", None, &source.token())
+        ConfirmProgram::new(sh(script)).show(&question("test message"), None, &source.token())
     }
 
     #[test]
@@ -353,7 +359,8 @@ mod tests {
     #[test]
     fn an_empty_command_is_an_error() {
         let source = CancelSource::new();
-        let outcome = SecretProgram::new(Vec::new()).show("test message", None, &source.token());
+        let outcome =
+            SecretProgram::new(Vec::new()).show(&question("test message"), None, &source.token());
         assert!(outcome.is_err());
     }
 
@@ -381,7 +388,11 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(200));
                 drop(source);
             });
-            SecretProgram::new(sh("sleep 30; printf hunter2")).show("test message", None, &token)
+            SecretProgram::new(sh("sleep 30; printf hunter2")).show(
+                &question("test message"),
+                None,
+                &token,
+            )
         });
         assert!(matches!(outcome, Ok(PromptOutcome::Interrupted)));
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -417,6 +428,34 @@ mod tests {
         assert_eq!(seen.as_str(), "Unlock personal");
     }
 
+    /// The data reaches the prompt in `KPA_PROMPT_DATA`, as the JSON of what
+    /// it was asked, next to the message, for both kinds of prompt.
+    #[test]
+    fn the_data_reaches_the_prompt_as_json_in_its_environment() {
+        let _spawning = spawn_lock();
+        let question = Question::unlock("personal");
+        let source = CancelSource::new();
+
+        let Ok(PromptOutcome::Answer(seen)) = SecretProgram::new(sh(&format!(
+            "printf %s \"${PROMPT_DATA_ENV}\""
+        )))
+        .show(&question, None, &source.token()) else {
+            panic!("expected the data back");
+        };
+        assert_eq!(
+            seen.as_str(),
+            r#"{"v":1,"kind":"unlock","database":"personal"}"#
+        );
+
+        let Ok(PromptOutcome::Answer(ConfirmAnswer::Allow)) = ConfirmProgram::new(sh(&format!(
+            "cat >/dev/null; test \"${PROMPT_DATA_ENV}\" = '{}' && echo Allow",
+            r#"{"v":1,"kind":"unlock","database":"personal"}"#
+        )))
+        .show(&question, None, &source.token()) else {
+            panic!("expected the confirm program to run with the data");
+        };
+    }
+
     /// The argv runs exactly as configured: nothing in it is rewritten,
     /// even text that looks like it could have been a placeholder.
     #[test]
@@ -440,7 +479,7 @@ mod tests {
         let _spawning = spawn_lock();
         let unlock = queued(&format!("printf %s \"${PROMPT_MESSAGE_ENV}\""), 60);
         let source = CancelSource::new();
-        let outcome = unlock.ask("Unlock personal\u{202e}evil", &source.token());
+        let outcome = unlock.ask(&question("Unlock personal\u{202e}evil"), &source.token());
         let Ok(PromptOutcome::Answer(seen)) = outcome else {
             panic!("expected the message back, got {outcome:?}");
         };
@@ -468,9 +507,9 @@ mod tests {
         let (a, b) = (CancelSource::new(), CancelSource::new());
 
         let (first, second) = std::thread::scope(|scope| {
-            let first = scope.spawn(|| unlock.ask("a", &a.token()));
+            let first = scope.spawn(|| unlock.ask(&question("a"), &a.token()));
             std::thread::sleep(Duration::from_millis(50));
-            let second = scope.spawn(|| unlock.ask("b", &b.token()));
+            let second = scope.spawn(|| unlock.ask(&question("b"), &b.token()));
             (
                 first.join().expect("first prompt thread panicked"),
                 second.join().expect("second prompt thread panicked"),
@@ -502,9 +541,9 @@ mod tests {
         let second_token = second_source.token();
 
         let (first, second) = std::thread::scope(|scope| {
-            let first = scope.spawn(|| unlock.ask("first", &first_source.token()));
+            let first = scope.spawn(|| unlock.ask(&question("first"), &first_source.token()));
             std::thread::sleep(Duration::from_millis(100));
-            let second = scope.spawn(|| unlock.ask("second", &second_token));
+            let second = scope.spawn(|| unlock.ask(&question("second"), &second_token));
             std::thread::sleep(Duration::from_millis(100));
             let cancelled_at = Instant::now();
             drop(second_source);

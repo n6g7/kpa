@@ -9,7 +9,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use super::{Backend, ConfirmAnswer, PromptOutcome};
+use super::{Backend, ConfirmAnswer, PromptOutcome, Question};
 use crate::cancel::CancelToken;
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -70,7 +70,7 @@ pub(crate) struct Scripted<T>(Arc<Script<T>>);
 
 struct Script<T> {
     steps: Mutex<VecDeque<Step<T>>>,
-    shown: Mutex<Vec<String>>,
+    shown: Mutex<Vec<Question>>,
 }
 
 impl<T> Clone for Scripted<T> {
@@ -95,6 +95,14 @@ impl<T> Scripted<T> {
 
     /// Every message shown so far, in order.
     pub(crate) fn shown(&self) -> Vec<String> {
+        self.shown_questions()
+            .into_iter()
+            .map(|question| question.message)
+            .collect()
+    }
+
+    /// Every question shown so far, in order.
+    pub(crate) fn shown_questions(&self) -> Vec<Question> {
         self.0.shown.lock().expect("shown").clone()
     }
 }
@@ -106,7 +114,7 @@ impl<T: Send> Backend<T> for Scripted<T> {
 
     fn show(
         &self,
-        message: &str,
+        question: &Question,
         _deadline: Option<Instant>,
         cancel: &CancelToken,
     ) -> io::Result<PromptOutcome<T>> {
@@ -116,12 +124,8 @@ impl<T: Send> Backend<T> for Scripted<T> {
             .lock()
             .expect("steps")
             .pop_front()
-            .unwrap_or_else(|| panic!("a prompt nobody scripted: {message:?}"));
-        self.0
-            .shown
-            .lock()
-            .expect("shown")
-            .push(message.to_string());
+            .unwrap_or_else(|| panic!("a prompt nobody scripted: {:?}", question.message));
+        self.0.shown.lock().expect("shown").push(question.clone());
         if let Some(while_up) = step.while_up {
             while_up();
         }
