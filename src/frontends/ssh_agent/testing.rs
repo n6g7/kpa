@@ -45,6 +45,29 @@ pub(super) fn signed_bind(
     }
 }
 
+/// The data of an SSH login for `user` with `key`, signed over `session_id`:
+/// a `SSH2_MSG_USERAUTH_REQUEST`, as the `ssh` client asks the agent to sign
+/// it.
+pub(super) fn login_data(key: &PrivateKey, session_id: &[u8], user: &str) -> Vec<u8> {
+    fn string(out: &mut Vec<u8>, bytes: &[u8]) {
+        out.extend((bytes.len() as u32).to_be_bytes());
+        out.extend(bytes);
+    }
+    let mut data = Vec::new();
+    string(&mut data, session_id);
+    data.push(50);
+    string(&mut data, user.as_bytes());
+    string(&mut data, b"ssh-connection");
+    string(&mut data, b"publickey");
+    data.push(1);
+    string(&mut data, key.algorithm().as_str().as_bytes());
+    string(
+        &mut data,
+        &key.public_key().to_bytes().expect("key encodes"),
+    );
+    data
+}
+
 /// The display session the fixture starts with, and so the one a requester
 /// on the desktop runs in.
 pub(super) const SESSION: &str = "3";

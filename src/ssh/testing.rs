@@ -124,7 +124,7 @@ pub(crate) fn host_key(seed: u64) -> KeyData {
 
 pub(crate) fn approval(key: u64, destination: Option<u64>, remember: bool) -> SignatureApproval {
     SignatureApproval {
-        scope: Scope::new(fingerprint(key), destination.map(host_key).as_ref()),
+        scope: Scope::local(fingerprint(key), destination.map(host_key).as_ref()),
         remember,
     }
 }
