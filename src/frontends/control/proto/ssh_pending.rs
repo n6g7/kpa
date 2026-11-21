@@ -39,6 +39,11 @@ pub struct WireScope {
     /// The forwarding host's host key, of a forwarded connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarding_host: Option<Fingerprint>,
+    /// Which of the forwarding sessions kpa has seen this one is, 1, 2, …,
+    /// of a forwarded connection. It tells two `ssh -A` sessions through the
+    /// same host apart, and says nothing about the session identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarding_session: Option<u32>,
 }
 
 /// What a refused request was.
@@ -84,6 +89,7 @@ mod tests {
                 },
                 destination: Some(KEY.parse().expect("a fingerprint")),
                 forwarding_host: None,
+                forwarding_session: None,
             },
             remember: true,
             request: WireRequestDetails {
@@ -139,6 +145,7 @@ mod tests {
                 },
                 destination: None,
                 forwarding_host: None,
+                forwarding_session: None,
             },
             request: WireRequestDetails {
                 user: None,
@@ -152,6 +159,7 @@ mod tests {
 
         assert!(json["scope"].get("destination").is_none());
         assert!(json["scope"].get("forwarding_host").is_none());
+        assert!(json["scope"].get("forwarding_session").is_none());
         assert!(json["scope"]["key"].get("title").is_none());
         assert!(json["request"].get("user").is_none());
         assert!(json["request"].get("command").is_none());

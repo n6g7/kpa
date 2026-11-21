@@ -372,6 +372,8 @@ fn a_forwarded_login_asks_once_per_ssh_session() {
     assert_eq!(grants[0]["remember"], true);
     let scope = &grants[0]["scope"];
     assert!(scope["forwarding_host"].is_string());
+    assert_eq!(scope["forwarding_session"], 1);
+    assert!(grants[0]["last_used_at"].is_u64());
     assert_eq!(scope["forwarding_host"], scope["destination"]);
 
     let second = rig.forwarded(&hop);
@@ -383,6 +385,8 @@ fn a_forwarded_login_asks_once_per_ssh_session() {
     let grants = rig.grants();
     assert_eq!(grants.len(), 2);
     assert_eq!(grants[1]["uses"], 1);
+    assert_eq!(grants[1]["scope"]["forwarding_session"], 2);
+    assert_eq!(grants[0]["scope"]["forwarding_session"], 1);
 }
 
 /// A key with `forwarded = false` is not listed to the forwarded agent and

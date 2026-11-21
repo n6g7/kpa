@@ -246,8 +246,9 @@ impl Agent {
         // it is made, and an approval for one signature is used up: a failed
         // one leaves it for the retry.
         if let Some(approval) = needed {
+            let wall = hold.wall();
             let open = hold.open().ok_or(Refused::Locked)?;
-            self.approvals.used(open, &approval.scope);
+            self.approvals.used(open, &approval.scope, wall);
         }
         Ok(signature)
     }
@@ -273,7 +274,7 @@ impl Agent {
             self.approvals
                 .grant(open, scope.clone(), GrantSource::OnScreen, wall);
             // The signature the user allowed is the first one it covers.
-            self.approvals.used(open, &scope);
+            self.approvals.used(open, &scope, wall);
         }
         Ok(signature)
     }

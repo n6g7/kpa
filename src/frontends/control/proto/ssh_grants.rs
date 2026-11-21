@@ -27,6 +27,9 @@ pub struct WireGrant {
     pub by: String,
     /// The signatures it has covered.
     pub uses: u64,
+    /// When it last covered one, in Unix seconds. Absent if it never has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<u64>,
     /// The seconds before its database locks for being idle, if nothing uses
     /// it.
     pub idle_lock_in: u64,
@@ -57,11 +60,13 @@ mod tests {
                 },
                 destination: None,
                 forwarding_host: None,
+                forwarding_session: None,
             },
             remember: true,
             expires_in: None,
             by: "on_screen".to_string(),
             uses: 3,
+            last_used_at: Some(1_700_000_030),
             idle_lock_in: 1500,
         }
     }
@@ -73,6 +78,8 @@ mod tests {
         one_signature.remember = false;
         one_signature.expires_in = Some(42);
         one_signature.by = "cli".to_string();
+        one_signature.last_used_at = None;
+        one_signature.scope.forwarding_session = Some(2);
 
         let kept = serde_json::to_value(grant()).expect("serializes");
         assert_eq!(kept["granted_at"], 1_700_000_000);
@@ -80,11 +87,15 @@ mod tests {
         assert!(kept.get("expires_in").is_none());
         assert_eq!(kept["by"], "on_screen");
         assert_eq!(kept["uses"], 3);
+        assert_eq!(kept["last_used_at"], 1_700_000_030u64);
+        assert!(kept["scope"].get("forwarding_session").is_none());
         assert_eq!(kept["idle_lock_in"], 1500);
         assert!(kept["scope"].get("destination").is_none());
 
         let once = serde_json::to_value(&one_signature).expect("serializes");
         assert_eq!(once["expires_in"], json!(42));
+        assert!(once.get("last_used_at").is_none());
+        assert_eq!(once["scope"]["forwarding_session"], 2);
         let back: WireGrant = serde_json::from_value(once).expect("deserializes");
         assert_eq!(back, one_signature);
     }

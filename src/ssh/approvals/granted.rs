@@ -35,6 +35,8 @@ pub enum GrantSource {
 #[derive(Debug, Clone)]
 pub struct Grant {
     pub scope: Scope,
+    /// The number of its forwarding session, if it is forwarded.
+    pub forwarding_session: Option<u32>,
     pub lasts: Lasts,
     /// When it was given, by the wall clock, so a client can tell its age.
     pub granted_at: SystemTime,
@@ -42,6 +44,10 @@ pub struct Grant {
     /// The signatures it has covered. A one-signature grant is gone with its
     /// first, so it never lists any.
     pub uses: u64,
+    /// When it last covered a signature, by the wall clock. A user who sees
+    /// a forwarding session's approval stop being used knows the session is
+    /// over: kpa sees no session end.
+    pub last_used_at: Option<SystemTime>,
 }
 
 impl Grant {
@@ -82,9 +88,21 @@ impl GrantedApprovals {
         self.0.iter().filter(move |grant| !grant.expired(now))
     }
 
-    /// Approves `scope` until lock. A scope that is approved until lock
-    /// already keeps its grant.
-    pub fn grant(&mut self, scope: Scope, by: GrantSource, wall: SystemTime) {
+    /// The forwarding sessions the grants kept refer to.
+    pub fn sessions(&self) -> impl Iterator<Item = u32> {
+        self.0.iter().filter_map(|grant| grant.forwarding_session)
+    }
+
+    /// Approves `scope`, which is forwarding session number
+    /// `forwarding_session` if it is forwarded, until lock. A scope that is
+    /// approved until lock already keeps its grant.
+    pub fn grant(
+        &mut self,
+        scope: Scope,
+        forwarding_session: Option<u32>,
+        by: GrantSource,
+        wall: SystemTime,
+    ) {
         if self
             .0
             .iter()
@@ -102,10 +120,12 @@ impl GrantedApprovals {
         }
         self.0.push(Grant {
             scope,
+            forwarding_session,
             lasts: Lasts::UntilLock,
             granted_at: wall,
             by,
             uses: 0,
+            last_used_at: None,
         });
     }
 
@@ -116,36 +136,40 @@ impl GrantedApprovals {
     pub fn approve(
         &mut self,
         approval: SignatureApproval,
+        forwarding_session: Option<u32>,
         now: Instant,
         wall: SystemTime,
         window: Duration,
     ) {
         if approval.remember {
-            self.grant(approval.scope, GrantSource::Cli, wall);
+            self.grant(approval.scope, forwarding_session, GrantSource::Cli, wall);
         } else {
             self.0
                 .retain(|grant| grant.scope != approval.scope && !grant.expired(now));
             self.0.push(Grant {
                 scope: approval.scope,
+                forwarding_session,
                 lasts: Lasts::OneSignature {
                     until: now + window,
                 },
                 granted_at: wall,
                 by: GrantSource::Cli,
                 uses: 0,
+                last_used_at: None,
             });
         }
     }
 
-    /// Records a signature `scope`'s approval covered: a one-signature grant
-    /// is used up, and a grant kept until lock counts it.
-    pub fn used(&mut self, scope: &Scope) {
+    /// Records a signature `scope`'s approval covered at `wall`: a
+    /// one-signature grant is used up, and a grant kept until lock counts it.
+    pub fn used(&mut self, scope: &Scope, wall: SystemTime) {
         if let Some(spent) = self.0.iter().position(|grant| {
             grant.scope == *scope && matches!(grant.lasts, Lasts::OneSignature { .. })
         }) {
             self.0.remove(spent);
         } else if let Some(grant) = self.0.iter_mut().find(|grant| grant.scope == *scope) {
             grant.uses += 1;
+            grant.last_used_at = Some(wall);
         }
     }
 }
@@ -158,11 +182,11 @@ mod tests {
     const WINDOW: Duration = Duration::from_secs(60);
 
     fn grant(approvals: &mut GrantedApprovals, scope: Scope) {
-        approvals.grant(scope, GrantSource::OnScreen, SystemTime::now());
+        approvals.grant(scope, None, GrantSource::OnScreen, SystemTime::now());
     }
 
     fn approve(approvals: &mut GrantedApprovals, ask: SignatureApproval, now: Instant) {
-        approvals.approve(ask, now, SystemTime::now(), WINDOW);
+        approvals.approve(ask, None, now, SystemTime::now(), WINDOW);
     }
 
     #[test]
@@ -204,7 +228,7 @@ mod tests {
         approve(&mut approvals, ask.clone(), now);
 
         assert!(approvals.covers(&ask.scope, now + WINDOW * 100));
-        approvals.used(&ask.scope);
+        approvals.used(&ask.scope, SystemTime::now());
         assert!(approvals.covers(&ask.scope, now));
     }
 
@@ -218,7 +242,7 @@ mod tests {
         assert!(approvals.covers(&ask.scope, now + WINDOW - Duration::from_millis(1)));
         assert!(!approvals.covers(&ask.scope, now + WINDOW));
         assert!(approvals.covers(&ask.scope, now));
-        approvals.used(&ask.scope);
+        approvals.used(&ask.scope, SystemTime::now());
         assert!(!approvals.covers(&ask.scope, now));
         assert_eq!(approvals.list(now).count(), 0);
     }
@@ -228,12 +252,13 @@ mod tests {
         let mut approvals = GrantedApprovals::default();
         let (now, wall) = (Instant::now(), SystemTime::now());
         let scope = Scope::local(&served_key(1), None);
-        approvals.grant(scope.clone(), GrantSource::OnScreen, wall);
-        approvals.used(&scope);
-        approvals.used(&scope);
+        approvals.grant(scope.clone(), None, GrantSource::OnScreen, wall);
+        approvals.used(&scope, SystemTime::now());
+        approvals.used(&scope, SystemTime::now());
         // Granting again keeps the first grant, its time and its count.
         approvals.grant(
             scope.clone(),
+            None,
             GrantSource::Cli,
             wall + Duration::from_secs(5),
         );
@@ -246,6 +271,21 @@ mod tests {
         assert_eq!(granted.granted_at, wall);
         assert_eq!(granted.uses, 2);
         assert_eq!(granted.time_left(now), None);
+    }
+
+    #[test]
+    fn a_grant_remembers_when_it_last_covered_a_signature() {
+        let mut approvals = GrantedApprovals::default();
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        let scope = Scope::local(&served_key(1), None);
+        grant(&mut approvals, scope.clone());
+        assert_eq!(approvals.list(now).next().unwrap().last_used_at, None);
+
+        approvals.used(&scope, wall);
+        approvals.used(&scope, wall + Duration::from_secs(9));
+
+        let used = approvals.list(now).next().unwrap().last_used_at;
+        assert_eq!(used, Some(wall + Duration::from_secs(9)));
     }
 
     #[test]

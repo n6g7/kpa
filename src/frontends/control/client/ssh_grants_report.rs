@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use super::ssh_requests_report::{age, span};
+use super::ssh_requests_report::{age, session, span};
 use crate::frontends::control::proto::WireGrant;
 use crate::output::Table;
 
@@ -34,10 +34,12 @@ pub fn render(answer: &Grants, now: SystemTime) -> String {
         "DATABASE",
         "DESTINATION",
         "FORWARDING HOST",
+        "SESSION",
         "LASTS",
         "AGE",
         "GRANTED BY",
         "USES",
+        "LAST USED",
         "IDLE LOCK",
     ]);
     for grant in &answer.grants {
@@ -52,6 +54,7 @@ pub fn render(answer: &Grants, now: SystemTime) -> String {
                 .scope
                 .forwarding_host
                 .map_or_else(|| NONE.to_string(), |host| host.to_string()),
+            &session(&grant.scope),
             &lasts(grant),
             &age(now, grant.granted_at),
             match grant.by.as_str() {
@@ -59,6 +62,9 @@ pub fn render(answer: &Grants, now: SystemTime) -> String {
                 by => by,
             },
             &grant.uses.to_string(),
+            &grant
+                .last_used_at
+                .map_or_else(|| NONE.to_string(), |at| age(now, at)),
             &format!("in {}", span(grant.idle_lock_in)),
         ]);
     }
@@ -107,11 +113,13 @@ mod tests {
                 },
                 destination: Some(DESTINATION.parse().expect("a fingerprint")),
                 forwarding_host: None,
+                forwarding_session: None,
             },
             remember: true,
             expires_in: None,
             by: "on_screen".to_string(),
             uses: 3,
+            last_used_at: Some(NOW - 30),
             idle_lock_in: 29 * 60 + 12,
         }
     }
@@ -125,6 +133,8 @@ mod tests {
         let mut once = grant("deploy-key");
         once.scope.destination = None;
         once.scope.forwarding_host = Some(KEY.parse().expect("a fingerprint"));
+        once.scope.forwarding_session = Some(2);
+        once.last_used_at = None;
         once.remember = false;
         once.expires_in = Some(42);
         once.by = "cli".to_string();
@@ -142,9 +152,9 @@ mod tests {
             text,
             format!(
                 "\
-KEY         DATABASE  DESTINATION                                         FORWARDING HOST                                     LASTS                  AGE  GRANTED BY  USES  IDLE LOCK
-github      personal  {DESTINATION}  -                                                   until lock             1m   screen      3     in 29m
-deploy-key  personal  -                                                   {KEY}  1 signature, 42s left  4s   cli         0     in 29m
+KEY         DATABASE  DESTINATION                                         FORWARDING HOST                                     SESSION  LASTS                  AGE  GRANTED BY  USES  LAST USED  IDLE LOCK
+github      personal  {DESTINATION}  -                                                   -        until lock             1m   screen      3     30s        in 29m
+deploy-key  personal  -                                                   {KEY}  2        1 signature, 42s left  4s   cli         0     -          in 29m
 
 `kpa lock <database>` drops a database's approvals. IDLE LOCK is when the database locks if nothing uses it.
 "

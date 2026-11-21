@@ -12,7 +12,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::frontends::control::proto::WirePending;
+use crate::frontends::control::proto::{WirePending, WireScope};
 use crate::output::Table;
 use crate::ssh::approvals::PENDING_TTL;
 use serde::Deserialize;
@@ -50,6 +50,7 @@ pub fn render(answer: &Pending, now: SystemTime) -> String {
         "AGE",
         "DESTINATION",
         "FORWARDING HOST",
+        "SESSION",
     ]);
     for request in &answer.pending {
         table.row([
@@ -67,6 +68,7 @@ pub fn render(answer: &Pending, now: SystemTime) -> String {
                 .scope
                 .forwarding_host
                 .map_or_else(|| NONE.to_string(), |host| host.to_string()),
+            &session(&request.scope),
         ]);
     }
     format!(
@@ -75,6 +77,13 @@ pub fn render(answer: &Pending, now: SystemTime) -> String {
         table.render(),
         PENDING_TTL.as_secs() / 60,
     )
+}
+
+/// The number of the forwarding session a forwarded request comes from.
+pub(super) fn session(scope: &WireScope) -> String {
+    scope
+        .forwarding_session
+        .map_or_else(|| NONE.to_string(), |session| session.to_string())
 }
 
 /// What the requester asked for, unescaped: the table does that.
@@ -137,6 +146,7 @@ mod tests {
                 },
                 destination: Some(DESTINATION.parse().expect("a fingerprint")),
                 forwarding_host: None,
+                forwarding_session: None,
             },
             remember: true,
             request: WireRequestDetails {
@@ -171,6 +181,8 @@ mod tests {
             signing.id = Uuid::from_u128(2);
             signing.refused_at = NOW - 4;
             signing.scope.destination = None;
+            signing.scope.forwarding_host = Some(KEY.parse().expect("a fingerprint"));
+            signing.scope.forwarding_session = Some(2);
             signing.request = WireRequestDetails {
                 purpose: "sshsig".to_string(),
                 user: None,
@@ -187,9 +199,9 @@ mod tests {
             text,
             format!(
                 "\
-ID                                    KEY         DATABASE  REQUEST         FROM  AGE  DESTINATION                                         FORWARDING HOST
-00000000-0000-0000-0000-000000000001  github      personal  login as alice  ssh   1m   {DESTINATION}  -
-00000000-0000-0000-0000-000000000002  deploy-key  personal  sign (git)      -     4s   -                                                   -
+ID                                    KEY         DATABASE  REQUEST         FROM  AGE  DESTINATION                                         FORWARDING HOST                                     SESSION
+00000000-0000-0000-0000-000000000001  github      personal  login as alice  ssh   1m   {DESTINATION}  -                                                   -
+00000000-0000-0000-0000-000000000002  deploy-key  personal  sign (git)      -     4s   -                                                   {KEY}  2
 
 Approve one with `kpa ssh approve <id>`. A request left alone expires after 5 minutes, and nothing is blocked meanwhile.
 "

@@ -499,6 +499,18 @@ forwarding host key, destination host key). The forwarding session is
 bound by the local `ssh` before the remote side can send anything, so a
 remote host cannot claim another session's approval.
 
+Two `ssh -A` sessions through the same host look the same to the user, so
+kpa numbers the forwarding sessions it sees after an unlock, 1, 2, … in the
+order a grant or a pending request first refers to them, per database
+(`kpa ssh pending` and `kpa ssh grants` show the number as SESSION). The
+number is made up by kpa and never derived from the session identifier, which
+is never shown, and it is no part of what an approval covers. kpa forgets a
+session's number once no grant and no pending request refers to it, which
+bounds the numbering by what they hold; a session that comes back after that
+gets a new number, and a number is never used twice in an unlock. Nothing
+tells kpa a session has ended, so an approval stays until the database locks
+(§ 6.8, "Listing what is approved", shows when it last covered a signature).
+
 Only one prompt is on screen at a time: unlock and confirm prompts share a
 queue.
 
@@ -551,7 +563,8 @@ refused:
       "title": "GitHub", "attachment": "id_ed25519"
     },
     "destination": "SHA256:…",
-    "forwarding_host": "SHA256:…"
+    "forwarding_host": "SHA256:…",
+    "forwarding_session": 2
   },
   "remember": true,
   "request": { "purpose": "login", "user": "git", "class": "forwarded", "command": "ssh" }
@@ -561,9 +574,10 @@ refused:
 `scope.key` is the object `ssh_keys` reports for a key, with the key's
 `name` (its override's, else its entry's title) and its entry's `entry`
 uuid. `destination` is there for a bound connection only, and
-`forwarding_host`, the forwarding host's host key, for a forwarded one
-(`kpa ssh pending` shows it as FORWARDING HOST; the forwarding session
-identifier itself is never shown). `request.user`
+`forwarding_host`, the forwarding host's host key, and
+`forwarding_session`, the number of its forwarding session (§ 6.7), for a
+forwarded one (`kpa ssh pending` shows them as FORWARDING HOST and SESSION; the
+forwarding session identifier itself is never shown). `request.user`
 for a login and `request.namespace` for an `SSHSIG`. Titles, names, users
 and command names reach the caller of this request, and never the
 daemon's log.
@@ -624,8 +638,8 @@ uid (NG-1). Each grant, oldest first within its database, is:
 
 - `granted_at`, in Unix seconds, from which a client works out the age;
 - `scope`: the `scope` `ssh_pending` shows, with the key, the
-  destination of a bound connection and the forwarding host of a forwarded
-  one;
+  destination of a bound connection, and the forwarding host and the
+  forwarding session number of a forwarded one;
 - `remember`: `true` for an approval kept until lock, `false` for one that
   covers a single signature, which also has `expires_in`, the seconds its
   retry window still has;
@@ -635,24 +649,34 @@ uid (NG-1). Each grant, oldest first within its database, is:
   made. The signature the user allowed on screen counts as the first. A
   one-signature approval is gone with its signature, so it always lists
   `0`;
+- `last_used_at`, in Unix seconds, when it last covered a signature, absent
+  if it never has. A one-signature approval never has one. A user who sees a
+  forwarding session's approval go unused knows the session is over, which
+  kpa itself cannot see;
 - `idle_lock_in`, the seconds before its database locks for being idle, if
   nothing uses it. A forwarded signature never counts as use (§ 6.9).
 
 ```json
 {
   "granted_at": 1700000000,
-  "scope": { "key": { "db": "personal", "…": "…" }, "destination": "SHA256:…" },
+  "scope": {
+    "key": { "db": "personal", "…": "…" },
+    "destination": "SHA256:…",
+    "forwarding_host": "SHA256:…",
+    "forwarding_session": 2
+  },
   "remember": true,
   "by": "on_screen",
   "uses": 3,
+  "last_used_at": 1700000060,
   "idle_lock_in": 1740
 }
 ```
 
-The table's columns are KEY, DATABASE, DESTINATION, FORWARDING HOST, LASTS
-(`until lock`, or `1 signature, 42s left`), AGE, GRANTED BY (`screen` or
-`cli`), USES and IDLE LOCK. A locked database lists nothing,
-since a lock drops its approvals. There is no way to revoke one: `kpa lock
+The table's columns are KEY, DATABASE, DESTINATION, FORWARDING HOST, SESSION,
+LASTS (`until lock`, or `1 signature, 42s left`), AGE, GRANTED BY (`screen`
+or `cli`), USES, LAST USED (an age, `-` if never) and IDLE LOCK. A locked
+database lists nothing, since a lock drops its approvals. There is no way to revoke one: `kpa lock
 <database>` drops a database's.
 
 ### 6.9 Lock and idle

@@ -260,7 +260,7 @@ impl Api {
             .map(|pending| WirePending {
                 id: pending.id,
                 refused_at: unix_seconds(pending.refused_at),
-                scope: wire_scope(&pending.approval.scope),
+                scope: wire_scope(&pending.approval.scope, pending.forwarding_session),
                 remember: pending.approval.remember,
                 request: WireRequestDetails {
                     purpose: pending.request.purpose.to_string(),
@@ -290,11 +290,12 @@ impl Api {
                 let expires_in = grant.time_left(now).map(|left| left.as_secs());
                 grants.push(WireGrant {
                     granted_at: unix_seconds(grant.granted_at),
-                    scope: wire_scope(&grant.scope),
+                    scope: wire_scope(&grant.scope, grant.forwarding_session),
                     remember: grant.lasts == Lasts::UntilLock,
                     expires_in,
                     by: by.to_string(),
                     uses: grant.uses,
+                    last_used_at: grant.last_used_at.map(unix_seconds),
                     idle_lock_in,
                 });
             }
@@ -327,7 +328,7 @@ impl Api {
 
 /// What an approval covers, as the wire shows it: the key it is for, and
 /// where the signature goes.
-fn wire_scope(scope: &Scope) -> WireScope {
+fn wire_scope(scope: &Scope, forwarding_session: Option<u32>) -> WireScope {
     let key = scope.key().clone();
     WireScope {
         key: WireSshKey {
@@ -341,6 +342,7 @@ fn wire_scope(scope: &Scope) -> WireScope {
         },
         destination: scope.destination(),
         forwarding_host: scope.forwarding_host(),
+        forwarding_session,
     }
 }
 

@@ -20,12 +20,15 @@ const MAX_PENDING: usize = 16;
 pub struct PendingRequests(Vec<PendingRequest>);
 
 impl PendingRequests {
-    /// Records that `request` was refused for want of `approval`. A request identical to a pending one is merged into it, which
-    /// keeps it and its id another [`PENDING_TTL`]. Past [`MAX_PENDING`] the
-    /// oldest goes.
+    /// Records that `request` was refused for want of `approval`, which
+    /// belongs to forwarding session number `forwarding_session`, if it is
+    /// forwarded. A request identical to a pending one is merged into it,
+    /// which keeps it and its id another [`PENDING_TTL`]. Past
+    /// [`MAX_PENDING`] the oldest goes.
     pub fn record(
         &mut self,
         approval: SignatureApproval,
+        forwarding_session: Option<u32>,
         request: RequestDetails,
         now: SystemTime,
     ) {
@@ -44,9 +47,17 @@ impl PendingRequests {
         self.0.push(PendingRequest {
             id,
             approval,
+            forwarding_session,
             request,
             refused_at: now,
         });
+    }
+
+    /// The forwarding sessions the requests kept refer to.
+    pub fn sessions(&self) -> impl Iterator<Item = u32> {
+        self.0
+            .iter()
+            .filter_map(|pending| pending.forwarding_session)
     }
 
     /// The requests still pending at `now`, oldest first.
@@ -81,15 +92,17 @@ mod tests {
     fn identical_requests_merge_keeping_the_id_and_the_latest_time() {
         let mut pending = PendingRequests::default();
         let t0 = SystemTime::now();
-        pending.record(approval(1, None, true), requested("ssh"), t0);
+        pending.record(approval(1, None, true), None, requested("ssh"), t0);
         let id = pending.list(t0).next().expect("pending").id;
         pending.record(
             approval(1, None, true),
+            None,
             requested("ssh"),
             t0 + Duration::from_secs(200),
         );
         pending.record(
             approval(1, None, true),
+            None,
             requested("git"),
             t0 + Duration::from_secs(200),
         );
@@ -108,7 +121,7 @@ mod tests {
     fn a_request_is_kept_for_five_minutes() {
         let mut pending = PendingRequests::default();
         let t0 = SystemTime::now();
-        pending.record(approval(1, None, true), requested("ssh"), t0);
+        pending.record(approval(1, None, true), None, requested("ssh"), t0);
         let id = pending.list(t0).next().expect("pending").id;
 
         assert_eq!(
@@ -126,7 +139,12 @@ mod tests {
         let mut pending = PendingRequests::default();
         let t0 = SystemTime::now();
         for command in 0..=MAX_PENDING {
-            pending.record(approval(1, None, true), requested(&command.to_string()), t0);
+            pending.record(
+                approval(1, None, true),
+                None,
+                requested(&command.to_string()),
+                t0,
+            );
         }
 
         let commands: Vec<_> = pending
@@ -145,9 +163,9 @@ mod tests {
     fn taking_an_id_removes_its_scopes_requests_and_returns_the_recorded_ask() {
         let mut pending = PendingRequests::default();
         let now = SystemTime::now();
-        pending.record(approval(1, None, false), requested("ssh"), now);
-        pending.record(approval(1, None, false), requested("git"), now);
-        pending.record(approval(2, None, true), requested("ssh"), now);
+        pending.record(approval(1, None, false), None, requested("ssh"), now);
+        pending.record(approval(1, None, false), None, requested("git"), now);
+        pending.record(approval(2, None, true), None, requested("ssh"), now);
         let ids: Vec<_> = pending.list(now).map(|listed| listed.id).collect();
 
         assert_eq!(pending.take(Uuid::new_v4(), now), None);
