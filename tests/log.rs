@@ -79,6 +79,35 @@ fn the_log_never_carries_vault_contents_or_the_password() {
     }
 }
 
+/// A lock the freshness guard makes is logged with its reason, as every lock
+/// is (`docs/design.md` § Logging).
+#[test]
+fn a_changed_file_is_logged_as_the_reason_for_a_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let copy = dir.path().join("personal.kdbx");
+    std::fs::copy(common::password_db(), &copy).expect("copy the fixture");
+    let daemon = InProcessDaemon::start(&config_toml(
+        &format!("printf %s '{}'", common::PASSWORD),
+        &copy.display().to_string(),
+    ));
+    // The whole run is under the capture: stderr is process-wide, and the
+    // other tests read it.
+    let log = capture_stderr(|| {
+        assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&copy)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, b"x"))
+            .expect("append to the copy");
+        assert_eq!(daemon.run(&["list"])["ok"], false);
+    });
+
+    assert!(
+        log.contains(" INFO  locked \"personal\" (file changed)"),
+        "{log}"
+    );
+}
+
 /// `docs/threat-model.md` T-4: "the prompt gets its own stderr, never the
 /// daemon's." A prompt script writing to its own stderr must not have that
 /// output land in the daemon's log, unescaped and without a level or

@@ -1,13 +1,15 @@
 //! The core alone: the state machine, with in-memory databases and observers
 //! that record what they are told.
 
+use std::ffi::OsStr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use super::testing::{PASSWORD, TestEntry, build};
-use super::vault::Fingerprint;
+use super::vault::{self, Fingerprint};
 use super::{
     Begin, BeginError, Databases, Observer, OpenError, UnknownDb, UnlockFailure, Unlocking,
     VaultError,
@@ -466,4 +468,220 @@ fn a_written_database_is_read_by_finish_like_any_file() {
         Err(UnlockFailure::LockedMeanwhile)
     ));
     assert!(!is_unlocked(&databases, "work"));
+}
+
+/// A `stat` that blocks until it is released, for the files `blocks` names,
+/// and the handles to watch and release it. A `stat` that is let through
+/// answers as the real one does.
+struct Stall {
+    /// A message for each `stat` that has begun.
+    entered: mpsc::Receiver<()>,
+    /// How many have begun.
+    calls: Arc<AtomicUsize>,
+    /// Dropping it releases every blocked `stat`, now and later.
+    release: mpsc::Sender<()>,
+}
+
+impl Stall {
+    fn wait_until_entered(&self) {
+        self.entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the check never began its stat");
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+/// What a check is given to `stat` with, and the handles to it.
+type StallingStat = Box<dyn Fn(&Path, &Fingerprint) -> bool + Send + Sync>;
+
+fn stalling(blocks: impl Fn(&Path) -> bool + Send + Sync + 'static) -> (StallingStat, Stall) {
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let stat = move |path: &Path, stamp: &Fingerprint| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        if blocks(path) {
+            let _ = entered_tx.send(());
+            // An error is the sender dropping: the release.
+            let _ = released.lock().unwrap().recv();
+        }
+        vault::is_unchanged(path, stamp)
+    };
+    (
+        Box::new(stat),
+        Stall {
+            entered,
+            calls,
+            release,
+        },
+    )
+}
+
+/// `f`'s result, failing rather than hanging if it doesn't come.
+fn promptly<R: Send + 'static>(what: &str, f: impl FnOnce() -> R + Send + 'static) -> R {
+    let (done, finished) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(f());
+    });
+    finished
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| panic!("{what} is blocked behind the stat"))
+}
+
+/// What the freshness check made of `work`, as `open` would see it: it found
+/// it stale, or locked, or fresh.
+fn checked(databases: &Databases, stat: StallingStat, deadline: Duration) -> &'static str {
+    let (slots, stale) = databases.checked_slots_with(0, stat, deadline);
+    match (stale, slots[0].loaded.is_some()) {
+        (Some(_), _) => "stale",
+        (None, false) => "locked",
+        (None, true) => "fresh",
+    }
+}
+
+/// The two checks, each as a call that says what it came to.
+type Check = fn(&Databases, StallingStat, Duration) -> &'static str;
+
+fn checks() -> [(&'static str, Check); 2] {
+    [
+        ("checked_slots", checked),
+        ("drop_stale", |databases, stat, deadline| {
+            databases.drop_stale_with(["work"], stat, deadline);
+            "done"
+        }),
+    ]
+}
+
+/// A stalled `stat` holds nothing the locks and reads need: while a check
+/// waits for it, `lock_all`, `lock`, `snapshot`, `any_unlocked` and
+/// `expire_idle` return, and the check that was waiting finds the database
+/// locked.
+#[test]
+fn a_stalled_stat_does_not_hold_up_the_locks() {
+    for (name, check) in checks() {
+        let databases = Arc::new(databases(&["work"]));
+        let (stat, stall) = stalling(|_| true);
+        databases.install_for_test("work", vec![]);
+        let checking = {
+            let databases = Arc::clone(&databases);
+            std::thread::spawn(move || check(&databases, stat, Duration::from_secs(60)))
+        };
+        stall.wait_until_entered();
+
+        let d = Arc::clone(&databases);
+        assert_eq!(
+            promptly("snapshot", move || d.snapshot()[0].entries),
+            Some(0),
+            "{name}"
+        );
+        let d = Arc::clone(&databases);
+        assert!(promptly("any_unlocked", move || d.any_unlocked()), "{name}");
+        let d = Arc::clone(&databases);
+        promptly("expire_idle", move || d.expire_idle(Instant::now()));
+        let d = Arc::clone(&databases);
+        promptly("lock_all", move || d.lock_all());
+        let d = Arc::clone(&databases);
+        promptly("lock", move || d.lock("work").unwrap());
+        assert!(!is_unlocked(&databases, "work"), "{name}");
+
+        drop(stall.release);
+        let came_to = checking.join().expect("the check");
+        let expected = if name == "drop_stale" {
+            "done"
+        } else {
+            "locked"
+        };
+        assert_eq!(came_to, expected, "{name}");
+        assert!(!is_unlocked(&databases, "work"), "{name}");
+    }
+}
+
+/// A file that doesn't answer within the deadline reads as changed: the
+/// database is locked, and it is not `stat`ed again while it stays locked.
+#[test]
+fn a_stat_that_does_not_answer_in_time_locks_the_database() {
+    let databases = databases(&["work"]);
+    let (stat, stall) = stalling(|_| true);
+    databases.install_for_test("work", vec![]);
+
+    let came_to = checked(&databases, stat, Duration::from_millis(100));
+
+    assert_eq!(came_to, "stale");
+    assert!(!is_unlocked(&databases, "work"));
+    let (stat, second) = stalling(|_| true);
+    assert_eq!(
+        checked(&databases, stat, Duration::from_millis(100)),
+        "locked"
+    );
+    assert_eq!(stall.calls(), 1);
+    assert_eq!(second.calls(), 0, "a locked database is not stat'ed");
+}
+
+/// `drop_stale` locks a file that doesn't answer in time and tells the
+/// observers, once.
+#[test]
+fn drop_stale_locks_a_file_that_does_not_answer_in_time() {
+    let (databases, _, log) = observed(&["work"]);
+    let (stat, _stall) = stalling(|_| true);
+    databases.install_for_test("work", vec![]);
+
+    databases.drop_stale_with(["work", "work"], stat, Duration::from_millis(100));
+
+    assert!(!is_unlocked(&databases, "work"));
+    let told: Vec<_> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.contains(":locked:"))
+        .cloned()
+        .collect();
+    assert_eq!(told, ["a:locked:work:locked"]);
+}
+
+/// A verdict about an unlock that a lock has since ended is moot, even a
+/// "changed" one: the fresh unlock that follows is not locked by it, and is
+/// checked in its turn.
+#[test]
+fn a_lock_and_a_fresh_unlock_during_the_stat_make_the_check_look_again() {
+    let databases = Arc::new(databases(&["work"]));
+    let (stat, stall) = stalling(|_| true);
+    databases.install_for_test("work", vec![]);
+    let checking = {
+        let databases = Arc::clone(&databases);
+        std::thread::spawn(move || checked(&databases, stat, Duration::from_secs(60)))
+    };
+    stall.wait_until_entered();
+
+    // The file changes, and the user locks and unlocks it again.
+    databases.change_file_for_test("work");
+    databases.lock("work").unwrap();
+    databases.install_for_test("work", vec![]);
+    let calls = Arc::clone(&stall.calls);
+    drop(stall.release);
+
+    assert_eq!(checking.join().expect("the check"), "fresh");
+    assert!(
+        is_unlocked(&databases, "work"),
+        "the fresh unlock was left alone"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// A hung mount reads as changed for its own databases only.
+#[test]
+fn a_stalled_stat_of_one_database_leaves_the_others_alone() {
+    let databases = databases(&["work", "home"]);
+    let (stat, _stall) = stalling(|path| path.file_stem() == Some(OsStr::new("work")));
+    databases.install_for_test("work", vec![]);
+    databases.install_for_test("home", vec![]);
+
+    databases.drop_stale_with(["work", "home"], stat, Duration::from_millis(200));
+
+    assert!(!is_unlocked(&databases, "work"));
+    assert!(is_unlocked(&databases, "home"));
 }

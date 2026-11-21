@@ -9,7 +9,8 @@ use keepass::DatabaseKey;
 use keepass::config::KdfConfig;
 use keepass::db::{Value, fields};
 
-use super::{Databases, Slot, vault};
+use super::vault;
+use super::{Databases, Slot};
 use crate::config::DatabaseConfig;
 
 /// The password of the databases [`Databases::write_for_test`] writes.
