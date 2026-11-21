@@ -63,8 +63,8 @@ pub fn render(answer: &Grants, now: SystemTime) -> String {
         ]);
     }
     format!(
-        "{}\n`kpa lock <database>` drops a database's approvals. A database nothing uses locks \
-         at its idle time.\n",
+        "{}\n`kpa lock <database>` drops a database's approvals. IDLE LOCK is when \
+         the database locks if nothing uses it.\n",
         table.render()
     )
 }
@@ -146,7 +146,7 @@ KEY         DATABASE  DESTINATION                                         FORWAR
 github      personal  {DESTINATION}  -                                                   until lock             1m   screen           3     in 29m
 deploy-key  personal  -                                                   {KEY}  1 signature, 42s left  4s   kpa ssh approve  0     in 29m
 
-`kpa lock <database>` drops a database's approvals. A database nothing uses locks at its idle time.
+`kpa lock <database>` drops a database's approvals. IDLE LOCK is when the database locks if nothing uses it.
 "
             )
         );

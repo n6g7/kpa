@@ -632,7 +632,7 @@ uid (NG-1). Each grant, oldest first within its database, is:
 - `by`: `on_screen` for an `Allow` on the confirm prompt, `ssh_approve` for
   `kpa ssh approve`;
 - `uses`, the signatures it has covered. A signature counts once it is
-  made. The one `Allow` on screen approved counts as the first. A
+  made. The signature the user allowed on screen counts as the first. A
   one-signature approval is gone with its signature, so it always lists
   `0`;
 - `idle_lock_in`, the seconds before its database locks for being idle, if
