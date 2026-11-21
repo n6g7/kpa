@@ -269,6 +269,7 @@ impl Api {
                         attachment: pending.key.attachment.unwrap_or_default(),
                     },
                     destination: pending.approval.scope.destination(),
+                    forwarding_host: pending.approval.scope.forwarding_host(),
                 },
                 remember: pending.approval.remember,
                 request: WireRequestDetails {

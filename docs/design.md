@@ -382,7 +382,8 @@ of kpa.
 kind, and for a copy the field name and the entry's title (so the log says which
 secret left). For a signature: the key's fingerprint and the `name` its
 `[[database.ssh_key]]` override gives it, never the entry's title; its purpose,
-connection class and destination fingerprint; and the outcome. Never passwords,
+connection class, destination fingerprint and, on a forwarded connection,
+forwarding host's fingerprint; and the outcome. Never passwords,
 protected fields (a protected title is replaced by the entry's uuid), usernames,
 URLs or any other vault content, at any level: a log outlives the unlocked
 session and ends up somewhere far less guarded than the socket (threat model

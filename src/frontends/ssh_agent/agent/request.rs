@@ -49,7 +49,17 @@ impl<'a> Request<'a> {
     pub(super) fn destination(&self) -> Option<&KeyData> {
         match self.class {
             ConnectionClass::LocalBound { dest } => Some(dest),
-            _ => None,
+            ConnectionClass::Forwarded { dest, .. } => dest.as_ref(),
+            ConnectionClass::LocalUnbound => None,
+        }
+    }
+
+    /// The host the local `ssh` forwarded the agent to, on a forwarded
+    /// connection.
+    pub(super) fn forwarding_host(&self) -> Option<&KeyData> {
+        match self.class {
+            ConnectionClass::Forwarded { host, .. } => Some(host),
+            ConnectionClass::LocalUnbound | ConnectionClass::LocalBound { .. } => None,
         }
     }
 
@@ -101,7 +111,8 @@ pub(super) fn log_sign(
 /// The log line for one `SIGN_REQUEST`: the key by fingerprint, and by
 /// `name` if its database's config names it (already escaped); its
 /// database; its purpose; the connection's class; the destination's
-/// fingerprint if the connection is bound to one; and what happened. Never
+/// fingerprint if the connection is bound to one; the forwarding host's
+/// fingerprint if the connection is forwarded; and what happened. Never
 /// the entry's title, which is vault content (G-4).
 pub(super) fn sign_line(
     db: &str,
@@ -121,8 +132,12 @@ pub(super) fn sign_line(
         .destination()
         .map(|dest| format!(", dest {}", dest.fingerprint(HashAlg::Sha256)))
         .unwrap_or_default();
+    let forwarding = request
+        .forwarding_host()
+        .map(|host| format!(", via {}", host.fingerprint(HashAlg::Sha256)))
+        .unwrap_or_default();
     format!(
-        "ssh sign {outcome}: key {}{name} in {db:?} ({purpose}, {class}{destination})",
+        "ssh sign {outcome}: key {}{name} in {db:?} ({purpose}, {class}{destination}{forwarding})",
         request.fingerprint,
     )
 }

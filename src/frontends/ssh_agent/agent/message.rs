@@ -15,31 +15,51 @@ use crate::ssh::keys::ServedKey;
 /// The most bytes (escaped) each piece of a message may take. The message
 /// is one line the prompt caps at 256 bytes, and the destination comes last,
 /// so every variable piece is cut well short of that: the worst message,
-/// an unlock prompt for an `SSHSIG` on a host `known_hosts` doesn't name,
-/// is 237 bytes (`the_worst_message_fits_the_prompt_cap`), and the
-/// destination is always whole.
-const MAX_DATABASE_LEN: usize = 24;
-const MAX_KEY_NAME_LEN: usize = 64;
+/// an unlock prompt for a login forwarded through a host `known_hosts`
+/// doesn't name to one it doesn't name either, is 251 bytes
+/// (`the_worst_message_fits_the_prompt_cap`), and the destination is always
+/// whole.
+const MAX_DATABASE_LEN: usize = 16;
+const MAX_KEY_NAME_LEN: usize = 40;
 /// The login user or `SSHSIG` namespace, from the request.
-const MAX_REQUESTED_LEN: usize = 32;
+const MAX_REQUESTED_LEN: usize = 24;
 /// A host name from `known_hosts`.
-const MAX_HOST_NAME_LEN: usize = 56;
+const MAX_HOST_NAME_LEN: usize = 48;
+
+/// A host a message names: its host key, and the name `known_hosts` gives
+/// it, if it has one.
+pub(super) struct Host<'a> {
+    pub(super) key: &'a KeyData,
+    pub(super) name: Option<String>,
+}
+
+impl Host<'_> {
+    /// The host's name, escaped and cut, else its host key's fingerprint.
+    fn shown(&self) -> String {
+        match &self.name {
+            Some(name) => escape_one_line(name, MAX_HOST_NAME_LEN),
+            None => format!("host key {}", self.key.fingerprint(HashAlg::Sha256)),
+        }
+    }
+}
 
 /// The confirm prompt's message, a question the user answers yes or no to:
 /// "Approve use of key "github" to log in to git@github.com?". The key is
 /// shown by its name, quoted. What follows says what it is for and, for a
-/// connection bound to a destination, where: the host name `known_hosts`
-/// gives its host key if it has one, else the host key's fingerprint. Every
-/// piece that comes from outside kpa's own text is escaped and cut to its
-/// own budget, so none can hide the destination.
+/// connection bound to a `destination`, where: the host name `known_hosts`
+/// gives its host key if it has one, else the host key's fingerprint. A
+/// forwarded connection says which host it comes through too: "Approve use
+/// of key "github" on build-box to log in to git@github.com?". Every piece
+/// that comes from outside kpa's own text is escaped and cut to its own
+/// budget, so none can hide the destination.
 pub(super) fn approval(
     served: &ServedKey,
     purpose: &Purpose,
-    destination: Option<&KeyData>,
-    known_hosts_name: Option<&str>,
+    destination: Option<&Host<'_>>,
+    forwarding: Option<&Host<'_>>,
 ) -> String {
     let lead = format!("Approve use of {}", key(served));
-    question(&lead, purpose, destination, known_hosts_name)
+    question(&lead, purpose, destination, forwarding)
 }
 
 /// The unlock prompt's message, a question about unlocking that says what
@@ -48,15 +68,15 @@ pub(super) fn approval(
 pub(super) fn unlock(
     served: &ServedKey,
     purpose: &Purpose,
-    destination: Option<&KeyData>,
-    known_hosts_name: Option<&str>,
+    destination: Option<&Host<'_>>,
+    forwarding: Option<&Host<'_>>,
 ) -> String {
     let lead = format!(
         "Unlock database {} to use {}",
         escape_one_line(&served.database, MAX_DATABASE_LEN),
         key(served)
     );
-    question(&lead, purpose, destination, known_hosts_name)
+    question(&lead, purpose, destination, forwarding)
 }
 
 /// `key "github"`, the key's name quoted.
@@ -64,24 +84,21 @@ fn key(served: &ServedKey) -> String {
     format!("key \"{}\"", quoted(&served.name))
 }
 
-/// `lead`, then what the key is for and where, as a question.
+/// `lead`, then which host the request is forwarded through, then what the
+/// key is for and where, as a question.
 fn question(
     lead: &str,
     purpose: &Purpose,
-    destination: Option<&KeyData>,
-    known_hosts_name: Option<&str>,
+    destination: Option<&Host<'_>>,
+    forwarding: Option<&Host<'_>>,
 ) -> String {
-    let name = known_hosts_name.map(|name| escape_one_line(name, MAX_HOST_NAME_LEN));
-    let host = |dest: &KeyData| match &name {
-        Some(name) => name.clone(),
-        None => format!("host key {}", dest.fingerprint(HashAlg::Sha256)),
-    };
+    let through = on(forwarding);
     let what = match (purpose, destination) {
         (Purpose::Login(login), Some(dest)) => {
             let user = escape_one_line(&login.user, MAX_REQUESTED_LEN);
-            match &name {
-                Some(name) => format!(" to log in to {user}@{name}"),
-                None => format!(" to log in as {user} to {}", host(dest)),
+            match &dest.name {
+                Some(_) => format!(" to log in to {user}@{}", dest.shown()),
+                None => format!(" to log in as {user} to {}", dest.shown()),
             }
         }
         (Purpose::Login(login), None) => {
@@ -93,16 +110,17 @@ fn question(
         (Purpose::SshSig { namespace }, destination) => format!(
             " to sign for namespace {}{}",
             escape_one_line(namespace, MAX_REQUESTED_LEN),
-            on(destination.map(host))
+            on(destination)
         ),
-        (Purpose::Other, destination) => on(destination.map(host)),
+        (Purpose::Other, destination) => on(destination),
     };
-    format!("{lead}{what}?")
+    format!("{lead}{through}{what}?")
 }
 
-/// " on <host>" for a destination, nothing without one.
-fn on(host: Option<String>) -> String {
-    host.map(|host| format!(" on {host}")).unwrap_or_default()
+/// " on <host>" for a host, nothing without one.
+fn on(host: Option<&Host<'_>>) -> String {
+    host.map(|host| format!(" on {}", host.shown()))
+        .unwrap_or_default()
 }
 
 /// A key's name for the message: escaped, cut, and with its quotes
@@ -176,12 +194,67 @@ mod tests {
         dest().fingerprint(HashAlg::Sha256).to_string()
     }
 
+    fn via() -> KeyData {
+        test_key(3).public_key().key_data().clone()
+    }
+
+    fn via_fingerprint() -> String {
+        via().fingerprint(HashAlg::Sha256).to_string()
+    }
+
+    fn host<'a>(key: Option<&'a KeyData>, name: Option<&str>) -> Option<Host<'a>> {
+        key.map(|key| Host {
+            key,
+            name: name.map(str::to_string),
+        })
+    }
+
     fn approved(purpose: &Purpose, dest: Option<&KeyData>, name: Option<&str>) -> String {
-        approval(&served("github"), purpose, dest, name)
+        approval(&served("github"), purpose, host(dest, name).as_ref(), None)
     }
 
     fn unlocked(purpose: &Purpose, dest: Option<&KeyData>, name: Option<&str>) -> String {
-        unlock(&served("github"), purpose, dest, name)
+        unlock(&served("github"), purpose, host(dest, name).as_ref(), None)
+    }
+
+    /// The same questions for a login forwarded through `via`, named
+    /// `via_name`, to `dest`, named `dest_name`.
+    fn forwarded(
+        message: fn(&ServedKey, &Purpose, Option<&Host<'_>>, Option<&Host<'_>>) -> String,
+        via_name: Option<&str>,
+        dest_name: Option<&str>,
+    ) -> String {
+        let (dest, via) = (dest(), via());
+        message(
+            &served("github"),
+            &login("git"),
+            host(Some(&dest), dest_name).as_ref(),
+            host(Some(&via), via_name).as_ref(),
+        )
+    }
+
+    /// A forwarded login says which host it comes through, and where it
+    /// goes.
+    #[test]
+    fn a_forwarded_login_names_the_forwarding_host_and_the_destination() {
+        let (fingerprint, via) = (fingerprint(), via_fingerprint());
+
+        assert_eq!(
+            forwarded(approval, Some("build-box"), Some("github.com")),
+            "Approve use of key \"github\" on build-box to log in to git@github.com?"
+        );
+        assert_eq!(
+            forwarded(unlock, Some("build-box"), Some("github.com")),
+            "Unlock database personal to use key \"github\" on build-box \
+             to log in to git@github.com?"
+        );
+        assert_eq!(
+            forwarded(approval, None, None),
+            format!(
+                "Approve use of key \"github\" on host key {via} \
+                 to log in as git to host key {fingerprint}?"
+            )
+        );
     }
 
     /// Every purpose and destination, as an approval question.
@@ -259,24 +332,38 @@ mod tests {
         let long = "w".repeat(1000);
         let mut key = served(&long);
         key.database = long.clone();
-        let purposes = [login(&long), sshsig(&long), Purpose::Other];
+        let via = via();
         let mut longest = 0;
 
         for message in [approval, unlock] {
-            for purpose in &purposes {
+            // Only a login is forwarded.
+            for (purpose, forwarded) in [
+                (login(&long), true),
+                (login(&long), false),
+                (sshsig(&long), false),
+                (Purpose::Other, false),
+            ] {
                 for name in [None, Some(long.as_str())] {
-                    let text = message(&key, purpose, Some(&dest), name);
-                    assert!(text.len() <= 256, "{} bytes: {text}", text.len());
-                    longest = longest.max(text.len());
-                    let end = match name {
-                        Some(_) => format!("{}?", "w".repeat(MAX_HOST_NAME_LEN)),
-                        None => format!("host key {fingerprint}?"),
-                    };
-                    assert!(text.ends_with(&end), "{text}");
+                    for via_name in [None, Some(long.as_str())] {
+                        let via = host(Some(&via), via_name).filter(|_| forwarded);
+                        let text = message(
+                            &key,
+                            &purpose,
+                            host(Some(&dest), name).as_ref(),
+                            via.as_ref(),
+                        );
+                        assert!(text.len() <= 256, "{} bytes: {text}", text.len());
+                        longest = longest.max(text.len());
+                        let end = match name {
+                            Some(_) => format!("{}?", "w".repeat(MAX_HOST_NAME_LEN)),
+                            None => format!("host key {fingerprint}?"),
+                        };
+                        assert!(text.ends_with(&end), "{text}");
+                    }
                 }
             }
         }
-        assert_eq!(longest, 237);
+        assert_eq!(longest, 251);
     }
 
     /// A key name can't close its quotes and carry on the sentence, nor
@@ -284,14 +371,14 @@ mod tests {
     #[test]
     fn a_hostile_key_name_stays_inside_its_quotes() {
         let message = approval(
-            &served("x\" to log in to root@bank.example\n\u{202e}"),
+            &served("x\" to log in as root\n\u{202e}"),
             &Purpose::Other,
             None,
             None,
         );
         assert_eq!(
             message,
-            "Approve use of key \"x\\\" to log in to root@bank.example\\u000a\\u202e\"?"
+            "Approve use of key \"x\\\" to log in as root\\u000a\\u202e\"?"
         );
     }
 
