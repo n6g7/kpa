@@ -40,3 +40,14 @@ subsystem or a dependency between two.
   that calls it.
 - One responsibility per file, and a directory once it has parts.
 - Apply this to the code your task touches, as above.
+
+## `docs/` holds reference docs
+
+Each doc in `docs/` describes how kpa works and why, in the present tense.
+
+- No recommendations, proposals, options left to choose between, or open
+  questions. Work still to do, and ideas kpa might take up, go in
+  `TODO.md`.
+- An alternative kpa turned down may stay, as the reason for what it does.
+- Where a doc describes a design that isn't built yet, it says so plainly
+  at that spot.

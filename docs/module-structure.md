@@ -82,7 +82,7 @@ are the dependency graph; there is no arrow between two front ends.
 
 Apply these to code a task already touches, like the
 [portability rules](./portability.md). Don't restructure other code only
-to follow them. The graph above has no cycles today.
+to follow them. The graph above has no cycles.
 
 ## Layout
 

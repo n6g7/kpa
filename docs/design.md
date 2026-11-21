@@ -18,22 +18,21 @@ the doc or the module that owns it:
 | [`portability.md`](./portability.md) | the OS seams, and the rules for keeping them replaceable |
 | [`config.example.toml`](../config.example.toml) | every config key |
 
-The research this rests on is [`background.md`](./background.md).
-
 ## Scope
 
 **Is:** a read-only index and secret-copier for `.kdbx` files, an SSH agent
 that signs with the keys stored in them, and a tray icon showing lock state.
 
-**Is not:** a vault editor, a Secret Service provider, a browser backend, or a
-replacement for a full-featured KeePass client, which already covers browser
+**Is not:** a vault editor, a Secret Service provider (an unlocked Secret
+Service collection takes new items from any app, ungated), a browser backend,
+or a replacement for a full-featured KeePass client, which already covers browser
 autofill and its own tray. kpa adds free-text search over all entries, a CLI
 that reuses an already-unlocked session, and an SSH agent that serves the keys
 straight from the daemon instead of pushing them into a separate agent.
 
 **Read-only is the defining property.** It is what makes this design safe to
 run alongside any KeePass client that already has write access to the same
-files (see `background.md` § Direction). The guarantee is structural: the
+files. The guarantee is structural: the
 protocol's op enum (`Op`, in `src/frontends/control/proto/request.rs`) has no
 write variants, the agent's wire layer answers every message that adds,
 removes, locks or unlocks keys with a failure, and `keepass` is built without
@@ -47,7 +46,7 @@ its `save_kdbx4` feature, so no code path can modify a database.
 | 2   | **JSON over a Unix socket**, serde | Fewest moving parts; hand-debuggable with `socat`; self-describing. Protobuf was considered and is defensible, but costs `protoc`, a second type system, and ~150 LoC of conversion boilerplate for no benefit at this scale. |
 | 3   | **Single binary, two roles** — `kpa serve` + client subcommands | No client/daemon version skew within a release; one build artifact. |
 | 4   | **No `get` — `copy` only** | The daemon owns the clipboard, so the secret never enters the client's address space. `get` would print secrets to stdout, into shell history and scrollback. |
-| 5   | **Keys: master password + keyfile only** | Challenge-response is deferred. |
+| 5   | **Keys: master password + keyfile only** | Challenge-response isn't supported. |
 | 6   | **TOTP via `keepass`'s `totp` feature, read-only** | `copy` generates the current code from the `otp` field at copy time; the seed never leaves the process. HOTP is permanently out — counters need writes. |
 | 7   | **Idle timeout 30 min per database**, config-overridable | logind's `Lock` signal already covers screen-lock; this only catches walking away without locking. |
 | 8   | **Daemon autostarts locked** | A tray should show state from login onward, and nothing prompts until something actually asks. |
@@ -299,8 +298,7 @@ Requests, responses, errors, the field collision rule and version skew are in
 ## Files and freshness
 
 A KeePass client and kpa can both have the file open at once. Clients write
-through a temp file and a rename, and there is no per-database lock file
-(`background.md` § Direction). So:
+through a temp file and a rename, and there is no per-database lock file. So:
 
 1. **Never create a lock file. Never hold an fd.** Open, read the whole file,
    close, parse. (Upstream, a file with pathological KDF parameters can make
@@ -347,7 +345,9 @@ else's clipboard. A lock of the unlock the offer came from ends it earlier.
 ## Secrets
 
 **Boundary: the user account.** Inside it, optimise for blast radius and time,
-not caller identity (`background.md` § "Security boundary"). Held while unlocked:
+not caller identity: anything running as the user can already read the `.kdbx`
+or log keystrokes, so checking which program asks stops nothing that targets
+the user. Held while unlocked:
 the decrypted database, the real exposure, same as any KeePass client. Not held:
 the master password and the keyfile's contents, whose copies kpa makes are
 zeroized after key derivation. The password arrives from the prompt command or a
@@ -423,18 +423,6 @@ resolve against the daemon's working directory.
 `serve` writes one line per event to stderr at `error`, `warn`, `info` (the
 default) or `debug`; `log_level` sets it and `serve --log-level` overrides it.
 `info` carries every unlock, lock and copy, and the tray starting and its host
-coming and going; `warn` failed or refused requests; `debug` why. Under systemd each line carries a `<N>` syslog priority prefix, so
-`journalctl -p warning` filters by level. What a line may contain is under
-§ Secrets.
-
-## Deferred
-
-- YubiKey challenge-response (note for whenever this lands: don't reuse the
-  key's own PIN as a vault credential — it collapses a two-factor property into
-  one)
-- `kpa get` behind an explicit flag
-- `pinentry` as the prompt
-- The legacy KeeOtp `TimeOtp-*` fields: a different, older convention from the
-  de-facto-standard `otp` field, which `keepass`'s `totp` feature does not parse
-
-What comes next is in [`TODO.md`](../TODO.md).
+coming and going; `warn` failed or refused requests; `debug` why. Under systemd
+each line carries a `<N>` syslog priority prefix, so `journalctl -p warning`
+filters by level. What a line may contain is under § Secrets.

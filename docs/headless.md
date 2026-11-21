@@ -14,17 +14,18 @@ terminal unlock in § 4. The claims are
 
 ## 2. Situations
 
-| Requester                                      | `unlock`                                    | `copy`                                                 | `status`, `lock`, `list` |
-| ---------------------------------------------- | ------------------------------------------- | ------------------------------------------------------ | ------------------------ |
-| Desktop, screen unlocked                       | Graphical prompt, as today                  | Clipboard, as today                                    | As today                 |
-| Desktop, screen locked                         | Terminal prompt (§ 4). No prompt behind the locker | Refused, `no_display`                           | As today                 |
-| Outside the desktop, desk screen unlocked      | Terminal prompt                             | Refused, `no_display`                                  | As today                 |
-| Outside the desktop, desk screen locked        | Terminal prompt                             | Refused, `no_display`                                  | As today                 |
-| No display session at all                      | Terminal prompt                             | Refused, `no_display`                                  | As today                 |
-| Outside the desktop, no terminal (a cron job)  | Refused, `no_prompt`                        | Refused, `no_display`                                  | As today                 |
+| Requester                                     | `unlock`                                           | `copy`                   |
+| --------------------------------------------- | -------------------------------------------------- | ------------------------ |
+| Desktop, screen unlocked                      | Prompt on screen                                   | Offered on the clipboard |
+| Desktop, screen locked                        | Terminal prompt (§ 4). No prompt behind the locker | Refused, `no_display`    |
+| Outside the desktop, desk screen unlocked     | Terminal prompt                                    | Refused, `no_display`    |
+| Outside the desktop, desk screen locked       | Terminal prompt                                    | Refused, `no_display`    |
+| No display session at all                     | Terminal prompt                                    | Refused, `no_display`    |
+| Outside the desktop, no terminal (a cron job) | Refused, `no_prompt`                               | Refused, `no_display`    |
 
 "Terminal prompt" means the terminal the request passed. Without one, the
-rows that ask on the terminal answer `no_prompt` too.
+rows that ask on the terminal answer `no_prompt` too. `status`, `lock` and
+`list` answer the same wherever the requester is.
 
 Both operations ask where the user is, from the requester's
 classification. A prompt must appear where someone can answer it, and a
@@ -73,6 +74,9 @@ screen (NG-7), or a terminal prompt it has to answer itself.
   the desktop's cgroup. An unlock from it raises the graphical prompt on
   the desk's screen, which the remote user can't see. The prompt timeout
   (§ 6) bounds that. A `copy` from it lands on the desk's clipboard.
+- **A graphical session that isn't the desk**, such as a remote desktop,
+  counts as outside. logind names one display session per user, and a
+  screen prompt opens with the daemon's own environment, on the desk.
 
 ## 4. Unlocking from a terminal
 
@@ -161,10 +165,11 @@ process can already do (NG-1, NG-7, T-19).
 - the requester is on the desktop (§ 3);
 - the display session is active and its `LockedHint` is false.
 
-Otherwise it fails with `no_display` and the clipboard is left alone. A locker that only sends the `Lock` signal never
-reports the unlock (ASM-7), so kpa can't track its state. With such a
-locker, `copy` behaves as it does today. The `Lock` signal still locks
-every database, so nothing is copied until the next unlock anyway.
+Otherwise it fails with `no_display` and the clipboard is left alone. A
+locker that only sends the `Lock` signal never reports the unlock (ASM-7),
+so kpa can't track its state, and with such a locker only the requester
+decides. The `Lock` signal still locks every database, so nothing is copied
+until the next unlock anyway.
 
 A copy's offer lasts until `clipboard_timeout` or until a lock ends the
 unlock the entry was read from, whichever comes first. A lock of another
@@ -181,8 +186,7 @@ Why:
   requester such as a timer.
 - **The cost falls on a shared terminal server used at the desk**, whose
   shells count as outside (§ 3). `kpa copy` there is refused, and the
-  launcher or a desktop terminal does the job. Open question 1 covers an
-  override.
+  launcher or a desktop terminal does the job.
 
 Remote use of a secret means a vault client on the machine you sit at, over
 the same synced vault. kpa adds no channel for it.
@@ -194,7 +198,7 @@ the same synced vault. kpa adds no channel for it.
 - **OSC 52.** kpa would write the secret to the requester's terminal as an
   `ESC ] 52 ; c ; <base64> BEL` escape sequence, and the terminal you sit at
   would put it on its own clipboard. It works over SSH and through
-  multiplexers that pass the sequence on. It is ruled out for now:
+  multiplexers that pass the sequence on. kpa doesn't use it:
   - It adds a second way out for secrets, which changes G-3 from "only to
     the clipboard".
   - The secret crosses every hop: the remote pty, a multiplexer or terminal
@@ -211,16 +215,12 @@ the same synced vault. kpa adds no channel for it.
     `kpa copy` followed by `wl-paste`, which T-18 already accepts, but it
     makes the scripted read one step shorter.
 
-  A remote session with no local vault client has no way to copy. Any
-  future OSC 52 design would need to be off by default, per entry or per
-  call, require a terminal that supports clearing, and have the threat
-  model name the new channel.
+  A remote session with no local vault client has no way to copy.
 
 ## 6. Prompt safety nets
 
-These matter once some prompts are raised where nobody may be looking.
-
-These hold for a prompt on a terminal as for one on screen (§ 4).
+Some prompts are raised where nobody may be looking, so each of these holds
+for a prompt on a terminal as for one on screen (§ 4).
 
 - **Timeout.** A prompt left unanswered for `prompt_timeout` (default 60 s)
   is ended, and the unlock fails with `prompt_cancelled`. A screen prompt is
@@ -251,7 +251,8 @@ policy talks to logind on the system bus. A machine reached only from outside
 the desktop needs a user manager running before anyone logs in graphically:
 the remote session can open a logind session, or lingering can be enabled.
 
-The lock triggers don't change. What changes is which of them can fire:
+The lock triggers are the same everywhere; what differs is which of them can
+fire:
 
 - **No display session**: the idle timer, suspend, explicit lock, and the
   freshness guard.
@@ -265,21 +266,3 @@ Unlocking from a terminal while the display session is locked is allowed. The us
 typed the master password, the same consent the graphical prompt collects.
 The desk's lock protects the desk, and the desk still gets nothing: `copy`
 stays refused while it is locked (§ 5).
-
-## 8. Open questions
-
-1. **Shared terminal servers.** Should config be able to name a service
-   whose shells count as the desktop? That would bring back the graphical
-   prompt and `copy` for those shells at the desk. The cost: for the same
-   server's remote clients, prompts appear unseen and copies land on the
-   desk's clipboard. The override would name a server that runs as a
-   system service by its unit, and one that registers logind sessions by
-   those sessions' `Service` name.
-2. **Remote display sessions.** The desk is the one session logind names as
-   the user's display, and the prompt starts with the daemon's own
-   environment. A graphical session that isn't the desk, such as a remote
-   desktop, is classified Outside. The prompt for a caller in such a
-   session should open in that caller's session, not on the desk's screen.
-   That needs the caller's session display environment, which logind
-   doesn't expose and which isn't per-session in the user manager. The
-   design for finding it is open.

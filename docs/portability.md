@@ -90,8 +90,8 @@ in `clipboard/wayland/compositor.rs`) stays inside its own module.
 
 ## Known Linux-shaped interfaces
 
-These cross a module boundary with Linux details today. Fix each one when
-work next changes that code:
+These cross a module boundary with Linux details. Fix each one when work
+next changes that code:
 
 - `clipboard::Backend::start` takes a logind session id and returns
   `wayland::Offer`, which `clipboard/mod.rs` re-exports.

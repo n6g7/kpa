@@ -10,9 +10,9 @@ were enumerated per trust boundary with STRIDE. The ID prefixes (`A-`,
 `ACT-`, `TB-`, `ASM-`, `G-`, `T-`, `NG-`) are local to this document — cite
 them in findings. IDs are stable: retire an entry rather than renumber.
 
-Rationale lives in [`background.md`](./background.md); mechanisms live in
-[`design.md`](./design.md). This file states *claims*, not implementation
-status — whether the code meets a claim is exactly what a review checks.
+Mechanisms and their rationale live in [`design.md`](./design.md). This
+file states *claims*, not implementation status — whether the code meets a
+claim is exactly what a review checks.
 
 ## 1. System
 
@@ -380,8 +380,8 @@ exists and isn't known to be locked, G-12), but not read anything.
 
 **T-16 · No trace of reads** (R) — ACT-10 · TB-1 · A-2 → —  
 Unaddressed: a `copy` produces no user-visible notification, so an
-unexpected read goes unnoticed. Not a goal today; the background research
-ranks read notifications as worthwhile. Findings here are hardening.
+unexpected read goes unnoticed. Not a goal; read notifications are in
+`TODO.md`. Findings here are hardening.
 
 **T-17 · Substituted or rolled-back file** (S, T) — ACT-3 · TB-2 · A-2, A-3 → —  
 Unaddressed: whoever can write the path can replace it, while it is
