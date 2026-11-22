@@ -604,7 +604,13 @@ mod tests {
 
         let mut local = SessionBindState::new();
         assert_eq!(
-            local.apply(&certified_bind(&host, &ca, b"session-id", false)),
+            local.apply(&certified_bind(
+                &host,
+                &ca,
+                "build-box",
+                b"session-id",
+                false
+            )),
             BindOutcome::Accepted
         );
         assert_eq!(
@@ -615,10 +621,10 @@ mod tests {
         );
 
         let mut forwarded = SessionBindState::new();
-        let forwarding = certified_bind(&host, &ca, b"first", true);
+        let forwarding = certified_bind(&host, &ca, "build-box", b"first", true);
         assert_eq!(forwarded.apply(&forwarding), BindOutcome::Accepted);
         assert_eq!(
-            forwarded.apply(&certified_bind(&host, &ca, b"second", false)),
+            forwarded.apply(&certified_bind(&host, &ca, "build-box", b"second", false)),
             BindOutcome::Accepted
         );
         assert_eq!(
@@ -637,7 +643,7 @@ mod tests {
     #[test]
     fn a_certificate_whose_certified_key_did_not_sign_is_refused() {
         let (host, other, ca) = (test_key(1), test_key(3), test_key(2));
-        let mut forged = certified_bind(&host, &ca, b"session-id", true);
+        let mut forged = certified_bind(&host, &ca, "build-box", b"session-id", true);
         forged.signature = signed_bind(&other, b"session-id", true).signature;
 
         let mut bindings = SessionBindState::new();
@@ -649,19 +655,19 @@ mod tests {
     }
 
     /// Nothing of the certificate but its key matters: a bind for a key whose
-    /// certificate comes from another CA, with other principals, or is
-    /// expired, is the same host.
+    /// certificate comes from another CA, names another host, or is expired
+    /// (every test certificate's window is over) is the same host.
     #[test]
     fn a_certificates_ca_validity_and_principals_make_no_difference() {
         let host = test_key(1);
-        let binds = |ca: u64| {
+        let binds = |ca: u64, principal: &str| {
             let mut bindings = SessionBindState::new();
-            let msg = certified_bind(&host, &test_key(ca), b"session-id", false);
+            let msg = certified_bind(&host, &test_key(ca), principal, b"session-id", false);
             assert_eq!(bindings.apply(&msg), BindOutcome::Accepted);
             bindings.class()
         };
 
-        assert_eq!(binds(2), binds(4));
+        assert_eq!(binds(2, "build-box"), binds(4, "github.com"));
     }
 
     #[test]

@@ -47,11 +47,13 @@ pub(super) fn signed_bind(
 }
 
 /// A `session-bind@openssh.com` message as a host that presents a certificate
-/// sends it: the host key is a host certificate for `host`, made by `ca`,
-/// and `host` signs the session identifier.
+/// sends it: the host key is a host certificate for `host` and the host name
+/// `principal`, made by `ca` for a window that is over, and `host` signs the
+/// session identifier.
 pub(super) fn certified_bind(
     host: &PrivateKey,
     ca: &PrivateKey,
+    principal: &str,
     session_id: &[u8],
     is_forwarding: bool,
 ) -> SessionBind {
@@ -60,8 +62,8 @@ pub(super) fn certified_bind(
     builder
         .cert_type(CertType::Host)
         .expect("a host certificate")
-        .all_principals_valid()
-        .expect("principals");
+        .valid_principal(principal)
+        .expect("a principal");
     let certificate = builder.sign(ca).expect("the CA signs");
     SessionBind {
         hostkey: certificate.to_bytes().expect("certificate encodes"),
