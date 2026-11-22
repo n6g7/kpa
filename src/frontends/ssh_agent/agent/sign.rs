@@ -166,7 +166,13 @@ impl Agent {
         };
         let db = found.database.as_str();
         let outcome = self.sign_or_refuse(&found, &request, requester);
-        log_sign(db, self.configured_name(db, &request), &request, &outcome);
+        log_sign(
+            db,
+            self.configured_name(db, &request),
+            &request,
+            self.known_hosts.as_deref(),
+            &outcome,
+        );
         match outcome {
             Ok(signature) => AgentResponse::SignResponse(signature),
             Err(_) => AgentResponse::Failure,
@@ -330,6 +336,7 @@ mod tests {
     use crate::frontends::ssh_agent::wire::SignFlags;
     use crate::prompt::{ConfirmAnswer, PromptOutcome, Step};
     use crate::ssh::approvals::{GrantSource, Scope};
+    use crate::ssh::known_hosts::HostNames;
     use crate::ssh::testing::{RSA_3072, database, key_entry, requested, served, test_key};
 
     /// A fixture whose cancelled prompts hold nothing back: the backoff has
@@ -1528,7 +1535,13 @@ mod tests {
         let request = Request::parse(&ConnectionClass::LocalUnbound, &sign, None).expect("parses");
         let line = |fx: &Fixture| {
             let name = fx.agent.configured_name("personal", &request);
-            sign_line("personal", name.as_deref(), &request, &Ok(Vec::new()))
+            sign_line(
+                "personal",
+                name.as_deref(),
+                &request,
+                &HostNames::default(),
+                &Ok(Vec::new()),
+            )
         };
 
         for (name, logged) in [
@@ -1567,6 +1580,84 @@ mod tests {
         assert!(fx.is_unlocked(), "the signature didn't reset the timer");
         fx.databases.expire_idle(Instant::now() + IDLE);
         assert!(!fx.is_unlocked());
+    }
+
+    /// The log line says a host by its fingerprint, and leads it with the name
+    /// `known_hosts` gives it, escaped, when it gives one.
+    #[test]
+    fn the_log_line_names_a_host_known_hosts_names_next_to_its_fingerprint() {
+        let key = test_key(1);
+        let (github, build_box, hostile) = (
+            test_key(2).public_key().clone(),
+            test_key(3).public_key().clone(),
+            test_key(4).public_key().clone(),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("known_hosts");
+        std::fs::write(
+            &path,
+            format!(
+                "github.com {}\nbuild-box {}\nevil\u{202e}host {}\n",
+                github.to_openssh().expect("encodes"),
+                build_box.to_openssh().expect("encodes"),
+                hostile.to_openssh().expect("encodes"),
+            ),
+        )
+        .expect("write known_hosts");
+        let names = HostNames::read(Some(&path));
+        let print = |key: &PublicKey| key.fingerprint(HashAlg::Sha256);
+        let sign = request_with(&key, 0);
+        let line = |class: ConnectionClass, names: &HostNames| {
+            let request = Request::parse(&class, &sign, None).expect("parses");
+            sign_line("personal", None, &request, names, &Ok(Vec::new()))
+        };
+        let forwarded = |host: &PublicKey, dest: &PublicKey| ConnectionClass::Forwarded {
+            host: host.key_data().clone(),
+            session: vec![1],
+            dest: Some(dest.key_data().clone()),
+        };
+
+        let named = line(forwarded(&build_box, &github), &names);
+        assert!(
+            named.contains(&format!(
+                "dest github.com ({}), via build-box ({})",
+                print(&github),
+                print(&build_box)
+            )),
+            "{named}"
+        );
+
+        // A host `known_hosts` doesn't name stays its fingerprint, and so
+        // do both when there are no names.
+        let stranger = key.public_key();
+        let partly = line(forwarded(stranger, &github), &names);
+        assert!(
+            partly.contains(&format!(
+                "dest github.com ({}), via {})",
+                print(&github),
+                print(stranger)
+            )),
+            "{partly}"
+        );
+        let unnamed = line(forwarded(stranger, &github), &HostNames::default());
+        assert!(
+            unnamed.contains(&format!(
+                "dest {}, via {})",
+                print(&github),
+                print(stranger)
+            )),
+            "{unnamed}"
+        );
+
+        // A name is escaped, so it can't drive whatever shows the log.
+        let escaped = line(
+            ConnectionClass::LocalBound {
+                dest: hostile.key_data().clone(),
+            },
+            &names,
+        );
+        assert!(escaped.contains("dest evil\\u202ehost ("), "{escaped}");
+        assert!(!escaped.contains('\u{202e}'));
     }
 
     /// A bound connection's prompt names the destination, by the host
