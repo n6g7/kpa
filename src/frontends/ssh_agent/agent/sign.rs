@@ -657,7 +657,10 @@ mod tests {
         let key = test_key(1);
         let fingerprint = key.public_key().fingerprint(HashAlg::Sha256);
         let named = format!("Unlock database personal to use key \"personal {fingerprint}\"?");
-        let approval = format!("Approve use of key \"personal {fingerprint}\"?");
+        // The unlock names the key as the locked database's cache does. Once
+        // it is unlocked the key is read again, and the approval, which is
+        // listed by `kpa ssh grants`, names it by its entry's title.
+        let approval = "Approve use of key \"github\"?";
         for (confirm, asked, kept) in [
             (SshKeyConfirm::Once, true, true),
             (SshKeyConfirm::Always, true, false),
@@ -669,13 +672,22 @@ mod tests {
 
             assert!(signed(&sign(&fx, &key)));
             assert_eq!(fx.unlocks.shown(), [named.as_str()]);
-            let expected: Vec<&str> = if asked {
-                vec![approval.as_str()]
-            } else {
-                vec![]
-            };
+            let expected: Vec<&str> = if asked { vec![approval] } else { vec![] };
             assert_eq!(fx.confirms.shown(), expected);
             assert_eq!(approved(&fx, &key), kept);
+            let names: Vec<_> = fx
+                .grants()
+                .iter()
+                .map(|g| g.scope.key().name.clone())
+                .collect();
+            assert_eq!(
+                names,
+                if kept {
+                    vec!["github"]
+                } else {
+                    Vec::<&str>::new()
+                }
+            );
         }
     }
 

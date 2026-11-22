@@ -110,6 +110,15 @@ impl Scope {
         }
     }
 
+    /// This scope for `key`, which is the same key as the scope's, served
+    /// again: what tells scopes apart doesn't change.
+    pub fn rekeyed(&self, key: &ServedKey) -> Scope {
+        Scope {
+            key: key.clone(),
+            ..self.clone()
+        }
+    }
+
     /// The key the approval is for, as the open database serves it.
     pub fn key(&self) -> &ServedKey {
         &self.key
