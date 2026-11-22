@@ -23,8 +23,6 @@ use crate::databases::{Begin, BeginError, UnlockFailure};
 use crate::prompt::Declined;
 use crate::ssh::approvals::SignatureApproval;
 use crate::ssh::keys::ServedKey;
-use crate::ssh::known_hosts::HostNames;
-use ssh_key::HashAlg;
 use ssh_key::public::KeyData;
 
 impl Refused {
@@ -188,20 +186,21 @@ impl Agent {
             })
     }
 
-    /// The hosts a message names, each with the name `known_hosts` gives it
-    /// if it has one: the connection's destination, if it is bound to one,
+    /// The hosts a message names, each with the name the request found for
+    /// it if it has one: the connection's destination, if it is bound to one,
     /// and the host it is forwarded through, if it is forwarded.
     fn hosts<'r>(&self, request: &'r Request<'_>) -> (Option<Host<'r>>, Option<Host<'r>>) {
-        let names = HostNames::read(self.known_hosts.as_deref());
-        let host = |key: &'r KeyData| Host {
-            name: names
-                .name(&key.fingerprint(HashAlg::Sha256))
-                .map(str::to_string),
+        let host = |key: &'r KeyData, name: &Option<String>| Host {
+            name: name.clone(),
             key,
         };
         (
-            request.destination().map(host),
-            request.forwarding_host().map(host),
+            request
+                .destination()
+                .map(|key| host(key, &request.hosts.destination)),
+            request
+                .forwarding_host()
+                .map(|key| host(key, &request.hosts.forwarding_host)),
         )
     }
 

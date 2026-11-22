@@ -44,7 +44,7 @@ use crate::databases::{Databases, Observer, Open};
 /// an approval can name the key. Two scopes are the same when their keys have
 /// the same fingerprint and their destination and forwarding session match:
 /// the key's other fields (its name, title, database) describe it, and don't
-/// change within an unlock.
+/// change within an unlock, and the host names are only for showing.
 #[derive(Debug, Clone)]
 pub struct Scope {
     key: ServedKey,
@@ -52,6 +52,11 @@ pub struct Scope {
     destination: Option<Fingerprint>,
     /// The forwarding session, for a forwarded connection.
     forwarding: Option<Box<Forwarding>>,
+    /// The names `known_hosts` gave the destination and the forwarding host
+    /// when the scope was made, for showing them. Display only: they take no
+    /// part in what tells scopes apart.
+    destination_name: Option<String>,
+    forwarding_host_name: Option<String>,
 }
 
 /// The forwarding session a [`Scope`] is limited to: the session identifier
@@ -89,6 +94,8 @@ impl Scope {
             key: key.clone(),
             destination: destination.map(|dest| dest.fingerprint(HashAlg::Sha256)),
             forwarding: None,
+            destination_name: None,
+            forwarding_host_name: None,
         }
     }
 
@@ -107,6 +114,8 @@ impl Scope {
                 session: session.to_vec(),
                 host: host.fingerprint(HashAlg::Sha256),
             })),
+            destination_name: None,
+            forwarding_host_name: None,
         }
     }
 
@@ -126,6 +135,28 @@ impl Scope {
 
     pub fn destination(&self) -> Option<Fingerprint> {
         self.destination
+    }
+
+    /// This scope with the names `known_hosts` gives its destination and its
+    /// forwarding host. A scope's identity doesn't change.
+    pub fn with_host_names(
+        mut self,
+        destination: Option<String>,
+        forwarding_host: Option<String>,
+    ) -> Scope {
+        self.destination_name = destination;
+        self.forwarding_host_name = forwarding_host;
+        self
+    }
+
+    /// The name `known_hosts` gave the destination, if it gave one.
+    pub fn destination_name(&self) -> Option<&str> {
+        self.destination_name.as_deref()
+    }
+
+    /// The name `known_hosts` gave the forwarding host, if it gave one.
+    pub fn forwarding_host_name(&self) -> Option<&str> {
+        self.forwarding_host_name.as_deref()
     }
 
     /// The host key of the forwarding host, for a forwarded connection's

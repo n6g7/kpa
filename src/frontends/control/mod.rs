@@ -348,6 +348,8 @@ fn wire_scope(scope: &Scope, forwarding_session: Option<u32>) -> WireScope {
         },
         destination: scope.destination(),
         forwarding_host: scope.forwarding_host(),
+        destination_name: scope.destination_name().map(str::to_string),
+        forwarding_host_name: scope.forwarding_host_name().map(str::to_string),
         forwarding_session,
     }
 }

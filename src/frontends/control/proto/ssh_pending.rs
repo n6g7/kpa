@@ -39,6 +39,13 @@ pub struct WireScope {
     /// The forwarding host's host key, of a forwarded connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarding_host: Option<Fingerprint>,
+    /// The name the daemon's `known_hosts` gives the destination's host key,
+    /// escaped, if it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_name: Option<String>,
+    /// The name it gives the forwarding host's host key, if it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarding_host_name: Option<String>,
     /// Which of the forwarding sessions kpa has seen this one is, 1, 2, …,
     /// of a forwarded connection. It tells two `ssh -A` sessions through the
     /// same host apart, and says nothing about the session identifier.
@@ -89,6 +96,8 @@ mod tests {
                 },
                 destination: Some(KEY.parse().expect("a fingerprint")),
                 forwarding_host: None,
+                destination_name: None,
+                forwarding_host_name: None,
                 forwarding_session: None,
             },
             remember: true,
@@ -145,6 +154,8 @@ mod tests {
                 },
                 destination: None,
                 forwarding_host: None,
+                destination_name: None,
+                forwarding_host_name: None,
                 forwarding_session: None,
             },
             request: WireRequestDetails {
@@ -159,6 +170,8 @@ mod tests {
 
         assert!(json["scope"].get("destination").is_none());
         assert!(json["scope"].get("forwarding_host").is_none());
+        assert!(json["scope"].get("destination_name").is_none());
+        assert!(json["scope"].get("forwarding_host_name").is_none());
         assert!(json["scope"].get("forwarding_session").is_none());
         assert!(json["scope"]["key"].get("title").is_none());
         assert!(json["request"].get("user").is_none());

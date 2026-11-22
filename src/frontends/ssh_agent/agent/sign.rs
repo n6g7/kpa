@@ -26,6 +26,8 @@
 //! A forwarded signature is made like any other, with an approval of its own
 //! forwarding session, and never resets the idle timer.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use ssh_key::Fingerprint;
 
 use super::hold::Hold;
@@ -41,6 +43,7 @@ use crate::output;
 use crate::prompt::Declined;
 use crate::ssh::approvals::{Approvals, GrantSource, SignatureApproval};
 use crate::ssh::keys::ServedKey;
+use crate::ssh::known_hosts::HostNames;
 
 /// The longest key name a log line carries: a `[[database.ssh_key]]`
 /// override's `name`, escaped and capped like an identity comment.
@@ -161,18 +164,22 @@ impl Agent {
         let Some(request) = Request::parse(class, sign, login_session_id) else {
             return AgentResponse::Failure;
         };
+        // `known_hosts` is read once for the request, and what it says about
+        // its hosts is what the prompts, the approval and the log line say.
+        let request = if request.has_hosts() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            request.named(&HostNames::read(self.known_hosts.as_deref()), now)
+        } else {
+            request
+        };
         let Some(found) = self.find_key(request.fingerprint) else {
             return AgentResponse::Failure;
         };
         let db = found.database.as_str();
         let outcome = self.sign_or_refuse(&found, &request, requester);
-        log_sign(
-            db,
-            self.configured_name(db, &request),
-            &request,
-            self.known_hosts.as_deref(),
-            &outcome,
-        );
+        log_sign(db, self.configured_name(db, &request), &request, &outcome);
         match outcome {
             Ok(signature) => AgentResponse::SignResponse(signature),
             Err(_) => AgentResponse::Failure,
@@ -201,7 +208,14 @@ impl Agent {
             &request.purpose,
             request.login_session_id,
         )
-        .map_err(Refused::Policy)?;
+        .map_err(Refused::Policy)?
+        .map(|mut approval| {
+            approval.scope = approval.scope.with_host_names(
+                request.hosts.destination.clone(),
+                request.hosts.forwarding_host.clone(),
+            );
+            approval
+        });
 
         // 2. Nothing to ask: sign. Most requests end here, in one hold,
         // waiting for nobody.
@@ -331,7 +345,8 @@ mod tests {
     use crate::databases::testing::PASSWORD;
     use crate::display_session::DisplaySession;
     use crate::frontends::ssh_agent::testing::{
-        Fixture, IDLE, Options, SESSION, login_data, outside, outside_running, requester,
+        Fixture, IDLE, Options, SESSION, certified_bind, login_data, outside, outside_running,
+        requester, signed_bind,
     };
     use crate::frontends::ssh_agent::wire::SignFlags;
     use crate::prompt::{ConfirmAnswer, PromptOutcome, Step};
@@ -1070,7 +1085,7 @@ mod tests {
         let key = test_key(1);
         let fx = Fixture::unlocked(&key, SshKeyConfirm::Once);
         let bound = |seed: u64| ConnectionClass::LocalBound {
-            dest: test_key(seed).public_key().key_data().clone(),
+            dest: test_key(seed).public_key().key_data().clone().into(),
         };
 
         for _ in 0..3 {
@@ -1214,9 +1229,9 @@ mod tests {
     /// key 9, bound to host key 8.
     fn forwarded(session: u8) -> ConnectionClass {
         ConnectionClass::Forwarded {
-            host: test_key(9).public_key().key_data().clone(),
+            host: test_key(9).public_key().key_data().clone().into(),
             session: vec![session],
-            dest: Some(test_key(8).public_key().key_data().clone()),
+            dest: Some(test_key(8).public_key().key_data().clone().into()),
         }
     }
 
@@ -1315,7 +1330,7 @@ mod tests {
         )));
         assert!(!signed(&sign_as(&fx, &key, &forwarded(1))));
         let unbound = ConnectionClass::Forwarded {
-            host: test_key(9).public_key().key_data().clone(),
+            host: test_key(9).public_key().key_data().clone().into(),
             session: vec![1],
             dest: None,
         };
@@ -1535,13 +1550,7 @@ mod tests {
         let request = Request::parse(&ConnectionClass::LocalUnbound, &sign, None).expect("parses");
         let line = |fx: &Fixture| {
             let name = fx.agent.configured_name("personal", &request);
-            sign_line(
-                "personal",
-                name.as_deref(),
-                &request,
-                &HostNames::default(),
-                &Ok(Vec::new()),
-            )
+            sign_line("personal", name.as_deref(), &request, &Ok(Vec::new()))
         };
 
         for (name, logged) in [
@@ -1586,6 +1595,7 @@ mod tests {
     /// `known_hosts` gives it, escaped, when it gives one.
     #[test]
     fn the_log_line_names_a_host_known_hosts_names_next_to_its_fingerprint() {
+        const NOW: u64 = 1_000;
         let key = test_key(1);
         let (github, build_box, hostile) = (
             test_key(2).public_key().clone(),
@@ -1608,13 +1618,15 @@ mod tests {
         let print = |key: &PublicKey| key.fingerprint(HashAlg::Sha256);
         let sign = request_with(&key, 0);
         let line = |class: ConnectionClass, names: &HostNames| {
-            let request = Request::parse(&class, &sign, None).expect("parses");
-            sign_line("personal", None, &request, names, &Ok(Vec::new()))
+            let request = Request::parse(&class, &sign, None)
+                .expect("parses")
+                .named(names, NOW);
+            sign_line("personal", None, &request, &Ok(Vec::new()))
         };
         let forwarded = |host: &PublicKey, dest: &PublicKey| ConnectionClass::Forwarded {
-            host: host.key_data().clone(),
+            host: host.key_data().clone().into(),
             session: vec![1],
-            dest: Some(dest.key_data().clone()),
+            dest: Some(dest.key_data().clone().into()),
         };
 
         let named = line(forwarded(&build_box, &github), &names);
@@ -1652,12 +1664,108 @@ mod tests {
         // A name is escaped, so it can't drive whatever shows the log.
         let escaped = line(
             ConnectionClass::LocalBound {
-                dest: hostile.key_data().clone(),
+                dest: hostile.key_data().clone().into(),
             },
             &names,
         );
         assert!(escaped.contains("dest evil\\u202ehost ("), "{escaped}");
         assert!(!escaped.contains('\u{202e}'));
+    }
+
+    /// A destination whose host certificate a CA that `known_hosts` trusts
+    /// signed is named by the certificate's principal in the confirm prompt,
+    /// in the approval's scope and in the log line, and without that CA line it
+    /// is its fingerprint alone.
+    #[test]
+    fn a_host_a_trusted_ca_certified_is_named_by_its_principal_everywhere() {
+        let key = test_key(1);
+        let (via, dest, ca) = (test_key(9), test_key(8), test_key(7));
+        let fingerprint = |key: &PrivateKey| key.public_key().fingerprint(HashAlg::Sha256);
+        let class = {
+            let mut bindings = crate::frontends::ssh_agent::bind::SessionBindState::new();
+            bindings.apply(&signed_bind(&via, b"first", true));
+            bindings.apply(&certified_bind(
+                &dest,
+                &ca,
+                "build-box.example",
+                b"second",
+                false,
+            ));
+            bindings.class()
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        for (trusted, to) in [
+            (true, "to log in to git@build-box.example".to_string()),
+            (
+                false,
+                format!("to log in as git to host key {}", fingerprint(&dest)),
+            ),
+        ] {
+            let known_hosts = dir.path().join(format!("known_hosts-{trusted}"));
+            std::fs::write(
+                &known_hosts,
+                if trusted {
+                    format!(
+                        "@cert-authority *.example {}\n",
+                        ca.public_key().to_openssh().expect("encodes")
+                    )
+                } else {
+                    String::new()
+                },
+            )
+            .expect("write known_hosts");
+            let fx = Fixture::unlocked_with(
+                &key,
+                SshKeyConfirm::Never,
+                Options {
+                    known_hosts: Some(known_hosts),
+                    ..Options::default()
+                },
+            );
+            fx.confirms.push(Step::allow());
+
+            assert!(signed(&forwarded_login(
+                &fx,
+                &key,
+                &class,
+                b"second",
+                &requester()
+            )));
+
+            assert_eq!(
+                fx.confirms.shown(),
+                [format!(
+                    "Approve use of key \"github\" on host key {} {to}?",
+                    fingerprint(&via)
+                )]
+            );
+            let grants = fx.grants();
+            assert_eq!(
+                grants[0].scope.destination_name(),
+                trusted.then_some("build-box.example")
+            );
+            assert_eq!(grants[0].scope.forwarding_host_name(), None);
+            let sign = SignRequest {
+                data: login_data(&key, b"second", "git"),
+                ..request_with(&key, 0)
+            };
+            let request = Request::parse(&class, &sign, Some(b"second"))
+                .expect("parses")
+                .named(
+                    &HostNames::read(Some(&dir.path().join(format!("known_hosts-{trusted}")))),
+                    1_000,
+                );
+            assert_eq!(
+                request.hosts.destination.as_deref(),
+                trusted.then_some("build-box.example")
+            );
+            assert_eq!(
+                sign_line("personal", None, &request, &Ok(Vec::new()))
+                    .contains("dest build-box.example ("),
+                trusted
+            );
+        }
     }
 
     /// A bound connection's prompt names the destination, by the host
@@ -1686,7 +1794,7 @@ mod tests {
         fx.confirms.push(Step::allow());
         fx.confirms.push(Step::allow());
         let bound = |dest: &PublicKey| ConnectionClass::LocalBound {
-            dest: dest.key_data().clone(),
+            dest: dest.key_data().clone().into(),
         };
 
         assert!(signed(&sign_as(&fx, &key, &bound(&dest))));

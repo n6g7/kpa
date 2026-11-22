@@ -1,15 +1,13 @@
 //! [`Request`]: one `SIGN_REQUEST` as the sign flow sees it, and the log
 //! line it ends in (`docs/design.md` § Secrets).
 
-use std::path::Path;
-
 use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg, PublicKey};
 
 use super::sign::Refused;
 use super::signer;
 use crate::authn::Requester;
-use crate::frontends::ssh_agent::bind::ConnectionClass;
+use crate::frontends::ssh_agent::bind::{BoundHost, ConnectionClass};
 use crate::frontends::ssh_agent::classify::{self, Purpose};
 use crate::frontends::ssh_agent::wire::SignRequest;
 use crate::log;
@@ -21,9 +19,17 @@ use crate::ssh::known_hosts::HostNames;
 /// request keeps: all come from the request.
 const MAX_PENDING_TEXT_LEN: usize = 64;
 
-/// The longest host name a log line carries, as long as one in a prompt's
-/// message.
-const MAX_LOGGED_HOST_NAME_LEN: usize = 56;
+/// The longest host name kept, as long as one in a prompt's message.
+const MAX_HOST_NAME_LEN: usize = 56;
+
+/// The names `known_hosts` gives the hosts a request is bound to, each
+/// escaped and cut: one place they are worked out, for the prompts, the log
+/// line and the approval's scope to say the same.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct HostLabels {
+    pub(super) destination: Option<String>,
+    pub(super) forwarding_host: Option<String>,
+}
 
 /// One `SIGN_REQUEST`, as the flow and its log line see it.
 pub(super) struct Request<'a> {
@@ -33,6 +39,8 @@ pub(super) struct Request<'a> {
     pub(super) class: &'a ConnectionClass,
     pub(super) sign: &'a SignRequest,
     pub(super) login_session_id: Option<&'a [u8]>,
+    /// The names of its hosts: none until [`Request::named`].
+    pub(super) hosts: HostLabels,
 }
 
 impl<'a> Request<'a> {
@@ -50,11 +58,33 @@ impl<'a> Request<'a> {
             class,
             sign,
             login_session_id,
+            hosts: HostLabels::default(),
         })
     }
 
+    /// This request with its hosts named as `names` names them at the Unix
+    /// time `now`: a host that presented a certificate by a principal of it
+    /// a CA the file trusts signed, any host by a plain entry for its key.
+    pub(super) fn named(mut self, names: &HostNames, now: u64) -> Request<'a> {
+        let label = |host: &BoundHost| {
+            names
+                .name_of(host.key(), host.certificate(), now)
+                .map(|name| escape_one_line(&name, MAX_HOST_NAME_LEN))
+        };
+        self.hosts = HostLabels {
+            destination: self.destination_host().and_then(label),
+            forwarding_host: self.forwarding_bound_host().and_then(label),
+        };
+        self
+    }
+
+    /// Whether the connection is bound to a host there could be a name for.
+    pub(super) fn has_hosts(&self) -> bool {
+        self.destination_host().is_some() || self.forwarding_bound_host().is_some()
+    }
+
     /// The connection's bound destination, if it has one.
-    pub(super) fn destination(&self) -> Option<&KeyData> {
+    fn destination_host(&self) -> Option<&BoundHost> {
         match self.class {
             ConnectionClass::LocalBound { dest } => Some(dest),
             ConnectionClass::Forwarded { dest, .. } => dest.as_ref(),
@@ -64,11 +94,22 @@ impl<'a> Request<'a> {
 
     /// The host the local `ssh` forwarded the agent to, on a forwarded
     /// connection.
-    pub(super) fn forwarding_host(&self) -> Option<&KeyData> {
+    fn forwarding_bound_host(&self) -> Option<&BoundHost> {
         match self.class {
             ConnectionClass::Forwarded { host, .. } => Some(host),
             ConnectionClass::LocalUnbound | ConnectionClass::LocalBound { .. } => None,
         }
+    }
+
+    /// The key of the connection's bound destination, if it has one.
+    pub(super) fn destination(&self) -> Option<&KeyData> {
+        self.destination_host().map(BoundHost::key)
+    }
+
+    /// The key of the host the local `ssh` forwarded the agent to, on a
+    /// forwarded connection.
+    pub(super) fn forwarding_host(&self) -> Option<&KeyData> {
+        self.forwarding_bound_host().map(BoundHost::key)
     }
 
     /// What this request is, for the user who is asked to approve it while
@@ -101,24 +142,18 @@ fn capped(text: &str, max_len: usize) -> &str {
 
 /// One line per `SIGN_REQUEST` for a served key (`docs/design.md`
 /// § Secrets), as [`sign_line`] words it. A signature is `info`, everything else
-/// `warn`. `known_hosts` is read, once, for a request that names a host.
+/// `warn`.
 pub(super) fn log_sign(
     db: &str,
     name: Option<String>,
     request: &Request<'_>,
-    known_hosts: Option<&Path>,
     outcome: &Result<Vec<u8>, Refused>,
 ) {
     let log = match outcome {
         Ok(_) => log::info,
         Err(_) => log::warn,
     };
-    let names = if request.destination().is_some() || request.forwarding_host().is_some() {
-        HostNames::read(known_hosts)
-    } else {
-        HostNames::default()
-    };
-    let line = sign_line(db, name.as_deref(), request, &names, outcome);
+    let line = sign_line(db, name.as_deref(), request, outcome);
     log(format_args!("{line}"));
 }
 
@@ -126,15 +161,13 @@ pub(super) fn log_sign(
 /// `name` if its database's config names it (already escaped); its
 /// database; its purpose; the connection's class; the destination if the
 /// connection is bound to one; the forwarding host if the connection is
-/// forwarded; and what happened. A host is its fingerprint, and the name
-/// `names` gives it before the fingerprint, in parentheses, when it gives
-/// one: `dest github.com (SHA256:…)`. Never the entry's title, which is vault
-/// content (G-4).
+/// forwarded; and what happened. A host is its fingerprint, led by its name
+/// from the request's [`HostLabels`] when it has one: `dest github.com
+/// (SHA256:…)`. Never the entry's title, which is vault content (G-4).
 pub(super) fn sign_line(
     db: &str,
     name: Option<&str>,
     request: &Request<'_>,
-    names: &HostNames,
     outcome: &Result<Vec<u8>, Refused>,
 ) -> String {
     let outcome: &dyn std::fmt::Display = match outcome {
@@ -147,11 +180,21 @@ pub(super) fn sign_line(
     let (purpose, class) = (request.purpose.label(), request.class.label());
     let destination = request
         .destination()
-        .map(|dest| format!(", dest {}", host(dest, names)))
+        .map(|dest| {
+            format!(
+                ", dest {}",
+                host(dest, request.hosts.destination.as_deref())
+            )
+        })
         .unwrap_or_default();
     let forwarding = request
         .forwarding_host()
-        .map(|via| format!(", via {}", host(via, names)))
+        .map(|via| {
+            format!(
+                ", via {}",
+                host(via, request.hosts.forwarding_host.as_deref())
+            )
+        })
         .unwrap_or_default();
     format!(
         "ssh sign {outcome}: key {}{name} in {db:?} ({purpose}, {class}{destination}{forwarding})",
@@ -159,15 +202,12 @@ pub(super) fn sign_line(
     )
 }
 
-/// A host as a log line says it: its fingerprint, led by the name `names`
-/// gives its host key, escaped and cut, if it gives one.
-fn host(key: &KeyData, names: &HostNames) -> String {
+/// A host as a log line says it: its fingerprint, led by its `name`, if it
+/// has one.
+fn host(key: &KeyData, name: Option<&str>) -> String {
     let fingerprint = key.fingerprint(HashAlg::Sha256);
-    match names.name(&fingerprint) {
-        Some(name) => format!(
-            "{} ({fingerprint})",
-            escape_one_line(name, MAX_LOGGED_HOST_NAME_LEN)
-        ),
+    match name {
+        Some(name) => format!("{name} ({fingerprint})"),
         None => fingerprint.to_string(),
     }
 }

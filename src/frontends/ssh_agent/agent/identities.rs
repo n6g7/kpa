@@ -157,7 +157,7 @@ mod tests {
 
     fn forwarded() -> ConnectionClass {
         ConnectionClass::Forwarded {
-            host: cached(9).key_data().clone(),
+            host: cached(9).key_data().clone().into(),
             session: vec![1],
             dest: None,
         }

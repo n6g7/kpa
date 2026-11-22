@@ -48,8 +48,8 @@ pub(super) fn signed_bind(
 
 /// A `session-bind@openssh.com` message as a host that presents a certificate
 /// sends it: the host key is a host certificate for `host` and the host name
-/// `principal`, made by `ca` for a window that is over, and `host` signs the
-/// session identifier.
+/// `principal`, made by `ca` for as long as there is time, and `host` signs
+/// the session identifier.
 pub(super) fn certified_bind(
     host: &PrivateKey,
     ca: &PrivateKey,
@@ -57,8 +57,13 @@ pub(super) fn certified_bind(
     session_id: &[u8],
     is_forwarding: bool,
 ) -> SessionBind {
-    let mut builder = Builder::new(vec![0; 16], host.public_key().key_data().clone(), 0, 1)
-        .expect("a valid window");
+    let mut builder = Builder::new(
+        vec![0; 16],
+        host.public_key().key_data().clone(),
+        0,
+        u64::MAX,
+    )
+    .expect("a valid window");
     builder
         .cert_type(CertType::Host)
         .expect("a host certificate")

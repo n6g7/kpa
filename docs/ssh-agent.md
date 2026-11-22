@@ -229,14 +229,38 @@ per connection, as `ssh-agent` does, refusing any new binding on a
 connection already bound for authentication.
 
 A binding's host key may be a certificate: `ssh` passes on the server's host
-certificate when the server presents one. kpa identifies the host by
-the key the certificate certifies, and verifies the signature against that
-key, so everything downstream (the scope, the prompts, the `known_hosts`
-names, the log) knows the host by that key's fingerprint, which a plain
-`known_hosts` entry for it matches. It checks neither the certificate's CA,
-nor its validity, nor its principals, and takes no host name from them: the
-server chooses them, and kpa trusts no CA here. The signature still has to
-be the certified key's.
+certificate when the server presents one. kpa identifies the host by the key
+the certificate certifies, and verifies the signature against that key, so
+the scope, the approvals and the grants know the host by that key's
+fingerprint, which a plain `known_hosts` entry for it matches. The signature
+still has to be the certified key's. The certificate is kept next to the key
+(up to 4 KiB of it), to name the host by.
+
+**Naming a host.** A host is shown by a name where there is one: in the
+prompts, the log line and the tables, and the daemon works it out once per
+request from its `known_hosts` (`~/.ssh/known_hosts`):
+
+- A host that presented a certificate is named by a principal of it, the
+  first one a pattern matches, if all of these hold: `known_hosts` has an
+  `@cert-authority` line for the certificate's CA whose patterns match the
+  principal; the CA's signature on the certificate verifies; it is a host
+  certificate, valid now, with no critical options; and neither the
+  certified key nor the CA is on an `@revoked` line. Without the CA line the
+  certificate proves nothing: its maker chose its principals, so nothing is
+  named from them. Patterns match as `ssh` matches them (`*`, `?`, `!`
+  negation, comma lists, case ignored). A principal has no port, so a
+  `[host]:port` pattern never matches one. A hashed `@cert-authority` line
+  names nothing: `ssh-keygen -H` doesn't write one, and kpa doesn't match
+  hashes for it.
+- Failing that, a host is named by the first plain host name of an
+  unhashed `known_hosts` entry for its key. A hashed entry gives no name, and
+  neither does a negated or wildcard pattern.
+- A key the file revokes is named by nothing, whatever else says so. A
+  revoked CA only takes the certificate route away.
+- Otherwise the host is its fingerprint alone.
+
+A name is untrusted text, even a principal a trusted CA signed: it is
+escaped as the other texts of a prompt are, and cut to 56 bytes.
 
 Each connection is classified as one of:
 
@@ -495,9 +519,8 @@ the pieces it is made of in `KPA_PROMPT_DATA`, see
 | Forwarded login, through a host `~/.ssh/known_hosts` names, to a host it names | `Approve use of key "github" on build-box to log in to git@github.com?` |
 | Forwarded login, through a host it doesn't name | `Approve use of key "github" on host key SHA256:… to log in to git@github.com?`, the destination worded as above |
 
-The destination is the connection's last binding's host key, named by the
-host name `~/.ssh/known_hosts` has an unhashed entry for, else by its
-fingerprint. On a forwarded connection the forwarding host, the first
+The destination is the connection's last binding's host, named as § 6.2
+("Naming a host") names it, else by its fingerprint. On a forwarded connection the forwarding host, the first
 binding's host key, is named the same way after the key, and the unlock
 prompt (§ 6.6) says the same: `Unlock database personal to use key "github"
 on build-box to log in to git@github.com?`. Every piece that comes from
@@ -578,7 +601,9 @@ refused:
       "title": "GitHub", "attachment": "id_ed25519"
     },
     "destination": "SHA256:…",
+    "destination_name": "github.com",
     "forwarding_host": "SHA256:…",
+    "forwarding_host_name": "build-box",
     "forwarding_session": 2
   },
   "remember": true,
@@ -592,7 +617,10 @@ uuid. `destination` is there for a bound connection only, and
 `forwarding_host`, the forwarding host's host key, and
 `forwarding_session`, the number of its forwarding session (§ 6.7), for a
 forwarded one (`kpa ssh pending` shows them as FORWARDING HOST and SESSION; the
-forwarding session identifier itself is never shown). `request.user`
+forwarding session identifier itself is never shown). `destination_name` and
+`forwarding_host_name` are the names the daemon found for those hosts
+("Naming a host", § 6.2), escaped, and absent when it found none; they are
+for showing, and an approval is for the key. `request.user`
 for a login and `request.namespace` for an `SSHSIG`. Titles, names, users
 and command names reach the caller of this request, and never the
 daemon's log.
@@ -677,7 +705,9 @@ uid (NG-1). Each grant, oldest first within its database, is:
   "scope": {
     "key": { "db": "personal", "…": "…" },
     "destination": "SHA256:…",
+    "destination_name": "github.com",
     "forwarding_host": "SHA256:…",
+    "forwarding_host_name": "build-box",
     "forwarding_session": 2
   },
   "remember": true,
@@ -697,14 +727,12 @@ approvals. There is no way to revoke one: `kpa lock <database>` drops a
 database's.
 
 **Host names in the tables.** `kpa ssh grants` and `kpa ssh pending` show a
-destination and a forwarding host by the host name `known_hosts` gives its
-host key, else by its fingerprint. The CLI looks the names up itself, in the
-user's `~/.ssh/known_hosts`, so the requests carry fingerprints only and
-`--json` prints them. Only an unhashed entry gives a name: a hashed one
-can't be reversed without the name that produced it, so a host known by one
-shows as its fingerprint, as do hosts from `@revoked` or `@cert-authority`
-entries and negated or wildcard patterns, which name no one host. The
-prompts (§ 6.7) name hosts by the same rule.
+destination and a forwarding host by the name the daemon found for it
+("Naming a host", § 6.2), else by its fingerprint. The names come in the
+requests' `scope`, so the CLI reads no `known_hosts` of its own, and `--json`
+prints them next to the fingerprints. A host known by a hashed entry shows as
+its fingerprint. The prompts (§ 6.7) and the log name hosts by the same
+names.
 
 ### 6.9 Lock and idle
 

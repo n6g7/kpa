@@ -153,7 +153,10 @@ visible — no extra `client_v` and `daemon_v` fields needed.
 was last refused, in Unix seconds, from which a client works out the age),
 the `scope` the approval covers, `remember` (whether approving grants the
 scope until lock) and the `request` that was refused; the shape is in
-[`ssh-agent.md`](./ssh-agent.md) § 6.8. `ssh_approve` answers
+[`ssh-agent.md`](./ssh-agent.md) § 6.8. The `scope` has `destination_name`
+and `forwarding_host_name` next to the host fingerprints when the daemon
+found a name for a host; a client that doesn't know them ignores them, and
+one that meets a daemon without them has none. `ssh_approve` answers
 `{"ok":true,"v":2}`. `ssh_grants` answers `{"ok":true,"v":2,"grants":[…]}`,
 each grant as `ssh-agent.md` § 6.8 shows it; like `ssh_pending` it has no
 failure, and nothing is logged for it.

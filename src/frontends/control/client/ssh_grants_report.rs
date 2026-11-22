@@ -13,7 +13,6 @@ use serde::Deserialize;
 use super::ssh_requests_report::{age, host, session, span};
 use crate::frontends::control::proto::WireGrant;
 use crate::output::Table;
-use crate::ssh::known_hosts::HostNames;
 
 /// What `ssh_grants` answers: the approvals, grouped by database in config
 /// order and oldest first within each.
@@ -42,16 +41,16 @@ const HEADER: [&str; 11] = [
 const BRIEF: [usize; 5] = [0, 2, 3, 5, 8];
 
 /// The table of `answer`, with each approval's age at `now` and its hosts by
-/// the name `names` gives them. Without `full` it keeps to the columns that
+/// the name the daemon gave them, if it did. Without `full` it keeps to the columns that
 /// say what is approved.
-pub fn render(answer: &Grants, now: SystemTime, names: &HostNames, full: bool) -> String {
+pub fn render(answer: &Grants, now: SystemTime, full: bool) -> String {
     if answer.grants.is_empty() {
         return "No SSH approval is granted.\n".to_string();
     }
     let rows: Vec<[String; 11]> = answer
         .grants
         .iter()
-        .map(|grant| cells(grant, now, names))
+        .map(|grant| cells(grant, now))
         .collect();
     let (table, footer) = if full {
         let mut table = Table::new(HEADER);
@@ -77,12 +76,18 @@ pub fn render(answer: &Grants, now: SystemTime, names: &HostNames, full: bool) -
 }
 
 /// One approval's cells, one per [`HEADER`] column.
-fn cells(grant: &WireGrant, now: SystemTime, names: &HostNames) -> [String; 11] {
+fn cells(grant: &WireGrant, now: SystemTime) -> [String; 11] {
     [
         grant.scope.key.name.clone(),
         grant.scope.key.db.clone(),
-        host(grant.scope.destination.as_ref(), names),
-        host(grant.scope.forwarding_host.as_ref(), names),
+        host(
+            grant.scope.destination.as_ref(),
+            grant.scope.destination_name.as_deref(),
+        ),
+        host(
+            grant.scope.forwarding_host.as_ref(),
+            grant.scope.forwarding_host_name.as_deref(),
+        ),
         session(&grant.scope),
         lasts(grant),
         age(now, grant.granted_at),
@@ -116,7 +121,6 @@ mod tests {
 
     use super::*;
     use crate::frontends::control::proto::{WireScope, WireSshKey};
-    use crate::ssh::testing::test_key;
 
     const KEY: &str = "SHA256:Nh0Me49Zh9fDw/VYUfq43IJmI1T+XrjiYONPND8GzaM";
     const DESTINATION: &str = "SHA256:BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -138,6 +142,8 @@ mod tests {
                 },
                 destination: Some(DESTINATION.parse().expect("a fingerprint")),
                 forwarding_host: None,
+                destination_name: None,
+                forwarding_host_name: None,
                 forwarding_session: None,
             },
             remember: true,
@@ -171,7 +177,6 @@ mod tests {
                 grants: vec![grant("github"), once],
             },
             at_now(),
-            &HostNames::default(),
             true,
         );
 
@@ -192,12 +197,7 @@ deploy-key  personal  -                                                   {KEY} 
     #[test]
     fn nothing_granted_says_so() {
         assert_eq!(
-            render(
-                &Grants { grants: vec![] },
-                at_now(),
-                &HostNames::default(),
-                false
-            ),
+            render(&Grants { grants: vec![] }, at_now(), false),
             "No SSH approval is granted.\n"
         );
     }
@@ -215,7 +215,6 @@ deploy-key  personal  -                                                   {KEY} 
                 grants: vec![grant("github"), once],
             },
             at_now(),
-            &HostNames::default(),
             false,
         );
 
@@ -233,31 +232,27 @@ deploy-key  {DESTINATION}  -                1 signature, 42s left  0
         );
     }
 
-    /// A host `known_hosts` names is shown by its name, any other by its
-    /// fingerprint.
+    /// A host the daemon named is shown by the name, any other by its
+    /// fingerprint, and the name is escaped here too.
     #[test]
-    fn a_host_known_by_name_is_shown_by_it() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("known_hosts");
-        let known = test_key(2).public_key().clone();
-        std::fs::write(
-            &path,
-            format!("github.com {}\n", known.to_openssh().expect("encodes")),
-        )
-        .expect("write known_hosts");
-        let mut forwarded = grant("github");
-        forwarded.scope.destination = Some(known.fingerprint(ssh_key::HashAlg::Sha256));
+    fn a_host_the_daemon_named_is_shown_by_the_name() {
+        let mut named = grant("github");
+        named.scope.destination_name = Some("github.com".to_string());
+        named.scope.forwarding_host_name = Some("evil\u{202e}host".to_string());
+        named.scope.forwarding_host = Some(KEY.parse().expect("a fingerprint"));
 
         let text = render(
             &Grants {
-                grants: vec![forwarded],
+                grants: vec![named, grant("deploy")],
             },
             at_now(),
-            &HostNames::read(Some(&path)),
             false,
         );
 
         assert!(text.contains("github.com"), "{text}");
-        assert!(!text.contains(&known.fingerprint(ssh_key::HashAlg::Sha256).to_string()));
+        assert!(text.contains("evil\\u202ehost"), "{text}");
+        assert!(!text.contains('\u{202e}'), "{text}");
+        // The host that came without a name is its fingerprint.
+        assert!(text.contains(DESTINATION), "{text}");
     }
 }
