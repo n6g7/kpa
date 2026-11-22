@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cancel::CancelToken;
 
-pub use data::{PromptData, PromptHost, PromptKey, PromptKind, Question};
+pub use data::Question;
 #[cfg(test)]
 pub(crate) use fake::{Scripted, Step};
 pub use outcome::{ConfirmAnswer, Declined, PromptOutcome};

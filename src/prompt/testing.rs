@@ -11,14 +11,11 @@ use rustix::fs::{Mode, OFlags, open};
 use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 use rustix::termios::{LocalModes, tcgetattr};
 
-use super::{PromptData, PromptKind, Question};
+use super::Question;
 
-/// A question that is only `message`: its data says nothing but its kind.
+/// A question that is only `message`, with no data.
 pub(crate) fn question(message: &str) -> Question {
-    Question {
-        message: message.to_string(),
-        data: PromptData::new(PromptKind::Unlock),
-    }
+    Question::new(message)
 }
 
 /// A pseudo-terminal: the master end stands for the user's keyboard and

@@ -5,7 +5,6 @@ use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::message::sanitize_message;
 use super::{Backend, PromptOutcome, PromptQueue, Question};
 use crate::cancel::CancelToken;
 
@@ -34,16 +33,13 @@ impl<T> Prompt<T> {
     }
 
     /// Shows `question` and brings back the answer. Its message, plain text,
-    /// is sanitized for display (`message`); its data is shown as it is, its
-    /// builder having made it display-safe. The prompt gets `timeout` from
-    /// the moment its turn comes. It ends as
+    /// is sanitized for display (`message`), and every string in its data is
+    /// escaped the same way. The prompt gets `timeout` from the moment its
+    /// turn comes. It ends as
     /// [`PromptOutcome::Interrupted`] once `cancel` is cancelled: killed if
     /// it is on screen, never shown if it is still queued.
     pub fn ask(&self, question: &Question, cancel: &CancelToken) -> io::Result<PromptOutcome<T>> {
-        let question = Question {
-            message: sanitize_message(&question.message),
-            data: question.data.clone(),
-        };
+        let question = question.sanitized();
         let _turn = if self.backend.is_queued() {
             let Some(turn) = self.queue.enter(cancel)? else {
                 return Ok(PromptOutcome::Interrupted);
@@ -81,17 +77,24 @@ mod tests {
     /// The backend sees the message sanitized, and its answer is the
     /// caller's.
     #[test]
-    fn a_prompt_shows_its_message_sanitized() {
+    fn a_prompt_shows_its_message_and_data_sanitized() {
         let (prompt, prompts) = prompt();
         prompts.push(Step::new(PromptOutcome::Answer(Zeroizing::new(
             "hunter2".to_string(),
         ))));
         let source = CancelSource::new();
 
-        let outcome = prompt.ask(&question("Unlock personal\u{202e}evil"), &source.token());
+        let hostile = question("Unlock personal\u{202e}evil")
+            .with("name", "per\u{202e}sonal")
+            .with("nested", serde_json::json!({"deep": ["a\nb"]}));
+        let outcome = prompt.ask(&hostile, &source.token());
 
         assert!(matches!(outcome, Ok(PromptOutcome::Answer(a)) if a.as_str() == "hunter2"));
         assert_eq!(prompts.shown(), ["Unlock personal\\u202eevil"]);
+        assert_eq!(
+            serde_json::Value::Object(prompts.shown_questions()[0].data.clone()),
+            serde_json::json!({"name": "per\\u202esonal", "nested": {"deep": ["a\\u000ab"]}})
+        );
     }
 
     /// A token cancelled before the prompt's turn comes never reaches the

@@ -27,8 +27,12 @@ use crate::cancel::CancelToken;
 /// rewrites it.
 const PROMPT_MESSAGE_ENV: &str = "KPA_PROMPT_MESSAGE";
 
-/// Where the JSON of a prompt's [`PromptData`] reaches it, next to the message.
+/// Where the JSON of a prompt's data reaches it, next to the message.
 const PROMPT_DATA_ENV: &str = "KPA_PROMPT_DATA";
+
+/// The version of the data a prompt program gets: a change a consumer can't
+/// ignore bumps it, a new field doesn't.
+const DATA_VERSION: u32 = 1;
 
 /// What a confirm prompt is offered, one choice per line.
 const APPROVAL_CHOICES: &[u8] = b"Allow\nDeny\n";
@@ -68,7 +72,7 @@ impl Backend<Zeroizing<String>> for SecretProgram {
         deadline: Option<Instant>,
         cancel: &CancelToken,
     ) -> std::io::Result<PromptOutcome> {
-        run(&self.argv, question, deadline, cancel, None)
+        run(&self.argv, question, "enter", deadline, cancel, None)
     }
 }
 
@@ -101,6 +105,7 @@ impl Backend<ConfirmAnswer> for ConfirmProgram {
         let outcome = run(
             &self.argv,
             question,
+            "select",
             deadline,
             cancel,
             Some(APPROVAL_CHOICES),
@@ -116,11 +121,15 @@ impl Backend<ConfirmAnswer> for ConfirmProgram {
 }
 
 /// Runs `argv` with `question`'s message and data in its environment, and
-/// reads what it prints. `stdin`, when given, is written before anything is read — a
-/// prompt that picks among choices gets them this way, one per line.
+/// reads what it prints. The data is the question's with `v`, the version of
+/// this contract, and `kind` added: how the program is asked, `enter` for a
+/// value it prints, `select` for one of the lines on its stdin. `stdin`, when
+/// given, is written before anything is read — a prompt that picks among
+/// choices gets them this way, one per line.
 fn run(
     argv: &[String],
     question: &Question,
+    kind: &str,
     deadline: Option<Instant>,
     cancel: &CancelToken,
     stdin: Option<&[u8]>,
@@ -134,7 +143,10 @@ fn run(
     let Some(cancel) = cancel.watch()? else {
         return Ok(PromptOutcome::Interrupted);
     };
-    let data = serde_json::to_string(&question.data).map_err(Error::other)?;
+    let mut data = question.data.clone();
+    data.insert("v".to_string(), DATA_VERSION.into());
+    data.insert("kind".to_string(), kind.into());
+    let data = serde_json::Value::Object(data).to_string();
     let mut child = Command::new(program)
         .args(args)
         .env(PROMPT_MESSAGE_ENV, &question.message)
@@ -433,7 +445,7 @@ mod tests {
     #[test]
     fn the_data_reaches_the_prompt_as_json_in_its_environment() {
         let _spawning = spawn_lock();
-        let question = Question::unlock("personal");
+        let question = Question::new("Unlock personal").with("database", "personal");
         let source = CancelSource::new();
 
         let Ok(PromptOutcome::Answer(seen)) = SecretProgram::new(sh(&format!(
@@ -442,17 +454,18 @@ mod tests {
         .show(&question, None, &source.token()) else {
             panic!("expected the data back");
         };
+        let seen: serde_json::Value = serde_json::from_str(seen.as_str()).expect("JSON");
         assert_eq!(
-            seen.as_str(),
-            r#"{"v":1,"kind":"unlock","database":"personal"}"#
+            seen,
+            serde_json::json!({"v": 1, "kind": "enter", "database": "personal"})
         );
 
+        // A program that selects is asked as one: its kind says so.
         let Ok(PromptOutcome::Answer(ConfirmAnswer::Allow)) = ConfirmProgram::new(sh(&format!(
-            "cat >/dev/null; test \"${PROMPT_DATA_ENV}\" = '{}' && echo Allow",
-            r#"{"v":1,"kind":"unlock","database":"personal"}"#
+            "cat >/dev/null; case \"${PROMPT_DATA_ENV}\" in *'\"kind\":\"select\"'*) echo Allow;; esac"
         )))
         .show(&question, None, &source.token()) else {
-            panic!("expected the confirm program to run with the data");
+            panic!("expected the confirm program to see its kind");
         };
     }
 

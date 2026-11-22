@@ -707,7 +707,7 @@ fn the_prompt_programs_get_the_data_behind_their_message() {
     };
     assert_eq!(
         json(&unlock_data),
-        serde_json::json!({"v": 1, "kind": "unlock", "database": "personal"})
+        serde_json::json!({"v": 1, "kind": "enter", "database": "personal"})
     );
 
     let listed = stdout(&ssh_add(&agent, ["-L"]));
@@ -717,7 +717,7 @@ fn the_prompt_programs_get_the_data_behind_their_message() {
     assert!(sign(&agent, &pubkey, &data).status.success());
 
     let confirm = json(&confirm_data);
-    assert_eq!(confirm["kind"], "confirm");
+    assert_eq!(confirm["kind"], "select");
     assert_eq!(confirm["database"], "personal");
     assert_eq!(confirm["key"]["name"], "Ed25519");
     assert_eq!(confirm["key"]["type"], "ssh-ed25519");

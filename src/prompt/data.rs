@@ -1,125 +1,73 @@
-//! What a prompt asks: [`Question`], its one-line message and the
-//! [`PromptData`] behind it. A prompt program gets the message in
-//! `KPA_PROMPT_MESSAGE` and the data as JSON in `KPA_PROMPT_DATA`
-//! (`docs/design.md`, "Configuration and logging").
+//! What a prompt asks: [`Question`], its one-line message and the data behind
+//! it. A prompt program gets the message in `KPA_PROMPT_MESSAGE` and the data
+//! as JSON in `KPA_PROMPT_DATA` (`docs/design.md`, "Configuration and
+//! logging").
 //!
 //! The data holds the pieces the message is made of, so a program that wants
 //! a richer display than one line doesn't parse the line. Whoever asks builds
-//! both from the same pieces, so the two can't disagree.
-//!
-//! This is plain data: strings and small structs, and nothing about SSH.
-//! What fills it in knows its own subject.
+//! both from the same pieces, so the two can't disagree. A prompt knows how it
+//! asks, and nothing about what: the data's fields are the asker's.
 
-use serde::Serialize;
+use serde_json::{Map, Value};
 
 use super::message::sanitize_message;
 
-/// What `PromptData::v` is. A change a consumer can't ignore bumps it.
-const DATA_VERSION: u32 = 1;
-
 /// A prompt's message, shown to the user in one line, and the data behind
 /// it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Question {
     /// Plain text. [`Prompt::ask`](super::Prompt::ask) sanitizes it before
     /// anything shows it.
     pub message: String,
-    pub data: PromptData,
+    /// Named values, JSON ones. [`Prompt::ask`](super::Prompt::ask) escapes
+    /// every string in them, nested ones too; the asker cuts each to its
+    /// budget. A prompt program's backend adds `v` and `kind` to what is
+    /// here.
+    pub data: Map<String, Value>,
 }
 
 impl Question {
-    /// The question that unlocks `database` and nothing more: "Unlock
-    /// personal".
-    pub fn unlock(database: &str) -> Question {
-        let mut data = PromptData::new(PromptKind::Unlock);
-        data.database = Some(sanitize_message(database));
+    /// A question that says `message` and has no data yet.
+    pub fn new(message: impl Into<String>) -> Question {
         Question {
-            message: format!("Unlock {database}"),
-            data,
+            message: message.into(),
+            data: Map::new(),
+        }
+    }
+
+    /// This question with `value` as its data's `field`.
+    pub fn with(mut self, field: &str, value: impl Into<Value>) -> Question {
+        self.data.insert(field.to_string(), value.into());
+        self
+    }
+
+    /// This question, made safe to display: its message is sanitized and every
+    /// string in its data escaped the same way.
+    pub(super) fn sanitized(&self) -> Question {
+        Question {
+            message: sanitize_message(&self.message),
+            data: self
+                .data
+                .iter()
+                .map(|(field, value)| (field.clone(), escaped(value)))
+                .collect(),
         }
     }
 }
 
-/// Which prompt asks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PromptKind {
-    /// For the master password of a database.
-    Unlock,
-    /// For an approval, answered `Allow` or `Deny`.
-    Confirm,
-}
-
-/// The pieces behind a prompt's message: the JSON in `KPA_PROMPT_DATA`.
-/// Every piece is absent when it doesn't apply.
-///
-/// Each string is display-safe: its control, bidi and zero-width characters
-/// are written as `\uXXXX`, and it is cut to the budget its piece has in the
-/// message, whoever fills it in. It is not quoted for a sentence: a `"` in a
-/// name is a `"`, as a JSON string holds it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PromptData {
-    pub v: u32,
-    pub kind: PromptKind,
-    /// The database the prompt is about.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub database: Option<String>,
-    /// The key a signature asks to use.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub key: Option<PromptKey>,
-    /// What the key is for: `login`, `sshsig` or `other`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub purpose: Option<String>,
-    /// The remote user of a login.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user: Option<String>,
-    /// The namespace of an `SSHSIG` request.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
-    /// Where the signature is accepted, if the connection is bound to a host.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub destination: Option<PromptHost>,
-    /// The host a forwarded connection comes through.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub forwarding_host: Option<PromptHost>,
-}
-
-impl PromptData {
-    /// The data of a `kind` prompt that says nothing more yet.
-    pub fn new(kind: PromptKind) -> PromptData {
-        PromptData {
-            v: DATA_VERSION,
-            kind,
-            database: None,
-            key: None,
-            purpose: None,
-            user: None,
-            namespace: None,
-            destination: None,
-            forwarding_host: None,
-        }
+/// `value` with every string in it, however deep, sanitized as a message is.
+fn escaped(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(sanitize_message(text)),
+        Value::Array(items) => Value::Array(items.iter().map(escaped).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(field, value)| (field.clone(), escaped(value)))
+                .collect(),
+        ),
+        other => other.clone(),
     }
-}
-
-/// A key, as a prompt names it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PromptKey {
-    /// Its name: an override's, else its entry's title, else `<database>
-    /// <fingerprint>` for a locked database's.
-    pub name: String,
-    pub fingerprint: String,
-    /// Its algorithm, `ssh-ed25519` for one.
-    #[serde(rename = "type")]
-    pub key_type: String,
-}
-
-/// A host, as a prompt names it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PromptHost {
-    /// The name `known_hosts` gives its host key, if it does.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub fingerprint: String,
 }
 
 #[cfg(test)]
@@ -128,55 +76,39 @@ mod tests {
 
     use super::*;
 
-    fn json_of(data: &PromptData) -> serde_json::Value {
-        serde_json::to_value(data).expect("serializes")
-    }
-
     #[test]
-    fn a_plain_unlock_names_its_database_and_nothing_else() {
-        let question = Question::unlock("personal");
+    fn a_question_carries_its_fields() {
+        let question = Question::new("Pick one")
+            .with("count", 2)
+            .with("choices", json!(["a", "b"]))
+            .with("title", "Work");
 
-        assert_eq!(question.message, "Unlock personal");
+        assert_eq!(question.message, "Pick one");
         assert_eq!(
-            json_of(&question.data),
-            json!({"v": 1, "kind": "unlock", "database": "personal"})
+            Value::Object(question.data),
+            json!({"count": 2, "choices": ["a", "b"], "title": "Work"})
         );
     }
 
+    /// Every string, at any depth, is escaped the way the message is, and what
+    /// is not a string is left alone.
     #[test]
-    fn a_database_name_is_escaped_in_the_data() {
-        let question = Question::unlock("per\nsonal\u{202e}");
+    fn sanitizing_escapes_every_string_however_deep() {
+        let question = Question::new("Unlock\u{202e}evil")
+            .with("name", "per\nsonal")
+            .with(
+                "nested",
+                json!({"deep": ["a\u{200b}b", {"leaf": "x\ty"}], "n": 1}),
+            );
 
+        let safe = question.sanitized();
+
+        assert_eq!(safe.message, "Unlock\\u202eevil");
         assert_eq!(
-            question.data.database.as_deref(),
-            Some("per\\u000asonal\\u202e")
-        );
-    }
-
-    #[test]
-    fn pieces_that_do_not_apply_are_left_out() {
-        let mut data = PromptData::new(PromptKind::Confirm);
-        data.key = Some(PromptKey {
-            name: "github".to_string(),
-            fingerprint: "SHA256:abc".to_string(),
-            key_type: "ssh-ed25519".to_string(),
-        });
-        data.purpose = Some("sshsig".to_string());
-        data.namespace = Some("git".to_string());
-        data.forwarding_host = Some(PromptHost {
-            name: None,
-            fingerprint: "SHA256:def".to_string(),
-        });
-
-        assert_eq!(
-            json_of(&data),
+            Value::Object(safe.data),
             json!({
-                "v": 1,
-                "kind": "confirm",
-                "key": {"name": "github", "fingerprint": "SHA256:abc", "type": "ssh-ed25519"},
-                "purpose": "sshsig",
-                "namespace": "git",
-                "forwarding_host": {"fingerprint": "SHA256:def"},
+                "name": "per\\u000asonal",
+                "nested": {"deep": ["a\\u200bb", {"leaf": "x\\u0009y"}], "n": 1},
             })
         );
     }

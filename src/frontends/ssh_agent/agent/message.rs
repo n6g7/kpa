@@ -3,16 +3,17 @@
 //! question, and the pieces it is made of, for a prompt program that wants
 //! them (`KPA_PROMPT_DATA`, `docs/design.md`).
 //!
-//! Each prompt's [`PromptData`] is filled first, with every piece escaped and
+//! Each prompt's [`Pieces`] are filled first, with every piece escaped and
 //! cut to its budget, and the message is formatted from that data and
 //! nothing else, so the two can't disagree.
 
+use serde_json::{Map, Value, json};
 use ssh_key::HashAlg;
 use ssh_key::public::KeyData;
 
 use crate::frontends::ssh_agent::classify::Purpose;
 use crate::output::escape_one_line;
-use crate::prompt::{PromptData, PromptHost, PromptKey, PromptKind, Question};
+use crate::prompt::Question;
 use crate::ssh::keys::ServedKey;
 
 /// The most bytes (escaped) each piece of a message may take. The message
@@ -39,14 +40,107 @@ pub(super) struct Host<'a> {
 impl Host<'_> {
     /// The host as the data names it: its name, escaped and cut, and its
     /// host key's fingerprint.
-    fn data(&self) -> PromptHost {
-        PromptHost {
+    fn piece(&self) -> HostPiece {
+        HostPiece {
             name: self
                 .name
                 .as_deref()
                 .map(|name| escape_one_line(name, MAX_HOST_NAME_LEN)),
             fingerprint: self.key.fingerprint(HashAlg::Sha256).to_string(),
         }
+    }
+}
+
+/// A host, as a prompt names it.
+struct HostPiece {
+    /// The name `known_hosts` gives its host key, if it does.
+    name: Option<String>,
+    fingerprint: String,
+}
+
+impl HostPiece {
+    fn value(&self) -> Value {
+        let mut fields = Map::new();
+        if let Some(name) = &self.name {
+            fields.insert("name".to_string(), name.clone().into());
+        }
+        fields.insert("fingerprint".to_string(), self.fingerprint.clone().into());
+        Value::Object(fields)
+    }
+}
+
+/// The pieces of a prompt about a key and a request for it, each escaped and
+/// cut to its budget. The message is formatted from them, and they are the
+/// data a prompt program gets.
+struct Pieces {
+    database: String,
+    key_name: String,
+    key_fingerprint: String,
+    key_type: String,
+    /// What the key is for: `login`, `sshsig` or `other`.
+    purpose: &'static str,
+    /// The remote user of a login.
+    user: Option<String>,
+    /// The namespace of an `SSHSIG` request.
+    namespace: Option<String>,
+    destination: Option<HostPiece>,
+    forwarding_host: Option<HostPiece>,
+}
+
+impl Pieces {
+    /// The pieces of a prompt about `served` and a request for `purpose`.
+    fn new(
+        served: &ServedKey,
+        purpose: &Purpose,
+        destination: Option<&Host<'_>>,
+        forwarding: Option<&Host<'_>>,
+    ) -> Pieces {
+        let (user, namespace) = match purpose {
+            Purpose::Login(login) => (Some(escape_one_line(&login.user, MAX_REQUESTED_LEN)), None),
+            Purpose::SshSig { namespace } => {
+                (None, Some(escape_one_line(namespace, MAX_REQUESTED_LEN)))
+            }
+            Purpose::Other => (None, None),
+        };
+        Pieces {
+            database: escape_one_line(&served.database, MAX_DATABASE_LEN),
+            key_name: escape_one_line(&served.name, MAX_KEY_NAME_LEN),
+            key_fingerprint: served.fingerprint.to_string(),
+            key_type: served.public_key.algorithm().to_string(),
+            purpose: purpose.label(),
+            user,
+            namespace,
+            destination: destination.map(Host::piece),
+            forwarding_host: forwarding.map(Host::piece),
+        }
+    }
+
+    /// The question that says `message`, with these pieces as its data.
+    fn question(&self, message: String) -> Question {
+        let mut question = Question::new(message)
+            .with("database", self.database.as_str())
+            .with(
+                "key",
+                json!({
+                    "name": self.key_name,
+                    "fingerprint": self.key_fingerprint,
+                    "type": self.key_type,
+                }),
+            )
+            .with("purpose", self.purpose);
+        if let Some(user) = &self.user {
+            question = question.with("user", user.as_str());
+        }
+        if let Some(namespace) = &self.namespace {
+            question = question.with("namespace", namespace.as_str());
+        }
+        if let Some(destination) = &self.destination {
+            question = question.with("destination", destination.value());
+        }
+        if let Some(forwarding) = &self.forwarding_host {
+            question = question.with("forwarding_host", forwarding.value());
+        }
+        question
     }
 }
 
@@ -65,15 +159,9 @@ pub(super) fn approval(
     destination: Option<&Host<'_>>,
     forwarding: Option<&Host<'_>>,
 ) -> Question {
-    let data = data(
-        PromptKind::Confirm,
-        served,
-        purpose,
-        destination,
-        forwarding,
-    );
-    let message = message(&format!("Approve use of {}", key(&data)), &data);
-    Question { message, data }
+    let pieces = Pieces::new(served, purpose, destination, forwarding);
+    let message = message(&format!("Approve use of {}", key(&pieces)), &pieces);
+    pieces.question(message)
 }
 
 /// The unlock prompt's question, about unlocking, which says what for:
@@ -85,67 +173,35 @@ pub(super) fn unlock(
     destination: Option<&Host<'_>>,
     forwarding: Option<&Host<'_>>,
 ) -> Question {
-    let data = data(PromptKind::Unlock, served, purpose, destination, forwarding);
+    let pieces = Pieces::new(served, purpose, destination, forwarding);
     let lead = format!(
         "Unlock database {} to use {}",
-        data.database.as_deref().unwrap_or_default(),
-        key(&data)
+        pieces.database,
+        key(&pieces)
     );
-    let message = message(&lead, &data);
-    Question { message, data }
-}
-
-/// The pieces of a prompt about `served` and a request for `purpose`, each
-/// escaped and cut to its budget.
-fn data(
-    kind: PromptKind,
-    served: &ServedKey,
-    purpose: &Purpose,
-    destination: Option<&Host<'_>>,
-    forwarding: Option<&Host<'_>>,
-) -> PromptData {
-    let mut data = PromptData::new(kind);
-    data.database = Some(escape_one_line(&served.database, MAX_DATABASE_LEN));
-    data.key = Some(PromptKey {
-        name: escape_one_line(&served.name, MAX_KEY_NAME_LEN),
-        fingerprint: served.fingerprint.to_string(),
-        key_type: served.public_key.algorithm().to_string(),
-    });
-    data.purpose = Some(purpose.label().to_string());
-    match purpose {
-        Purpose::Login(login) => {
-            data.user = Some(escape_one_line(&login.user, MAX_REQUESTED_LEN));
-        }
-        Purpose::SshSig { namespace } => {
-            data.namespace = Some(escape_one_line(namespace, MAX_REQUESTED_LEN));
-        }
-        Purpose::Other => {}
-    }
-    data.destination = destination.map(Host::data);
-    data.forwarding_host = forwarding.map(Host::data);
-    data
+    let message = message(&lead, &pieces);
+    pieces.question(message)
 }
 
 /// `key "github"`, the key's name quoted.
-fn key(data: &PromptData) -> String {
-    let name = data.key.as_ref().map_or("", |key| key.name.as_str());
-    format!("key \"{}\"", quoted(name))
+fn key(pieces: &Pieces) -> String {
+    format!("key \"{}\"", quoted(&pieces.key_name))
 }
 
 /// `lead`, then which host the request is forwarded through, then what the
 /// key is for and where, as a question.
-fn message(lead: &str, data: &PromptData) -> String {
-    let through = on(data.forwarding_host.as_ref());
-    let user = data.user.as_deref().unwrap_or_default();
-    let what = match (data.purpose.as_deref(), data.destination.as_ref()) {
-        (Some("login"), Some(dest)) => match &dest.name {
+fn message(lead: &str, pieces: &Pieces) -> String {
+    let through = on(pieces.forwarding_host.as_ref());
+    let user = pieces.user.as_deref().unwrap_or_default();
+    let what = match (pieces.purpose, pieces.destination.as_ref()) {
+        ("login", Some(dest)) => match &dest.name {
             Some(_) => format!(" to log in to {user}@{}", shown(dest)),
             None => format!(" to log in as {user} to {}", shown(dest)),
         },
-        (Some("login"), None) => format!(" to log in as {user}"),
-        (Some("sshsig"), destination) => format!(
+        ("login", None) => format!(" to log in as {user}"),
+        ("sshsig", destination) => format!(
             " to sign for namespace {}{}",
-            data.namespace.as_deref().unwrap_or_default(),
+            pieces.namespace.as_deref().unwrap_or_default(),
             on(destination)
         ),
         (_, destination) => on(destination),
@@ -154,7 +210,7 @@ fn message(lead: &str, data: &PromptData) -> String {
 }
 
 /// The host's name, else its host key's fingerprint.
-fn shown(host: &PromptHost) -> String {
+fn shown(host: &HostPiece) -> String {
     match &host.name {
         Some(name) => name.clone(),
         None => format!("host key {}", host.fingerprint),
@@ -162,7 +218,7 @@ fn shown(host: &PromptHost) -> String {
 }
 
 /// " on <host>" for a host, nothing without one.
-fn on(host: Option<&PromptHost>) -> String {
+fn on(host: Option<&HostPiece>) -> String {
     host.map(|host| format!(" on {}", shown(host)))
         .unwrap_or_default()
 }
@@ -433,8 +489,7 @@ mod tests {
     fn the_data_escapes_a_key_name_without_quoting_it() {
         let question = approval(&served("say \"hi\"\n\u{202e}"), &Purpose::Other, None, None);
 
-        let key = question.data.key.expect("a key");
-        assert_eq!(key.name, "say \"hi\"\\u000a\\u202e");
+        assert_eq!(question.data["key"]["name"], "say \"hi\"\\u000a\\u202e");
         assert!(question.message.contains("say \\\"hi\\\""));
     }
 
@@ -476,10 +531,8 @@ mod tests {
         );
 
         assert_eq!(
-            serde_json::to_value(&question.data).expect("serializes"),
+            serde_json::Value::Object(question.data),
             serde_json::json!({
-                "v": 1,
-                "kind": "confirm",
                 "database": "personal",
                 "key": {
                     "name": "github",
@@ -504,16 +557,22 @@ mod tests {
         );
     }
 
-    /// An unlock on demand is the confirm's data with the kind of an unlock;
-    /// an `SSHSIG` carries its namespace and no user.
+    /// An unlock on demand has the confirm's data; an `SSHSIG` carries its
+    /// namespace and no user, and a connection bound to nothing has no
+    /// destination.
     #[test]
     fn the_unlock_and_sshsig_data_say_what_they_are() {
         let unlocked = unlock(&served("github"), &sshsig("git"), None, None);
 
-        assert_eq!(unlocked.data.kind, PromptKind::Unlock);
-        assert_eq!(unlocked.data.purpose.as_deref(), Some("sshsig"));
-        assert_eq!(unlocked.data.namespace.as_deref(), Some("git"));
-        assert_eq!(unlocked.data.user, None);
-        assert_eq!(unlocked.data.destination, None);
+        assert_eq!(unlocked.data["purpose"], "sshsig");
+        assert_eq!(unlocked.data["namespace"], "git");
+        assert_eq!(unlocked.data["database"], "personal");
+        assert!(!unlocked.data.contains_key("user"));
+        assert!(!unlocked.data.contains_key("destination"));
+        assert!(!unlocked.data.contains_key("forwarding_host"));
+        assert_eq!(
+            unlocked.message,
+            "Unlock database personal to use key \"github\" to sign for namespace git?"
+        );
     }
 }
