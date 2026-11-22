@@ -460,9 +460,9 @@ each string, nested ones too, is made display-safe the way the message is:
 control, bidi and zero-width characters are written as `\uXXXX`. The prompts
 that ask about a key also cut each piece to the same length budget as its piece
 in the message; the message leaves a host after the first in `forwarding_chain`
-out when it has no room for it, and the data never does. Strings are not quoted for the sentence: a `"` in a name is a
-`"`, as a JSON string holds it, where the message writes it `\"` so a name
-can't end its own quotation.
+out when it has no room for it, and the data never does. Strings are not quoted
+for the sentence: a `"` in a name is a `"`, as a JSON string holds it, where the
+message writes it `\"` so a name can't end its own quotation.
 
 A program knows how it is asked from the setting it is configured in (`prompt`
 asks for a value it prints, `ssh_agent.confirm_prompt` for one of the lines on
