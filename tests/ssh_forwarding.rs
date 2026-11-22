@@ -214,13 +214,8 @@ impl Rig {
             authorized.push_str(&format!("{}\n", key_line(&listed, title)));
         }
         let sshd = start_sshd(&tools, dir.path(), &host_key, None, &authorized);
-        let known_hosts = daemon
-            .paths
-            .known_hosts
-            .clone()
-            .expect("the daemon's known_hosts");
         std::fs::write(
-            known_hosts,
+            &daemon.known_hosts,
             format!("[127.0.0.1]:{} {}", sshd.port, public(&host_key)),
         )
         .expect("write known_hosts");
@@ -246,7 +241,7 @@ impl Rig {
 
     /// `ssh_options` for an `sshd` on `port`.
     fn ssh_options_to(&self, port: u16) -> Vec<String> {
-        let known_hosts = self.daemon.paths.known_hosts.clone().expect("known_hosts");
+        let known_hosts = self.daemon.known_hosts.clone();
         let mut options: Vec<String> = ["-F", "/dev/null", "-p"]
             .iter()
             .map(|option| option.to_string())
@@ -356,7 +351,7 @@ impl Rig {
                 .expect("read authorized_keys");
         authorized.push('\n');
         let destination = start_sshd(&self.tools, dir, &host_key, Some(&certificate), &authorized);
-        let known_hosts = self.daemon.paths.known_hosts.clone().expect("known_hosts");
+        let known_hosts = self.daemon.known_hosts.clone();
         let mut entries = std::fs::read_to_string(&known_hosts).expect("read known_hosts");
         entries.push_str(&format!(
             "[127.0.0.1]:{} {}",

@@ -3,7 +3,7 @@
 //! ssh grants` and `kpa ssh pending` (`docs/ssh-agent.md` § 6.2, § 6.7,
 //! § 6.8).
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use ssh_key::certificate::CertType;
 use ssh_key::known_hosts::{HostPatterns, KnownHosts, Marker};
@@ -35,22 +35,32 @@ struct Authority {
 }
 
 impl HostNames {
-    /// What `path` says. A missing path or a file that can't be read says
-    /// nothing. A line that doesn't parse (a key type this build doesn't
-    /// know, say) is skipped: the other lines still count. A hashed
-    /// `@cert-authority` line names nothing: `ssh-keygen -H` never writes
-    /// one, and kpa doesn't match hashes for it.
-    pub fn read(path: Option<&Path>) -> HostNames {
-        let Some(input) = path.and_then(|path| std::fs::read_to_string(path).ok()) else {
-            return HostNames::default();
-        };
+    /// What `files` say, read in order, as `ssh` reads them. A file that is
+    /// missing or can't be read says nothing, and the files after it still
+    /// count. A plain entry names a key in the first file that has one for
+    /// it. `@cert-authority` and `@revoked` lines count from every file, so a
+    /// key one file revokes is revoked. A line that doesn't parse (a key type
+    /// this build doesn't know, say) is skipped: the other lines still count.
+    /// A hashed `@cert-authority` line names nothing: `ssh-keygen -H` never
+    /// writes one, and kpa doesn't match hashes for it.
+    pub fn read(files: &[PathBuf]) -> HostNames {
         let mut names = HostNames::default();
-        for entry in KnownHosts::new(&input).filter_map(Result::ok) {
+        for file in files {
+            if let Ok(input) = std::fs::read_to_string(file) {
+                names.add(&input);
+            }
+        }
+        names
+    }
+
+    /// Adds what `input`, one file, says.
+    fn add(&mut self, input: &str) {
+        for entry in KnownHosts::new(input).filter_map(Result::ok) {
             let key = entry.public_key().fingerprint(HashAlg::Sha256);
             match (entry.marker(), entry.host_patterns()) {
-                (Some(Marker::Revoked), _) => names.revoked.push(key),
+                (Some(Marker::Revoked), _) => self.revoked.push(key),
                 (Some(Marker::CertAuthority), HostPatterns::Patterns(patterns)) => {
-                    names.authorities.push(Authority {
+                    self.authorities.push(Authority {
                         key,
                         patterns: patterns.clone(),
                     });
@@ -60,14 +70,17 @@ impl HostNames {
                     let plain = patterns
                         .iter()
                         .find(|pattern| !pattern.starts_with('!') && !pattern.contains(['*', '?']));
-                    if let Some(name) = plain {
-                        names.named.push((key, name.clone()));
+                    // A key a line before this one, in this file or an earlier
+                    // one, named keeps that name.
+                    if let Some(name) = plain
+                        && !self.named.iter().any(|(named, _)| *named == key)
+                    {
+                        self.named.push((key, name.clone()));
                     }
                 }
                 (None, HostPatterns::HashedName { .. }) => {}
             }
         }
-        names
     }
 
     /// The name a plain entry gives the host key with `fingerprint`, if one
@@ -227,7 +240,7 @@ mod tests {
         )
         .expect("write known_hosts");
 
-        let names = HostNames::read(Some(&path));
+        let names = HostNames::read(&[path]);
 
         assert_eq!(names.name(&fingerprint(5)), None);
         assert_eq!(names.name(&fingerprint(6)), None);
@@ -251,7 +264,7 @@ mod tests {
         )
         .expect("write known_hosts");
 
-        let names = HostNames::read(Some(&path));
+        let names = HostNames::read(&[path]);
 
         assert_eq!(names.name(&fingerprint(2)), Some("github.com"));
         assert_eq!(names.name(&fingerprint(3)), None);
@@ -277,7 +290,7 @@ mod tests {
         )
         .expect("write known_hosts");
 
-        let names = HostNames::read(Some(&path));
+        let names = HostNames::read(&[path]);
 
         assert_eq!(names.name(&fingerprint(2)), Some("first.example"));
         assert_eq!(names.name(&fingerprint(3)), Some("second.example"));
@@ -287,9 +300,9 @@ mod tests {
     fn a_missing_path_or_file_gives_no_names() {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        assert_eq!(HostNames::read(None).name(&fingerprint(2)), None);
+        assert_eq!(HostNames::read(&[]).name(&fingerprint(2)), None);
         assert_eq!(
-            HostNames::read(Some(&dir.path().join("missing"))).name(&fingerprint(2)),
+            HostNames::read(&[dir.path().join("missing")]).name(&fingerprint(2)),
             None
         );
     }
@@ -303,7 +316,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("known_hosts");
         std::fs::write(&path, lines).expect("write known_hosts");
-        HostNames::read(Some(&path))
+        HostNames::read(&[path])
     }
 
     const NOW: u64 = 1_000_000;
@@ -537,6 +550,75 @@ mod tests {
             Some("plain.example")
         );
         assert_eq!(names.name_of(&host(4), None, NOW), None);
+    }
+
+    /// Several files, read as `ssh` reads them. `files[i]` is the text of
+    /// the i-th.
+    fn names_from_files(files: &[&str]) -> HostNames {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths: Vec<PathBuf> = files
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                let path = dir.path().join(format!("known_hosts-{i}"));
+                std::fs::write(&path, text).expect("write known_hosts");
+                path
+            })
+            .collect();
+        HostNames::read(&paths)
+    }
+
+    /// A plain entry names a key in the first file that has one for it.
+    #[test]
+    fn the_first_file_that_names_a_key_wins() {
+        let names = names_from_files(&[
+            &format!("first.example {}\n", line_key(1)),
+            &format!(
+                "second.example {}\nonly-second.example {}\n",
+                line_key(1),
+                line_key(2)
+            ),
+        ]);
+
+        assert_eq!(names.name(&fingerprint(1)), Some("first.example"));
+        assert_eq!(names.name(&fingerprint(2)), Some("only-second.example"));
+    }
+
+    /// A CA line in one file trusts the CA for a certificate whatever file
+    /// names the key, and a revocation in any file revokes.
+    #[test]
+    fn ca_and_revoked_lines_count_from_every_file() {
+        let certificate = certificate(1, 2, &["build-box.example"]);
+        let trusting = ca_line(2, "*.example");
+        let revoking = format!("@revoked * {}\n", line_key(1));
+
+        let names = names_from_files(&["", &trusting]);
+        assert_eq!(
+            names.name_of(&host(1), Some(&certificate), NOW).as_deref(),
+            Some("build-box.example")
+        );
+
+        let names = names_from_files(&[&revoking, &trusting]);
+        assert_eq!(names.name_of(&host(1), Some(&certificate), NOW), None);
+
+        let names = names_from_files(&[&trusting, &revoking]);
+        assert_eq!(names.name_of(&host(1), Some(&certificate), NOW), None);
+    }
+
+    /// A file that is missing or can't be read is skipped, and the files
+    /// after it still count. No files name nothing.
+    #[test]
+    fn a_missing_file_is_skipped_and_no_files_name_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let present = dir.path().join("known_hosts");
+        std::fs::write(&present, format!("plain.example {}\n", line_key(1))).expect("write");
+        let unreadable = dir.path().join("a-directory");
+        std::fs::create_dir(&unreadable).expect("mkdir");
+
+        let names = HostNames::read(&[dir.path().join("missing"), unreadable, present]);
+
+        assert_eq!(names.name(&fingerprint(1)), Some("plain.example"));
+        assert_eq!(HostNames::read(&[]).name(&fingerprint(1)), None);
     }
 
     /// Patterns are OpenSSH's: lists, globs, case, negation and ports.

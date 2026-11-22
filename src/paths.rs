@@ -1,5 +1,4 @@
-//! Where kpa's sockets and caches, and OpenSSH's `known_hosts`, live on
-//! this machine.
+//! Where kpa's sockets and caches live on this machine.
 //! [`Paths::from_env`] reads them from the environment once, at startup,
 //! and the code that needs one is handed the `Paths` it resolved; a test
 //! builds its own `Paths` rather than depending on this process's
@@ -30,9 +29,6 @@ pub struct Paths {
     /// The per-user cache directory: `$XDG_CACHE_HOME`, or `$HOME/.cache`
     /// if that's unset.
     pub cache_dir: Option<PathBuf>,
-    /// OpenSSH's known-hosts file, at its default location:
-    /// `$HOME/.ssh/known_hosts`.
-    pub known_hosts: Option<PathBuf>,
 }
 
 impl Paths {
@@ -50,7 +46,6 @@ impl Paths {
             runtime_dir: dir("XDG_RUNTIME_DIR"),
             cache_dir: dir("XDG_CACHE_HOME")
                 .or_else(|| home.as_ref().map(|home| home.join(".cache"))),
-            known_hosts: home.map(|home| home.join(".ssh/known_hosts")),
         }
     }
 }
@@ -86,10 +81,6 @@ mod tests {
         ]);
         assert_eq!(paths.runtime_dir, Some(PathBuf::from("/run/user/1000")));
         assert_eq!(paths.cache_dir, Some(PathBuf::from("/var/cache/me")));
-        assert_eq!(
-            paths.known_hosts,
-            Some(PathBuf::from("/home/me/.ssh/known_hosts"))
-        );
     }
 
     #[test]

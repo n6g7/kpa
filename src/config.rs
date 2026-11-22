@@ -126,6 +126,13 @@ pub struct SshAgentConfig {
     /// covers one signature, and only until this has passed.
     #[serde(with = "humantime_serde", default = "default_ssh_agent_retry_window")]
     pub retry_window: Duration,
+
+    /// The OpenSSH `known_hosts` files that name the hosts a signature goes
+    /// to (`docs/ssh-agent.md` § 6.2), in the order `ssh` checks them. A
+    /// path is absolute or under `~/`, which `load` expands, and a `~/` one
+    /// is left out where `$HOME` isn't set. An empty list names no host.
+    #[serde(default = "default_known_hosts")]
+    pub known_hosts: Vec<PathBuf>,
 }
 
 impl Default for SshAgentConfig {
@@ -136,6 +143,7 @@ impl Default for SshAgentConfig {
             confirm_prompt_timeout: None,
             backoff: default_ssh_agent_backoff(),
             retry_window: default_ssh_agent_retry_window(),
+            known_hosts: default_known_hosts(),
         }
     }
 }
@@ -305,6 +313,14 @@ fn default_ssh_agent_retry_window() -> Duration {
     Duration::from_secs(60)
 }
 
+/// The user's file, then the system's: the order `ssh` reads them in.
+fn default_known_hosts() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("~/.ssh/known_hosts"),
+        PathBuf::from("/etc/ssh/ssh_known_hosts"),
+    ]
+}
+
 impl Config {
     /// How long the SSH agent's confirm prompt may stay open:
     /// `ssh_agent.confirm_prompt_timeout` if set, `prompt_timeout`
@@ -376,6 +392,23 @@ impl Config {
         if let Some(socket) = &self.ssh_agent.socket {
             self.ssh_agent.socket = Some(expand(socket)?);
         }
+        let mut known_hosts = Vec::new();
+        for path in &self.ssh_agent.known_hosts {
+            match self::expand(path, home) {
+                Ok(path) => known_hosts.push(path),
+                // The default's `~/` file can't be found without a home, and
+                // the files after it still count.
+                Err(TildeError::NoHome) => {}
+                Err(kind) => {
+                    return Err(ConfigError::Path {
+                        config: config.to_path_buf(),
+                        path: path.clone(),
+                        kind,
+                    });
+                }
+            }
+        }
+        self.ssh_agent.known_hosts = known_hosts;
         Ok(self)
     }
 
@@ -385,6 +418,7 @@ impl Config {
     /// - `ssh_agent.confirm_prompt` is required once any database opts in;
     /// - `ssh_agent.socket`, if set, is absolute, since a relative one
     ///   would bind against the daemon's working directory;
+    /// - `ssh_agent.known_hosts` paths are absolute, for the same reason;
     /// - a `[[database.ssh_key]]` override needs its database's
     ///   `serve_ssh_keys = true`;
     /// - fingerprints are unique within one database. The same fingerprint
@@ -400,6 +434,19 @@ impl Config {
             return Err(ConfigError::RelativeSshAgentSocket {
                 config: config.to_path_buf(),
                 socket: socket.clone(),
+            });
+        }
+        if let Some(path) = self
+            .ssh_agent
+            .known_hosts
+            .iter()
+            .find(|path| !path.is_absolute() && !path.starts_with("~"))
+        {
+            // (`load` expands a `~/` path before this, so one that is still
+            // here is for a caller that validates without expanding.)
+            return Err(ConfigError::RelativeKnownHosts {
+                config: config.to_path_buf(),
+                path: path.clone(),
             });
         }
         if self.databases.iter().any(|db| db.serve_ssh_keys)
@@ -472,6 +519,12 @@ pub enum ConfigError {
         socket.display()
     )]
     RelativeSshAgentSocket { config: PathBuf, socket: PathBuf },
+    #[error(
+        "in {}: ssh_agent.known_hosts {} is relative; give an absolute path or one under ~/",
+        config.display(),
+        path.display()
+    )]
+    RelativeKnownHosts { config: PathBuf, path: PathBuf },
     #[error(
         "in {}: database {database:?} has [[database.ssh_key]] overrides but serve_ssh_keys is not true",
         config.display()
@@ -971,6 +1024,82 @@ socket = "/custom/sock"
             .validate(Path::new("config.toml"))
             .expect_err("a relative socket is refused");
         assert!(matches!(err, ConfigError::RelativeSshAgentSocket { .. }));
+    }
+
+    /// The default is the user's file and the system's, in the order `ssh`
+    /// reads them, and `~/` expands as it does in the other paths.
+    #[test]
+    fn the_known_hosts_default_is_the_users_file_then_the_systems() {
+        let config = Config::parse("").expect("an empty config parses");
+        assert_eq!(
+            config.ssh_agent.known_hosts,
+            [
+                PathBuf::from("~/.ssh/known_hosts"),
+                PathBuf::from("/etc/ssh/ssh_known_hosts")
+            ]
+        );
+
+        let expanded = config
+            .expand_home(Some(Path::new("/home/alice")), Path::new("config.toml"))
+            .expect("expands");
+        assert_eq!(
+            expanded.ssh_agent.known_hosts,
+            [
+                PathBuf::from("/home/alice/.ssh/known_hosts"),
+                PathBuf::from("/etc/ssh/ssh_known_hosts")
+            ]
+        );
+        expanded
+            .validate(Path::new("config.toml"))
+            .expect("the default is valid");
+    }
+
+    /// Without a home the `~/` file can't be found and is left out, and the
+    /// other files still count.
+    #[test]
+    fn a_home_file_is_left_out_without_a_home() {
+        let expanded = Config::parse("")
+            .expect("parses")
+            .expand_home(None, Path::new("config.toml"))
+            .expect("expands");
+
+        assert_eq!(
+            expanded.ssh_agent.known_hosts,
+            [PathBuf::from("/etc/ssh/ssh_known_hosts")]
+        );
+    }
+
+    #[test]
+    fn the_known_hosts_list_is_the_configs_to_set_or_empty() {
+        let config = Config::parse("[ssh_agent]\nknown_hosts = [\"~/kh\", \"/srv/known_hosts\"]\n")
+            .expect("parses")
+            .expand_home(Some(Path::new("/home/alice")), Path::new("config.toml"))
+            .expect("expands");
+        assert_eq!(
+            config.ssh_agent.known_hosts,
+            [
+                PathBuf::from("/home/alice/kh"),
+                PathBuf::from("/srv/known_hosts")
+            ]
+        );
+
+        let none = Config::parse("[ssh_agent]\nknown_hosts = []\n").expect("parses");
+        assert!(none.ssh_agent.known_hosts.is_empty());
+    }
+
+    #[test]
+    fn a_relative_or_other_users_known_hosts_path_is_refused() {
+        let relative = Config::parse("[ssh_agent]\nknown_hosts = [\"kh\"]\n").expect("parses");
+        let err = relative
+            .validate(Path::new("config.toml"))
+            .expect_err("a relative path is refused");
+        assert!(matches!(err, ConfigError::RelativeKnownHosts { .. }));
+
+        let other = Config::parse("[ssh_agent]\nknown_hosts = [\"~bob/kh\"]\n").expect("parses");
+        let err = other
+            .expand_home(Some(Path::new("/home/alice")), Path::new("config.toml"))
+            .expect_err("~user is refused");
+        assert!(matches!(err, ConfigError::Path { .. }));
     }
 
     #[test]

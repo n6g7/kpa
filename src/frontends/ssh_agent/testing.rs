@@ -146,7 +146,7 @@ pub(super) fn outside_running(command: &str) -> Requester {
 pub(super) struct Options {
     pub(super) backoff: Duration,
     /// Where the agent finds `known_hosts`.
-    pub(super) known_hosts: Option<PathBuf>,
+    pub(super) known_hosts: Vec<PathBuf>,
     /// Whether the public-key cache has a directory.
     pub(super) cache: bool,
 }
@@ -155,7 +155,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             backoff: BACKOFF,
-            known_hosts: None,
+            known_hosts: Vec::new(),
             cache: true,
         }
     }
