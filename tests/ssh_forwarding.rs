@@ -75,18 +75,29 @@ fn generate_key(tools: &Tools, path: &Path) {
 }
 
 /// Starts an `sshd` that accepts the keys in `authorized_keys` for the
-/// current user, and waits until it takes connections.
-fn start_sshd(tools: &Tools, dir: &Path, host_key: &Path, authorized_keys: &str) -> Sshd {
+/// current user, presents `host_certificate` for its host key if it has one,
+/// and waits until it takes connections.
+fn start_sshd(
+    tools: &Tools,
+    dir: &Path,
+    host_key: &Path,
+    host_certificate: Option<&Path>,
+    authorized_keys: &str,
+) -> Sshd {
     let port = free_port();
-    let authorized = dir.join("authorized_keys");
+    let authorized = dir.join(format!("authorized_keys-{port}"));
     std::fs::write(&authorized, authorized_keys).expect("write authorized_keys");
-    let config = dir.join("sshd_config");
+    let config = dir.join(format!("sshd_config-{port}"));
+    let certificate = host_certificate
+        .map(|path| format!("HostCertificate {}\n", path.display()))
+        .unwrap_or_default();
     std::fs::write(
         &config,
         format!(
             "Port {port}\n\
              ListenAddress 127.0.0.1\n\
              HostKey {host_key}\n\
+             {certificate}\
              AuthorizedKeysFile {authorized}\n\
              PidFile {pid}\n\
              UsePAM no\n\
@@ -96,11 +107,12 @@ fn start_sshd(tools: &Tools, dir: &Path, host_key: &Path, authorized_keys: &str)
              AllowAgentForwarding yes\n",
             host_key = host_key.display(),
             authorized = authorized.display(),
-            pid = dir.join("sshd.pid").display(),
+            pid = dir.join(format!("sshd-{port}.pid")).display(),
         ),
     )
     .expect("write sshd_config");
-    let log = std::fs::File::create(dir.join("sshd.log")).expect("create sshd.log");
+    let log_path = dir.join(format!("sshd-{port}.log"));
+    let log = std::fs::File::create(&log_path).expect("create the sshd log");
     let child = Command::new(&tools.sshd)
         .args(["-D", "-e", "-f"])
         .arg(&config)
@@ -112,7 +124,7 @@ fn start_sshd(tools: &Tools, dir: &Path, host_key: &Path, authorized_keys: &str)
     let mut sshd = Sshd { child, port };
     let deadline = Instant::now() + Duration::from_secs(10);
     while TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err() {
-        let log = || std::fs::read_to_string(dir.join("sshd.log")).unwrap_or_default();
+        let log = || std::fs::read_to_string(&log_path).unwrap_or_default();
         if let Some(status) = sshd.child.try_wait().expect("poll sshd") {
             panic!("sshd exited with {status}: {}", log());
         }
@@ -201,7 +213,7 @@ impl Rig {
         for title in ["Ed25519", "Ecdsa", "Rsa"] {
             authorized.push_str(&format!("{}\n", key_line(&listed, title)));
         }
-        let sshd = start_sshd(&tools, dir.path(), &host_key, &authorized);
+        let sshd = start_sshd(&tools, dir.path(), &host_key, None, &authorized);
         let known_hosts = daemon
             .paths
             .known_hosts
@@ -229,12 +241,17 @@ impl Rig {
     /// The options both `ssh` clients run with: no configuration file, the
     /// private `sshd`, and the `known_hosts` kpa reads too.
     fn ssh_options(&self) -> Vec<String> {
+        self.ssh_options_to(self.sshd.port)
+    }
+
+    /// `ssh_options` for an `sshd` on `port`.
+    fn ssh_options_to(&self, port: u16) -> Vec<String> {
         let known_hosts = self.daemon.paths.known_hosts.clone().expect("known_hosts");
         let mut options: Vec<String> = ["-F", "/dev/null", "-p"]
             .iter()
             .map(|option| option.to_string())
             .collect();
-        options.push(self.sshd.port.to_string());
+        options.push(port.to_string());
         for option in [
             "BatchMode=yes".to_string(),
             "StrictHostKeyChecking=yes".to_string(),
@@ -284,9 +301,14 @@ impl Rig {
     /// The command that, run on the `sshd`, logs in to it again with
     /// `title`'s key through the forwarded agent, and runs `true`.
     fn second_hop(&self, title: &str) -> String {
+        self.second_hop_to(title, self.sshd.port)
+    }
+
+    /// `second_hop` to the `sshd` on `port`.
+    fn second_hop_to(&self, title: &str, port: u16) -> String {
         let public = self.public_key_file(title);
         let mut words = vec![quoted(self.tools.ssh.to_str().expect("utf-8 path"))];
-        let options = self.ssh_options();
+        let options = self.ssh_options_to(port);
         let (host, options) = options.split_last().expect("options");
         words.extend(options.iter().map(|option| quoted(option)));
         words.extend([
@@ -297,6 +319,42 @@ impl Rig {
         words.push(quoted(public.to_str().expect("utf-8 path")));
         words.extend([quoted(host), "true".to_string()]);
         words.join(" ")
+    }
+
+    /// Starts a second `sshd`, as a destination, whose host key comes with a
+    /// host certificate made by a CA of its own, as `ssh-keygen -s` makes
+    /// one. `known_hosts` has a plain entry for the host key and none for
+    /// the CA, so what names the host is the key the certificate certifies.
+    fn start_certified_destination(&self) -> Sshd {
+        let dir = self.dir.path();
+        let (ca, host_key) = (dir.join("ca"), dir.join("certified_host_key"));
+        generate_key(&self.tools, &ca);
+        generate_key(&self.tools, &host_key);
+        let signed = Command::new(&self.tools.ssh_keygen)
+            .args(["-q", "-s"])
+            .arg(&ca)
+            .args(["-I", "build-box", "-h", "-n", "127.0.0.1", "-V", "-5m:+1h"])
+            .arg(host_key.with_extension("pub"))
+            .status()
+            .expect("spawn ssh-keygen -s");
+        assert!(signed.success(), "ssh-keygen -s failed");
+        let certificate = dir.join("certified_host_key-cert.pub");
+        assert!(certificate.is_file(), "no host certificate was made");
+
+        let mut authorized =
+            std::fs::read_to_string(dir.join(format!("authorized_keys-{}", self.sshd.port)))
+                .expect("read authorized_keys");
+        authorized.push('\n');
+        let destination = start_sshd(&self.tools, dir, &host_key, Some(&certificate), &authorized);
+        let known_hosts = self.daemon.paths.known_hosts.clone().expect("known_hosts");
+        let mut entries = std::fs::read_to_string(&known_hosts).expect("read known_hosts");
+        entries.push_str(&format!(
+            "[127.0.0.1]:{} {}",
+            destination.port,
+            std::fs::read_to_string(host_key.with_extension("pub")).expect("read host key"),
+        ));
+        std::fs::write(&known_hosts, entries).expect("write known_hosts");
+        destination
     }
 
     /// What `kpa ssh grants` lists: each approval in force, as JSON.
@@ -440,6 +498,32 @@ fn a_forwarded_connection_signs_only_logins_with_keys_allowed_on_it() {
     assert!(!data.with_extension("sig").exists());
 
     assert_eq!(rig.confirmations(), Vec::<String>::new());
+}
+
+/// A destination that presents a host certificate is bound by the key the
+/// certificate certifies: the forwarded login to it is approved, naming it as
+/// `known_hosts` names that key, and signs.
+#[test]
+fn a_forwarded_login_to_a_host_with_a_certificate_asks_and_signs() {
+    let Some(rig) = Rig::start("30m", "") else {
+        return;
+    };
+    let destination = rig.start_certified_destination();
+
+    let login = rig.forwarded(&rig.second_hop_to("Ed25519", destination.port));
+
+    assert!(login.status.success(), "{}", output_text(&login));
+    let (via, dest) = (
+        format!("[127.0.0.1]:{}", rig.sshd.port),
+        format!("[127.0.0.1]:{}", destination.port),
+    );
+    assert_eq!(
+        rig.confirmations(),
+        [format!(
+            "Approve use of key \"Ed25519\" on {via} to log in to {}@{dest}?",
+            rig.user
+        )]
+    );
 }
 
 /// A forwarded signature is a remote host's: it does not keep the database

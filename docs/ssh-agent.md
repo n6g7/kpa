@@ -228,6 +228,16 @@ same connection. kpa verifies each signature and records up to 16 bindings
 per connection, as `ssh-agent` does, refusing any new binding on a
 connection already bound for authentication.
 
+A binding's host key may be a certificate: `ssh` passes on the server's host
+certificate when the server presents one. kpa identifies the host by
+the key the certificate certifies, and verifies the signature against that
+key, so everything downstream (the scope, the prompts, the `known_hosts`
+names, the log) knows the host by that key's fingerprint, which a plain
+`known_hosts` entry for it matches. It checks neither the certificate's CA,
+nor its validity, nor its principals, and takes no host name from them: the
+server chooses them, and kpa trusts no CA here. The signature still has to
+be the certified key's.
+
 Each connection is classified as one of:
 
 - **Local, unbound**: no binding. `ssh-keygen -Y sign`, and clients other

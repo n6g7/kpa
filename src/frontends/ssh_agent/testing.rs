@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use signature::Signer;
+use ssh_key::certificate::{Builder, CertType};
 use ssh_key::encoding::Encode;
 use ssh_key::{Fingerprint, HashAlg, PrivateKey, Signature};
 use uuid::Uuid;
@@ -42,6 +43,31 @@ pub(super) fn signed_bind(
         session_id: session_id.to_vec(),
         signature: signature.encode_vec().expect("signature encodes"),
         is_forwarding,
+    }
+}
+
+/// A `session-bind@openssh.com` message as a host that presents a certificate
+/// sends it: the host key is a host certificate for `host` and the host name
+/// `principal`, made by `ca` for a window that is over, and `host` signs the
+/// session identifier.
+pub(super) fn certified_bind(
+    host: &PrivateKey,
+    ca: &PrivateKey,
+    principal: &str,
+    session_id: &[u8],
+    is_forwarding: bool,
+) -> SessionBind {
+    let mut builder = Builder::new(vec![0; 16], host.public_key().key_data().clone(), 0, 1)
+        .expect("a valid window");
+    builder
+        .cert_type(CertType::Host)
+        .expect("a host certificate")
+        .valid_principal(principal)
+        .expect("a principal");
+    let certificate = builder.sign(ca).expect("the CA signs");
+    SessionBind {
+        hostkey: certificate.to_bytes().expect("certificate encodes"),
+        ..signed_bind(host, session_id, is_forwarding)
     }
 }
 
