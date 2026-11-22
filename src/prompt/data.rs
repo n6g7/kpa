@@ -21,8 +21,7 @@ pub struct Question {
     pub message: String,
     /// Named values, JSON ones. [`Prompt::ask`](super::Prompt::ask) escapes
     /// every string in them, nested ones too; the asker cuts each to its
-    /// budget. A prompt program's backend adds `v` and `kind` to what is
-    /// here.
+    /// budget. A prompt program's backend adds `v` to what is here.
     pub data: Map<String, Value>,
 }
 

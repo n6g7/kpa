@@ -436,13 +436,12 @@ anything in its argv:
   pieces, so the two agree. A prompt on a terminal runs no program and gets
   neither.
 
-The data is an object. `v` and `kind` are always there; the other members are
-what kpa's prompts are about, each absent when it doesn't apply:
+The data is an object. `v` is always there; the other members are what kpa's
+prompts are about, each absent when it doesn't apply:
 
 | Member | What it is |
 | --- | --- |
 | `v` | Always `1`. A change a consumer can't ignore bumps it; a new member doesn't. |
-| `kind` | How the program is asked, never what about: `"enter"` for a value it prints (`prompt`), `"select"` for one of the lines it is offered on its stdin (`ssh_agent.confirm_prompt`). |
 | `database` | The database the prompt is about. |
 | `key` | The key a signature asks to use: `name`, `fingerprint` and `type` (its algorithm, `ssh-ed25519` for one). |
 | `purpose` | What the key is for: `"login"`, `"sshsig"` or `"other"`. |
@@ -450,17 +449,21 @@ what kpa's prompts are about, each absent when it doesn't apply:
 | `namespace` | The namespace of an `SSHSIG` request. |
 | `destination`, `forwarding_host` | Where the signature is accepted, and the host a forwarded connection comes through: each `{"name"?, "fingerprint"}`, `name` being the host name `known_hosts` gives its host key, when it gives one. |
 
-A plain `kpa unlock personal` is `{"v":1,"kind":"enter","database":"personal"}`.
+A plain `kpa unlock personal` is `{"v":1,"database":"personal"}`.
 A confirm prompt for a forwarded login is
-`{"v":1,"kind":"select","database":"personal","key":{"name":"github","fingerprint":"SHA256:…","type":"ssh-ed25519"},"purpose":"login","user":"git","destination":{"name":"github.com","fingerprint":"SHA256:…"},"forwarding_host":{"name":"build-box","fingerprint":"SHA256:…"}}`.
+`{"v":1,"database":"personal","key":{"name":"github","fingerprint":"SHA256:…","type":"ssh-ed25519"},"purpose":"login","user":"git","destination":{"name":"github.com","fingerprint":"SHA256:…"},"forwarding_host":{"name":"build-box","fingerprint":"SHA256:…"}}`.
 
 Some of the text isn't kpa's own (a key's name, a login user, a host name), so
 each string, nested ones too, is made display-safe the way the message is:
 control, bidi and zero-width characters are written as `\uXXXX`. The prompts
 that ask about a key also cut each piece to the same length budget as its piece
-in the message. Strings are not quoted for the
-sentence: a `"` in a name is a `"`, as a JSON string holds it, where the message
-writes it `\"` so a name can't end its own quotation.
+in the message. Strings are not quoted for the sentence: a `"` in a name is a
+`"`, as a JSON string holds it, where the message writes it `\"` so a name
+can't end its own quotation.
+
+A program knows how it is asked from the setting it is configured in (`prompt`
+asks for a value it prints, `ssh_agent.confirm_prompt` for one of the lines on
+its stdin), so one program used for both takes an argument to tell them apart.
 
 Both variables are in the program's environment, readable by processes of the
 same user; a wrapper that puts a piece into its own argv makes it visible to
