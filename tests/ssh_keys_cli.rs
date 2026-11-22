@@ -69,7 +69,14 @@ fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
     // A key two databases hold shows once for each, in config order.
     let keys = rows(
         &stdout,
-        &["DATABASE", "ENTRY", "ATTACHMENT", "TYPE", "FINGERPRINT"],
+        &[
+            "NAME",
+            "DATABASE",
+            "ENTRY",
+            "ATTACHMENT",
+            "TYPE",
+            "FINGERPRINT",
+        ],
     );
     assert!(!keys.is_empty(), "no keys table in:\n{stdout}");
     let expected: Vec<Vec<String>> = ["personal", "work"]
@@ -82,6 +89,9 @@ fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
             ]
             .map(|(key_type, title, attachment)| {
                 vec![
+                    // No override names these keys, so they are served under
+                    // their entries' titles.
+                    title.to_string(),
                     db.to_string(),
                     title.to_string(),
                     attachment.to_string(),
@@ -99,8 +109,8 @@ fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
     shown.sort();
     expected_sorted.sort();
     assert_eq!(shown, expected_sorted, "{stdout}");
-    assert_eq!(keys[1][0], "personal", "config order: {stdout}");
-    assert_eq!(keys[4][0], "work", "config order: {stdout}");
+    assert_eq!(keys[1][1], "personal", "config order: {stdout}");
+    assert_eq!(keys[4][1], "work", "config order: {stdout}");
 
     // Fingerprints line up under their header.
     let header = stdout.lines().next().expect("a header");
