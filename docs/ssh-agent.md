@@ -330,13 +330,14 @@ the keys the desk keeps off forwarding (S8).
   key switched off for a client's agent is still served by kpa unless an
   override says `serve = false`.
 
-`kpa ssh keys` prints each key found in the unlocked databases (database,
-entry title, attachment name, type, fingerprint), the attachments it skipped
-and why, and the databases it could not scan because they are locked.
-`--database <name>` limits it to one database. It reads databases that have
-not opted in too, which shows what opting in would serve. `--toml` prints
-only a ready-to-paste override block per key, grouped under the database it
-belongs in, so it can go straight into the config file.
+`kpa ssh keys` prints each key found in the unlocked databases (the name it
+is served under, type and fingerprint; `--full` adds the database, entry
+title and attachment name), the attachments it skipped and why, and the
+databases it could not scan because they are locked. `--database <name>`
+limits it to one database. It reads databases that have not opted in too,
+which shows what opting in would serve. `--toml` prints only a ready-to-paste
+override block per key, grouped under the database it belongs in, so it can go
+straight into the config file.
 
 kpa lists keys in config order, then entry order. With many keys, a server
 can hit `MaxAuthTries`. The usual answer is `IdentitiesOnly yes` plus a

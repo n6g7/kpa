@@ -57,19 +57,57 @@ fn rows<'a>(stdout: &'a str, header: &[&str]) -> Vec<Vec<&'a str>> {
         .collect()
 }
 
+/// Without `--full` the keys table is the name, type and fingerprint of each
+/// key, and the skipped attachments keep their columns.
+#[test]
+fn by_default_the_keys_table_has_the_name_type_and_fingerprint_only() {
+    let daemon = daemon();
+    unlock(&daemon, &["personal"]);
+
+    let output = kpa(&daemon, &["ssh", "keys"]);
+    let stdout = text(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", text(&output.stderr));
+
+    let keys = rows(&stdout, &["NAME", "TYPE", "FINGERPRINT"]);
+    assert_eq!(keys.len(), 4, "a header and three keys:\n{stdout}");
+    for (title, key_type) in [
+        ("Ed25519", "ssh-ed25519"),
+        ("Ecdsa", "ecdsa-sha2-nistp256"),
+        ("Rsa", "ssh-rsa"),
+    ] {
+        let fingerprint = common::ssh_fixture_fingerprint(title);
+        assert!(
+            keys.iter()
+                .any(|row| row[..] == [title, key_type, fingerprint.as_str()]),
+            "no row for {title}:\n{stdout}"
+        );
+    }
+    assert!(
+        !rows(&stdout, &["DATABASE", "ENTRY", "ATTACHMENT", "REASON"]).is_empty(),
+        "the skipped attachments keep their table:\n{stdout}"
+    );
+}
+
 #[test]
 fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
     let daemon = daemon();
     unlock(&daemon, &["personal", "work"]);
 
-    let output = kpa(&daemon, &["ssh", "keys"]);
+    let output = kpa(&daemon, &["ssh", "keys", "--full"]);
     let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", text(&output.stderr));
 
     // A key two databases hold shows once for each, in config order.
     let keys = rows(
         &stdout,
-        &["DATABASE", "ENTRY", "ATTACHMENT", "TYPE", "FINGERPRINT"],
+        &[
+            "NAME",
+            "DATABASE",
+            "ENTRY",
+            "ATTACHMENT",
+            "TYPE",
+            "FINGERPRINT",
+        ],
     );
     assert!(!keys.is_empty(), "no keys table in:\n{stdout}");
     let expected: Vec<Vec<String>> = ["personal", "work"]
@@ -82,6 +120,9 @@ fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
             ]
             .map(|(key_type, title, attachment)| {
                 vec![
+                    // No override names these keys, so they are served under
+                    // their entries' titles.
+                    title.to_string(),
                     db.to_string(),
                     title.to_string(),
                     attachment.to_string(),
@@ -99,8 +140,8 @@ fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
     shown.sort();
     expected_sorted.sort();
     assert_eq!(shown, expected_sorted, "{stdout}");
-    assert_eq!(keys[1][0], "personal", "config order: {stdout}");
-    assert_eq!(keys[4][0], "work", "config order: {stdout}");
+    assert_eq!(keys[1][1], "personal", "config order: {stdout}");
+    assert_eq!(keys[4][1], "work", "config order: {stdout}");
 
     // Fingerprints line up under their header.
     let header = stdout.lines().next().expect("a header");

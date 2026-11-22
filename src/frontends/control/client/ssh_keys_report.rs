@@ -1,6 +1,8 @@
 //! What `kpa ssh keys` prints (`docs/ssh-agent.md` § 6.4): the keys the
 //! unlocked databases hold and the attachments skipped, or, on request, a
-//! `[[database.ssh_key]]` block per key to paste into the config.
+//! `[[database.ssh_key]]` block per key to paste into the config. A key is
+//! listed by the name it is served under, the one `kpa ssh grants` and `kpa
+//! ssh pending` show.
 //!
 //! Pure: a report in, text out. Cells go through `output::Table`, which
 //! escapes them; the rest of a line is built from `escape_one_line`, which
@@ -18,8 +20,22 @@ const MAX_TEXT_LEN: usize = 128;
 /// An entry without a title.
 const UNTITLED: &str = "(untitled)";
 
-/// `toml` shows only the blocks, for a file.
-pub fn render(report: &SshKeysReport, toml: bool) -> String {
+/// The keys table's columns, in order, and the ones shown without `--full`:
+/// what a key is, by name, type and fingerprint. Where it comes from
+/// (database, entry, attachment) is the rest.
+const HEADER: [&str; 6] = [
+    "NAME",
+    "DATABASE",
+    "ENTRY",
+    "ATTACHMENT",
+    "TYPE",
+    "FINGERPRINT",
+];
+const BRIEF: [usize; 3] = [0, 4, 5];
+
+/// `toml` shows only the blocks, for a file. Without `full` the keys table
+/// keeps to name, type and fingerprint.
+pub fn render(report: &SshKeysReport, toml: bool, full: bool) -> String {
     if toml {
         return blocks(report);
     }
@@ -28,17 +44,25 @@ pub fn render(report: &SshKeysReport, toml: bool) -> String {
     if report.keys.is_empty() {
         sections.push("No SSH keys found.\n".to_string());
     } else {
-        let mut table = Table::new(["DATABASE", "ENTRY", "ATTACHMENT", "TYPE", "FINGERPRINT"]);
-        for key in &report.keys {
-            table.row([
-                &key.db,
+        let rows = report.keys.iter().map(|key| {
+            [
+                key.name.as_str(),
+                key.db.as_str(),
                 key.title.as_deref().unwrap_or(UNTITLED),
-                &key.attachment,
-                &key.key_type,
-                &key.fingerprint,
-            ]);
-        }
-        sections.push(table.render());
+                key.attachment.as_str(),
+                key.key_type.as_str(),
+                key.fingerprint.as_str(),
+            ]
+        });
+        sections.push(if full {
+            let mut table = Table::new(HEADER);
+            rows.for_each(|row| table.row(row));
+            table.render()
+        } else {
+            let mut table = Table::new(BRIEF.map(|column| HEADER[column]));
+            rows.for_each(|row| table.row(BRIEF.map(|column| row[column])));
+            table.render()
+        });
     }
 
     if !report.skipped.is_empty() {
@@ -120,7 +144,8 @@ mod tests {
             db: db.to_string(),
             key_type: "ssh-ed25519".to_string(),
             fingerprint: FINGERPRINT.to_string(),
-            name: title.unwrap_or("personal SHA256:…").to_string(),
+            // A key with no title is served under its database's fallback.
+            name: title.map_or_else(|| format!("{db} {FINGERPRINT}"), str::to_string),
             entry: uuid::Uuid::from_u128(1),
             title: title.map(str::to_string),
             attachment: "id_ed25519".to_string(),
@@ -150,12 +175,18 @@ mod tests {
     fn lists_keys_skipped_attachments_and_locked_databases() {
         let report = SshKeysReport {
             keys: vec![
-                key("personal", Some("Deploy")),
+                // Named by its override, not by its entry's title.
+                WireSshKey {
+                    name: "deploy-prod".to_string(),
+                    ..key("personal", Some("Deploy"))
+                },
                 WireSshKey {
                     key_type: "ecdsa-sha2-nistp256".to_string(),
                     attachment: "id_ecdsa".to_string(),
                     ..key("work", None)
                 },
+                // Named by its entry's title.
+                key("work", Some("Staging")),
             ],
             skipped: vec![WireSkippedKey {
                 db: "personal".to_string(),
@@ -166,18 +197,61 @@ mod tests {
             locked: vec!["archive".to_string()],
         };
 
+        // The NAME column is as wide as the longest name, the fallback.
+        let name =
+            |text: &str| format!("{text:<width$}", width = "work ".len() + FINGERPRINT.len());
         assert_eq!(
-            render(&report, false),
+            render(&report, false, true),
             format!(
-                "DATABASE  ENTRY       ATTACHMENT  TYPE                 FINGERPRINT\n\
-                 personal  Deploy      id_ed25519  ssh-ed25519          {FINGERPRINT}\n\
-                 work      (untitled)  id_ecdsa    ecdsa-sha2-nistp256  {FINGERPRINT}\n\
+                "{}  DATABASE  ENTRY       ATTACHMENT  TYPE                 FINGERPRINT\n\
+                 {}  personal  Deploy      id_ed25519  ssh-ed25519          {FINGERPRINT}\n\
+                 work {FINGERPRINT}  work      (untitled)  id_ecdsa    ecdsa-sha2-nistp256  {FINGERPRINT}\n\
+                 {}  work      Staging     id_ed25519  ssh-ed25519          {FINGERPRINT}\n\
                  \n\
                  Skipped attachments:\n\
                  DATABASE  ENTRY  ATTACHMENT  REASON\n\
                  personal  Old    id_rsa      PEM format\n\
                  \n\
-                 Locked, not scanned: archive (`kpa unlock <database>` first)\n"
+                 Locked, not scanned: archive (`kpa unlock <database>` first)\n",
+                name("NAME"),
+                name("deploy-prod"),
+                name("Staging"),
+            )
+        );
+    }
+
+    /// Without `--full` the keys table has the name, type and fingerprint
+    /// and nothing of where the key comes from. The skipped attachments, which
+    /// no name or fingerprint identifies, keep theirs.
+    #[test]
+    fn the_default_table_keeps_to_name_type_and_fingerprint() {
+        let report = SshKeysReport {
+            keys: vec![
+                WireSshKey {
+                    name: "deploy-prod".to_string(),
+                    ..key("personal", Some("Deploy"))
+                },
+                key("work", Some("Staging")),
+            ],
+            skipped: vec![WireSkippedKey {
+                db: "personal".to_string(),
+                title: Some("Old".to_string()),
+                attachment: "id_rsa".to_string(),
+                reason: "PEM format".to_string(),
+            }],
+            locked: Vec::new(),
+        };
+
+        assert_eq!(
+            render(&report, false, false),
+            format!(
+                "NAME         TYPE         FINGERPRINT\n\
+                 deploy-prod  ssh-ed25519  {FINGERPRINT}\n\
+                 Staging      ssh-ed25519  {FINGERPRINT}\n\
+                 \n\
+                 Skipped attachments:\n\
+                 DATABASE  ENTRY  ATTACHMENT  REASON\n\
+                 personal  Old    id_rsa      PEM format\n"
             )
         );
     }
@@ -185,10 +259,10 @@ mod tests {
     #[test]
     fn no_keys_says_so() {
         assert_eq!(
-            render(&SshKeysReport::default(), false),
+            render(&SshKeysReport::default(), false, false),
             "No SSH keys found.\n"
         );
-        assert_eq!(render(&SshKeysReport::default(), true), "");
+        assert_eq!(render(&SshKeysReport::default(), true, false), "");
     }
 
     /// The blocks come grouped under the database they belong to, and parse
@@ -202,6 +276,7 @@ mod tests {
                 key("work", Some("Build")),
             ]),
             true,
+            false,
         );
 
         assert_eq!(
@@ -256,7 +331,7 @@ mod tests {
         let report = report(vec![key(hostile, Some(hostile))]);
 
         for toml in [false, true] {
-            let text = render(&report, toml);
+            let text = render(&report, toml, true);
             assert!(!text.contains('\u{9b}') && !text.contains('\u{202e}'));
             assert!(!text.contains('\t'));
             assert!(
@@ -266,7 +341,7 @@ mod tests {
             );
         }
         // Only the real fingerprint is in the blocks.
-        let blocks = render(&report, true);
+        let blocks = render(&report, true, false);
         let after_header = blocks.split_once('\n').expect("a header").1;
         let config = config_with(after_header).expect("the blocks should still parse");
         assert_eq!(config.databases[0].ssh_keys.len(), 1);
