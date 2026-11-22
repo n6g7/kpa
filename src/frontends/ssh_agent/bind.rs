@@ -7,6 +7,12 @@
 //! the answer every later decision (which keys to list, what a signature
 //! is allowed to be) actually needs.
 //!
+//! A binding's host key may be a certificate, as a modern `ssh` offers when
+//! the server presents one: the host is the key the certificate certifies,
+//! and the signature is checked against that key. The certificate's CA,
+//! validity and principals are not checked, and no name is taken from them.
+//! OpenSSH's own agent parses it the same way (`sshkey_froms`).
+//!
 //! Three rules, mirroring OpenSSH's own `ssh-agent` (`process_ext_session_bind`
 //! in `ssh-agent.c`) with one deliberate addition:
 //!
@@ -132,7 +138,7 @@ impl SessionBindState {
         let is_first_attempt = self.attempts == 0;
         self.attempts += 1;
 
-        let host_key = key_data_from_bytes(&msg.hostkey);
+        let host_key = host_key_from_bytes(&msg.hostkey);
 
         // The claim is recorded from the very first attempt regardless of
         // whether it goes on to verify — see the module doc. It needs the
@@ -243,18 +249,22 @@ impl SessionBindState {
     }
 }
 
-/// Decode a standalone public-key blob (not `string`-wrapped — the caller
-/// already unwrapped that layer), rejecting trailing bytes.
-fn key_data_from_bytes(bytes: &[u8]) -> ssh_key::Result<KeyData> {
+/// Decode a standalone host key blob (not `string`-wrapped — the caller
+/// already unwrapped that layer), rejecting trailing bytes. A certificate is
+/// the key it certifies: nothing else of it is looked at.
+fn host_key_from_bytes(bytes: &[u8]) -> ssh_key::Result<KeyData> {
     let mut reader: &[u8] = bytes;
     let key_data = KeyData::decode(&mut reader)?;
     reader.ensure_finished()?;
-    Ok(key_data)
+    Ok(match key_data.certificate() {
+        Some(certificate) => certificate.public_key().clone(),
+        None => key_data,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::signed_bind;
+    use super::super::testing::{certified_bind, signed_bind};
     use super::super::wire::AgentRequest;
     use super::*;
     use crate::ssh::testing::test_key;
@@ -584,6 +594,76 @@ mod tests {
     /// `is_forwarding` is `false`: a plain `ssh`, no `-A`.
     const REAL_SESSION_BIND: &[u8] = include_bytes!("testdata/session_bind.bin");
 
+    /// A host that presents a certificate binds by the key it certifies, in
+    /// both a plain and a forwarded connection, and the destination is that
+    /// key.
+    #[test]
+    fn a_certificate_host_key_binds_by_the_key_it_certifies() {
+        let (host, ca) = (test_key(1), test_key(2));
+        let certified = host.public_key().key_data().clone();
+
+        let mut local = SessionBindState::new();
+        assert_eq!(
+            local.apply(&certified_bind(&host, &ca, b"session-id", false)),
+            BindOutcome::Accepted
+        );
+        assert_eq!(
+            local.class(),
+            ConnectionClass::LocalBound {
+                dest: certified.clone()
+            }
+        );
+
+        let mut forwarded = SessionBindState::new();
+        let forwarding = certified_bind(&host, &ca, b"first", true);
+        assert_eq!(forwarded.apply(&forwarding), BindOutcome::Accepted);
+        assert_eq!(
+            forwarded.apply(&certified_bind(&host, &ca, b"second", false)),
+            BindOutcome::Accepted
+        );
+        assert_eq!(
+            forwarded.class(),
+            ConnectionClass::Forwarded {
+                host: certified.clone(),
+                session: b"first".to_vec(),
+                dest: Some(certified),
+            }
+        );
+    }
+
+    /// The signature has to be the certified key's: a certificate for one key
+    /// whose signature another made is refused, and a forwarding claim it
+    /// makes is still recorded, as any claim is.
+    #[test]
+    fn a_certificate_whose_certified_key_did_not_sign_is_refused() {
+        let (host, other, ca) = (test_key(1), test_key(3), test_key(2));
+        let mut forged = certified_bind(&host, &ca, b"session-id", true);
+        forged.signature = signed_bind(&other, b"session-id", true).signature;
+
+        let mut bindings = SessionBindState::new();
+        assert_eq!(bindings.apply(&forged), BindOutcome::Refused);
+        assert_eq!(
+            verified_host(&bindings.class()),
+            host.public_key().key_data()
+        );
+    }
+
+    /// Nothing of the certificate but its key matters: a bind for a key whose
+    /// certificate comes from another CA, with other principals, or is
+    /// expired, is the same host.
+    #[test]
+    fn a_certificates_ca_validity_and_principals_make_no_difference() {
+        let host = test_key(1);
+        let binds = |ca: u64| {
+            let mut bindings = SessionBindState::new();
+            let msg = certified_bind(&host, &test_key(ca), b"session-id", false);
+            assert_eq!(bindings.apply(&msg), BindOutcome::Accepted);
+            bindings.class()
+        };
+
+        assert_eq!(binds(2), binds(4));
+    }
+
     #[test]
     fn a_real_openssh_session_bind_decodes_and_verifies() {
         let AgentRequest::SessionBind(msg) = super::super::wire::decode_request(REAL_SESSION_BIND)
@@ -592,7 +672,7 @@ mod tests {
         };
         assert!(!msg.is_forwarding);
 
-        let host_key = key_data_from_bytes(&msg.hostkey).expect("hostkey should parse");
+        let host_key = host_key_from_bytes(&msg.hostkey).expect("hostkey should parse");
         assert_eq!(
             host_key.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
             "SHA256:GPlhdYQP8NhCXJtc7h0vcH/sL2q9s5FcguM+r/ieqww"
