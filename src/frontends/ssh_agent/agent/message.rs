@@ -2,10 +2,7 @@
 //! § 6.7): the key, what it is for and where the signature goes, as one
 //! question.
 
-use std::path::Path;
-
 use ssh_key::HashAlg;
-use ssh_key::known_hosts::{HostPatterns, KnownHosts};
 use ssh_key::public::KeyData;
 
 use crate::frontends::ssh_agent::classify::Purpose;
@@ -127,26 +124,6 @@ fn on(host: Option<&Host<'_>>) -> String {
 /// escaped, so it can't end its own quotation and continue the sentence.
 fn quoted(name: &str) -> String {
     escape_one_line(&name.replace('"', "\\\""), MAX_KEY_NAME_LEN)
-}
-
-/// The first plain host name a `known_hosts` entry for `dest` gives. A
-/// hashed entry can't be reversed without the name that produced it, an
-/// `@revoked` or `@cert-authority` one doesn't vouch for `dest` as this
-/// host's key, and a negated or wildcard pattern doesn't name one host, so
-/// all of those are skipped rather than shown. `None` if the file can't
-/// be read.
-pub(super) fn known_hosts_name(path: &Path, dest: &KeyData) -> Option<String> {
-    KnownHosts::read_file(path)
-        .ok()?
-        .into_iter()
-        .filter(|entry| entry.marker().is_none() && entry.public_key().key_data() == dest)
-        .find_map(|entry| match entry.host_patterns() {
-            HostPatterns::Patterns(patterns) => patterns
-                .iter()
-                .find(|pattern| !pattern.starts_with('!') && !pattern.contains(['*', '?']))
-                .cloned(),
-            HostPatterns::HashedName { .. } => None,
-        })
 }
 
 #[cfg(test)]
@@ -379,69 +356,6 @@ mod tests {
         assert_eq!(
             message,
             "Approve use of key \"x\\\" to log in as root\\u000a\\u202e\"?"
-        );
-    }
-
-    /// Only a plain host name on a plain entry names a destination: not a
-    /// revoked or certificate-authority entry, nor a negated or wildcard
-    /// pattern.
-    #[test]
-    fn known_hosts_skips_markers_and_patterns_that_name_no_one_host() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let revoked = test_key(5).public_key().clone();
-        let authority = test_key(6).public_key().clone();
-        let patterned = test_key(7).public_key().clone();
-        let path = dir.path().join("known_hosts");
-        std::fs::write(
-            &path,
-            format!(
-                "@revoked evil.example {}\n\
-                 @cert-authority *.example {}\n\
-                 !bad.example,*.example,good.example {}\n",
-                revoked.to_openssh().expect("encodes"),
-                authority.to_openssh().expect("encodes"),
-                patterned.to_openssh().expect("encodes"),
-            ),
-        )
-        .expect("write known_hosts");
-
-        assert_eq!(known_hosts_name(&path, revoked.key_data()), None);
-        assert_eq!(known_hosts_name(&path, authority.key_data()), None);
-        assert_eq!(
-            known_hosts_name(&path, patterned.key_data()).as_deref(),
-            Some("good.example")
-        );
-    }
-
-    #[test]
-    fn known_hosts_names_an_unhashed_entry_and_skips_a_hashed_one() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let named = test_key(2).public_key().clone();
-        let hashed = test_key(3).public_key().clone();
-        let path = dir.path().join("known_hosts");
-        std::fs::write(
-            &path,
-            format!(
-                "github.com,140.82.121.4 {}\n\
-                 |1|F1E1KeoE/eEWhi10WpGv4OdiO6Y=|3988QV0VE8wmZL7suNrYQLITLCg= {}\n",
-                named.to_openssh().expect("encodes"),
-                hashed.to_openssh().expect("encodes"),
-            ),
-        )
-        .expect("write known_hosts");
-
-        assert_eq!(
-            known_hosts_name(&path, named.key_data()).as_deref(),
-            Some("github.com")
-        );
-        assert_eq!(known_hosts_name(&path, hashed.key_data()), None);
-        assert_eq!(
-            known_hosts_name(&path, test_key(4).public_key().key_data()),
-            None
-        );
-        assert_eq!(
-            known_hosts_name(&dir.path().join("missing"), named.key_data()),
-            None
         );
     }
 }

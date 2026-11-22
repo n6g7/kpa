@@ -10,9 +10,10 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use super::ssh_requests_report::{age, session, span};
+use super::ssh_requests_report::{age, host, session, span};
 use crate::frontends::control::proto::WireGrant;
 use crate::output::Table;
+use crate::ssh::known_hosts::HostNames;
 
 /// What `ssh_grants` answers: the approvals, grouped by database in config
 /// order and oldest first within each.
@@ -24,55 +25,78 @@ pub struct Grants {
 /// A cell with nothing to say.
 const NONE: &str = "-";
 
-/// The table of `answer`, with each approval's age at `now`.
-pub fn render(answer: &Grants, now: SystemTime) -> String {
+/// Every column, in order, and the ones shown without `--full`.
+const HEADER: [&str; 11] = [
+    "KEY",
+    "DATABASE",
+    "DESTINATION",
+    "FORWARDING HOST",
+    "SESSION",
+    "LASTS",
+    "AGE",
+    "GRANTED BY",
+    "USES",
+    "LAST USED",
+    "IDLE LOCK",
+];
+const BRIEF: [usize; 5] = [0, 2, 3, 5, 8];
+
+/// The table of `answer`, with each approval's age at `now` and its hosts by
+/// the name `names` gives them. Without `full` it keeps to the columns that
+/// say what is approved.
+pub fn render(answer: &Grants, now: SystemTime, names: &HostNames, full: bool) -> String {
     if answer.grants.is_empty() {
         return "No SSH approval is granted.\n".to_string();
     }
-    let mut table = Table::new([
-        "KEY",
-        "DATABASE",
-        "DESTINATION",
-        "FORWARDING HOST",
-        "SESSION",
-        "LASTS",
-        "AGE",
-        "GRANTED BY",
-        "USES",
-        "LAST USED",
-        "IDLE LOCK",
-    ]);
-    for grant in &answer.grants {
-        table.row([
-            &grant.scope.key.name,
-            &grant.scope.key.db,
-            &grant
-                .scope
-                .destination
-                .map_or_else(|| NONE.to_string(), |destination| destination.to_string()),
-            &grant
-                .scope
-                .forwarding_host
-                .map_or_else(|| NONE.to_string(), |host| host.to_string()),
-            &session(&grant.scope),
-            &lasts(grant),
-            &age(now, grant.granted_at),
-            match grant.by.as_str() {
-                "on_screen" => "screen",
-                by => by,
-            },
-            &grant.uses.to_string(),
-            &grant
-                .last_used_at
-                .map_or_else(|| NONE.to_string(), |at| age(now, at)),
-            &format!("in {}", span(grant.idle_lock_in)),
-        ]);
-    }
-    format!(
-        "{}\n`kpa lock <database>` drops a database's approvals. IDLE LOCK is when \
-         the database locks if nothing uses it.\n",
-        table.render()
-    )
+    let rows: Vec<[String; 11]> = answer
+        .grants
+        .iter()
+        .map(|grant| cells(grant, now, names))
+        .collect();
+    let (table, footer) = if full {
+        let mut table = Table::new(HEADER);
+        for row in &rows {
+            table.row(row.each_ref().map(String::as_str));
+        }
+        (
+            table.render(),
+            "`kpa lock <database>` drops a database's approvals. IDLE LOCK is when the database \
+             locks if nothing uses it.",
+        )
+    } else {
+        let mut table = Table::new(BRIEF.map(|column| HEADER[column]));
+        for row in &rows {
+            table.row(BRIEF.map(|column| row[column].as_str()));
+        }
+        (
+            table.render(),
+            "`kpa lock <database>` drops a database's approvals. `--full` shows more columns.",
+        )
+    };
+    format!("{table}\n{footer}\n")
+}
+
+/// One approval's cells, one per [`HEADER`] column.
+fn cells(grant: &WireGrant, now: SystemTime, names: &HostNames) -> [String; 11] {
+    [
+        grant.scope.key.name.clone(),
+        grant.scope.key.db.clone(),
+        host(grant.scope.destination.as_ref(), names),
+        host(grant.scope.forwarding_host.as_ref(), names),
+        session(&grant.scope),
+        lasts(grant),
+        age(now, grant.granted_at),
+        match grant.by.as_str() {
+            "on_screen" => "screen",
+            by => by,
+        }
+        .to_string(),
+        grant.uses.to_string(),
+        grant
+            .last_used_at
+            .map_or_else(|| NONE.to_string(), |at| age(now, at)),
+        format!("in {}", span(grant.idle_lock_in)),
+    ]
 }
 
 /// How long the approval covers: until its database locks, or one signature
@@ -92,6 +116,7 @@ mod tests {
 
     use super::*;
     use crate::frontends::control::proto::{WireScope, WireSshKey};
+    use crate::ssh::testing::test_key;
 
     const KEY: &str = "SHA256:Nh0Me49Zh9fDw/VYUfq43IJmI1T+XrjiYONPND8GzaM";
     const DESTINATION: &str = "SHA256:BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -146,6 +171,8 @@ mod tests {
                 grants: vec![grant("github"), once],
             },
             at_now(),
+            &HostNames::default(),
+            true,
         );
 
         assert_eq!(
@@ -165,8 +192,72 @@ deploy-key  personal  -                                                   {KEY} 
     #[test]
     fn nothing_granted_says_so() {
         assert_eq!(
-            render(&Grants { grants: vec![] }, at_now()),
+            render(
+                &Grants { grants: vec![] },
+                at_now(),
+                &HostNames::default(),
+                false
+            ),
             "No SSH approval is granted.\n"
         );
+    }
+
+    /// Without `--full` the table says what is approved and nothing else.
+    #[test]
+    fn the_default_table_keeps_to_what_is_approved() {
+        let mut once = grant("deploy-key");
+        once.remember = false;
+        once.expires_in = Some(42);
+        once.uses = 0;
+
+        let text = render(
+            &Grants {
+                grants: vec![grant("github"), once],
+            },
+            at_now(),
+            &HostNames::default(),
+            false,
+        );
+
+        assert_eq!(
+            text,
+            format!(
+                "\
+KEY         DESTINATION                                         FORWARDING HOST  LASTS                  USES
+github      {DESTINATION}  -                until lock             3
+deploy-key  {DESTINATION}  -                1 signature, 42s left  0
+
+`kpa lock <database>` drops a database's approvals. `--full` shows more columns.
+"
+            )
+        );
+    }
+
+    /// A host `known_hosts` names is shown by its name, any other by its
+    /// fingerprint.
+    #[test]
+    fn a_host_known_by_name_is_shown_by_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("known_hosts");
+        let known = test_key(2).public_key().clone();
+        std::fs::write(
+            &path,
+            format!("github.com {}\n", known.to_openssh().expect("encodes")),
+        )
+        .expect("write known_hosts");
+        let mut forwarded = grant("github");
+        forwarded.scope.destination = Some(known.fingerprint(ssh_key::HashAlg::Sha256));
+
+        let text = render(
+            &Grants {
+                grants: vec![forwarded],
+            },
+            at_now(),
+            &HostNames::read(Some(&path)),
+            false,
+        );
+
+        assert!(text.contains("github.com"), "{text}");
+        assert!(!text.contains(&known.fingerprint(ssh_key::HashAlg::Sha256).to_string()));
     }
 }

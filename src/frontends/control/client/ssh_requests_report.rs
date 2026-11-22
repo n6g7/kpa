@@ -15,7 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::frontends::control::proto::{WirePending, WireScope};
 use crate::output::Table;
 use crate::ssh::approvals::PENDING_TTL;
+use crate::ssh::known_hosts::HostNames;
 use serde::Deserialize;
+use ssh_key::Fingerprint;
 use uuid::Uuid;
 
 /// What `ssh_pending` answers: the requests, oldest first.
@@ -36,8 +38,9 @@ pub fn approved(id: Uuid, _: &Approved) -> String {
 /// A cell with nothing to say.
 const NONE: &str = "-";
 
-/// The table of `answer`, with each request's age at `now`.
-pub fn render(answer: &Pending, now: SystemTime) -> String {
+/// The table of `answer`, with each request's age at `now`, and its hosts by
+/// the name `names` gives them.
+pub fn render(answer: &Pending, now: SystemTime, names: &HostNames) -> String {
     if answer.pending.is_empty() {
         return "No SSH request is pending.\n".to_string();
     }
@@ -60,14 +63,8 @@ pub fn render(answer: &Pending, now: SystemTime) -> String {
             &what(request),
             request.request.command.as_deref().unwrap_or(NONE),
             &age(now, request.refused_at),
-            &request
-                .scope
-                .destination
-                .map_or_else(|| NONE.to_string(), |destination| destination.to_string()),
-            &request
-                .scope
-                .forwarding_host
-                .map_or_else(|| NONE.to_string(), |host| host.to_string()),
+            &host(request.scope.destination.as_ref(), names),
+            &host(request.scope.forwarding_host.as_ref(), names),
             &session(&request.scope),
         ]);
     }
@@ -77,6 +74,17 @@ pub fn render(answer: &Pending, now: SystemTime) -> String {
         table.render(),
         PENDING_TTL.as_secs() / 60,
     )
+}
+
+/// A host as a table shows it: by the name `names` gives its host key, else
+/// by the fingerprint, `-` for no host.
+pub(super) fn host(fingerprint: Option<&Fingerprint>, names: &HostNames) -> String {
+    match fingerprint {
+        Some(fingerprint) => names
+            .name(fingerprint)
+            .map_or_else(|| fingerprint.to_string(), str::to_string),
+        None => NONE.to_string(),
+    }
 }
 
 /// The number of the forwarding session a forwarded request comes from.
@@ -193,7 +201,11 @@ mod tests {
             signing
         };
 
-        let text = render(&pending(vec![request(), signing]), at_now());
+        let text = render(
+            &pending(vec![request(), signing]),
+            at_now(),
+            &HostNames::default(),
+        );
 
         assert_eq!(
             text,
@@ -214,7 +226,7 @@ Approve one with `kpa ssh approve <id>`. A request left alone expires after 5 mi
         let mut ahead = request();
         ahead.refused_at = NOW + 30;
 
-        assert!(render(&pending(vec![ahead]), at_now()).contains("  0s  "));
+        assert!(render(&pending(vec![ahead]), at_now(), &HostNames::default()).contains("  0s  "));
     }
 
     #[test]
@@ -228,7 +240,7 @@ Approve one with `kpa ssh approve <id>`. A request left alone expires after 5 mi
     #[test]
     fn nothing_pending_says_so() {
         assert_eq!(
-            render(&pending(Vec::new()), at_now()),
+            render(&pending(Vec::new()), at_now(), &HostNames::default()),
             "No SSH request is pending.\n"
         );
     }
@@ -242,7 +254,7 @@ Approve one with `kpa ssh approve <id>`. A request left alone expires after 5 mi
         hostile.request.user = Some("evil\u{1b}[2J\n".to_string());
         hostile.request.command = Some("a\u{9b}b".to_string());
 
-        let text = render(&pending(vec![hostile]), at_now());
+        let text = render(&pending(vec![hostile]), at_now(), &HostNames::default());
 
         assert!(!text.contains(['\u{1b}', '\u{9b}', '\u{7}']), "{text:?}");
         assert!(text.contains("evil\\u001b[2J\\u000a"), "{text}");
