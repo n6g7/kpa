@@ -163,6 +163,8 @@ struct Rig {
     listed: String,
     /// One line per confirm prompt kpa raised: the question it asked.
     confirmations: PathBuf,
+    /// One line per confirm prompt kpa raised: the data it was given.
+    prompt_data: PathBuf,
 }
 
 impl Rig {
@@ -178,11 +180,12 @@ impl Rig {
         };
         let dir = tempfile::tempdir().expect("tempdir");
         let confirmations = dir.path().join("confirmations");
+        let prompt_data = dir.path().join("prompt_data");
         let config = format!(
             "idle_timeout = \"{idle_timeout}\"\n\
              prompt = [\"/bin/sh\", \"-c\", \"printf {password}\"]\n\n\
              [ssh_agent]\n\
-             confirm_prompt = [\"/bin/sh\", \"-c\", \"echo \\\"$KPA_PROMPT_MESSAGE\\\" >> '{log}'; head -n1\"]\n\n\
+             confirm_prompt = [\"/bin/sh\", \"-c\", \"echo \\\"$KPA_PROMPT_MESSAGE\\\" >> '{log}'; echo \\\"$KPA_PROMPT_DATA\\\" >> '{data}'; head -n1\"]\n\n\
              [[database]]\n\
              name = \"personal\"\n\
              path = \"{db}\"\n\
@@ -190,6 +193,7 @@ impl Rig {
              {overrides}",
             password = common::PASSWORD,
             log = confirmations.display(),
+            data = prompt_data.display(),
             db = common::ssh_db().display(),
         );
         let daemon = InProcessDaemon::start(&config);
@@ -229,6 +233,7 @@ impl Rig {
             client_key,
             listed,
             confirmations,
+            prompt_data,
             dir,
         })
     }
@@ -316,6 +321,26 @@ impl Rig {
         words.join(" ")
     }
 
+    /// The command that, run on the `sshd`, logs in to the `sshd` on `port`
+    /// with `ssh -A` and the session's own key, which forwards the agent on,
+    /// and runs `remote` there.
+    fn forward_on(&self, port: u16, remote: &str) -> String {
+        let mut words = vec![quoted(self.tools.ssh.to_str().expect("utf-8 path"))];
+        let options = self.ssh_options_to(port);
+        let (host, options) = options.split_last().expect("options");
+        words.extend(options.iter().map(|option| quoted(option)));
+        words.extend([
+            "-A".to_string(),
+            "-o".to_string(),
+            "IdentitiesOnly=yes".to_string(),
+            "-i".to_string(),
+            quoted(self.client_key.to_str().expect("utf-8 path")),
+            quoted(host),
+            quoted(remote),
+        ]);
+        words.join(" ")
+    }
+
     /// Starts a second `sshd`, as a destination, whose host key comes with a
     /// host certificate made by a CA of its own, as `ssh-keygen -s` makes
     /// one, for `build-box.example` and the loopback address. `known_hosts`
@@ -381,6 +406,15 @@ impl Rig {
             .unwrap_or_default()
             .lines()
             .map(str::to_string)
+            .collect()
+    }
+
+    /// The data the confirm prompt was given so far, one object per prompt.
+    fn prompt_data(&self) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(&self.prompt_data)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("JSON data"))
             .collect()
     }
 
@@ -564,6 +598,51 @@ fn a_destination_certified_by_a_trusted_ca_is_named_by_its_principal() {
         "build-box.example"
     );
     assert_eq!(grants[0]["scope"]["forwarding_host"]["name"], via);
+}
+
+/// A login through two forwarding hosts, `ssh -A` to one and from there
+/// `ssh -A` to a second, shows both in the prompt, the first host whole and
+/// the second short, and gives the prompt's data the whole chain. The
+/// approval is for the first host only.
+#[test]
+fn a_login_through_two_forwarding_hosts_names_both() {
+    let Some(rig) = Rig::start("30m", "") else {
+        return;
+    };
+    let middle = rig.start_certified_destination(false);
+    let login = rig.second_hop("Ed25519");
+
+    let output = rig.forwarded(&rig.forward_on(middle.port, &login));
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let (first, second) = (
+        format!("[127.0.0.1]:{}", rig.sshd.port),
+        format!("[127.0.0.1]:{}", middle.port),
+    );
+    assert_eq!(
+        rig.confirmations(),
+        [format!(
+            "Approve use of key \"Ed25519\" on {first} → [127.0.0.1… to log in to {}@{first}?",
+            rig.user
+        )]
+    );
+    let prompts = rig.prompt_data();
+    assert_eq!(prompts.len(), 1);
+    let chain = prompts[0]["forwarding_chain"].as_array().expect("a chain");
+    assert_eq!(chain.len(), 2);
+    assert_eq!(chain[0]["name"], first.as_str());
+    assert_eq!(chain[1]["name"], second.as_str());
+    assert_eq!(prompts[0]["forwarding_host"], chain[0]);
+    assert_eq!(prompts[0]["destination"]["name"], first.as_str());
+
+    // Nothing else shows the second host: the approval covers the first.
+    let grants = rig.grants();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(
+        grants[0]["scope"]["forwarding_host"]["name"],
+        first.as_str()
+    );
+    assert!(grants[0]["scope"].get("forwarding_chain").is_none());
 }
 
 /// A forwarded signature is a remote host's: it does not keep the database

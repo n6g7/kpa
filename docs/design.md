@@ -449,16 +449,18 @@ prompts are about, each absent when it doesn't apply:
 | `user` | The remote user of a login. |
 | `namespace` | The namespace of an `SSHSIG` request. |
 | `destination`, `forwarding_host` | Where the signature is accepted, and the host a forwarded connection comes through: each `{"name"?, "fingerprint"}`, `name` being the name the daemon gives the host (`docs/ssh-agent.md` § 6.2, "Naming a host"), when it finds one. |
+| `forwarding_chain` | Every host a forwarded connection comes through, in order, as a list of the same `{"name"?, "fingerprint"}`: `forwarding_host` first, then the hosts it relayed on. The hosts after the first are reported by the first (`docs/ssh-agent.md` § 6.7). Present on a forwarded connection only. |
 
 A plain `kpa unlock personal` is `{"v":1,"database":"personal"}`.
 A confirm prompt for a forwarded login is
-`{"v":1,"database":"personal","key":{"name":"github","fingerprint":"SHA256:…","type":"ssh-ed25519"},"purpose":"login","user":"git","destination":{"name":"github.com","fingerprint":"SHA256:…"},"forwarding_host":{"name":"build-box","fingerprint":"SHA256:…"}}`.
+`{"v":1,"database":"personal","key":{"name":"github","fingerprint":"SHA256:…","type":"ssh-ed25519"},"purpose":"login","user":"git","destination":{"name":"github.com","fingerprint":"SHA256:…"},"forwarding_host":{"name":"build-box","fingerprint":"SHA256:…"},"forwarding_chain":[{"name":"build-box","fingerprint":"SHA256:…"}]}`.
 
 Some of the text isn't kpa's own (a key's name, a login user, a host name), so
 each string, nested ones too, is made display-safe the way the message is:
 control, bidi and zero-width characters are written as `\uXXXX`. The prompts
 that ask about a key also cut each piece to the same length budget as its piece
-in the message. Strings are not quoted for the sentence: a `"` in a name is a
+in the message, except that a host after the first in `forwarding_chain` keeps
+its whole name and fingerprint where the message shows it shorter. Strings are not quoted for the sentence: a `"` in a name is a
 `"`, as a JSON string holds it, where the message writes it `\"` so a name
 can't end its own quotation.
 

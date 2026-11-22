@@ -145,11 +145,14 @@ pub enum ConnectionClass {
     /// further binding can follow it) binding's host.
     LocalBound { dest: BoundHost },
     /// The first binding has `is_forwarding`. `host` is that binding's
-    /// host and `session` its session identifier; `dest` is the last
-    /// non-forwarding binding, if the remote `ssh` sent one.
+    /// host and `session` its session identifier; `onward` are the hosts of
+    /// the forwarding bindings after it, in the order they arrived, which
+    /// the first host relayed on (`docs/ssh-agent.md` § 6.7); `dest` is the
+    /// last non-forwarding binding, if the remote `ssh` sent one.
     Forwarded {
         host: BoundHost,
         session: Vec<u8>,
+        onward: Vec<BoundHost>,
         dest: Option<BoundHost>,
     },
 }
@@ -157,6 +160,18 @@ pub enum ConnectionClass {
 impl ConnectionClass {
     pub fn is_forwarded(&self) -> bool {
         matches!(self, ConnectionClass::Forwarded { .. })
+    }
+
+    /// The hosts the agent was forwarded through, in the order their
+    /// bindings arrived: the forwarding host first, then the hosts it
+    /// relayed on. Empty for a connection that isn't forwarded.
+    pub fn forwarding_chain(&self) -> Vec<&BoundHost> {
+        match self {
+            ConnectionClass::Forwarded { host, onward, .. } => {
+                std::iter::once(host).chain(onward).collect()
+            }
+            ConnectionClass::LocalUnbound | ConnectionClass::LocalBound { .. } => Vec::new(),
+        }
     }
 
     /// The class in a few words, for a log line or a listing.
@@ -270,6 +285,13 @@ impl SessionBindState {
                 ConnectionClass::Forwarded {
                     host: first.host_key.clone(),
                     session: first.session_id.clone(),
+                    onward: self
+                        .verified
+                        .iter()
+                        .skip(1)
+                        .filter(|binding| binding.is_forwarding)
+                        .map(|binding| binding.host_key.clone())
+                        .collect(),
                     dest,
                 }
             }
@@ -288,6 +310,7 @@ impl SessionBindState {
                 Some(claim) => ConnectionClass::Forwarded {
                     host: claim.host_key.clone(),
                     session: claim.session_id.clone(),
+                    onward: Vec::new(),
                     dest: None,
                 },
                 None => ConnectionClass::LocalUnbound,
@@ -360,6 +383,7 @@ mod tests {
             ConnectionClass::Forwarded {
                 host: host.public_key().key_data().clone().into(),
                 session: b"session-id".to_vec(),
+                onward: Vec::new(),
                 dest: None,
             }
         );
@@ -383,6 +407,7 @@ mod tests {
             ConnectionClass::Forwarded {
                 host: forwarding_host.public_key().key_data().clone().into(),
                 session: b"sid".to_vec(),
+                onward: Vec::new(),
                 dest: Some(dest_host.public_key().key_data().clone().into()),
             }
         );
@@ -483,6 +508,7 @@ mod tests {
             ConnectionClass::Forwarded {
                 host: host.public_key().key_data().clone().into(),
                 session: b"sid".to_vec(),
+                onward: Vec::new(),
                 dest: None,
             }
         );
@@ -685,6 +711,7 @@ mod tests {
             ConnectionClass::Forwarded {
                 host: certified.clone().into(),
                 session: b"first".to_vec(),
+                onward: Vec::new(),
                 dest: Some(certified.into()),
             }
         );
@@ -798,6 +825,106 @@ mod tests {
             panic!("expected a forwarded connection");
         };
         assert!(claimed.certificate().is_none());
+    }
+
+    fn chain_keys(class: &ConnectionClass) -> Vec<KeyData> {
+        class
+            .forwarding_chain()
+            .into_iter()
+            .map(|host| host.key().clone())
+            .collect()
+    }
+
+    /// The chain is every verified forwarding binding, in the order they
+    /// arrived, the first being the forwarding host; the authentication
+    /// binding after them is the destination and not a hop.
+    #[test]
+    fn the_forwarding_chain_is_the_forwarding_bindings_in_order() {
+        let hops = [test_key(1), test_key(2), test_key(3)];
+        let dest = test_key(4);
+        let mut bindings = SessionBindState::new();
+        for (n, hop) in hops.iter().enumerate() {
+            let session = format!("hop-{n}");
+            assert_eq!(
+                bindings.apply(&signed_bind(hop, session.as_bytes(), true)),
+                BindOutcome::Accepted
+            );
+        }
+        assert_eq!(
+            bindings.apply(&signed_bind(&dest, b"login", false)),
+            BindOutcome::Accepted
+        );
+
+        let class = bindings.class();
+        let keys = |keys: &[&ssh_key::PrivateKey]| {
+            keys.iter()
+                .map(|key| key.public_key().key_data().clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(chain_keys(&class), keys(&[&hops[0], &hops[1], &hops[2]]));
+        let ConnectionClass::Forwarded {
+            host,
+            onward,
+            dest: bound,
+            ..
+        } = class
+        else {
+            panic!("expected a forwarded connection");
+        };
+        assert_eq!(host.key(), hops[0].public_key().key_data());
+        assert_eq!(onward.len(), 2);
+        assert_eq!(
+            bound.expect("a destination").key(),
+            dest.public_key().key_data()
+        );
+    }
+
+    /// A binding that fails verification is never a hop, and a later one
+    /// that verifies is.
+    #[test]
+    fn a_binding_that_fails_verification_is_not_in_the_chain() {
+        let (first, second, third) = (test_key(1), test_key(2), test_key(3));
+        let mut bindings = SessionBindState::new();
+        assert_eq!(
+            bindings.apply(&signed_bind(&first, b"one", true)),
+            BindOutcome::Accepted
+        );
+        let mut forged = signed_bind(&second, b"two", true);
+        forged.signature = signed_bind(&third, b"two", true).signature;
+        assert_eq!(bindings.apply(&forged), BindOutcome::Refused);
+        assert_eq!(
+            bindings.apply(&signed_bind(&third, b"three", true)),
+            BindOutcome::Accepted
+        );
+
+        assert_eq!(
+            chain_keys(&bindings.class()),
+            vec![
+                first.public_key().key_data().clone(),
+                third.public_key().key_data().clone()
+            ]
+        );
+    }
+
+    /// A connection with only the unverified forwarding claim has a chain of
+    /// that one host, and one that isn't forwarded has none.
+    #[test]
+    fn a_claim_alone_is_a_chain_of_one_and_a_local_connection_has_none() {
+        let (host, wrong_signer) = (test_key(1), test_key(2));
+        let mut bindings = SessionBindState::new();
+        assert!(chain_keys(&bindings.class()).is_empty());
+
+        let mut forged = signed_bind(&wrong_signer, b"sid", true);
+        forged.hostkey = host.public_key().to_bytes().expect("key encodes");
+        assert_eq!(bindings.apply(&forged), BindOutcome::Refused);
+        assert_eq!(
+            chain_keys(&bindings.class()),
+            vec![host.public_key().key_data().clone()]
+        );
+
+        let mut local = SessionBindState::new();
+        local.apply(&signed_bind(&host, b"sid", false));
+        assert!(chain_keys(&local.class()).is_empty());
     }
 
     #[test]

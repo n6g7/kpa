@@ -19,16 +19,24 @@ use crate::ssh::keys::ServedKey;
 /// The most bytes (escaped) each piece of a message may take. The message
 /// is one line the prompt caps at 320 bytes, and the destination comes last,
 /// so every variable piece is cut well short of that: the worst message,
-/// an unlock prompt for a login forwarded through a host `known_hosts`
-/// doesn't name to one it doesn't name either, is 291 bytes
-/// (`the_worst_message_fits_the_prompt_cap`), and the destination is always
-/// whole.
-const MAX_DATABASE_LEN: usize = 24;
+/// an unlock prompt for a login forwarded through three hosts, the first
+/// one `known_hosts` doesn't name, to a destination it doesn't name either,
+/// is 319 bytes (`the_worst_message_fits_the_prompt_cap`), and the
+/// destination is always whole.
+const MAX_DATABASE_LEN: usize = 16;
 const MAX_KEY_NAME_LEN: usize = 64;
 /// The login user or `SSHSIG` namespace, from the request.
 const MAX_REQUESTED_LEN: usize = 32;
 /// A host name from `known_hosts`.
 const MAX_HOST_NAME_LEN: usize = 56;
+/// A forwarding host after the first, as the message shows it: its name, or
+/// the start of its fingerprint, with `…` if either is cut. The data has it
+/// whole.
+const MAX_HOP_LEN: usize = 13;
+/// How many forwarding hosts the message shows. A longer chain shows the
+/// first, `…` and the last.
+const MAX_HOPS_SHOWN: usize = 3;
+const ELLIPSIS: &str = "…";
 
 /// The host as the data names it: its name, escaped and cut, and its host
 /// key's fingerprint.
@@ -75,7 +83,9 @@ struct Pieces {
     /// The namespace of an `SSHSIG` request.
     namespace: Option<String>,
     destination: Option<HostPiece>,
-    forwarding_host: Option<HostPiece>,
+    /// The hosts the agent was forwarded through, in order, the forwarding
+    /// host first.
+    forwarding_chain: Vec<HostPiece>,
 }
 
 impl Pieces {
@@ -84,7 +94,7 @@ impl Pieces {
         served: &ServedKey,
         purpose: &Purpose,
         destination: Option<&NamedHost>,
-        forwarding: Option<&NamedHost>,
+        forwarding: &[NamedHost],
     ) -> Pieces {
         let (user, namespace) = match purpose {
             Purpose::Login(login) => (Some(escape_one_line(&login.user, MAX_REQUESTED_LEN)), None),
@@ -102,7 +112,7 @@ impl Pieces {
             user,
             namespace,
             destination: destination.map(piece),
-            forwarding_host: forwarding.map(piece),
+            forwarding_chain: forwarding.iter().map(piece).collect(),
         }
     }
 
@@ -128,8 +138,11 @@ impl Pieces {
         if let Some(destination) = &self.destination {
             question = question.with("destination", destination.value());
         }
-        if let Some(forwarding) = &self.forwarding_host {
-            question = question.with("forwarding_host", forwarding.value());
+        if let Some(forwarding) = self.forwarding_chain.first() {
+            question = question.with("forwarding_host", forwarding.value()).with(
+                "forwarding_chain",
+                Value::Array(self.forwarding_chain.iter().map(HostPiece::value).collect()),
+            );
         }
         question
     }
@@ -141,14 +154,16 @@ impl Pieces {
 /// connection bound to a `destination`, where: the host name `known_hosts`
 /// gives its host key if it has one, else the host key's fingerprint. A
 /// forwarded connection says which host it comes through too: "Approve use
-/// of key "github" on build-box to log in to git@github.com?". Every piece
+/// of key "github" on build-box to log in to git@github.com?", and one that
+/// was relayed on says the hosts it went through: "on build-box → jump-2".
+/// Every piece
 /// that comes from outside kpa's own text is escaped and cut to its own
 /// budget, so none can hide the destination.
 pub(super) fn approval(
     served: &ServedKey,
     purpose: &Purpose,
     destination: Option<&NamedHost>,
-    forwarding: Option<&NamedHost>,
+    forwarding: &[NamedHost],
 ) -> Question {
     let pieces = Pieces::new(served, purpose, destination, forwarding);
     let message = message(&format!("Approve use of {}", key(&pieces)), &pieces);
@@ -162,7 +177,7 @@ pub(super) fn unlock(
     served: &ServedKey,
     purpose: &Purpose,
     destination: Option<&NamedHost>,
-    forwarding: Option<&NamedHost>,
+    forwarding: &[NamedHost],
 ) -> Question {
     let pieces = Pieces::new(served, purpose, destination, forwarding);
     let lead = format!(
@@ -182,7 +197,7 @@ fn key(pieces: &Pieces) -> String {
 /// `lead`, then which host the request is forwarded through, then what the
 /// key is for and where, as a question.
 fn message(lead: &str, pieces: &Pieces) -> String {
-    let through = on(pieces.forwarding_host.as_ref());
+    let through = through(&pieces.forwarding_chain);
     let user = pieces.user.as_deref().unwrap_or_default();
     let what = match (pieces.purpose, pieces.destination.as_ref()) {
         ("login", Some(dest)) => match &dest.name {
@@ -206,6 +221,55 @@ fn shown(host: &HostPiece) -> String {
         Some(name) => name.clone(),
         None => format!("host key {}", host.fingerprint),
     }
+}
+
+/// The hosts a forwarded connection comes through, as " on build-box": the
+/// forwarding host as `on` shows it, and each host after it in the short form
+/// ("build-box → jump-2 → jump-3"). A chain longer than [`MAX_HOPS_SHOWN`]
+/// shows the first, `…` and the last. Nothing for a connection that isn't
+/// forwarded.
+fn through(chain: &[HostPiece]) -> String {
+    let Some((first, onward)) = chain.split_first() else {
+        return String::new();
+    };
+    let mut hosts = vec![shown(first)];
+    match onward {
+        [] => {}
+        [.., last] if chain.len() > MAX_HOPS_SHOWN => {
+            hosts.push(ELLIPSIS.to_string());
+            hosts.push(brief(last));
+        }
+        _ => hosts.extend(onward.iter().map(brief)),
+    }
+    format!(" on {}", hosts.join(" → "))
+}
+
+/// A host after the first as the message shows it, in at most
+/// [`MAX_HOP_LEN`] bytes: its name, else the start of its fingerprint, with
+/// `…` when it is cut.
+fn brief(host: &HostPiece) -> String {
+    let (text, name) = match &host.name {
+        Some(name) => (name.as_str(), true),
+        None => (host.fingerprint.as_str(), false),
+    };
+    if name && text.len() <= MAX_HOP_LEN {
+        return text.to_string();
+    }
+    format!("{}{ELLIPSIS}", cut(text, MAX_HOP_LEN - ELLIPSIS.len()))
+}
+
+/// `text` cut to at most `max_len` bytes, between whole characters and whole
+/// `\uXXXX` escapes.
+fn cut(text: &str, max_len: usize) -> &str {
+    let mut end = 0;
+    while let Some(next) = text[end..].chars().next() {
+        let len = escape_len(&text[end..]).unwrap_or(next.len_utf8());
+        if end + len > max_len {
+            break;
+        }
+        end += len;
+    }
+    &text[..end]
 }
 
 /// " on <host>" for a host, nothing without one.
@@ -302,17 +366,17 @@ mod tests {
     }
 
     fn approved(purpose: &Purpose, dest: Option<&KeyData>, name: Option<&str>) -> String {
-        approval(&served("github"), purpose, host(dest, name).as_ref(), None).message
+        approval(&served("github"), purpose, host(dest, name).as_ref(), &[]).message
     }
 
     fn unlocked(purpose: &Purpose, dest: Option<&KeyData>, name: Option<&str>) -> String {
-        unlock(&served("github"), purpose, host(dest, name).as_ref(), None).message
+        unlock(&served("github"), purpose, host(dest, name).as_ref(), &[]).message
     }
 
     /// The same questions for a login forwarded through `via`, named
     /// `via_name`, to `dest`, named `dest_name`.
     fn forwarded(
-        message: fn(&ServedKey, &Purpose, Option<&NamedHost>, Option<&NamedHost>) -> Question,
+        message: fn(&ServedKey, &Purpose, Option<&NamedHost>, &[NamedHost]) -> Question,
         via_name: Option<&str>,
         dest_name: Option<&str>,
     ) -> String {
@@ -321,9 +385,36 @@ mod tests {
             &served("github"),
             &login("git"),
             host(Some(&dest), dest_name).as_ref(),
-            host(Some(&via), via_name).as_ref(),
+            &chain(&[(via, via_name)]),
         )
         .message
+    }
+
+    /// Hosts, each a key and the name it is given, if any.
+    fn chain(hosts: &[(KeyData, Option<&str>)]) -> Vec<NamedHost> {
+        hosts
+            .iter()
+            .map(|(key, name)| host(Some(key), *name).expect("a host"))
+            .collect()
+    }
+
+    /// The message of an approval for a login to `dest` forwarded through
+    /// hosts seeded 3, 4, …, one for each of `names`.
+    fn through(names: &[Option<&str>]) -> String {
+        forwarded_through(names).message
+    }
+
+    fn forwarded_through(names: &[Option<&str>]) -> Question {
+        let hosts: Vec<_> = (3..)
+            .zip(names)
+            .map(|(seed, name)| (test_key(seed).public_key().key_data().clone(), *name))
+            .collect();
+        approval(
+            &served("github"),
+            &login("git"),
+            host(Some(&dest()), Some("github.com")).as_ref(),
+            &chain(&hosts),
+        )
     }
 
     /// A forwarded login says which host it comes through, and where it
@@ -416,48 +507,51 @@ mod tests {
         );
     }
 
-    /// Whatever the key, user, namespace, database and host name are, the
-    /// whole message, destination included, fits the prompt's cap, and the
-    /// destination is its end: each piece is cut on its own.
+    /// Whatever the key, user, namespace, database and host names are, and
+    /// however long the chain of forwarding hosts, the whole message,
+    /// destination included, fits the prompt's cap, and the destination is
+    /// its end: each piece is cut on its own.
     #[test]
     fn the_worst_message_fits_the_prompt_cap() {
         let (dest, fingerprint) = (dest(), fingerprint());
         let long = "w".repeat(1000);
         let mut key = served(&long);
         key.database = long.clone();
-        let via = via();
         let mut longest = 0;
 
         for message in [approval, unlock] {
             // Only a login is forwarded.
-            for (purpose, forwarded) in [
-                (login(&long), true),
-                (login(&long), false),
-                (sshsig(&long), false),
-                (Purpose::Other, false),
-            ] {
-                for name in [None, Some(long.as_str())] {
-                    for via_name in [None, Some(long.as_str())] {
-                        let via = host(Some(&via), via_name).filter(|_| forwarded);
-                        let text = message(
-                            &key,
-                            &purpose,
-                            host(Some(&dest), name).as_ref(),
-                            via.as_ref(),
-                        )
-                        .message;
-                        assert!(text.len() <= 320, "{} bytes: {text}", text.len());
-                        longest = longest.max(text.len());
-                        let end = match name {
-                            Some(_) => format!("{}?", "w".repeat(MAX_HOST_NAME_LEN)),
-                            None => format!("host key {fingerprint}?"),
-                        };
-                        assert!(text.ends_with(&end), "{text}");
+            for (purpose, most_hops) in [(login(&long), 5), (sshsig(&long), 0), (Purpose::Other, 0)]
+            {
+                for hops in 0..=most_hops {
+                    for name in [None, Some(long.as_str())] {
+                        for via_name in [None, Some(long.as_str())] {
+                            let via: Vec<_> = (3..)
+                                .take(hops)
+                                .map(|seed| {
+                                    (test_key(seed).public_key().key_data().clone(), via_name)
+                                })
+                                .collect();
+                            let text = message(
+                                &key,
+                                &purpose,
+                                host(Some(&dest), name).as_ref(),
+                                &chain(&via),
+                            )
+                            .message;
+                            assert!(text.len() <= 320, "{} bytes: {text}", text.len());
+                            longest = longest.max(text.len());
+                            let end = match name {
+                                Some(_) => format!("{}?", "w".repeat(MAX_HOST_NAME_LEN)),
+                                None => format!("host key {fingerprint}?"),
+                            };
+                            assert!(text.ends_with(&end), "{text}");
+                        }
                     }
                 }
             }
         }
-        assert_eq!(longest, 291);
+        assert_eq!(longest, 319);
     }
 
     /// A key name can't close its quotes and carry on the sentence, nor
@@ -468,7 +562,7 @@ mod tests {
             &served("x\" to log in as root\n\u{202e}"),
             &Purpose::Other,
             None,
-            None,
+            &[],
         );
         assert_eq!(
             question.message,
@@ -480,7 +574,7 @@ mod tests {
     /// sentence: a `"` is a `"`, as JSON holds it.
     #[test]
     fn the_data_escapes_a_key_name_without_quoting_it() {
-        let question = approval(&served("say \"hi\"\n\u{202e}"), &Purpose::Other, None, None);
+        let question = approval(&served("say \"hi\"\n\u{202e}"), &Purpose::Other, None, &[]);
 
         assert_eq!(question.data["key"]["name"], "say \"hi\"\\u000a\\u202e");
         assert!(question.message.contains("say \\\"hi\\\""));
@@ -491,7 +585,7 @@ mod tests {
     #[test]
     fn quoting_keeps_a_key_name_within_its_budget_between_whole_pieces() {
         for name in ["\"".repeat(100), "\u{202e}\"".repeat(100)] {
-            let question = approval(&served(&name), &Purpose::Other, None, None);
+            let question = approval(&served(&name), &Purpose::Other, None, &[]);
 
             let quoted = question
                 .message
@@ -520,7 +614,7 @@ mod tests {
             &served("github"),
             &login("git"),
             host(Some(&dest), Some("github.com")).as_ref(),
-            host(Some(&via), None).as_ref(),
+            &chain(&[(via, None)]),
         );
 
         assert_eq!(
@@ -539,6 +633,7 @@ mod tests {
                     "fingerprint": fingerprint(),
                 },
                 "forwarding_host": {"fingerprint": via_fingerprint()},
+                "forwarding_chain": [{"fingerprint": via_fingerprint()}],
             })
         );
         assert_eq!(
@@ -555,7 +650,7 @@ mod tests {
     /// destination.
     #[test]
     fn the_unlock_and_sshsig_data_say_what_they_are() {
-        let unlocked = unlock(&served("github"), &sshsig("git"), None, None);
+        let unlocked = unlock(&served("github"), &sshsig("git"), None, &[]);
 
         assert_eq!(unlocked.data["purpose"], "sshsig");
         assert_eq!(unlocked.data["namespace"], "git");
@@ -563,9 +658,132 @@ mod tests {
         assert!(!unlocked.data.contains_key("user"));
         assert!(!unlocked.data.contains_key("destination"));
         assert!(!unlocked.data.contains_key("forwarding_host"));
+        assert!(!unlocked.data.contains_key("forwarding_chain"));
         assert_eq!(
             unlocked.message,
             "Unlock database personal to use key \"github\" to sign for namespace git?"
+        );
+    }
+
+    /// The start of host key `seed`'s fingerprint, as a hop shows it.
+    fn short_fingerprint(seed: u64) -> String {
+        let fingerprint = test_key(seed)
+            .public_key()
+            .fingerprint(HashAlg::Sha256)
+            .to_string();
+        format!("{}…", &fingerprint[..10])
+    }
+
+    /// A message says which hosts a forwarded login went through, in order,
+    /// up to three in full, and past that the first, `…` and the last.
+    #[test]
+    fn a_chain_of_hops_is_shown_in_order_and_shortened_past_three() {
+        let to = " to log in to git@github.com?";
+        let lead = "Approve use of key \"github\"";
+
+        assert_eq!(
+            through(&[Some("build-box")]),
+            format!("{lead} on build-box{to}")
+        );
+        assert_eq!(
+            through(&[Some("build-box"), Some("jump-2")]),
+            format!("{lead} on build-box → jump-2{to}")
+        );
+        assert_eq!(
+            through(&[Some("build-box"), Some("jump-2"), Some("jump-3")]),
+            format!("{lead} on build-box → jump-2 → jump-3{to}")
+        );
+        assert_eq!(
+            through(&[
+                Some("build-box"),
+                Some("jump-2"),
+                Some("jump-3"),
+                Some("jump-4")
+            ]),
+            format!("{lead} on build-box → … → jump-4{to}")
+        );
+        assert_eq!(
+            through(&[
+                Some("build-box"),
+                Some("jump-2"),
+                Some("jump-3"),
+                Some("jump-4"),
+                Some("jump-5")
+            ]),
+            format!("{lead} on build-box → … → jump-5{to}")
+        );
+    }
+
+    /// The first host is shown as a single forwarding host is, and each host
+    /// after it by its name, else the start of its fingerprint, cut with `…`.
+    #[test]
+    fn a_hop_after_the_first_is_shown_short() {
+        let first = via_fingerprint();
+
+        assert_eq!(
+            through(&[None, None]),
+            format!(
+                "Approve use of key \"github\" on host key {first} → {} \
+                 to log in to git@github.com?",
+                short_fingerprint(4)
+            )
+        );
+        assert_eq!(
+            through(&[Some("build-box"), Some("a-jump-host.example.org")]),
+            "Approve use of key \"github\" on build-box → a-jump-hos… \
+             to log in to git@github.com?"
+        );
+        // A cut never falls inside an escape.
+        let escaped = format!("{}\u{202e}", "a".repeat(8));
+        let text = through(&[Some("build-box"), Some(&escaped)]);
+        assert!(text.contains(" → aaaaaaaa… to log in"), "{text}");
+        // One that fits whole is not cut.
+        let fits = format!("{}\u{202e}", "a".repeat(7));
+        let text = through(&[Some("build-box"), Some(&fits)]);
+        assert!(text.contains(" → aaaaaaa\\u202e to log in"), "{text}");
+    }
+
+    /// The data has the whole chain, the forwarding host first, each host
+    /// whole however the message shortens it, and the chain is there for a
+    /// single hop too.
+    #[test]
+    fn the_data_has_every_host_of_the_chain_whole() {
+        let question = forwarded_through(&[
+            Some("build-box"),
+            None,
+            Some("jump-3"),
+            Some("a-jump-host.example.org"),
+        ]);
+
+        let fingerprint = |seed: u64| {
+            test_key(seed)
+                .public_key()
+                .fingerprint(HashAlg::Sha256)
+                .to_string()
+        };
+        assert_eq!(
+            question.data["forwarding_chain"],
+            serde_json::json!([
+                {"name": "build-box", "fingerprint": fingerprint(3)},
+                {"fingerprint": fingerprint(4)},
+                {"name": "jump-3", "fingerprint": fingerprint(5)},
+                {"name": "a-jump-host.example.org", "fingerprint": fingerprint(6)},
+            ])
+        );
+        assert_eq!(
+            question.data["forwarding_host"],
+            question.data["forwarding_chain"][0]
+        );
+        assert!(
+            question
+                .message
+                .contains(" on build-box → … → a-jump-hos… to "),
+            "{}",
+            question.message
+        );
+        assert_eq!(
+            forwarded_through(&[Some("build-box")]).data["forwarding_chain"],
+            serde_json::json!([{"name": "build-box", "fingerprint": fingerprint(3)}])
         );
     }
 }
