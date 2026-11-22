@@ -11,7 +11,7 @@
 /// key names and destinations a confirm prompt adds, short enough that a
 /// hostile database or entry name can't hand the prompt program an
 /// unbounded message.
-const MAX_PROMPT_MESSAGE_LEN: usize = 320;
+pub const MAX_PROMPT_MESSAGE_LEN: usize = 320;
 
 /// Turns `text` into what a prompt may safely display: the characters that
 /// could spoof or drive a display (controls, tab and newline included,

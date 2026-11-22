@@ -527,7 +527,7 @@ the pieces it is made of in `KPA_PROMPT_DATA`, see
 | Forwarded login, through a host `known_hosts` names, to a host it names | `Approve use of key "github" on build-box to log in to git@github.com?` |
 | Forwarded login, through a host it doesn't name | `Approve use of key "github" on host key SHA256:… to log in to git@github.com?`, the destination worded as above |
 | Forwarded login, through two or three hosts | `Approve use of key "github" on build-box → jump-2 to log in to git@github.com?` |
-| Forwarded login, through more than three | `Approve use of key "github" on build-box → … → jump-4 to log in to git@github.com?` |
+| Forwarded login, through more than three hosts, or with no room for them all | `Approve use of key "github" on build-box → … → jump-4 to log in to git@github.com?` |
 
 The destination is the connection's last binding's host, named as § 6.2
 ("Naming a host") names it, else by its fingerprint. On a forwarded
@@ -543,11 +543,13 @@ The key name's quotes are escaped, so a name can't end its quotation and
 carry on the sentence.
 
 A connection forwarded through further hosts (§ 6.2, the forwarding chain)
-says every host it came through: the forwarding host as above, then each host
-after it, in order, joined with `→`. Those are shown by name, else by the
-start of their fingerprint, and cut to 13 bytes with `…`, so the chain can't
-push the destination past the prompt's cap; a chain of more than three shows
-the first, `…` and the last. `KPA_PROMPT_DATA` has the whole chain, each host
+says the hosts it came through: the forwarding host as above, then the hosts
+after it, in order, joined with `→`, each by its name, else by its whole
+fingerprint. The hosts after the forwarding host go in the room the rest of
+the message leaves under the prompt's cap, whole or not at all, never cut: all
+of them, if there are one or two; else `…` and the last; else `…` alone. So
+the destination is always whole, and a long name or a long chain costs the
+message hosts, not its end. `KPA_PROMPT_DATA` has the whole chain, each host
 whole, as `forwarding_chain` (`design.md`, "Configuration and logging"). The
 hosts after the first are as the first reports them: a remote `ssh` there
 binds each further hop over the same connection, and kpa verifies each

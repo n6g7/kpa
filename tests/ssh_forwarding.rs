@@ -601,9 +601,8 @@ fn a_destination_certified_by_a_trusted_ca_is_named_by_its_principal() {
 }
 
 /// A login through two forwarding hosts, `ssh -A` to one and from there
-/// `ssh -A` to a second, shows both in the prompt, the first host whole and
-/// the second short, and gives the prompt's data the whole chain. The
-/// approval is for the first host only.
+/// `ssh -A` to a second, shows both in the prompt, and gives the prompt's
+/// data the whole chain. The approval is for the first host only.
 #[test]
 fn a_login_through_two_forwarding_hosts_names_both() {
     let Some(rig) = Rig::start("30m", "") else {
@@ -622,7 +621,7 @@ fn a_login_through_two_forwarding_hosts_names_both() {
     assert_eq!(
         rig.confirmations(),
         [format!(
-            "Approve use of key \"Ed25519\" on {first} → [127.0.0.1… to log in to {}@{first}?",
+            "Approve use of key \"Ed25519\" on {first} → {second} to log in to {}@{first}?",
             rig.user
         )]
     );

@@ -44,6 +44,7 @@ use crate::cancel::CancelToken;
 pub use data::Question;
 #[cfg(test)]
 pub(crate) use fake::{Scripted, Step};
+pub use message::MAX_PROMPT_MESSAGE_LEN;
 pub use outcome::{ConfirmAnswer, Declined, PromptOutcome};
 pub use program::{ConfirmProgram, SecretProgram};
 pub use question::Prompt;

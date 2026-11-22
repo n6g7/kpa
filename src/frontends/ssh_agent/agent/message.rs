@@ -13,30 +13,28 @@ use ssh_key::HashAlg;
 use super::request::NamedHost;
 use crate::frontends::ssh_agent::classify::Purpose;
 use crate::output::escape_one_line;
-use crate::prompt::Question;
+use crate::prompt::{MAX_PROMPT_MESSAGE_LEN, Question};
 use crate::ssh::keys::ServedKey;
 
 /// The most bytes (escaped) each piece of a message may take. The message
 /// is one line the prompt caps at 320 bytes, and the destination comes last,
 /// so every variable piece is cut well short of that: the worst message,
-/// an unlock prompt for a login forwarded through three hosts, the first
-/// one `known_hosts` doesn't name, to a destination it doesn't name either,
-/// is 319 bytes (`the_worst_message_fits_the_prompt_cap`), and the
-/// destination is always whole.
-const MAX_DATABASE_LEN: usize = 16;
+/// an unlock prompt for a login forwarded through a host `known_hosts`
+/// doesn't name to one it doesn't name either, is 291 bytes
+/// (`the_worst_message_fits_the_prompt_cap`), and the destination is always
+/// whole. The hosts after the forwarding host have no budget of their own:
+/// they are shown whole in what room that leaves, else not (see
+/// [`onward`]).
+const MAX_DATABASE_LEN: usize = 24;
 const MAX_KEY_NAME_LEN: usize = 64;
 /// The login user or `SSHSIG` namespace, from the request.
 const MAX_REQUESTED_LEN: usize = 32;
 /// A host name from `known_hosts`.
 const MAX_HOST_NAME_LEN: usize = 56;
-/// A forwarding host after the first, as the message shows it: its name, or
-/// the start of its fingerprint, with `…` if either is cut. The data has it
-/// whole.
-const MAX_HOP_LEN: usize = 13;
-/// How many forwarding hosts the message shows. A longer chain shows the
-/// first, `…` and the last.
+/// How many forwarding hosts the message names when it has room: the
+/// forwarding host and the hosts after it. A longer chain names the first and
+/// the last.
 const MAX_HOPS_SHOWN: usize = 3;
-const ELLIPSIS: &str = "…";
 
 /// The host as the data names it: its name, escaped and cut, and its host
 /// key's fingerprint.
@@ -195,9 +193,14 @@ fn key(pieces: &Pieces) -> String {
 }
 
 /// `lead`, then which host the request is forwarded through, then what the
-/// key is for and where, as a question.
+/// key is for and where, as a question. The hosts after the forwarding host
+/// go where the room under the prompt's cap is left once the rest of the
+/// message is written, so they can't push the destination out.
 fn message(lead: &str, pieces: &Pieces) -> String {
-    let through = through(&pieces.forwarding_chain);
+    let (through, further) = match pieces.forwarding_chain.split_first() {
+        Some((first, further)) => (on(Some(first)), further),
+        None => (String::new(), &[][..]),
+    };
     let user = pieces.user.as_deref().unwrap_or_default();
     let what = match (pieces.purpose, pieces.destination.as_ref()) {
         ("login", Some(dest)) => match &dest.name {
@@ -212,7 +215,9 @@ fn message(lead: &str, pieces: &Pieces) -> String {
         ),
         (_, destination) => on(destination),
     };
-    format!("{lead}{through}{what}?")
+    let room = MAX_PROMPT_MESSAGE_LEN.saturating_sub(lead.len() + through.len() + what.len() + 1);
+    let onward = onward(further, room);
+    format!("{lead}{through}{onward}{what}?")
 }
 
 /// The host's name, else its host key's fingerprint.
@@ -223,53 +228,38 @@ fn shown(host: &HostPiece) -> String {
     }
 }
 
-/// The hosts a forwarded connection comes through, as " on build-box": the
-/// forwarding host as `on` shows it, and each host after it in the short form
-/// ("build-box → jump-2 → jump-3"). A chain longer than [`MAX_HOPS_SHOWN`]
-/// shows the first, `…` and the last. Nothing for a connection that isn't
-/// forwarded.
-fn through(chain: &[HostPiece]) -> String {
-    let Some((first, onward)) = chain.split_first() else {
+/// The hosts after the forwarding host, written after it (" → jump-2 →
+/// jump-3") in at most `room` bytes. A host is shown whole, by its name, else
+/// by its fingerprint, or not at all. The most is shown that fits, in this
+/// order:
+///
+/// 1. every one, if there are fewer than [`MAX_HOPS_SHOWN`] of them;
+/// 2. `…` and the last (" → … → jump-4"), if there are two or more;
+/// 3. `…` alone (" → …"), which says there are more and is short enough to
+///    fit whatever the other pieces are cut to.
+///
+/// Nothing for a connection that was relayed no further.
+fn onward(further: &[HostPiece], room: usize) -> String {
+    let Some(last) = further.last() else {
         return String::new();
     };
-    let mut hosts = vec![shown(first)];
-    match onward {
-        [] => {}
-        [.., last] if chain.len() > MAX_HOPS_SHOWN => {
-            hosts.push(ELLIPSIS.to_string());
-            hosts.push(brief(last));
-        }
-        _ => hosts.extend(onward.iter().map(brief)),
-    }
-    format!(" on {}", hosts.join(" → "))
-}
-
-/// A host after the first as the message shows it, in at most
-/// [`MAX_HOP_LEN`] bytes: its name, else the start of its fingerprint, with
-/// `…` when it is cut.
-fn brief(host: &HostPiece) -> String {
-    let (text, name) = match &host.name {
-        Some(name) => (name.as_str(), true),
-        None => (host.fingerprint.as_str(), false),
+    let hop = |host: &HostPiece| {
+        host.name
+            .clone()
+            .unwrap_or_else(|| host.fingerprint.clone())
     };
-    if name && text.len() <= MAX_HOP_LEN {
-        return text.to_string();
-    }
-    format!("{}{ELLIPSIS}", cut(text, MAX_HOP_LEN - ELLIPSIS.len()))
-}
-
-/// `text` cut to at most `max_len` bytes, between whole characters and whole
-/// `\uXXXX` escapes.
-fn cut(text: &str, max_len: usize) -> &str {
-    let mut end = 0;
-    while let Some(next) = text[end..].chars().next() {
-        let len = escape_len(&text[end..]).unwrap_or(next.len_utf8());
-        if end + len > max_len {
-            break;
-        }
-        end += len;
-    }
-    &text[..end]
+    let all = (further.len() < MAX_HOPS_SHOWN).then(|| {
+        further
+            .iter()
+            .map(|host| format!(" → {}", hop(host)))
+            .collect::<String>()
+    });
+    let last = (further.len() >= 2).then(|| format!(" → … → {}", hop(last)));
+    [all, last, Some(" → …".to_string())]
+        .into_iter()
+        .flatten()
+        .find(|text| text.len() <= room)
+        .unwrap_or_default()
 }
 
 /// " on <host>" for a host, nothing without one.
@@ -539,8 +529,18 @@ mod tests {
                                 &chain(&via),
                             )
                             .message;
-                            assert!(text.len() <= 320, "{} bytes: {text}", text.len());
-                            longest = longest.max(text.len());
+                            assert!(
+                                text.len() <= MAX_PROMPT_MESSAGE_LEN,
+                                "{} bytes: {text}",
+                                text.len()
+                            );
+                            if hops <= 1 {
+                                longest = longest.max(text.len());
+                            } else {
+                                // The hops are left out before the
+                                // destination is cut: at the very least `…`.
+                                assert!(text.contains(" → "), "{text}");
+                            }
                             let end = match name {
                                 Some(_) => format!("{}?", "w".repeat(MAX_HOST_NAME_LEN)),
                                 None => format!("host key {fingerprint}?"),
@@ -551,7 +551,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(longest, 319);
+        // The hosts after the forwarding host fill what is left of the cap.
+        assert_eq!(longest, 291);
     }
 
     /// A key name can't close its quotes and carry on the sentence, nor
@@ -665,82 +666,140 @@ mod tests {
         );
     }
 
-    /// The start of host key `seed`'s fingerprint, as a hop shows it.
-    fn short_fingerprint(seed: u64) -> String {
-        let fingerprint = test_key(seed)
-            .public_key()
-            .fingerprint(HashAlg::Sha256)
-            .to_string();
-        format!("{}…", &fingerprint[..10])
-    }
-
-    /// A message says which hosts a forwarded login went through, in order,
-    /// up to three in full, and past that the first, `…` and the last.
+    /// A message says which hosts a forwarded login went through, in order:
+    /// all of them up to three, and past that the first, `…` and the last.
     #[test]
     fn a_chain_of_hops_is_shown_in_order_and_shortened_past_three() {
         let to = " to log in to git@github.com?";
         let lead = "Approve use of key \"github\"";
+        let names = [
+            Some("build-box"),
+            Some("jump-2"),
+            Some("jump-3"),
+            Some("jump-4"),
+            Some("jump-5"),
+        ];
 
+        assert_eq!(through(&names[..1]), format!("{lead} on build-box{to}"));
         assert_eq!(
-            through(&[Some("build-box")]),
-            format!("{lead} on build-box{to}")
-        );
-        assert_eq!(
-            through(&[Some("build-box"), Some("jump-2")]),
+            through(&names[..2]),
             format!("{lead} on build-box → jump-2{to}")
         );
         assert_eq!(
-            through(&[Some("build-box"), Some("jump-2"), Some("jump-3")]),
+            through(&names[..3]),
             format!("{lead} on build-box → jump-2 → jump-3{to}")
         );
         assert_eq!(
-            through(&[
-                Some("build-box"),
-                Some("jump-2"),
-                Some("jump-3"),
-                Some("jump-4")
-            ]),
+            through(&names[..4]),
             format!("{lead} on build-box → … → jump-4{to}")
         );
         assert_eq!(
-            through(&[
-                Some("build-box"),
-                Some("jump-2"),
-                Some("jump-3"),
-                Some("jump-4"),
-                Some("jump-5")
-            ]),
+            through(&names[..5]),
             format!("{lead} on build-box → … → jump-5{to}")
         );
     }
 
-    /// The first host is shown as a single forwarding host is, and each host
-    /// after it by its name, else the start of its fingerprint, cut with `…`.
+    /// The first host is shown as a single forwarding host is, and a host
+    /// after it that has no name by its whole fingerprint.
     #[test]
-    fn a_hop_after_the_first_is_shown_short() {
-        let first = via_fingerprint();
+    fn a_hop_without_a_name_is_shown_by_its_fingerprint() {
+        let (first, second) = (via_fingerprint(), {
+            let key = test_key(4).public_key().clone();
+            key.fingerprint(HashAlg::Sha256).to_string()
+        });
 
         assert_eq!(
             through(&[None, None]),
             format!(
-                "Approve use of key \"github\" on host key {first} → {} \
-                 to log in to git@github.com?",
-                short_fingerprint(4)
+                "Approve use of key \"github\" on host key {first} → {second} \
+                 to log in to git@github.com?"
             )
         );
-        assert_eq!(
-            through(&[Some("build-box"), Some("a-jump-host.example.org")]),
-            "Approve use of key \"github\" on build-box → a-jump-hos… \
-             to log in to git@github.com?"
+    }
+
+    /// The hosts after the first are shown whole or not at all, in the room
+    /// left: every one, else `…` and the last, else `…`.
+    #[test]
+    fn the_hops_that_fit_are_shown_whole_and_the_rest_are_left_out() {
+        let hop = |name: &str| HostPiece {
+            name: Some(name.to_string()),
+            fingerprint: "SHA256:x".to_string(),
+        };
+        let (two, three) = (
+            [hop(&"a".repeat(20)), hop(&"b".repeat(20))],
+            [hop("a"), hop("b"), hop(&"c".repeat(20))],
         );
-        // A cut never falls inside an escape.
-        let escaped = format!("{}\u{202e}", "a".repeat(8));
-        let text = through(&[Some("build-box"), Some(&escaped)]);
-        assert!(text.contains(" → aaaaaaaa… to log in"), "{text}");
-        // One that fits whole is not cut.
-        let fits = format!("{}\u{202e}", "a".repeat(7));
-        let text = through(&[Some("build-box"), Some(&fits)]);
-        assert!(text.contains(" → aaaaaaa\\u202e to log in"), "{text}");
+        let both = format!(" → {} → {}", "a".repeat(20), "b".repeat(20));
+        let last = format!(" → … → {}", "b".repeat(20));
+
+        assert_eq!(onward(&two, both.len()), both);
+        assert_eq!(onward(&two, both.len() - 1), last);
+        assert_eq!(onward(&two, last.len()), last);
+        assert_eq!(onward(&two, last.len() - 1), " → …");
+        assert_eq!(onward(&two, 8), " → …");
+        assert_eq!(onward(&two, 7), "");
+        // Three hops are more than are named in full, whatever the room.
+        assert_eq!(onward(&three, 1000), format!(" → … → {}", "c".repeat(20)));
+        assert_eq!(onward(&three, 8), " → …");
+        assert_eq!(onward(&[], 0), "");
+        // One hop that doesn't fit is `…`: there is no last to name apart
+        // from it.
+        assert_eq!(onward(&two[..1], 8), " → …");
+    }
+
+    /// With names as long as can be, the hops give way to what the rest of
+    /// the message needs, and the destination stays whole.
+    #[test]
+    fn long_hop_names_leave_the_message_its_destination() {
+        let long = "w".repeat(1000);
+        let hops = vec![
+            (
+                test_key(3).public_key().key_data().clone(),
+                Some(long.as_str()),
+            ),
+            (
+                test_key(4).public_key().key_data().clone(),
+                Some(long.as_str()),
+            ),
+            (
+                test_key(5).public_key().key_data().clone(),
+                Some(long.as_str()),
+            ),
+        ];
+        let mut key = served(&long);
+        key.database = long.clone();
+
+        let text = unlock(
+            &key,
+            &login(&long),
+            host(Some(&dest()), Some(&long)).as_ref(),
+            &chain(&hops),
+        )
+        .message;
+
+        assert!(text.len() <= MAX_PROMPT_MESSAGE_LEN, "{text}");
+        assert!(text.contains(&format!(" on {} → …", "w".repeat(MAX_HOST_NAME_LEN))));
+        assert!(text.ends_with(&format!("{}?", "w".repeat(MAX_HOST_NAME_LEN))));
+    }
+
+    /// A database name of the longest length is named whole in the unlock
+    /// prompt, and a longer one is cut.
+    #[test]
+    fn the_unlock_names_a_database_of_24_bytes_whole() {
+        let ask = |name: &str| {
+            let mut key = served("github");
+            key.database = name.to_string();
+            unlock(&key, &Purpose::Other, None, &[]).message
+        };
+
+        assert_eq!(
+            ask(&"d".repeat(24)),
+            format!("Unlock database {} to use key \"github\"?", "d".repeat(24))
+        );
+        assert_eq!(
+            ask(&"d".repeat(25)),
+            format!("Unlock database {} to use key \"github\"?", "d".repeat(24))
+        );
     }
 
     /// The data has the whole chain, the forwarding host first, each host
@@ -777,7 +836,7 @@ mod tests {
         assert!(
             question
                 .message
-                .contains(" on build-box → … → a-jump-hos… to "),
+                .contains(" on build-box → … → a-jump-host.example.org to "),
             "{}",
             question.message
         );
