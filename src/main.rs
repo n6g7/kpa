@@ -109,6 +109,10 @@ enum SshCommand {
         /// into the config.
         #[arg(long, conflicts_with = "json")]
         toml: bool,
+        /// Show every column: the database, the entry and the attachment
+        /// too.
+        #[arg(long)]
+        full: bool,
     },
     /// List the SSH requests that came from outside the desktop and were
     /// refused for want of an approval, each with the id `kpa ssh approve`
@@ -179,12 +183,17 @@ fn dispatch(cli: Cli) -> ExitCode {
             client::run_client(&socket_path, Op::Copy(CopyRequest { db, uuid, field }))
         }
         Command::Ssh {
-            command: SshCommand::Keys { database, toml },
+            command:
+                SshCommand::Keys {
+                    database,
+                    toml,
+                    full,
+                },
         } => client::run(
             &socket_path,
             Op::SshKeys(SshKeysRequest { db: database }),
             if cli.json { Format::Json } else { Format::Text },
-            |report: SshKeysReport| ssh_keys_report::render(&report, toml),
+            |report: SshKeysReport| ssh_keys_report::render(&report, toml, full),
         ),
         Command::Ssh {
             command: SshCommand::Pending,

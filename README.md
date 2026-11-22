@@ -142,9 +142,10 @@ cargo run -- lock personal     # lock one
 cargo run -- lock              # lock all of them
 cargo run -- ssh keys          # the SSH keys every unlocked database holds, by
                                 # the name each is served under, and the
-                                # attachments skipped (--database <name>
-                                # for one; --toml prints a config block per
-                                # key instead)
+                                # attachments skipped (--full adds the
+                                # database, entry and attachment columns;
+                                # --database <name> for one; --toml prints a
+                                # config block per key instead)
 cargo run -- ssh pending       # SSH requests from outside the desktop that
                                 # wait for an approval, each with its id
 cargo run -- ssh approve <id>  # approve one; the refused command then signs

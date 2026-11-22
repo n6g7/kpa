@@ -57,12 +57,43 @@ fn rows<'a>(stdout: &'a str, header: &[&str]) -> Vec<Vec<&'a str>> {
         .collect()
 }
 
+/// Without `--full` the keys table is the name, type and fingerprint of each
+/// key, and the skipped attachments keep their columns.
+#[test]
+fn by_default_the_keys_table_has_the_name_type_and_fingerprint_only() {
+    let daemon = daemon();
+    unlock(&daemon, &["personal"]);
+
+    let output = kpa(&daemon, &["ssh", "keys"]);
+    let stdout = text(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", text(&output.stderr));
+
+    let keys = rows(&stdout, &["NAME", "TYPE", "FINGERPRINT"]);
+    assert_eq!(keys.len(), 4, "a header and three keys:\n{stdout}");
+    for (title, key_type) in [
+        ("Ed25519", "ssh-ed25519"),
+        ("Ecdsa", "ecdsa-sha2-nistp256"),
+        ("Rsa", "ssh-rsa"),
+    ] {
+        let fingerprint = common::ssh_fixture_fingerprint(title);
+        assert!(
+            keys.iter()
+                .any(|row| row[..] == [title, key_type, fingerprint.as_str()]),
+            "no row for {title}:\n{stdout}"
+        );
+    }
+    assert!(
+        !rows(&stdout, &["DATABASE", "ENTRY", "ATTACHMENT", "REASON"]).is_empty(),
+        "the skipped attachments keep their table:\n{stdout}"
+    );
+}
+
 #[test]
 fn prints_every_unlocked_databases_keys_skipped_attachments_and_locked_names() {
     let daemon = daemon();
     unlock(&daemon, &["personal", "work"]);
 
-    let output = kpa(&daemon, &["ssh", "keys"]);
+    let output = kpa(&daemon, &["ssh", "keys", "--full"]);
     let stdout = text(&output.stdout);
     assert!(output.status.success(), "{stdout}{}", text(&output.stderr));
 
