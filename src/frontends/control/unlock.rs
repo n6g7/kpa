@@ -9,7 +9,7 @@ use super::{Api, authz};
 use crate::authn::Requester;
 use crate::databases::{Begin, BeginError, UnlockFailure, VaultError};
 use crate::log;
-use crate::prompt::{self, Prompt, PromptOn, PromptOutcome, SecretTerminal};
+use crate::prompt::{self, Prompt, PromptOn, PromptOutcome, Question, SecretTerminal};
 
 impl Api {
     /// The unlock `kpa unlock` runs for `requester`. The token comes before
@@ -39,8 +39,9 @@ impl Api {
                 )),
             };
         log::debug(format_args!("prompting for {name:?}"));
+        let question = Question::new(format!("Unlock {name}")).with("database", name);
         let outcome = Prompt::new(Arc::clone(&self.prompts), backend, self.prompt_timeout)
-            .ask(&format!("Unlock {name}"), unlocking.unlock_token());
+            .ask(&question, unlocking.unlock_token());
         let password = match outcome {
             Ok(PromptOutcome::Answer(password)) => password,
             Ok(PromptOutcome::Cancelled) => return Err(UnlockError::PromptCancelled { db: db() }),
@@ -239,6 +240,11 @@ mod tests {
 
         assert_eq!(unlock_from(&fx, "personal", &desktop()), cancelled());
         assert_eq!(prompts.shown(), ["Unlock personal"]);
+        // The data says which database it is for, whatever the message says.
+        assert_eq!(
+            serde_json::Value::Object(prompts.shown_questions()[0].data.clone()),
+            serde_json::json!({"database": "personal"})
+        );
     }
 
     /// The three places a screen lock can fall relative to an unlock's

@@ -402,7 +402,10 @@ one bound to a destination. A key without a `name` override is named
 titles are unknown. Answering it approves nothing: the confirm prompt follows
 it for a key that needs one (§ 6.7). `prompt` runs exactly as configured; kpa
 sets `KPA_PROMPT_MESSAGE` in its environment instead, so a prompt program that
-reads it — directly, or through a wrapper script — can show the reason:
+reads it — directly, or through a wrapper script — can show the reason. The
+pieces the message is made of, such as the key and the destination, are in
+`KPA_PROMPT_DATA` as JSON, for a program that renders more than a line
+([`design.md`](./design.md), "Configuration and logging"):
 
 ```toml
 prompt = ["sh", "-c", "exec fuzzel --dmenu --password --prompt \"$KPA_PROMPT_MESSAGE\""]
@@ -467,8 +470,9 @@ contract as `prompt`, in dmenu style:
 - It is required once any database has `serve_ssh_keys = true`. Without it,
   `kpa serve` refuses to start.
 
-The message, delivered the same way `prompt`'s is (`KPA_PROMPT_MESSAGE`),
-is one question, "Approve use of key (name) to (purpose)?":
+The message, delivered the same way `prompt`'s is (`KPA_PROMPT_MESSAGE`, with
+the pieces it is made of in `KPA_PROMPT_DATA`, see
+[`design.md`](./design.md), "Configuration and logging"), is one question, "Approve use of key (name) to (purpose)?":
 
 | Request | Message |
 | --- | --- |

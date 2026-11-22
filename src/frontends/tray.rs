@@ -40,7 +40,7 @@ use crate::databases::{
 };
 use crate::display_session::DisplayHandle;
 use crate::log;
-use crate::prompt::{Prompt, PromptOutcome};
+use crate::prompt::{Prompt, PromptOutcome, Question};
 
 /// Tells the tray's loop that a database was unlocked or locked, by anything.
 /// Registered with the core before it is shared.
@@ -286,7 +286,8 @@ fn unlock(
         return Err("no_prompt");
     }
     log::debug(format_args!("prompting for {name:?}"));
-    let password = match prompt.ask(&format!("Unlock {name}"), unlocking.unlock_token()) {
+    let question = Question::new(format!("Unlock {name}")).with("database", name);
+    let password = match prompt.ask(&question, unlocking.unlock_token()) {
         Ok(PromptOutcome::Answer(password)) => password,
         Ok(PromptOutcome::Cancelled) => return Ok(()),
         Ok(PromptOutcome::TimedOut) => {
@@ -1079,6 +1080,10 @@ mod tests {
 
         assert_eq!(fx.unlock("personal"), Ok(()));
         assert_eq!(fx.prompts.shown(), ["Unlock personal"]);
+        assert_eq!(
+            serde_json::Value::Object(fx.prompts.shown_questions()[0].data.clone()),
+            serde_json::json!({"database": "personal"})
+        );
     }
 
     /// The claim is taken before the display session is read, so a second
