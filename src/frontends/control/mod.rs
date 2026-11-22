@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 use self::proto::{
     DatabaseStatus, ListError, ListRequest, LockError, LockRequest, Op, Request, Response,
     SshApproveError, SshApproveRequest, SshKeysError, SshKeysReport, SshKeysRequest, WireEntry,
-    WireGrant, WirePending, WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
+    WireGrant, WireHost, WirePending, WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
 };
 use crate::authn::Requester;
 use crate::config::Config;
@@ -29,7 +29,7 @@ use crate::databases::{Databases, EntrySummary, Open, OpenError, UnknownDb};
 use crate::display_session::DisplayHandle;
 use crate::log;
 use crate::prompt::{self, PromptQueue};
-use crate::ssh::approvals::{Approvals, GrantSource, Lasts, Scope};
+use crate::ssh::approvals::{Approvals, GrantSource, Host, Lasts, Scope};
 use crate::ssh::keys;
 
 pub use copy::CopyState;
@@ -346,9 +346,16 @@ fn wire_scope(scope: &Scope, forwarding_session: Option<u32>) -> WireScope {
             title: key.title,
             attachment: key.attachment.unwrap_or_default(),
         },
-        destination: scope.destination(),
-        forwarding_host: scope.forwarding_host(),
+        destination: scope.destination().map(wire_host),
+        forwarding_host: scope.forwarding_host().map(wire_host),
         forwarding_session,
+    }
+}
+
+fn wire_host(host: &Host) -> WireHost {
+    WireHost {
+        fingerprint: host.fingerprint,
+        name: host.name.clone(),
     }
 }
 

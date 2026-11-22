@@ -383,7 +383,7 @@ kind, and for a copy the field name and the entry's title (so the log says which
 secret left). For a signature: the key's fingerprint and the `name` its
 `[[database.ssh_key]]` override gives it, never the entry's title; its purpose,
 connection class, destination and, on a forwarded connection, forwarding host
-(each by fingerprint, led by the name `known_hosts` gives its host key, if it
+(each by fingerprint, led by the name the daemon's `known_hosts` gives it, if it
 gives one); and the outcome. Never passwords,
 protected fields (a protected title is replaced by the entry's uuid), usernames,
 URLs or any other vault content, at any level: a log outlives the unlocked
@@ -448,7 +448,7 @@ prompts are about, each absent when it doesn't apply:
 | `purpose` | What the key is for: `"login"`, `"sshsig"` or `"other"`. |
 | `user` | The remote user of a login. |
 | `namespace` | The namespace of an `SSHSIG` request. |
-| `destination`, `forwarding_host` | Where the signature is accepted, and the host a forwarded connection comes through: each `{"name"?, "fingerprint"}`, `name` being the host name `known_hosts` gives its host key, when it gives one. |
+| `destination`, `forwarding_host` | Where the signature is accepted, and the host a forwarded connection comes through: each `{"name"?, "fingerprint"}`, `name` being the name the daemon gives the host (`docs/ssh-agent.md` § 6.2, "Naming a host"), when it finds one. |
 
 A plain `kpa unlock personal` is `{"v":1,"database":"personal"}`.
 A confirm prompt for a forwarded login is

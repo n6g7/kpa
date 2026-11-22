@@ -68,7 +68,7 @@ pub fn authorize_sign(
             }
             // Whatever `confirm` says, a forwarded login needs an approval.
             return Ok(Some(SignatureApproval {
-                scope: Scope::forwarded(key, session, host, dest),
+                scope: Scope::forwarded(key, session, host.key(), dest.key()),
                 remember: key.confirm != SshKeyConfirm::Always,
             }));
         }
@@ -78,7 +78,7 @@ pub fn authorize_sign(
             {
                 return Err(Refusal::SessionMismatch);
             }
-            Scope::local(key, Some(dest))
+            Scope::local(key, Some(dest.key()))
         }
         // Any purpose, no binding to check a login's session against.
         ConnectionClass::LocalUnbound => Scope::local(key, None),
@@ -150,15 +150,15 @@ mod tests {
 
     fn bound_to(dest: u64) -> ConnectionClass {
         ConnectionClass::LocalBound {
-            dest: host_key(dest),
+            dest: host_key(dest).into(),
         }
     }
 
     fn forwarded(dest: Option<u64>) -> ConnectionClass {
         ConnectionClass::Forwarded {
-            host: host_key(9),
+            host: host_key(9).into(),
             session: vec![1],
-            dest: dest.map(host_key),
+            dest: dest.map(|seed| host_key(seed).into()),
         }
     }
 
@@ -253,14 +253,14 @@ mod tests {
         };
         let first = asked(&forwarded(Some(8)));
         let other_session = ConnectionClass::Forwarded {
-            host: host_key(9),
+            host: host_key(9).into(),
             session: vec![2],
-            dest: Some(host_key(8)),
+            dest: Some(host_key(8).into()),
         };
         let other_host = ConnectionClass::Forwarded {
-            host: host_key(7),
+            host: host_key(7).into(),
             session: vec![1],
-            dest: Some(host_key(8)),
+            dest: Some(host_key(8).into()),
         };
         assert_ne!(first, asked(&other_session));
         assert_ne!(first, asked(&other_host));

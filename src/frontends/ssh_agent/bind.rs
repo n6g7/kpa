@@ -28,9 +28,9 @@
 //!   though, [`SessionBindState::class`] trusts that over the unverified claim.
 
 use signature::Verifier;
-use ssh_key::Signature;
 use ssh_key::encoding::{Decode, Reader};
 use ssh_key::public::KeyData;
+use ssh_key::{Certificate, Signature};
 
 use super::wire::SessionBind;
 
@@ -41,10 +41,55 @@ pub const MAX_BINDINGS: usize = 16;
 /// longer than this is refused outright, signature check skipped.
 const MAX_SESSION_ID_LEN: usize = 128;
 
+/// The longest certificate kept with a host, as its encoded blob: a host
+/// certificate is a few hundred bytes, and a remote host on a forwarded
+/// connection can send binds of its own, each as large as a frame.
+const MAX_CERTIFICATE_LEN: usize = 4096;
+
+/// A host a connection is bound to: its key, and the certificate it presented
+/// for it, if it did. The key is the host: a certificate is kept only to name
+/// it (`docs/ssh-agent.md` § 6.2), so two are the same host if their keys are.
+#[derive(Debug, Clone)]
+pub struct BoundHost {
+    key: KeyData,
+    certificate: Option<Box<Certificate>>,
+}
+
+impl BoundHost {
+    /// The host key, which is the certified key if the host presented a
+    /// certificate.
+    pub fn key(&self) -> &KeyData {
+        &self.key
+    }
+
+    /// The certificate the host presented, if it did.
+    pub fn certificate(&self) -> Option<&Certificate> {
+        self.certificate.as_deref()
+    }
+}
+
+impl PartialEq for BoundHost {
+    fn eq(&self, other: &BoundHost) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for BoundHost {}
+
+impl From<KeyData> for BoundHost {
+    /// A host that presented no certificate.
+    fn from(key: KeyData) -> BoundHost {
+        BoundHost {
+            key,
+            certificate: None,
+        }
+    }
+}
+
 /// One successfully verified binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Binding {
-    host_key: KeyData,
+    host_key: BoundHost,
     session_id: Vec<u8>,
     is_forwarding: bool,
 }
@@ -53,7 +98,7 @@ struct Binding {
 /// bindings list never ends up with anything in it — see the module doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ForwardingClaim {
-    host_key: KeyData,
+    host_key: BoundHost,
     session_id: Vec<u8>,
 }
 
@@ -97,15 +142,15 @@ pub enum ConnectionClass {
     /// OpenSSH's `ssh`.
     LocalUnbound,
     /// Authentication bindings only. `dest` is the (one and only, since no
-    /// further binding can follow it) binding's host key.
-    LocalBound { dest: KeyData },
+    /// further binding can follow it) binding's host.
+    LocalBound { dest: BoundHost },
     /// The first binding has `is_forwarding`. `host` is that binding's
-    /// host key and `session` its session identifier; `dest` is the last
+    /// host and `session` its session identifier; `dest` is the last
     /// non-forwarding binding, if the remote `ssh` sent one.
     Forwarded {
-        host: KeyData,
+        host: BoundHost,
         session: Vec<u8>,
-        dest: Option<KeyData>,
+        dest: Option<BoundHost>,
     },
 }
 
@@ -148,8 +193,10 @@ impl SessionBindState {
             && msg.is_forwarding
             && let Ok(key) = &host_key
         {
+            // The claim's signature is never checked, so what it presents
+            // names nothing: only its key is kept.
             self.forwarding_claim = Some(ForwardingClaim {
-                host_key: key.clone(),
+                host_key: key.key().clone().into(),
                 session_id: msg.session_id.clone(),
             });
         }
@@ -163,7 +210,7 @@ impl SessionBindState {
         let Ok(signature) = Signature::try_from(msg.signature.as_slice()) else {
             return BindOutcome::Refused;
         };
-        if host_key.verify(&msg.session_id, &signature).is_err() {
+        if host_key.key().verify(&msg.session_id, &signature).is_err() {
             return BindOutcome::Refused;
         }
 
@@ -251,14 +298,18 @@ impl SessionBindState {
 
 /// Decode a standalone host key blob (not `string`-wrapped — the caller
 /// already unwrapped that layer), rejecting trailing bytes. A certificate is
-/// the key it certifies: nothing else of it is looked at.
-fn host_key_from_bytes(bytes: &[u8]) -> ssh_key::Result<KeyData> {
+/// the key it certifies, and is kept next to it, if it isn't too big, to name
+/// the host by.
+fn host_key_from_bytes(bytes: &[u8]) -> ssh_key::Result<BoundHost> {
     let mut reader: &[u8] = bytes;
     let key_data = KeyData::decode(&mut reader)?;
     reader.ensure_finished()?;
-    Ok(match key_data.certificate() {
-        Some(certificate) => certificate.public_key().clone(),
-        None => key_data,
+    Ok(match key_data {
+        KeyData::Certificate(certificate) => BoundHost {
+            key: certificate.public_key().clone(),
+            certificate: (bytes.len() <= MAX_CERTIFICATE_LEN).then_some(certificate),
+        },
+        plain => BoundHost::from(plain),
     })
 }
 
@@ -266,12 +317,14 @@ fn host_key_from_bytes(bytes: &[u8]) -> ssh_key::Result<KeyData> {
 mod tests {
     use super::super::testing::{certified_bind, signed_bind};
     use super::super::wire::AgentRequest;
+    use ssh_key::certificate::{Builder, CertType};
+
     use super::*;
     use crate::ssh::testing::test_key;
 
     fn verified_host(class: &ConnectionClass) -> &KeyData {
         match class {
-            ConnectionClass::Forwarded { host, .. } => host,
+            ConnectionClass::Forwarded { host, .. } => host.key(),
             other => panic!("expected Forwarded, got {other:?}"),
         }
     }
@@ -291,7 +344,7 @@ mod tests {
         assert_eq!(
             bindings.class(),
             ConnectionClass::LocalBound {
-                dest: host.public_key().key_data().clone()
+                dest: host.public_key().key_data().clone().into()
             }
         );
     }
@@ -305,7 +358,7 @@ mod tests {
         assert_eq!(
             bindings.class(),
             ConnectionClass::Forwarded {
-                host: host.public_key().key_data().clone(),
+                host: host.public_key().key_data().clone().into(),
                 session: b"session-id".to_vec(),
                 dest: None,
             }
@@ -328,9 +381,9 @@ mod tests {
         assert_eq!(
             bindings.class(),
             ConnectionClass::Forwarded {
-                host: forwarding_host.public_key().key_data().clone(),
+                host: forwarding_host.public_key().key_data().clone().into(),
                 session: b"sid".to_vec(),
-                dest: Some(dest_host.public_key().key_data().clone()),
+                dest: Some(dest_host.public_key().key_data().clone().into()),
             }
         );
     }
@@ -356,7 +409,7 @@ mod tests {
         assert_eq!(
             bindings.class(),
             ConnectionClass::LocalBound {
-                dest: first.public_key().key_data().clone()
+                dest: first.public_key().key_data().clone().into()
             }
         );
     }
@@ -428,7 +481,7 @@ mod tests {
         assert_eq!(
             class,
             ConnectionClass::Forwarded {
-                host: host.public_key().key_data().clone(),
+                host: host.public_key().key_data().clone().into(),
                 session: b"sid".to_vec(),
                 dest: None,
             }
@@ -470,7 +523,7 @@ mod tests {
         assert_eq!(
             bindings.class(),
             ConnectionClass::LocalBound {
-                dest: host.public_key().key_data().clone()
+                dest: host.public_key().key_data().clone().into()
             }
         );
     }
@@ -616,7 +669,7 @@ mod tests {
         assert_eq!(
             local.class(),
             ConnectionClass::LocalBound {
-                dest: certified.clone()
+                dest: certified.clone().into()
             }
         );
 
@@ -630,9 +683,9 @@ mod tests {
         assert_eq!(
             forwarded.class(),
             ConnectionClass::Forwarded {
-                host: certified.clone(),
+                host: certified.clone().into(),
                 session: b"first".to_vec(),
-                dest: Some(certified),
+                dest: Some(certified.into()),
             }
         );
     }
@@ -654,9 +707,9 @@ mod tests {
         );
     }
 
-    /// Nothing of the certificate but its key matters: a bind for a key whose
-    /// certificate comes from another CA, names another host, or is expired
-    /// (every test certificate's window is over) is the same host.
+    /// Nothing of the certificate but its key makes the host: a bind for a key
+    /// whose certificate comes from another CA, or names another host, is the
+    /// same host.
     #[test]
     fn a_certificates_ca_validity_and_principals_make_no_difference() {
         let host = test_key(1);
@@ -670,6 +723,83 @@ mod tests {
         assert_eq!(binds(2, "build-box"), binds(4, "github.com"));
     }
 
+    /// The certificate is kept next to the key it certifies, to name the host
+    /// by, and doesn't make two hosts of one key.
+    #[test]
+    fn a_host_keeps_the_certificate_it_presented_next_to_its_key() {
+        let (host, ca) = (test_key(1), test_key(2));
+        let mut bindings = SessionBindState::new();
+        bindings.apply(&certified_bind(
+            &host,
+            &ca,
+            "build-box",
+            b"session-id",
+            false,
+        ));
+
+        let ConnectionClass::LocalBound { dest } = bindings.class() else {
+            panic!("expected a bound connection");
+        };
+
+        assert_eq!(dest.key(), host.public_key().key_data());
+        assert_eq!(
+            dest.certificate()
+                .map(|certificate| certificate.valid_principals().to_vec()),
+            Some(vec!["build-box".to_string()])
+        );
+        assert_eq!(dest, BoundHost::from(host.public_key().key_data().clone()));
+    }
+
+    /// A certificate too big to keep still binds its key: the host is the
+    /// same, and it isn't named by what it presented.
+    #[test]
+    fn a_certificate_too_big_to_keep_binds_by_its_key_alone() {
+        let (host, ca) = (test_key(1), test_key(2));
+        let mut builder = Builder::new(
+            vec![0; 16],
+            host.public_key().key_data().clone(),
+            0,
+            u64::MAX,
+        )
+        .expect("a valid window");
+        builder.cert_type(CertType::Host).expect("a type");
+        builder
+            .key_id("x".repeat(MAX_CERTIFICATE_LEN))
+            .expect("a key id");
+        builder.valid_principal("build-box").expect("a principal");
+        let big = builder.sign(&ca).expect("the CA signs");
+        let msg = SessionBind {
+            hostkey: big.to_bytes().expect("encodes"),
+            ..signed_bind(&host, b"session-id", false)
+        };
+
+        let mut bindings = SessionBindState::new();
+        assert_eq!(bindings.apply(&msg), BindOutcome::Accepted);
+
+        let ConnectionClass::LocalBound { dest } = bindings.class() else {
+            panic!("expected a bound connection");
+        };
+        assert_eq!(dest.key(), host.public_key().key_data());
+        assert!(dest.certificate().is_none());
+    }
+
+    /// A forwarding claim whose signature never verified names nothing: it
+    /// keeps its key, and not the certificate it came with.
+    #[test]
+    fn an_unverified_forwarding_claim_keeps_no_certificate() {
+        let (host, other, ca) = (test_key(1), test_key(3), test_key(2));
+        let mut forged = certified_bind(&host, &ca, "build-box", b"session-id", true);
+        forged.signature = signed_bind(&other, b"session-id", true).signature;
+
+        let mut bindings = SessionBindState::new();
+        assert_eq!(bindings.apply(&forged), BindOutcome::Refused);
+
+        let ConnectionClass::Forwarded { host: claimed, .. } = bindings.class() else {
+            panic!("expected a forwarded connection");
+        };
+        assert!(claimed.certificate().is_none());
+    }
+
     #[test]
     fn a_real_openssh_session_bind_decodes_and_verifies() {
         let AgentRequest::SessionBind(msg) = super::super::wire::decode_request(REAL_SESSION_BIND)
@@ -680,7 +810,10 @@ mod tests {
 
         let host_key = host_key_from_bytes(&msg.hostkey).expect("hostkey should parse");
         assert_eq!(
-            host_key.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+            host_key
+                .key()
+                .fingerprint(ssh_key::HashAlg::Sha256)
+                .to_string(),
             "SHA256:GPlhdYQP8NhCXJtc7h0vcH/sL2q9s5FcguM+r/ieqww"
         );
 

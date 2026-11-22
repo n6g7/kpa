@@ -29,6 +29,40 @@ use super::keys::ServedKey;
 use crate::cancel::CancelToken;
 use crate::databases::{Databases, Observer, Open};
 
+/// A host an approval is for: its host key's fingerprint, and the name the
+/// daemon found for it, if it found one, which is only for showing
+/// (`docs/ssh-agent.md` § 6.2, "Naming a host"). Hosts are equal when their
+/// fingerprints are: the name is only for showing, and plays no part in
+/// equality or hashing.
+#[derive(Debug, Clone)]
+pub struct Host {
+    pub fingerprint: Fingerprint,
+    pub name: Option<String>,
+}
+
+impl PartialEq for Host {
+    fn eq(&self, other: &Host) -> bool {
+        self.fingerprint == other.fingerprint
+    }
+}
+
+impl Eq for Host {}
+
+impl std::hash::Hash for Host {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.fingerprint.hash(state);
+    }
+}
+
+impl Host {
+    fn new(key: &KeyData) -> Host {
+        Host {
+            fingerprint: key.fingerprint(HashAlg::Sha256),
+            name: None,
+        }
+    }
+}
+
 /// What one approval covers: a key, for one destination — the last
 /// binding's host key on a bound connection, `None` on a `LocalUnbound` one
 /// (`ssh-keygen -Y sign`, and clients other than OpenSSH's `ssh`, which never
@@ -40,16 +74,16 @@ use crate::databases::{Databases, Observer, Open};
 /// § 6.7). Computed once, by `ssh_agent::authz::authorize_sign`, and carried
 /// to the lookup and the grant.
 ///
-/// The scope holds the key as the open database serves it, so whatever shows
-/// an approval can name the key. Two scopes are the same when their keys have
-/// the same fingerprint and their destination and forwarding session match:
-/// the key's other fields (its name, title, database) describe it, and don't
-/// change within an unlock.
+/// The scope holds the key as the open database serves it, and its hosts
+/// with their names, so whatever shows an approval can name them. Two scopes
+/// are the same when their keys have the same fingerprint and their
+/// destination and forwarding session match: the key's other fields (its
+/// name, title, database) describe it, and don't change within an unlock, and
+/// the hosts' names are only for showing.
 #[derive(Debug, Clone)]
 pub struct Scope {
     key: ServedKey,
-    /// The destination's host key, by its SHA-256 fingerprint.
-    destination: Option<Fingerprint>,
+    destination: Option<Host>,
     /// The forwarding session, for a forwarded connection.
     forwarding: Option<Box<Forwarding>>,
 }
@@ -60,14 +94,24 @@ pub struct Scope {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Forwarding {
     session: Vec<u8>,
-    host: Fingerprint,
+    host: Host,
+}
+
+impl Scope {
+    /// What tells this scope from another: the key, the destination and the
+    /// forwarding session.
+    fn identity(&self) -> (&Fingerprint, Option<&Host>, Option<&Forwarding>) {
+        (
+            &self.key.fingerprint,
+            self.destination.as_ref(),
+            self.forwarding.as_deref(),
+        )
+    }
 }
 
 impl PartialEq for Scope {
     fn eq(&self, other: &Scope) -> bool {
-        self.key.fingerprint == other.key.fingerprint
-            && self.destination == other.destination
-            && self.forwarding == other.forwarding
+        self.identity() == other.identity()
     }
 }
 
@@ -75,9 +119,7 @@ impl Eq for Scope {}
 
 impl std::hash::Hash for Scope {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.key.fingerprint.hash(state);
-        self.destination.hash(state);
-        self.forwarding.hash(state);
+        self.identity().hash(state);
     }
 }
 
@@ -87,7 +129,7 @@ impl Scope {
     pub fn local(key: &ServedKey, destination: Option<&KeyData>) -> Scope {
         Scope {
             key: key.clone(),
-            destination: destination.map(|dest| dest.fingerprint(HashAlg::Sha256)),
+            destination: destination.map(Host::new),
             forwarding: None,
         }
     }
@@ -102,10 +144,10 @@ impl Scope {
     ) -> Scope {
         Scope {
             key: key.clone(),
-            destination: Some(destination.fingerprint(HashAlg::Sha256)),
+            destination: Some(Host::new(destination)),
             forwarding: Some(Box::new(Forwarding {
                 session: session.to_vec(),
-                host: host.fingerprint(HashAlg::Sha256),
+                host: Host::new(host),
             })),
         }
     }
@@ -124,14 +166,31 @@ impl Scope {
         &self.key
     }
 
-    pub fn destination(&self) -> Option<Fingerprint> {
-        self.destination
+    /// The destination, for a bound connection.
+    pub fn destination(&self) -> Option<&Host> {
+        self.destination.as_ref()
     }
 
-    /// The host key of the forwarding host, for a forwarded connection's
-    /// scope. The session identifier is never shown.
-    pub fn forwarding_host(&self) -> Option<Fingerprint> {
-        self.forwarding.as_ref().map(|forwarding| forwarding.host)
+    /// The host the forwarded connection comes through, for a forwarded
+    /// connection's scope. The session identifier is never shown.
+    pub fn forwarding_host(&self) -> Option<&Host> {
+        self.forwarding.as_ref().map(|forwarding| &forwarding.host)
+    }
+
+    /// This scope with the names the daemon found for its destination and its
+    /// forwarding host. A scope's identity doesn't change.
+    pub fn with_host_names(
+        mut self,
+        destination: Option<String>,
+        forwarding_host: Option<String>,
+    ) -> Scope {
+        if let Some(host) = &mut self.destination {
+            host.name = destination;
+        }
+        if let Some(forwarding) = &mut self.forwarding {
+            forwarding.host.name = forwarding_host;
+        }
+        self
     }
 
     /// Whether this is a forwarded connection's scope.
@@ -569,6 +628,36 @@ mod tests {
                 .granted(&databases.open("personal").unwrap(), now)
                 .is_empty()
         );
+    }
+
+    /// The names the daemon found for a scope's hosts are for showing, and
+    /// don't make two scopes of one.
+    #[test]
+    fn host_names_take_no_part_in_what_tells_scopes_apart() {
+        let (host, dest) = (host_key(4), host_key(5));
+        let plain = Scope::forwarded(&key(), &[1], &host, &dest);
+        let named = plain.clone().with_host_names(
+            Some("github.com".to_string()),
+            Some("build-box".to_string()),
+        );
+
+        assert_eq!(plain, named);
+        assert_eq!(
+            named.destination().unwrap().name.as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            named.forwarding_host().unwrap().name.as_deref(),
+            Some("build-box")
+        );
+        let hashed = |scope: &Scope| {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            scope.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hashed(&plain), hashed(&named));
+        assert_ne!(plain, Scope::forwarded(&key(), &[1], &host_key(6), &dest));
     }
 
     /// A scope is its key's fingerprint, destination and forwarding session:

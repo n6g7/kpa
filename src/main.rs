@@ -23,7 +23,6 @@ use kpa::log::{self, Level};
 use kpa::output::report_error;
 use kpa::paths::Paths;
 use kpa::socket;
-use kpa::ssh::known_hosts::HostNames;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -202,8 +201,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             Op::SshPending,
             if cli.json { Format::Json } else { Format::Text },
             |pending: ssh_requests_report::Pending| {
-                let names = HostNames::read(paths.known_hosts.as_deref());
-                ssh_requests_report::render(&pending, SystemTime::now(), &names)
+                ssh_requests_report::render(&pending, SystemTime::now())
             },
         ),
         Command::Ssh {
@@ -213,8 +211,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             Op::SshGrants,
             if cli.json { Format::Json } else { Format::Text },
             |grants: ssh_grants_report::Grants| {
-                let names = HostNames::read(paths.known_hosts.as_deref());
-                ssh_grants_report::render(&grants, SystemTime::now(), &names, full)
+                ssh_grants_report::render(&grants, SystemTime::now(), full)
             },
         ),
         Command::Ssh {

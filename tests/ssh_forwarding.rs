@@ -323,9 +323,11 @@ impl Rig {
 
     /// Starts a second `sshd`, as a destination, whose host key comes with a
     /// host certificate made by a CA of its own, as `ssh-keygen -s` makes
-    /// one. `known_hosts` has a plain entry for the host key and none for
-    /// the CA, so what names the host is the key the certificate certifies.
-    fn start_certified_destination(&self) -> Sshd {
+    /// one, for `build-box.example` and the loopback address. `known_hosts`
+    /// has a plain entry for the host key, and a line trusting the CA for
+    /// `*.example` if `trust_ca`: then the certificate's principal names the
+    /// host, and without the line the plain entry does.
+    fn start_certified_destination(&self, trust_ca: bool) -> Sshd {
         let dir = self.dir.path();
         let (ca, host_key) = (dir.join("ca"), dir.join("certified_host_key"));
         generate_key(&self.tools, &ca);
@@ -333,7 +335,15 @@ impl Rig {
         let signed = Command::new(&self.tools.ssh_keygen)
             .args(["-q", "-s"])
             .arg(&ca)
-            .args(["-I", "build-box", "-h", "-n", "127.0.0.1", "-V", "-5m:+1h"])
+            .args([
+                "-I",
+                "build-box",
+                "-h",
+                "-n",
+                "build-box.example,127.0.0.1",
+                "-V",
+                "-5m:+1h",
+            ])
             .arg(host_key.with_extension("pub"))
             .status()
             .expect("spawn ssh-keygen -s");
@@ -353,6 +363,12 @@ impl Rig {
             destination.port,
             std::fs::read_to_string(host_key.with_extension("pub")).expect("read host key"),
         ));
+        if trust_ca {
+            entries.push_str(&format!(
+                "@cert-authority *.example {}",
+                std::fs::read_to_string(ca.with_extension("pub")).expect("read the CA"),
+            ));
+        }
         std::fs::write(&known_hosts, entries).expect("write known_hosts");
         destination
     }
@@ -429,7 +445,7 @@ fn a_forwarded_login_asks_once_per_ssh_session() {
     assert_eq!(grants[0]["uses"], 2);
     assert_eq!(grants[0]["remember"], true);
     let scope = &grants[0]["scope"];
-    assert!(scope["forwarding_host"].is_string());
+    assert!(scope["forwarding_host"]["fingerprint"].is_string());
     assert_eq!(scope["forwarding_session"], 1);
     assert!(grants[0]["last_used_at"].is_u64());
     assert_eq!(scope["forwarding_host"], scope["destination"]);
@@ -508,7 +524,7 @@ fn a_forwarded_login_to_a_host_with_a_certificate_asks_and_signs() {
     let Some(rig) = Rig::start("30m", "") else {
         return;
     };
-    let destination = rig.start_certified_destination();
+    let destination = rig.start_certified_destination(false);
 
     let login = rig.forwarded(&rig.second_hop_to("Ed25519", destination.port));
 
@@ -524,6 +540,35 @@ fn a_forwarded_login_to_a_host_with_a_certificate_asks_and_signs() {
             rig.user
         )]
     );
+}
+
+/// With a line trusting the CA that signed the destination's host
+/// certificate, the prompt and the approval name the host by the
+/// certificate's principal.
+#[test]
+fn a_destination_certified_by_a_trusted_ca_is_named_by_its_principal() {
+    let Some(rig) = Rig::start("30m", "") else {
+        return;
+    };
+    let destination = rig.start_certified_destination(true);
+
+    let login = rig.forwarded(&rig.second_hop_to("Ed25519", destination.port));
+
+    assert!(login.status.success(), "{}", output_text(&login));
+    let via = format!("[127.0.0.1]:{}", rig.sshd.port);
+    assert_eq!(
+        rig.confirmations(),
+        [format!(
+            "Approve use of key \"Ed25519\" on {via} to log in to {}@build-box.example?",
+            rig.user
+        )]
+    );
+    let grants = rig.grants();
+    assert_eq!(
+        grants[0]["scope"]["destination"]["name"],
+        "build-box.example"
+    );
+    assert_eq!(grants[0]["scope"]["forwarding_host"]["name"], via);
 }
 
 /// A forwarded signature is a remote host's: it does not keep the database
