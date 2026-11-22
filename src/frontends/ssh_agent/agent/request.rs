@@ -1,6 +1,8 @@
 //! [`Request`]: one `SIGN_REQUEST` as the sign flow sees it, and the log
 //! line it ends in (`docs/design.md` § Secrets).
 
+use std::path::Path;
+
 use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg, PublicKey};
 
@@ -11,11 +13,17 @@ use crate::frontends::ssh_agent::bind::ConnectionClass;
 use crate::frontends::ssh_agent::classify::{self, Purpose};
 use crate::frontends::ssh_agent::wire::SignRequest;
 use crate::log;
+use crate::output::escape_one_line;
 use crate::ssh::approvals::RequestDetails;
+use crate::ssh::known_hosts::HostNames;
 
 /// The longest login user, `SSHSIG` namespace or command name a pending
 /// request keeps: all come from the request.
 const MAX_PENDING_TEXT_LEN: usize = 64;
+
+/// The longest host name a log line carries, as long as one in a prompt's
+/// message.
+const MAX_LOGGED_HOST_NAME_LEN: usize = 56;
 
 /// One `SIGN_REQUEST`, as the flow and its log line see it.
 pub(super) struct Request<'a> {
@@ -93,31 +101,40 @@ fn capped(text: &str, max_len: usize) -> &str {
 
 /// One line per `SIGN_REQUEST` for a served key (`docs/design.md`
 /// § Secrets), as [`sign_line`] words it. A signature is `info`, everything else
-/// `warn`.
+/// `warn`. `known_hosts` is read, once, for a request that names a host.
 pub(super) fn log_sign(
     db: &str,
     name: Option<String>,
     request: &Request<'_>,
+    known_hosts: Option<&Path>,
     outcome: &Result<Vec<u8>, Refused>,
 ) {
     let log = match outcome {
         Ok(_) => log::info,
         Err(_) => log::warn,
     };
-    let line = sign_line(db, name.as_deref(), request, outcome);
+    let names = if request.destination().is_some() || request.forwarding_host().is_some() {
+        HostNames::read(known_hosts)
+    } else {
+        HostNames::default()
+    };
+    let line = sign_line(db, name.as_deref(), request, &names, outcome);
     log(format_args!("{line}"));
 }
 
 /// The log line for one `SIGN_REQUEST`: the key by fingerprint, and by
 /// `name` if its database's config names it (already escaped); its
-/// database; its purpose; the connection's class; the destination's
-/// fingerprint if the connection is bound to one; the forwarding host's
-/// fingerprint if the connection is forwarded; and what happened. Never
-/// the entry's title, which is vault content (G-4).
+/// database; its purpose; the connection's class; the destination if the
+/// connection is bound to one; the forwarding host if the connection is
+/// forwarded; and what happened. A host is its fingerprint, and the name
+/// `names` gives it before the fingerprint, in parentheses, when it gives
+/// one: `dest github.com (SHA256:…)`. Never the entry's title, which is vault
+/// content (G-4).
 pub(super) fn sign_line(
     db: &str,
     name: Option<&str>,
     request: &Request<'_>,
+    names: &HostNames,
     outcome: &Result<Vec<u8>, Refused>,
 ) -> String {
     let outcome: &dyn std::fmt::Display = match outcome {
@@ -130,14 +147,27 @@ pub(super) fn sign_line(
     let (purpose, class) = (request.purpose.label(), request.class.label());
     let destination = request
         .destination()
-        .map(|dest| format!(", dest {}", dest.fingerprint(HashAlg::Sha256)))
+        .map(|dest| format!(", dest {}", host(dest, names)))
         .unwrap_or_default();
     let forwarding = request
         .forwarding_host()
-        .map(|host| format!(", via {}", host.fingerprint(HashAlg::Sha256)))
+        .map(|via| format!(", via {}", host(via, names)))
         .unwrap_or_default();
     format!(
         "ssh sign {outcome}: key {}{name} in {db:?} ({purpose}, {class}{destination}{forwarding})",
         request.fingerprint,
     )
+}
+
+/// A host as a log line says it: its fingerprint, led by the name `names`
+/// gives its host key, escaped and cut, if it gives one.
+fn host(key: &KeyData, names: &HostNames) -> String {
+    let fingerprint = key.fingerprint(HashAlg::Sha256);
+    match names.name(&fingerprint) {
+        Some(name) => format!(
+            "{} ({fingerprint})",
+            escape_one_line(name, MAX_LOGGED_HOST_NAME_LEN)
+        ),
+        None => fingerprint.to_string(),
+    }
 }
