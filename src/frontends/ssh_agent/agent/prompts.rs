@@ -13,7 +13,6 @@
 
 use std::sync::MutexGuard;
 
-use super::message::Host;
 use super::request::Request;
 use super::sign::{Asked, Lacking, Refused};
 use super::{Agent, message};
@@ -23,7 +22,6 @@ use crate::databases::{Begin, BeginError, UnlockFailure};
 use crate::prompt::Declined;
 use crate::ssh::approvals::SignatureApproval;
 use crate::ssh::keys::ServedKey;
-use ssh_key::public::KeyData;
 
 impl Refused {
     /// Whether this is the user declining to answer a prompt, as opposed to
@@ -127,12 +125,11 @@ impl Agent {
     /// approval is for, which ends when the unlock `asked` was found lacking
     /// in is locked.
     fn prompt_to_confirm(&self, request: &Request<'_>, asked: &Asked) -> Result<(), Refused> {
-        let (destination, forwarding) = self.hosts(request);
         let question = message::approval(
             asked.approval.scope.key(),
             &request.purpose,
-            destination.as_ref(),
-            forwarding.as_ref(),
+            request.destination.as_ref(),
+            request.forwarding_host.as_ref(),
         );
         self.confirm_prompt
             .ask(&question, &asked.unlock)
@@ -163,12 +160,11 @@ impl Agent {
         if !may_prompt_on_screen(requester, &self.display.get()) {
             return Err(Refused::Locked);
         }
-        let (destination, forwarding) = self.hosts(request);
         let question = message::unlock(
             key,
             &request.purpose,
-            destination.as_ref(),
-            forwarding.as_ref(),
+            request.destination.as_ref(),
+            request.forwarding_host.as_ref(),
         );
         let password = self
             .screen_unlock
@@ -184,24 +180,6 @@ impl Agent {
                 UnlockFailure::Vault(err) => Refused::UnlockFailed(err),
                 UnlockFailure::LockedMeanwhile => Refused::Locked,
             })
-    }
-
-    /// The hosts a message names, each with the name the request found for
-    /// it if it has one: the connection's destination, if it is bound to one,
-    /// and the host it is forwarded through, if it is forwarded.
-    fn hosts<'r>(&self, request: &'r Request<'_>) -> (Option<Host<'r>>, Option<Host<'r>>) {
-        let host = |key: &'r KeyData, name: &Option<String>| Host {
-            name: name.clone(),
-            key,
-        };
-        (
-            request
-                .destination()
-                .map(|key| host(key, &request.hosts.destination)),
-            request
-                .forwarding_host()
-                .map(|key| host(key, &request.hosts.forwarding_host)),
-        )
     }
 
     /// Holds `db`'s prompts back, as a prompt the user cancelled or left

@@ -9,8 +9,8 @@
 
 use serde_json::{Map, Value, json};
 use ssh_key::HashAlg;
-use ssh_key::public::KeyData;
 
+use super::request::NamedHost;
 use crate::frontends::ssh_agent::classify::Purpose;
 use crate::output::escape_one_line;
 use crate::prompt::Question;
@@ -30,24 +30,15 @@ const MAX_REQUESTED_LEN: usize = 32;
 /// A host name from `known_hosts`.
 const MAX_HOST_NAME_LEN: usize = 56;
 
-/// A host a message names: its host key, and the name `known_hosts` gives
-/// it, if it has one.
-pub(super) struct Host<'a> {
-    pub(super) key: &'a KeyData,
-    pub(super) name: Option<String>,
-}
-
-impl Host<'_> {
-    /// The host as the data names it: its name, escaped and cut, and its
-    /// host key's fingerprint.
-    fn piece(&self) -> HostPiece {
-        HostPiece {
-            name: self
-                .name
-                .as_deref()
-                .map(|name| escape_one_line(name, MAX_HOST_NAME_LEN)),
-            fingerprint: self.key.fingerprint(HashAlg::Sha256).to_string(),
-        }
+/// The host as the data names it: its name, escaped and cut, and its host
+/// key's fingerprint.
+fn piece(host: &NamedHost) -> HostPiece {
+    HostPiece {
+        name: host
+            .name
+            .as_deref()
+            .map(|name| escape_one_line(name, MAX_HOST_NAME_LEN)),
+        fingerprint: host.key.fingerprint(HashAlg::Sha256).to_string(),
     }
 }
 
@@ -92,8 +83,8 @@ impl Pieces {
     fn new(
         served: &ServedKey,
         purpose: &Purpose,
-        destination: Option<&Host<'_>>,
-        forwarding: Option<&Host<'_>>,
+        destination: Option<&NamedHost>,
+        forwarding: Option<&NamedHost>,
     ) -> Pieces {
         let (user, namespace) = match purpose {
             Purpose::Login(login) => (Some(escape_one_line(&login.user, MAX_REQUESTED_LEN)), None),
@@ -110,8 +101,8 @@ impl Pieces {
             purpose: purpose.label(),
             user,
             namespace,
-            destination: destination.map(Host::piece),
-            forwarding_host: forwarding.map(Host::piece),
+            destination: destination.map(piece),
+            forwarding_host: forwarding.map(piece),
         }
     }
 
@@ -156,8 +147,8 @@ impl Pieces {
 pub(super) fn approval(
     served: &ServedKey,
     purpose: &Purpose,
-    destination: Option<&Host<'_>>,
-    forwarding: Option<&Host<'_>>,
+    destination: Option<&NamedHost>,
+    forwarding: Option<&NamedHost>,
 ) -> Question {
     let pieces = Pieces::new(served, purpose, destination, forwarding);
     let message = message(&format!("Approve use of {}", key(&pieces)), &pieces);
@@ -170,8 +161,8 @@ pub(super) fn approval(
 pub(super) fn unlock(
     served: &ServedKey,
     purpose: &Purpose,
-    destination: Option<&Host<'_>>,
-    forwarding: Option<&Host<'_>>,
+    destination: Option<&NamedHost>,
+    forwarding: Option<&NamedHost>,
 ) -> Question {
     let pieces = Pieces::new(served, purpose, destination, forwarding);
     let lead = format!(
@@ -250,6 +241,8 @@ fn escape_len(text: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use ssh_key::public::KeyData;
+
     use super::*;
     use crate::config::SshKeyConfirm;
     use crate::frontends::ssh_agent::classify::LoginRequest;
@@ -301,9 +294,9 @@ mod tests {
         via().fingerprint(HashAlg::Sha256).to_string()
     }
 
-    fn host<'a>(key: Option<&'a KeyData>, name: Option<&str>) -> Option<Host<'a>> {
-        key.map(|key| Host {
-            key,
+    fn host(key: Option<&KeyData>, name: Option<&str>) -> Option<NamedHost> {
+        key.map(|key| NamedHost {
+            key: key.clone(),
             name: name.map(str::to_string),
         })
     }
@@ -319,7 +312,7 @@ mod tests {
     /// The same questions for a login forwarded through `via`, named
     /// `via_name`, to `dest`, named `dest_name`.
     fn forwarded(
-        message: fn(&ServedKey, &Purpose, Option<&Host<'_>>, Option<&Host<'_>>) -> Question,
+        message: fn(&ServedKey, &Purpose, Option<&NamedHost>, Option<&NamedHost>) -> Question,
         via_name: Option<&str>,
         dest_name: Option<&str>,
     ) -> String {

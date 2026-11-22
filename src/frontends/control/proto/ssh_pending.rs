@@ -33,24 +33,27 @@ pub struct WirePending {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WireScope {
     pub key: WireSshKey,
-    /// The destination's host key, of a bound connection.
+    /// The destination, of a bound connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destination: Option<Fingerprint>,
-    /// The forwarding host's host key, of a forwarded connection.
+    pub destination: Option<WireHost>,
+    /// The forwarding host, of a forwarded connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forwarding_host: Option<Fingerprint>,
-    /// The name the daemon's `known_hosts` gives the destination's host key,
-    /// escaped, if it gives one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destination_name: Option<String>,
-    /// The name it gives the forwarding host's host key, if it gives one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forwarding_host_name: Option<String>,
+    pub forwarding_host: Option<WireHost>,
     /// Which of the forwarding sessions kpa has seen this one is, 1, 2, …,
     /// of a forwarded connection. It tells two `ssh -A` sessions through the
     /// same host apart, and says nothing about the session identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forwarding_session: Option<u32>,
+}
+
+/// A host, as the daemon names it: its host key's fingerprint, and the name
+/// its `known_hosts` gives it (`docs/ssh-agent.md` § 6.2, "Naming a host"),
+/// escaped, if it gives one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireHost {
+    pub fingerprint: Fingerprint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// What a refused request was.
@@ -94,10 +97,11 @@ mod tests {
                     title: Some("GitHub".to_string()),
                     attachment: "id_ed25519".to_string(),
                 },
-                destination: Some(KEY.parse().expect("a fingerprint")),
+                destination: Some(WireHost {
+                    fingerprint: KEY.parse().expect("a fingerprint"),
+                    name: None,
+                }),
                 forwarding_host: None,
-                destination_name: None,
-                forwarding_host_name: None,
                 forwarding_session: None,
             },
             remember: true,
@@ -130,7 +134,7 @@ mod tests {
                         "title": "GitHub",
                         "attachment": "id_ed25519",
                     },
-                    "destination": KEY,
+                    "destination": {"fingerprint": KEY},
                 },
                 "remember": true,
                 "request": {
@@ -141,6 +145,30 @@ mod tests {
                 },
             })
         );
+    }
+
+    /// A host is its fingerprint and, if the daemon found one, its name.
+    #[test]
+    fn a_host_is_a_fingerprint_and_maybe_a_name() {
+        let named = WireHost {
+            fingerprint: KEY.parse().expect("a fingerprint"),
+            name: Some("github.com".to_string()),
+        };
+        let bare = WireHost {
+            name: None,
+            ..named.clone()
+        };
+
+        assert_eq!(
+            serde_json::to_value(&named).expect("serializes"),
+            json!({"fingerprint": KEY, "name": "github.com"})
+        );
+        assert_eq!(
+            serde_json::to_value(&bare).expect("serializes"),
+            json!({"fingerprint": KEY})
+        );
+        let back: WireHost = serde_json::from_value(json!({"fingerprint": KEY})).expect("parses");
+        assert_eq!(back, bare);
     }
 
     /// What a request or a key has none of is left out, not null.
@@ -154,8 +182,6 @@ mod tests {
                 },
                 destination: None,
                 forwarding_host: None,
-                destination_name: None,
-                forwarding_host_name: None,
                 forwarding_session: None,
             },
             request: WireRequestDetails {

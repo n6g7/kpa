@@ -31,7 +31,7 @@ pub use request::{DecodeError, Op, ProtocolError, Request, decode_request, encod
 pub use ssh_approve::{SshApproveError, SshApproveRequest};
 pub use ssh_grants::WireGrant;
 pub use ssh_keys::{SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey};
-pub use ssh_pending::{WirePending, WireRequestDetails, WireScope};
+pub use ssh_pending::{WireHost, WirePending, WireRequestDetails, WireScope};
 pub use status::DatabaseStatus;
 pub use unlock::{UnlockError, UnlockRequest};
 

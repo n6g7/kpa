@@ -60,8 +60,6 @@ mod tests {
                 },
                 destination: None,
                 forwarding_host: None,
-                destination_name: None,
-                forwarding_host_name: None,
                 forwarding_session: None,
             },
             remember: true,

@@ -445,7 +445,7 @@ fn a_forwarded_login_asks_once_per_ssh_session() {
     assert_eq!(grants[0]["uses"], 2);
     assert_eq!(grants[0]["remember"], true);
     let scope = &grants[0]["scope"];
-    assert!(scope["forwarding_host"].is_string());
+    assert!(scope["forwarding_host"]["fingerprint"].is_string());
     assert_eq!(scope["forwarding_session"], 1);
     assert!(grants[0]["last_used_at"].is_u64());
     assert_eq!(scope["forwarding_host"], scope["destination"]);
@@ -564,8 +564,11 @@ fn a_destination_certified_by_a_trusted_ca_is_named_by_its_principal() {
         )]
     );
     let grants = rig.grants();
-    assert_eq!(grants[0]["scope"]["destination_name"], "build-box.example");
-    assert_eq!(grants[0]["scope"]["forwarding_host_name"], via);
+    assert_eq!(
+        grants[0]["scope"]["destination"]["name"],
+        "build-box.example"
+    );
+    assert_eq!(grants[0]["scope"]["forwarding_host"]["name"], via);
 }
 
 /// A forwarded signature is a remote host's: it does not keep the database

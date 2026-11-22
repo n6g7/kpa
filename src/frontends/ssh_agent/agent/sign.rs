@@ -211,8 +211,14 @@ impl Agent {
         .map_err(Refused::Policy)?
         .map(|mut approval| {
             approval.scope = approval.scope.with_host_names(
-                request.hosts.destination.clone(),
-                request.hosts.forwarding_host.clone(),
+                request
+                    .destination
+                    .as_ref()
+                    .and_then(|host| host.name.clone()),
+                request
+                    .forwarding_host
+                    .as_ref()
+                    .and_then(|host| host.name.clone()),
             );
             approval
         });
@@ -1397,7 +1403,11 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].request.class, "forwarded");
         assert_eq!(
-            pending[0].approval.scope.forwarding_host(),
+            pending[0]
+                .approval
+                .scope
+                .forwarding_host()
+                .map(|host| host.fingerprint),
             Some(test_key(9).public_key().fingerprint(HashAlg::Sha256))
         );
         assert!(approve_from_terminal(&fx, &key));
@@ -1471,7 +1481,10 @@ mod tests {
         let grants = fx.grants();
         assert_eq!(grants.len(), 1);
         assert_eq!(
-            grants[0].scope.forwarding_host(),
+            grants[0]
+                .scope
+                .forwarding_host()
+                .map(|host| host.fingerprint),
             Some(test_key(9).public_key().fingerprint(HashAlg::Sha256))
         );
         assert_eq!(grants[0].uses, 2);
@@ -1742,10 +1755,19 @@ mod tests {
             );
             let grants = fx.grants();
             assert_eq!(
-                grants[0].scope.destination_name(),
+                grants[0]
+                    .scope
+                    .destination()
+                    .and_then(|host| host.name.as_deref()),
                 trusted.then_some("build-box.example")
             );
-            assert_eq!(grants[0].scope.forwarding_host_name(), None);
+            assert_eq!(
+                grants[0]
+                    .scope
+                    .forwarding_host()
+                    .and_then(|host| host.name.as_deref()),
+                None
+            );
             let sign = SignRequest {
                 data: login_data(&key, b"second", "git"),
                 ..request_with(&key, 0)
@@ -1757,7 +1779,10 @@ mod tests {
                     1_000,
                 );
             assert_eq!(
-                request.hosts.destination.as_deref(),
+                request
+                    .destination
+                    .as_ref()
+                    .and_then(|host| host.name.as_deref()),
                 trusted.then_some("build-box.example")
             );
             assert_eq!(

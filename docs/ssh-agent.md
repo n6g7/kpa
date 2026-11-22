@@ -601,10 +601,8 @@ refused:
       "name": "github", "entry": "3f2a9c1e-5b7d-4e08-8a62-1d4c9b0e7f35",
       "title": "GitHub", "attachment": "id_ed25519"
     },
-    "destination": "SHA256:…",
-    "destination_name": "github.com",
-    "forwarding_host": "SHA256:…",
-    "forwarding_host_name": "build-box",
+    "destination": { "fingerprint": "SHA256:…", "name": "github.com" },
+    "forwarding_host": { "fingerprint": "SHA256:…", "name": "build-box" },
     "forwarding_session": 2
   },
   "remember": true,
@@ -615,12 +613,11 @@ refused:
 `scope.key` is the object `ssh_keys` reports for a key, with the key's
 `name` (its override's, else its entry's title) and its entry's `entry`
 uuid. `destination` is there for a bound connection only, and
-`forwarding_host`, the forwarding host's host key, and
-`forwarding_session`, the number of its forwarding session (§ 6.7), for a
-forwarded one (`kpa ssh pending` shows them as FORWARDING HOST and SESSION; the
-forwarding session identifier itself is never shown). `destination_name` and
-`forwarding_host_name` are the names the daemon found for those hosts
-("Naming a host", § 6.2), escaped, and absent when it found none; they are
+`forwarding_host`, the forwarding host, and `forwarding_session`, the number
+of its forwarding session (§ 6.7), for a forwarded one (`kpa ssh pending`
+shows them as FORWARDING HOST and SESSION; the forwarding session identifier
+itself is never shown). A host is its host key's `fingerprint` and, if the
+daemon found one ("Naming a host", § 6.2), its `name`, escaped; the name is
 for showing, and an approval is for the key. `request.user`
 for a login and `request.namespace` for an `SSHSIG`. Titles, names, users
 and command names reach the caller of this request, and never the
@@ -705,10 +702,8 @@ uid (NG-1). Each grant, oldest first within its database, is:
   "granted_at": 1700000000,
   "scope": {
     "key": { "db": "personal", "…": "…" },
-    "destination": "SHA256:…",
-    "destination_name": "github.com",
-    "forwarding_host": "SHA256:…",
-    "forwarding_host_name": "build-box",
+    "destination": { "fingerprint": "SHA256:…", "name": "github.com" },
+    "forwarding_host": { "fingerprint": "SHA256:…", "name": "build-box" },
     "forwarding_session": 2
   },
   "remember": true,

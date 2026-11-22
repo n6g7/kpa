@@ -12,11 +12,10 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::frontends::control::proto::{WirePending, WireScope};
+use crate::frontends::control::proto::{WireHost, WirePending, WireScope};
 use crate::output::Table;
 use crate::ssh::approvals::PENDING_TTL;
 use serde::Deserialize;
-use ssh_key::Fingerprint;
 use uuid::Uuid;
 
 /// What `ssh_pending` answers: the requests, oldest first.
@@ -62,14 +61,8 @@ pub fn render(answer: &Pending, now: SystemTime) -> String {
             &what(request),
             request.request.command.as_deref().unwrap_or(NONE),
             &age(now, request.refused_at),
-            &host(
-                request.scope.destination.as_ref(),
-                request.scope.destination_name.as_deref(),
-            ),
-            &host(
-                request.scope.forwarding_host.as_ref(),
-                request.scope.forwarding_host_name.as_deref(),
-            ),
+            &host(request.scope.destination.as_ref()),
+            &host(request.scope.forwarding_host.as_ref()),
             &session(&request.scope),
         ]);
     }
@@ -81,13 +74,15 @@ pub fn render(answer: &Pending, now: SystemTime) -> String {
     )
 }
 
-/// A host as a table shows it: by the `name` the daemon gave its host key,
+/// A host as a table shows it: by the name the daemon gave its host key,
 /// else by its fingerprint, `-` for no host. The table escapes it.
-pub(super) fn host(fingerprint: Option<&Fingerprint>, name: Option<&str>) -> String {
-    match (fingerprint, name) {
-        (_, Some(name)) => name.to_string(),
-        (Some(fingerprint), None) => fingerprint.to_string(),
-        (None, None) => NONE.to_string(),
+pub(super) fn host(host: Option<&WireHost>) -> String {
+    match host {
+        Some(WireHost {
+            name: Some(name), ..
+        }) => name.clone(),
+        Some(WireHost { fingerprint, .. }) => fingerprint.to_string(),
+        None => NONE.to_string(),
     }
 }
 
@@ -156,10 +151,11 @@ mod tests {
                     title: Some("GitHub".to_string()),
                     attachment: "id_ed25519".to_string(),
                 },
-                destination: Some(DESTINATION.parse().expect("a fingerprint")),
+                destination: Some(WireHost {
+                    fingerprint: DESTINATION.parse().expect("a fingerprint"),
+                    name: None,
+                }),
                 forwarding_host: None,
-                destination_name: None,
-                forwarding_host_name: None,
                 forwarding_session: None,
             },
             remember: true,
@@ -195,7 +191,10 @@ mod tests {
             signing.id = Uuid::from_u128(2);
             signing.refused_at = NOW - 4;
             signing.scope.destination = None;
-            signing.scope.forwarding_host = Some(KEY.parse().expect("a fingerprint"));
+            signing.scope.forwarding_host = Some(WireHost {
+                fingerprint: KEY.parse().expect("a fingerprint"),
+                name: None,
+            });
             signing.scope.forwarding_session = Some(2);
             signing.request = WireRequestDetails {
                 purpose: "sshsig".to_string(),

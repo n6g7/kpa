@@ -80,14 +80,8 @@ fn cells(grant: &WireGrant, now: SystemTime) -> [String; 11] {
     [
         grant.scope.key.name.clone(),
         grant.scope.key.db.clone(),
-        host(
-            grant.scope.destination.as_ref(),
-            grant.scope.destination_name.as_deref(),
-        ),
-        host(
-            grant.scope.forwarding_host.as_ref(),
-            grant.scope.forwarding_host_name.as_deref(),
-        ),
+        host(grant.scope.destination.as_ref()),
+        host(grant.scope.forwarding_host.as_ref()),
         session(&grant.scope),
         lasts(grant),
         age(now, grant.granted_at),
@@ -120,7 +114,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::frontends::control::proto::{WireScope, WireSshKey};
+    use crate::frontends::control::proto::{WireHost, WireScope, WireSshKey};
 
     const KEY: &str = "SHA256:Nh0Me49Zh9fDw/VYUfq43IJmI1T+XrjiYONPND8GzaM";
     const DESTINATION: &str = "SHA256:BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -140,10 +134,11 @@ mod tests {
                     title: None,
                     attachment: "id_ed25519".to_string(),
                 },
-                destination: Some(DESTINATION.parse().expect("a fingerprint")),
+                destination: Some(WireHost {
+                    fingerprint: DESTINATION.parse().expect("a fingerprint"),
+                    name: None,
+                }),
                 forwarding_host: None,
-                destination_name: None,
-                forwarding_host_name: None,
                 forwarding_session: None,
             },
             remember: true,
@@ -163,7 +158,10 @@ mod tests {
     fn approvals_are_listed_in_aligned_columns() {
         let mut once = grant("deploy-key");
         once.scope.destination = None;
-        once.scope.forwarding_host = Some(KEY.parse().expect("a fingerprint"));
+        once.scope.forwarding_host = Some(WireHost {
+            fingerprint: KEY.parse().expect("a fingerprint"),
+            name: None,
+        });
         once.scope.forwarding_session = Some(2);
         once.last_used_at = None;
         once.remember = false;
@@ -237,9 +235,16 @@ deploy-key  {DESTINATION}  -                1 signature, 42s left  0
     #[test]
     fn a_host_the_daemon_named_is_shown_by_the_name() {
         let mut named = grant("github");
-        named.scope.destination_name = Some("github.com".to_string());
-        named.scope.forwarding_host_name = Some("evil\u{202e}host".to_string());
-        named.scope.forwarding_host = Some(KEY.parse().expect("a fingerprint"));
+        named
+            .scope
+            .destination
+            .as_mut()
+            .expect("a destination")
+            .name = Some("github.com".to_string());
+        named.scope.forwarding_host = Some(WireHost {
+            fingerprint: KEY.parse().expect("a fingerprint"),
+            name: Some("evil\u{202e}host".to_string()),
+        });
 
         let text = render(
             &Grants {
