@@ -31,13 +31,27 @@ use crate::databases::{Databases, Observer, Open};
 
 /// A host an approval is for: its host key's fingerprint, and the name the
 /// daemon found for it, if it found one, which is only for showing
-/// (`docs/ssh-agent.md` § 6.2, "Naming a host"). A [`Scope`] tells hosts apart
-/// by their fingerprints, and `Host` has no equality of its own that would
-/// say a name matters.
+/// (`docs/ssh-agent.md` § 6.2, "Naming a host"). Hosts are equal when their
+/// fingerprints are: the name is only for showing, and plays no part in
+/// equality or hashing.
 #[derive(Debug, Clone)]
 pub struct Host {
     pub fingerprint: Fingerprint,
     pub name: Option<String>,
+}
+
+impl PartialEq for Host {
+    fn eq(&self, other: &Host) -> bool {
+        self.fingerprint == other.fingerprint
+    }
+}
+
+impl Eq for Host {}
+
+impl std::hash::Hash for Host {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.fingerprint.hash(state);
+    }
 }
 
 impl Host {
@@ -76,35 +90,20 @@ pub struct Scope {
 
 /// The forwarding session a [`Scope`] is limited to: the session identifier
 /// the local `ssh` bound before the remote side could send anything, and the
-/// host it forwarded to. Equal by the session and the host's fingerprint.
-#[derive(Debug, Clone)]
+/// host it forwarded to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Forwarding {
     session: Vec<u8>,
     host: Host,
 }
 
-impl PartialEq for Forwarding {
-    fn eq(&self, other: &Forwarding) -> bool {
-        self.session == other.session && self.host.fingerprint == other.host.fingerprint
-    }
-}
-
-impl Eq for Forwarding {}
-
-impl std::hash::Hash for Forwarding {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.session.hash(state);
-        self.host.fingerprint.hash(state);
-    }
-}
-
 impl Scope {
     /// What tells this scope from another: the key, the destination and the
-    /// forwarding session, each by the fingerprint its equality goes by.
-    fn identity(&self) -> (&Fingerprint, Option<&Fingerprint>, Option<&Forwarding>) {
+    /// forwarding session.
+    fn identity(&self) -> (&Fingerprint, Option<&Host>, Option<&Forwarding>) {
         (
             &self.key.fingerprint,
-            self.destination.as_ref().map(|host| &host.fingerprint),
+            self.destination.as_ref(),
             self.forwarding.as_deref(),
         )
     }
