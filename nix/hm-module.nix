@@ -28,6 +28,34 @@ let
     else
       agentSocket;
   sshConfigAgentSocket = if agentSocket == null then "/run/user/%i/kpa/ssh-agent" else agentSocket;
+
+  # `pick.keyBinding` (`ctrl-s`, `alt-s`) in each shell's own spelling.
+  # The option's type admits only those two shapes, so the match holds
+  # whenever the key is set; nothing reads this while it is null.
+  pickKey =
+    let
+      parts = builtins.match "(ctrl|alt)-([a-z])" cfg.pick.keyBinding;
+      modifier = builtins.elemAt parts 0;
+      letter = builtins.elemAt parts 1;
+    in
+    if modifier == "ctrl" then
+      {
+        zsh = "^${letter}";
+        bash = "\\C-${letter}";
+        fish = "\\c${letter}";
+      }
+    else
+      {
+        zsh = "\\e${letter}";
+        bash = "\\e${letter}";
+        fish = "\\e${letter}";
+      };
+
+  # Terminal flow control swallows these two keys before a shell reads them.
+  pickKeyIsFlowControl = builtins.elem cfg.pick.keyBinding [
+    "ctrl-s"
+    "ctrl-q"
+  ];
 in
 {
   options.services.kpa = {
@@ -76,6 +104,31 @@ in
         off, where they exist, is yours to do.
       '';
     };
+
+    pick.keyBinding = lib.mkOption {
+      type = lib.types.nullOr (lib.types.strMatching "ctrl-[abefgklnopqrstuvwy]|alt-[a-z]");
+      default = null;
+      example = "ctrl-s";
+      description = ''
+        A key that runs `kpa pick` in your interactive zsh, bash and fish
+        shells, in each one home-manager manages (`programs.<shell>.enable`).
+        Null binds nothing. A key is `ctrl-` or `alt-` and a letter, such as
+        `ctrl-s` or `alt-s`. `ctrl-c`, `ctrl-d`, `ctrl-h`, `ctrl-i`,
+        `ctrl-j`, `ctrl-m`, `ctrl-x` and `ctrl-z` are not accepted, because
+        the terminal or the shell already uses them (interrupt, suspend,
+        end of input, Backspace, Tab, Enter, newline, and the prefix of
+        other bindings).
+
+        The key types `kpa pick` as a command line and runs it, so it runs
+        as if you had typed it, with the terminal in its normal modes. The
+        line you were typing comes back at the next prompt, and `kpa pick`
+        lands in your shell history.
+
+        `ctrl-s` and `ctrl-q` are the terminal's flow-control keys. When the
+        key is one of them, the binding also turns flow control off in zsh
+        and bash (fish has it off already). No other key changes it.
+      '';
+    };
   };
 
   config = lib.mkMerge [
@@ -85,10 +138,17 @@ in
           assertion = cfg.sshAgent.enable -> cfg.enable;
           message = "services.kpa.sshAgent.enable requires services.kpa.enable.";
         }
+        {
+          assertion = cfg.pick.keyBinding != null -> cfg.enable;
+          message = "services.kpa.pick.keyBinding requires services.kpa.enable.";
+        }
       ];
     }
 
     (lib.mkIf cfg.enable {
+      # `kpa` on PATH, for `kpa pick` and every other subcommand.
+      home.packages = [ cfg.package ];
+
       xdg.configFile."kpa/config.toml".source = settingsFormat.generate "kpa-config.toml" cfg.settings;
 
       systemd.user.services.kpa = {
@@ -197,6 +257,71 @@ in
         if not set -q SSH_AUTH_SOCK
             set -gx SSH_AUTH_SOCK "${envAgentSocket}"
         end
+      '';
+    })
+
+    # The `pick.keyBinding` key, in the shells home-manager manages. Each
+    # binding replaces the line being typed with `kpa pick`, runs it as an
+    # ordinary command line, and puts the typed line back at the next prompt.
+    # A command run from inside the line editor gets the editor's raw
+    # terminal modes in bash and fish (no echo, Enter sent as `\r`), unlike
+    # a command line, so each shell hands the line over to its own
+    # command-line execution instead.
+    (lib.mkIf (cfg.enable && cfg.pick.keyBinding != null) {
+      programs.zsh.initContent = lib.mkIf config.programs.zsh.enable ''
+        ${lib.optionalString pickKeyIsFlowControl "unsetopt flow_control\n"}
+        kpa-pick-widget() {
+          zle push-line
+          BUFFER='kpa pick'
+          zle accept-line
+        }
+        zle -N kpa-pick-widget
+        bindkey '${pickKey.zsh}' kpa-pick-widget
+      '';
+
+      # `bind -x` is the only way to read or set the line (`READLINE_LINE`),
+      # but a command it runs is inside the editor, so two of them only
+      # stash and restore the line, and a macro around them accepts the
+      # line in between. The keys after the accept stay queued and run at
+      # the next prompt, before anything is typed.
+      programs.bash.initExtra = lib.mkIf config.programs.bash.enable ''
+        ${lib.optionalString pickKeyIsFlowControl "if [[ -t 0 ]]; then stty -ixon; fi\n"}
+        __kpa_pick_stash() {
+          __kpa_pick_line=$READLINE_LINE
+          __kpa_pick_point=$READLINE_POINT
+          READLINE_LINE='kpa pick'
+          READLINE_POINT=8
+        }
+        __kpa_pick_restore() {
+          READLINE_LINE=$__kpa_pick_line
+          READLINE_POINT=$__kpa_pick_point
+        }
+        for __kpa_pick_keymap in emacs vi-insert; do
+          bind -m $__kpa_pick_keymap -x '"\C-x\C-k1": __kpa_pick_stash'
+          bind -m $__kpa_pick_keymap -x '"\C-x\C-k2": __kpa_pick_restore'
+          bind -m $__kpa_pick_keymap '"${pickKey.bash}": "\C-x\C-k1\C-m\C-x\C-k2"'
+        done
+        unset __kpa_pick_keymap
+      '';
+
+      # `fish_postexec` puts the stashed line back after the command. fish
+      # turns flow control off itself.
+      programs.fish.interactiveShellInit = lib.mkIf config.programs.fish.enable ''
+        function __kpa_pick_run
+            set -g __kpa_pick_line (commandline | string collect)
+            set -g __kpa_pick_cursor (commandline --cursor)
+            commandline --replace 'kpa pick'
+            commandline --function execute
+        end
+        function __kpa_pick_restore --on-event fish_postexec
+            if set -q __kpa_pick_line
+                commandline --replace -- $__kpa_pick_line
+                commandline --cursor $__kpa_pick_cursor
+                set -e __kpa_pick_line __kpa_pick_cursor
+            end
+        end
+        bind ${pickKey.fish} __kpa_pick_run
+        bind -M insert ${pickKey.fish} __kpa_pick_run
       '';
     })
   ];
