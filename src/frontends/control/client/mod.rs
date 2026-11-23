@@ -22,10 +22,13 @@ use crate::socket;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+mod pick;
 pub mod ssh_grants_report;
 pub mod ssh_keys_report;
 pub mod ssh_requests_report;
 mod tty;
+
+pub use pick::run_pick;
 
 pub fn run_client(socket_path: &Path, op: Op) -> ExitCode {
     let request = Request::new(op);

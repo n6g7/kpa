@@ -346,8 +346,6 @@ else's clipboard. A lock of the unlock the offer came from ends it earlier.
 
 ## The picker: `kpa pick`
 
-*Not built yet.*
-
 `kpa pick [QUERY...]` picks an entry in a terminal and copies one of its
 fields. It is a client subcommand of the `control` front end
 (`src/frontends/control/client/`) and adds no op: it asks `status`, `unlock`,
@@ -357,7 +355,8 @@ fields. It is a client subcommand of the `control` front end
    `can_copy` is false: [`protocol.md`](./protocol.md) § Responses,
    [`headless.md`](./headless.md) § 5), it stops with `no_display` before it
    unlocks anything or opens fzf, since a pick that can't copy is wasted. The
-   field is advisory: `copy` decides again.
+   field is advisory: `copy` decides again, and a daemon that doesn't report
+   it is taken to allow the copy.
 2. If every database is locked, it unlocks each one on the terminal, as `kpa
    unlock --tty`. If some are unlocked, it lists those and names the locked
    ones in fzf's header, and unlocks nothing.
