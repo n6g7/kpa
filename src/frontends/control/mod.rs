@@ -19,9 +19,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 use self::proto::{
-    DatabaseStatus, ListError, ListRequest, LockError, LockRequest, Op, Request, Response,
-    SshApproveError, SshApproveRequest, SshKeysError, SshKeysReport, SshKeysRequest, WireEntry,
-    WireGrant, WireHost, WirePending, WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
+    DatabaseStatus, ListError, ListRequest, ListResponse, LockError, LockRequest, Op, Request,
+    Response, SshApproveError, SshApproveRequest, SshKeysError, SshKeysReport, SshKeysRequest,
+    StatusResponse, WireEntry, WireGrant, WireHost, WirePending, WireRequestDetails, WireScope,
+    WireSkippedKey, WireSshKey,
 };
 use crate::authn::Requester;
 use crate::config::Config;
@@ -82,14 +83,16 @@ impl Api {
             ..requester.clone()
         };
         match &request.op {
-            Op::Status => Response::Status {
+            Op::Status => Response::Status(StatusResponse {
                 databases: self.status(),
                 version: crate::VERSION.to_string(),
                 can_copy: self.can_copy(requester),
-            },
+            }),
             Op::Unlock(unlock) => Response::Unlock(self.unlock(unlock, requester)),
             Op::Lock(lock) => Response::Lock(self.lock(lock)),
-            Op::List(list) => Response::List(self.list(list)),
+            Op::List(list) => {
+                Response::List(self.list(list).map(|entries| ListResponse { entries }))
+            }
             Op::Copy(copy) => Response::Copy(self.copy(copy, requester)),
             Op::SshKeys(keys) => Response::SshKeys(self.ssh_keys(keys)),
             Op::SshPending => Response::SshPending(self.ssh_pending()),

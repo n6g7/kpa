@@ -20,6 +20,14 @@ pub struct ListRequest {
     pub db: Option<String>,
 }
 
+/// What a successful `list` answers, as the daemon builds it and a client
+/// reads it.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ListResponse {
+    /// The entries of every database the request covered.
+    pub entries: Vec<WireEntry>,
+}
+
 /// A `vault::EntrySummary` plus the database it came from. `list` can span
 /// every unlocked database at once (`docs/protocol.md`'s example response
 /// tags each entry with `"db"`), but `vault::EntrySummary` itself has no

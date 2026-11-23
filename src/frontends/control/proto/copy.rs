@@ -214,6 +214,15 @@ impl CopyError {
     }
 }
 
+/// What a successful `copy` answers on the wire, as the daemon builds it and
+/// a client reads it: which field, and for how long, never its value.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CopyResponse {
+    pub copied: Field,
+    /// Whole seconds until the daemon drops its clipboard offer on its own.
+    pub expires_in: u64,
+}
+
 /// What a successful `copy` reports. `db` and `entry` are never put on the
 /// wire (the client already named both) — they're here only so
 /// the operation log can say which database and entry a copy
@@ -223,9 +232,7 @@ pub struct CopyOutcome {
     pub db: String,
     /// The entry's title, or its uuid when it has no readable title.
     pub entry: String,
-    pub field: Field,
-    /// Whole seconds until the daemon drops its clipboard offer on its own.
-    pub expires_in: u64,
+    pub response: CopyResponse,
 }
 
 #[cfg(test)]

@@ -146,7 +146,7 @@ fn log_response(response: &Response) {
         // never the secret — and never a protected title.
         Response::Copy(Ok(outcome)) => log::info(format_args!(
             "copied {:?} of {:?} from {:?}",
-            outcome.field, outcome.entry, outcome.db
+            outcome.response.copied, outcome.entry, outcome.db
         )),
         Response::Copy(Err(err)) => log::warn(format_args!("copy failed: {err:?}")),
 

@@ -23,16 +23,16 @@ mod ssh_pending;
 mod status;
 mod unlock;
 
-pub use copy::{CopyError, CopyOutcome, CopyRequest, Field};
+pub use copy::{CopyError, CopyOutcome, CopyRequest, CopyResponse, Field};
 pub use error::ErrorCode;
-pub use list::{ListError, ListRequest, WireEntry};
+pub use list::{ListError, ListRequest, ListResponse, WireEntry};
 pub use lock::{LockError, LockRequest};
 pub use request::{DecodeError, Op, ProtocolError, Request, decode_request, encode_request};
 pub use ssh_approve::{SshApproveError, SshApproveRequest};
 pub use ssh_grants::WireGrant;
 pub use ssh_keys::{SshKeysError, SshKeysReport, SshKeysRequest, WireSkippedKey, WireSshKey};
 pub use ssh_pending::{WireHost, WirePending, WireRequestDetails, WireScope};
-pub use status::DatabaseStatus;
+pub use status::{DatabaseStatus, StatusResponse};
 pub use unlock::{UnlockError, UnlockRequest};
 
 /// Where a prompt asks, which a request may name (`Request::preferred_prompt`).
@@ -70,24 +70,13 @@ pub const VERSION: u32 = 2;
 /// read the field it cares about out of a `serde_json::Value` instead.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Response {
-    Status {
-        databases: Vec<DatabaseStatus>,
-        /// The daemon's own build version (`kpa::VERSION`), so `kpa version`
-        /// can name a CLI/daemon mismatch after an upgrade where the old
-        /// daemon is still running. Always present on this build; absent
-        /// only when the peer is an older daemon that predates this field —
-        /// the client reads it as an optional field for exactly that reason.
-        version: String,
-        /// Whether a `copy` from the requester that asked would land
-        /// (`docs/protocol.md` § Responses). Advisory: `copy` decides again.
-        can_copy: bool,
-    },
+    Status(StatusResponse),
     /// `Ok` names the database that is now unlocked.
     Unlock(Result<String, UnlockError>),
     /// `Ok` names the database that was locked; `None` means "all of them".
     Lock(Result<Option<String>, LockError>),
     /// `Ok` carries the entries of every database the request covered.
-    List(Result<Vec<WireEntry>, ListError>),
+    List(Result<ListResponse, ListError>),
     /// `Ok` names which field was copied and for how long it will stay on
     /// the clipboard — never the value itself (see `copy`'s module doc).
     Copy(Result<CopyOutcome, CopyError>),
@@ -115,15 +104,11 @@ impl Serialize for Response {
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("v", &VERSION)?;
         match self {
-            Response::Status {
-                databases,
-                version,
-                can_copy,
-            } => {
+            Response::Status(status) => {
                 map.serialize_entry("ok", &true)?;
-                map.serialize_entry("databases", databases)?;
-                map.serialize_entry("version", version)?;
-                map.serialize_entry("can_copy", can_copy)?;
+                map.serialize_entry("databases", &status.databases)?;
+                map.serialize_entry("version", &status.version)?;
+                map.serialize_entry("can_copy", &status.can_copy)?;
             }
             Response::Unlock(Ok(db)) => {
                 map.serialize_entry("ok", &true)?;
@@ -137,15 +122,15 @@ impl Serialize for Response {
                 }
             }
             Response::Lock(Err(err)) => serialize_error(&mut map, &err.fields())?,
-            Response::List(Ok(entries)) => {
+            Response::List(Ok(list)) => {
                 map.serialize_entry("ok", &true)?;
-                map.serialize_entry("entries", entries)?;
+                map.serialize_entry("entries", &list.entries)?;
             }
             Response::List(Err(err)) => serialize_error(&mut map, &err.fields())?,
             Response::Copy(Ok(outcome)) => {
                 map.serialize_entry("ok", &true)?;
-                map.serialize_entry("copied", &outcome.field)?;
-                map.serialize_entry("expires_in", &outcome.expires_in)?;
+                map.serialize_entry("copied", &outcome.response.copied)?;
+                map.serialize_entry("expires_in", &outcome.response.expires_in)?;
             }
             Response::Copy(Err(err)) => serialize_error(&mut map, &err.fields())?,
             Response::SshKeys(Ok(report)) => {
@@ -185,7 +170,7 @@ mod tests {
     /// trusting a derive to keep matching it.
     #[test]
     fn success_responses_match_the_documented_wire_shape() {
-        let status = Response::Status {
+        let status = Response::Status(StatusResponse {
             databases: vec![
                 DatabaseStatus {
                     name: "personal".to_string(),
@@ -200,7 +185,7 @@ mod tests {
             ],
             version: "1.2.3".to_string(),
             can_copy: true,
-        };
+        });
         assert_eq!(
             serde_json::to_value(&status).expect("status should serialize"),
             json!({
@@ -215,15 +200,17 @@ mod tests {
             })
         );
 
-        let list = Response::List(Ok(vec![WireEntry {
-            db: "personal".to_string(),
-            uuid: uuid::Uuid::nil(),
-            title: Some("GitHub".to_string()),
-            username: Some("alice".to_string()),
-            url: None,
-            group: "Dev".to_string(),
-            fields: vec!["username".to_string(), "password".to_string()],
-        }]));
+        let list = Response::List(Ok(ListResponse {
+            entries: vec![WireEntry {
+                db: "personal".to_string(),
+                uuid: uuid::Uuid::nil(),
+                title: Some("GitHub".to_string()),
+                username: Some("alice".to_string()),
+                url: None,
+                group: "Dev".to_string(),
+                fields: vec!["username".to_string(), "password".to_string()],
+            }],
+        }));
         assert_eq!(
             serde_json::to_value(&list).expect("list should serialize"),
             json!({
@@ -251,8 +238,10 @@ mod tests {
         let copy = Response::Copy(Ok(CopyOutcome {
             db: "personal".to_string(),
             entry: "GitHub".to_string(),
-            field: Field::Password,
-            expires_in: 30,
+            response: CopyResponse {
+                copied: Field::Password,
+                expires_in: 30,
+            },
         }));
         assert_eq!(
             serde_json::to_value(&copy).expect("copy should serialize"),
@@ -342,12 +331,76 @@ mod tests {
         );
     }
 
+    /// What the daemon writes for `status`, `list` and `copy` is what a client
+    /// reads back into the same types.
+    #[test]
+    fn a_client_reads_what_the_daemon_wrote() {
+        let status = StatusResponse {
+            databases: vec![DatabaseStatus {
+                name: "personal".to_string(),
+                locked: false,
+                entries: Some(1),
+            }],
+            version: "1.2.3".to_string(),
+            can_copy: false,
+        };
+        let wire = serde_json::to_string(&Response::Status(status.clone())).unwrap();
+        assert_eq!(
+            serde_json::from_str::<StatusResponse>(&wire).unwrap(),
+            status
+        );
+
+        let list = ListResponse {
+            entries: vec![WireEntry {
+                db: "personal".to_string(),
+                uuid: Uuid::nil(),
+                title: Some("GitHub".to_string()),
+                username: None,
+                url: None,
+                group: "Dev".to_string(),
+                fields: vec!["password".to_string()],
+            }],
+        };
+        let wire = serde_json::to_string(&Response::List(Ok(list.clone()))).unwrap();
+        assert_eq!(serde_json::from_str::<ListResponse>(&wire).unwrap(), list);
+
+        let response = CopyResponse {
+            copied: Field::Custom("api-key".to_string()),
+            expires_in: 30,
+        };
+        let outcome = CopyOutcome {
+            db: "personal".to_string(),
+            entry: "GitHub".to_string(),
+            response: response.clone(),
+        };
+        let wire = serde_json::to_string(&Response::Copy(Ok(outcome))).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CopyResponse>(&wire).unwrap(),
+            response
+        );
+    }
+
+    /// A daemon that predates `can_copy` doesn't send it: the client reads
+    /// that as a copy that may land, and `copy` decides.
+    #[test]
+    fn a_status_without_can_copy_reads_as_one_that_may_copy() {
+        let status: StatusResponse = serde_json::from_str(
+            r#"{"v":2,"ok":true,"databases":[{"name":"personal","locked":true}],"version":"1.0.0"}"#,
+        )
+        .unwrap();
+        assert!(status.can_copy);
+        assert_eq!(status.databases.len(), 1);
+    }
+
     /// `list` returning nothing is an empty array, not an absent field —
     /// a client can iterate the result without special-casing.
     #[test]
     fn an_empty_listing_still_carries_an_array() {
         assert_eq!(
-            serde_json::to_value(Response::List(Ok(Vec::new()))).expect("should serialize"),
+            serde_json::to_value(Response::List(Ok(ListResponse {
+                entries: Vec::new(),
+            })))
+            .expect("should serialize"),
             json!({"v": 2, "ok": true, "entries": []})
         );
     }
@@ -357,15 +410,17 @@ mod tests {
     /// can't mistake "protected" for "set to nothing".
     #[test]
     fn entries_omit_withheld_fields_entirely() {
-        let response = Response::List(Ok(vec![WireEntry {
-            db: "personal".to_string(),
-            uuid: uuid::Uuid::nil(),
-            title: None,
-            username: None,
-            url: None,
-            group: "Web".to_string(),
-            fields: Vec::new(),
-        }]));
+        let response = Response::List(Ok(ListResponse {
+            entries: vec![WireEntry {
+                db: "personal".to_string(),
+                uuid: uuid::Uuid::nil(),
+                title: None,
+                username: None,
+                url: None,
+                group: "Web".to_string(),
+                fields: Vec::new(),
+            }],
+        }));
 
         let value = serde_json::to_value(&response).expect("should serialize");
         let entry = &value["entries"][0];

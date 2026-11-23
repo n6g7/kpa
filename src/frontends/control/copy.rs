@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-use super::proto::{CopyError, CopyOutcome, CopyRequest, Field};
+use super::proto::{CopyError, CopyOutcome, CopyRequest, CopyResponse, Field};
 use super::{Api, authz};
 use crate::authn::Requester;
 use crate::cancel::CancelToken;
@@ -163,8 +163,10 @@ impl Api {
         Ok(CopyOutcome {
             db: db(),
             entry,
-            field: request.field.clone(),
-            expires_in: self.clipboard_timeout.as_secs(),
+            response: CopyResponse {
+                copied: request.field.clone(),
+                expires_in: self.clipboard_timeout.as_secs(),
+            },
         })
     }
 }

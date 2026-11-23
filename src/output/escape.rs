@@ -70,7 +70,7 @@ pub fn escape_one_line(text: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::escape_for_terminal;
-    use crate::frontends::control::proto::{Response, WireEntry};
+    use crate::frontends::control::proto::{ListResponse, Response, WireEntry};
 
     /// The characters `escape_for_terminal` must never let through, written
     /// out as ranges independently of the function's own table.
@@ -117,15 +117,17 @@ mod tests {
     #[test]
     fn a_listed_title_comes_out_escaped_and_still_decodes() {
         let title = "\u{9b}c\u{9d}0;t\u{9c}\u{202e}x\u{7f}\u{2028}";
-        let response = Response::List(Ok(vec![WireEntry {
-            db: "personal".to_string(),
-            uuid: uuid::Uuid::nil(),
-            title: Some(title.to_string()),
-            username: Some("alice\u{2067}".to_string()),
-            url: None,
-            group: "Web\u{9b}".to_string(),
-            fields: Vec::new(),
-        }]));
+        let response = Response::List(Ok(ListResponse {
+            entries: vec![WireEntry {
+                db: "personal".to_string(),
+                uuid: uuid::Uuid::nil(),
+                title: Some(title.to_string()),
+                username: Some("alice\u{2067}".to_string()),
+                url: None,
+                group: "Web\u{9b}".to_string(),
+                fields: Vec::new(),
+            }],
+        }));
         let line = format!(
             "{}\n",
             serde_json::to_string(&response).expect("serializes")

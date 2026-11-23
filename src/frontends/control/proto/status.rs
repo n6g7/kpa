@@ -6,6 +6,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// What a successful `status` answers, as the daemon builds it and a client
+/// reads it (`docs/protocol.md` § Responses).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct StatusResponse {
+    pub databases: Vec<DatabaseStatus>,
+    /// The daemon's own build version (`kpa::VERSION`), so `kpa version`
+    /// can name a CLI/daemon mismatch after an upgrade where the old
+    /// daemon is still running.
+    pub version: String,
+    /// Whether a `copy` from the requester that asked would land. Advisory:
+    /// `copy` decides again. A daemon older than the client doesn't send it,
+    /// and that reads as `true`: the client goes on and `copy` decides.
+    #[serde(default = "copy_may_land")]
+    pub can_copy: bool,
+}
+
+fn copy_may_land() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DatabaseStatus {
     pub name: String,
