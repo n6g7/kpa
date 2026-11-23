@@ -238,7 +238,7 @@ still has to be the certified key's. The certificate is kept next to the key
 
 **Naming a host.** A host is shown by a name where there is one: in the
 prompts, the log line and the tables, and the daemon works it out once per
-request from its `known_hosts` (`~/.ssh/known_hosts`):
+request from its `known_hosts` files (§ 7, `known_hosts`):
 
 - A host that presented a certificate is named by a principal of it, the
   first one a pattern matches, if all of these hold: `known_hosts` has an
@@ -258,6 +258,11 @@ request from its `known_hosts` (`~/.ssh/known_hosts`):
 - A key the file revokes is named by nothing, whatever else says so. A
   revoked CA only takes the certificate route away.
 - Otherwise the host is its fingerprint alone.
+
+The files are read in the order they are listed, as `ssh` reads them: a plain
+entry names a key in the first file that has one for it, and `@cert-authority`
+and `@revoked` lines count from every file, so a key revoked in one file is
+revoked. A file that is missing or can't be read is skipped.
 
 A name is untrusted text, even a principal a trusted CA signed: it is
 escaped as the other texts of a prompt are, and cut to 56 bytes.
@@ -512,11 +517,11 @@ the pieces it is made of in `KPA_PROMPT_DATA`, see
 | Request | Message |
 | --- | --- |
 | Login, no binding | `Approve use of key "github" to log in as git?` |
-| Login, bound to a host `~/.ssh/known_hosts` names | `Approve use of key "github" to log in to git@github.com?` |
+| Login, bound to a host `known_hosts` names | `Approve use of key "github" to log in to git@github.com?` |
 | Login, bound to any other host | `Approve use of key "github" to log in as git to host key SHA256:…?` |
 | `SSHSIG` | `Approve use of key "github" to sign for namespace git?`, with `on github.com` or `on host key SHA256:…` after the namespace for a bound connection |
 | Anything else | `Approve use of key "github"?`, with the same `on …` for a bound connection |
-| Forwarded login, through a host `~/.ssh/known_hosts` names, to a host it names | `Approve use of key "github" on build-box to log in to git@github.com?` |
+| Forwarded login, through a host `known_hosts` names, to a host it names | `Approve use of key "github" on build-box to log in to git@github.com?` |
 | Forwarded login, through a host it doesn't name | `Approve use of key "github" on host key SHA256:… to log in to git@github.com?`, the destination worded as above |
 
 The destination is the connection's last binding's host, named as § 6.2
@@ -777,6 +782,7 @@ failed to recognize would make it a remote password-guessing oracle.
 | `confirm_prompt_timeout` | `[ssh_agent]` | `prompt_timeout` | How long the confirm prompt may stay open unanswered before it is killed and the signature refused |
 | `backoff` | `[ssh_agent]` | `"2m"` | How long a cancelled prompt holds back prompts for its database (§ 6.6) |
 | `retry_window` | `[ssh_agent]` | `"1m"` | How long an approval of a `confirm = "always"` key from `ssh_approve` stays usable for the retry (§ 6.8) |
+| `known_hosts` | `[ssh_agent]` | `["~/.ssh/known_hosts", "/etc/ssh/ssh_known_hosts"]` | The `known_hosts` files that name hosts, in order (§ 6.2). Absolute or under `~/`; a missing file is skipped; `[]` names nothing |
 | `fingerprint` | `[[database.ssh_key]]` | required | Which key the override is for, as `ssh-add -l` and `kpa ssh keys` print it |
 | `name` | `[[database.ssh_key]]` | the entry's title | Identity comment, shown in prompts and logs |
 | `confirm` | `[[database.ssh_key]]` | `"once"` | Local approval: `"once"`, `"always"` or `"never"` (§ 6.7) |

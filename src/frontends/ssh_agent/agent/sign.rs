@@ -170,7 +170,7 @@ impl Agent {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_secs());
-            request.named(&HostNames::read(self.known_hosts.as_deref()), now)
+            request.named(&HostNames::read(&self.known_hosts), now)
         } else {
             request
         };
@@ -1277,7 +1277,7 @@ mod tests {
             &key,
             SshKeyConfirm::Never,
             Options {
-                known_hosts: Some(known_hosts),
+                known_hosts: vec![known_hosts],
                 ..Options::default()
             },
         );
@@ -1627,7 +1627,7 @@ mod tests {
             ),
         )
         .expect("write known_hosts");
-        let names = HostNames::read(Some(&path));
+        let names = HostNames::read(std::slice::from_ref(&path));
         let print = |key: &PublicKey| key.fingerprint(HashAlg::Sha256);
         let sign = request_with(&key, 0);
         let line = |class: ConnectionClass, names: &HostNames| {
@@ -1732,7 +1732,7 @@ mod tests {
                 &key,
                 SshKeyConfirm::Never,
                 Options {
-                    known_hosts: Some(known_hosts),
+                    known_hosts: vec![known_hosts],
                     ..Options::default()
                 },
             );
@@ -1775,7 +1775,7 @@ mod tests {
             let request = Request::parse(&class, &sign, Some(b"second"))
                 .expect("parses")
                 .named(
-                    &HostNames::read(Some(&dir.path().join(format!("known_hosts-{trusted}")))),
+                    &HostNames::read(&[dir.path().join(format!("known_hosts-{trusted}"))]),
                     1_000,
                 );
             assert_eq!(
@@ -1812,7 +1812,7 @@ mod tests {
             &key,
             SshKeyConfirm::Once,
             Options {
-                known_hosts: Some(known_hosts),
+                known_hosts: vec![known_hosts],
                 ..Options::default()
             },
         );

@@ -52,8 +52,8 @@ pub struct Agent {
     /// confirm prompt does, so only one prompt is on screen at a time.
     screen_unlock: Arc<Prompt<Zeroizing<String>>>,
     confirm_prompt: Prompt<ConfirmAnswer>,
-    /// OpenSSH's known-hosts file, for naming a prompt's destination.
-    known_hosts: Option<PathBuf>,
+    /// OpenSSH's known-hosts files, for naming the hosts of a request.
+    known_hosts: Vec<PathBuf>,
     /// One per database, held by the one signature that is asking about it
     /// (`prompts`). The others wait on it, then look again.
     turns: HashMap<String, Mutex<()>>,
@@ -69,7 +69,7 @@ impl Agent {
         display: DisplayHandle,
         screen_unlock: Arc<Prompt<Zeroizing<String>>>,
         confirm_prompt: Prompt<ConfirmAnswer>,
-        known_hosts: Option<PathBuf>,
+        known_hosts: Vec<PathBuf>,
     ) -> Agent {
         let turns = databases
             .configs()

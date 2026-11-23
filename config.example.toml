@@ -80,6 +80,14 @@ prompt_timeout = "60s"
 # `confirm = "always"` the approval covers one signature, the retry, and
 # lapses after `retry_window` if the retry doesn't come.
 # retry_window = "1m"
+#
+# The OpenSSH known_hosts files that name the hosts a signature goes to
+# (docs/ssh-agent.md § 6.2), in the order `ssh` reads them: a host's name
+# comes from the first file with an entry for its key, and `@cert-authority`
+# and `@revoked` lines count from all of them. A path is absolute or under
+# `~/`. A file that is missing or unreadable is skipped, and an empty list
+# names no host. This is the default:
+# known_hosts = ["~/.ssh/known_hosts", "/etc/ssh/ssh_known_hosts"]
 
 # Both entries deliberately point at the same fixture: two names is what
 # makes the multi-database behaviour testable — `status` listing two rows,

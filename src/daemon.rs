@@ -73,6 +73,7 @@ pub fn build(
     sleep_hold: Arc<dyn Observer>,
 ) -> (Daemon, Tray) {
     let copies = Arc::new(CopyState::new(backends.clipboard));
+    let known_hosts = config.ssh_agent.known_hosts.clone();
     let approvals = Arc::new(Approvals::new());
     let ssh = Arc::new(SshState::new(
         keys::cache_dir(&paths),
@@ -120,7 +121,7 @@ pub fn build(
             backends.confirm_prompt,
             config.confirm_prompt_timeout(),
         ),
-        paths.known_hosts,
+        known_hosts,
     ));
     let daemon = Daemon {
         databases,

@@ -198,9 +198,12 @@ pub struct InProcessDaemon {
     /// The display session as the daemon's front ends read it. Written by
     /// the test, or by the logind watch of `on_bus` (then `None`).
     pub display: Option<Arc<kpa::display_session::DisplayWriter>>,
-    /// The daemon's file locations: its SSH key cache and `known_hosts`
-    /// live under its own tempdir, so a test never touches the real ones.
+    /// The daemon's file locations: its SSH key cache lives under its own
+    /// tempdir, so a test never touches the real one.
     pub paths: kpa::paths::Paths,
+    /// The one `known_hosts` file the daemon reads, in its own tempdir
+    /// rather than the user's and the system's.
+    pub known_hosts: PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -258,7 +261,7 @@ impl InProcessDaemon {
     }
 
     fn build(
-        config: kpa::config::Config,
+        mut config: kpa::config::Config,
         cgroup: String,
         writer: Option<kpa::display_session::DisplayWriter>,
         display: kpa::display_session::DisplayHandle,
@@ -269,9 +272,10 @@ impl InProcessDaemon {
         let socket = dir.path().join("sock");
         let paths = kpa::paths::Paths {
             cache_dir: Some(dir.path().join("cache")),
-            known_hosts: Some(dir.path().join("known_hosts")),
             ..kpa::paths::Paths::default()
         };
+        let known_hosts = dir.path().join("known_hosts");
+        config.ssh_agent.known_hosts = vec![known_hosts.clone()];
         let idle_timeout = config.idle_timeout;
         let backends = kpa::daemon::Backends::real(&config);
         // No tray: there is no session bus to show one on.
@@ -315,6 +319,7 @@ impl InProcessDaemon {
             databases,
             display: writer.map(Arc::new),
             paths,
+            known_hosts,
             _dir: dir,
         }
     }
