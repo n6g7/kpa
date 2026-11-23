@@ -57,6 +57,19 @@ sandboxed by default (`NoNewPrivileges`, a restricted syscall filter,
 is applied with `lib.mkDefault`, so it can be loosened per directive with
 `systemd.user.services.kpa.Service.<name> = lib.mkForce ...;`.
 
+The module also puts `kpa` on your `PATH`. `services.kpa.pick.keyBinding`
+binds a key to `kpa pick` in the zsh, bash and fish shells home-manager
+manages (null by default, so no key is bound):
+
+```nix
+services.kpa.pick.keyBinding = "ctrl-s"; # or "alt-s", and so on
+```
+
+The key runs `kpa pick` as a command line, so it can ask for a master
+password at the terminal, and your half-typed line comes back at the next
+prompt. For `ctrl-s` and `ctrl-q` it also turns off the terminal's flow
+control, which would otherwise swallow the key.
+
 ## Build & test
 
 A Nix flake provides the whole toolchain (`cargo`, `rustc`, `clippy`,
