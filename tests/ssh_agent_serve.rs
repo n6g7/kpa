@@ -112,13 +112,14 @@ fn identities_list_from_the_cache_while_locked_and_live_once_unlocked() {
     assert_eq!(daemon.run(&["lock", "personal"])["ok"], true);
     let locked = stdout(&ssh_add(&agent, ["-L"]));
     // The cache holds no titles, so a locked listing falls back to
-    // "<database> <fingerprint>" instead.
-    for title in ["Ed25519", "Ecdsa", "Rsa"] {
-        assert!(
-            locked.lines().all(|line| !comment(line).contains(title)),
-            "a locked listing must not show titles: {locked:?}"
-        );
-    }
+    // "<database> <fingerprint>" instead. Pinning that whole shape shows
+    // no title is there without matching titles against base64.
+    assert!(
+        locked
+            .lines()
+            .all(|line| comment(line).starts_with("personal SHA256:")),
+        "a locked listing must name the database and fingerprint, not titles: {locked:?}"
+    );
     assert!(locked.contains("personal SHA256:"));
 }
 
