@@ -119,10 +119,10 @@ in
         end of input, Backspace, Tab, Enter, newline, and the prefix of
         other bindings).
 
-        The key types `kpa pick` as a command line and runs it, so `kpa pick`
-        can read a master password from the terminal when it unlocks a
-        database. The line you were typing comes back at the next prompt,
-        and `kpa pick` lands in your shell history.
+        The key types `kpa pick` as a command line and runs it, so it runs
+        as if you had typed it, with the terminal in its normal modes. The
+        line you were typing comes back at the next prompt, and `kpa pick`
+        lands in your shell history.
 
         `ctrl-s` and `ctrl-q` are the terminal's flow-control keys. When the
         key is one of them, the binding also turns flow control off in zsh
@@ -263,10 +263,9 @@ in
     # The `pick.keyBinding` key, in the shells home-manager manages. Each
     # binding replaces the line being typed with `kpa pick`, runs it as an
     # ordinary command line, and puts the typed line back at the next prompt.
-    # `kpa pick` can ask the terminal for a master password, which needs the
-    # terminal's normal modes (echo off by `stty`, Enter ending the read).
-    # A command run from inside the line editor gets the editor's raw modes
-    # in bash and fish, so each shell hands the line over to its own
+    # A command run from inside the line editor gets the editor's raw
+    # terminal modes in bash and fish (no echo, Enter sent as `\r`), unlike
+    # a command line, so each shell hands the line over to its own
     # command-line execution instead.
     (lib.mkIf (cfg.enable && cfg.pick.keyBinding != null) {
       programs.zsh.initContent = lib.mkIf config.programs.zsh.enable ''
