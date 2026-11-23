@@ -58,7 +58,7 @@ its `save_kdbx4` feature, so no code path can modify a database.
 | 14  | **Observers, not events, tell what a lock must clear** | State that must die with a lock belongs to the module that made it, and the core tells it through an `Observer` before the lock call returns. A `kpa lock` is then answered with the clipboard offer already ended; an event on a channel would arrive after. |
 | 15  | **The front end prompts; the core never does** | Where a prompt may appear is per requester, and its text and what its answer means differ per front end. The core hands out the token that ends the question. |
 | 16  | **Threads, not async** | `std::thread`, a core behind one mutex, and `ksni`'s blocking API. Most requests are sub-millisecond and the slow ones wait on a human, so a runtime would buy nothing. |
-| 17  | **`kpa pick` runs the user's `fzf`, found on `PATH`, with no preview pane** | `list` is an index and the matching is the picker's (`protocol.md` § What `list` returns), so kpa borrows one instead of writing a matcher. A package dependency would make every install carry a program only `pick` runs. Each line already shows the title, username, database and group, and a preview would add only the URL and field names, at the cost of a program run and a request per cursor move. |
+| 17  | **`kpa pick` runs the user's `fzf`, found on `PATH`, with no preview pane** | `list` is an index and the matching is the picker's (`protocol.md` § What `list` returns), so kpa borrows one instead of writing a matcher. A package dependency would make every install carry a program only `pick` runs. Each line already shows the title, username and database, and a preview would add only the URL and field names, at the cost of a program run and a request per cursor move. |
 
 ## How it is put together
 
@@ -361,7 +361,7 @@ and `copy`. `QUERY` is fzf's initial query.
    unlock one (`kpa unlock <name>`). If some are unlocked, it lists those and
    names the locked ones on a line of fzf's header. It never unlocks anything.
 3. It reads `list`, builds one line per entry in memory (the entry's title,
-   username, database and group) and pipes the lines to `fzf`. Each line
+   its username when it has one, and its database) and pipes the lines to `fzf`. Each line
    carries a hidden index into that in-memory list, and the answer is read
    back through the index, never parsed out of the displayed text.
 4. The key fzf exits with names the field to `copy`. fzf opens below the

@@ -23,19 +23,19 @@ pub(super) fn title_of(entry: &WireEntry) -> &str {
     entry.title.as_deref().unwrap_or("(no title)")
 }
 
-/// One line per entry, in the order given: its title, username, database and
-/// group.
+/// One line per entry, in the order given: its title, its username when it
+/// has one, and its database.
 pub(super) fn entry_lines(entries: &[WireEntry]) -> Vec<String> {
     entries
         .iter()
         .enumerate()
         .map(|(index, entry)| {
             let title = title_of(entry);
-            let username = entry.username.as_deref().unwrap_or("");
-            line(
-                index,
-                &format!("{title}  {username}  [{}] {}", entry.db, entry.group),
-            )
+            let username = match entry.username.as_deref() {
+                Some(username) if !username.is_empty() => format!("  {username}"),
+                _ => String::new(),
+            };
+            line(index, &format!("{title}{username}  [{}]", entry.db))
         })
         .collect()
 }
@@ -75,10 +75,15 @@ mod tests {
     }
 
     #[test]
-    fn a_line_shows_the_title_username_database_and_group_after_its_index() {
-        let lines = entry_lines(&[entry(Some("GitHub"), Some("alice")), entry(None, None)]);
-        assert_eq!(lines[0], "0\tGitHub  alice  [personal] Dev");
-        assert_eq!(lines[1], "1\t(no title)    [personal] Dev");
+    fn a_line_shows_the_title_username_and_database_after_its_index() {
+        let lines = entry_lines(&[
+            entry(Some("GitHub"), Some("alice")),
+            entry(None, None),
+            entry(Some("Bank"), Some("")),
+        ]);
+        assert_eq!(lines[0], "0\tGitHub  alice  [personal]");
+        assert_eq!(lines[1], "1\t(no title)  [personal]");
+        assert_eq!(lines[2], "2\tBank  [personal]");
     }
 
     /// Vault text can't add a line, a field or a control sequence to what
