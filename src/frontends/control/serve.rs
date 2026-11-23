@@ -473,7 +473,7 @@ mod tests {
         assert_eq!(
             reply,
             format!(
-                "{{\"v\":2,\"ok\":true,\"databases\":[],\"version\":{:?}}}\n",
+                "{{\"v\":2,\"ok\":true,\"databases\":[],\"version\":{:?},\"can_copy\":false}}\n",
                 crate::VERSION
             )
         );

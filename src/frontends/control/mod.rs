@@ -85,6 +85,7 @@ impl Api {
             Op::Status => Response::Status {
                 databases: self.status(),
                 version: crate::VERSION.to_string(),
+                can_copy: self.can_copy(requester),
             },
             Op::Unlock(unlock) => Response::Unlock(self.unlock(unlock, requester)),
             Op::Lock(lock) => Response::Lock(self.lock(lock)),

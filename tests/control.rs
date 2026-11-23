@@ -820,6 +820,32 @@ fn status_reports_the_daemon_version() {
     assert_eq!(status["version"], kpa::VERSION);
 }
 
+/// `status` says whether a `copy` from the requester that asks would land:
+/// not from outside the desktop, nor while the desk's screen is locked.
+#[test]
+fn status_reports_whether_a_copy_would_land() {
+    use kpa::display_session::DisplaySession;
+
+    let config = || {
+        kpa::config::Config::parse(&config_toml(
+            "printf %s unused",
+            &common::password_db().display().to_string(),
+        ))
+        .expect("valid config")
+    };
+
+    let desktop = InProcessDaemon::with_requester_on(config(), true);
+    assert_eq!(desktop.run(&["status"])["can_copy"], true);
+    desktop.set_display(DisplaySession::Locked {
+        id: "test".to_string(),
+        active: true,
+    });
+    assert_eq!(desktop.run(&["status"])["can_copy"], false);
+
+    let outside = InProcessDaemon::with_requester_on(config(), false);
+    assert_eq!(outside.run(&["status"])["can_copy"], false);
+}
+
 /// The daemon names its own version in its first log line, so an operator
 /// reading `journalctl` (or this test, reading piped stderr) doesn't have
 /// to separately ask it.

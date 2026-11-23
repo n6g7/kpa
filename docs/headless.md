@@ -173,7 +173,7 @@ decides. The `Lock` signal still locks every database, so nothing is copied
 until the next unlock anyway.
 
 `status` reports the same check, for the requester that asks, as `can_copy`
-(not built yet; [`protocol.md`](./protocol.md) § Responses), so a client such
+([`protocol.md`](./protocol.md) § Responses), so a client such
 as `kpa pick` can tell before it unlocks anything.
 
 A copy's offer lasts until `clipboard_timeout` or until a lock ends the
