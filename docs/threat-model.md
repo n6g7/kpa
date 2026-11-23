@@ -27,6 +27,11 @@ files decrypted in memory. It has four front ends:
 | Tray | A status icon on the session bus: lock state, and a menu to lock and unlock |
 | Lock triggers | logind on the system bus (screen lock, suspend), an idle timer per database, and a vault file that changed on disk |
 
+The CLI's subcommands send a request and print the answer. `kpa pick` is
+the one that also runs a program: it hands the index to the user's `fzf`,
+found on `PATH`, through a pipe, and sends a `copy` for the entry and field
+chosen there.
+
 The daemon asks the user two things: the master password, on screen through
 a configured prompt program or on the terminal a request passed, and whether
 a signature may be made, on screen through a second program. A prompt
@@ -53,6 +58,7 @@ graph LR
     serve -.->|"TB-7 must not cross"| disk["disk: swap, cores, logs"]
     serve -->|"public keys only"| cache["key cache"]
     serve -->|"TB-3 entry content"| client
+    client -->|"kpa pick: the index,<br/>on a pipe"| picker["fzf"]
 ```
 
 ## 2. Assets
@@ -103,7 +109,7 @@ Prompts, listings and the log name them.
 | ---- | ---------------------------------------------------------------------------------------------- | -------------- |
 | TB-1 | The control socket under `$XDG_RUNTIME_DIR`: uid separation via filesystem permissions. It accepts one inbound file descriptor with a request, a terminal, which the daemon writes a prompt to and reads A-1 from | Request bytes and the descriptor (ACT-1, ACT-6 must not reach it; ACT-5 clients may be buggy, and a same-uid client can pass any terminal it can open); for a client, whoever answers at the path (ACT-1 must not) |
 | TB-2 | Reading `.kdbx` and keyfile: header and KDF parameters before authentication, payload after     | File bytes (ACT-3) |
-| TB-3 | Decrypted entry content flowing out: to control clients and what they print, to agent clients as identity comments, into prompt messages and their data, into the log | Entry content (ACT-4) |
+| TB-3 | Decrypted entry content flowing out: to control clients and what they print, from `kpa pick` to `fzf`, to agent clients as identity comments, into prompt messages and their data, into the log | Entry content (ACT-4) |
 | TB-4 | The clipboard (Wayland data-control): visible to every client of the compositor                | Readers (ACT-5) |
 | TB-5 | The prompt subprocesses: each is handed a message and the data behind it, in its environment; the unlock prompt's stdout carries the password, the confirm prompt's an `Allow` or a `Deny` | The user's view of a prompt: anything that can draw on screen (ACT-6) can imitate it (NG-8). The programs themselves are trusted (ASM-3) |
 | TB-6 | D-Bus: session bus (the tray menu, the service manager's environment naming the compositor), system bus (logind `Lock`, `LockedHint`, `PrepareForSleep`) | Callers and signal senders (ACT-6) |
@@ -120,17 +126,21 @@ kpa (see §9).
 - **ASM-2** — `$XDG_RUNTIME_DIR` is per-user, owned by the user, mode
   `0700`, and on a non-persistent filesystem.
 - **ASM-3** — The config file, the prompt programs it names (`prompt`, or
-  the built-in default, and `ssh_agent.confirm_prompt`), every `$PATH`
-  directory searched to find them, the paths the config points to, the
-  `known_hosts` files it lists (by default the user's and the system's) and
-  kpa's cache directory are chosen by the user and writable only by them,
-  or by root. The prompt programs are trusted: the unlock prompt with the
-  master password, which it doesn't store or send, and the confirm prompt
-  to report the answer the user gave. Where their output channels lead is
-  kpa's responsibility, not theirs (T-4). What they do with the message and
-  the data kpa hands them is theirs (T-24). kpa trusts a `known_hosts` file
-  as `ssh` does: an entry to name its key, and a certificate authority to
-  name hosts under the patterns of its line.
+  the built-in default, and `ssh_agent.confirm_prompt`), the `fzf` that
+  `kpa pick` runs, every `$PATH` directory searched to find them, the paths
+  the config points to, the `known_hosts` files it lists (by default the
+  user's and the system's) and kpa's cache directory are chosen by the user
+  and writable only by them, or by root. The prompt programs are trusted:
+  the unlock prompt with the master password, which it doesn't store or
+  send, and the confirm prompt to report the answer the user gave. Where
+  their output channels lead is kpa's responsibility, not theirs (T-4).
+  What they do with the message and the data kpa hands them is theirs
+  (T-24). `fzf` is trusted with the index: to show it, and to report the
+  line the user chose. Its options are the user's, read from the
+  environment `kpa pick` runs in, except its history and its preview,
+  which kpa turns off (T-5, T-24). kpa trusts a `known_hosts` file as `ssh`
+  does: an entry to name its key, and a certificate authority to name
+  hosts under the patterns of its line.
 - **ASM-4** — The compositor is trusted. Clipboard contents are visible to
   the session by design; kpa can only tag and expire them. The compositor
   is the one named by `WAYLAND_DISPLAY` in the service manager's
@@ -194,7 +204,7 @@ for a channel and G-4 for anything persistent:
 | A-1 | The daemon and nothing else, for one unlock: the password from the user's own typing, the keyfile from its configured path |
 | A-2 field values other than a TOTP seed, and TOTP codes | The clipboard offer, after a `copy` naming that entry and field |
 | A-2 TOTP seeds, attachments, SSH private keys, old versions of entries | Nothing outside the process |
-| A-3 | The answers to `list`, `ssh_keys`, `ssh_pending` and `ssh_grants`, and what the CLI prints of them; an SSH key's name, in identity comments and in a prompt's message and data; a copied entry's title, in the log |
+| A-3 | The answers to `list`, `ssh_keys`, `ssh_pending` and `ssh_grants`, and what the CLI prints of them; the list `kpa pick` pipes to `fzf`, and the line it prints of the entry it copied from; an SSH key's name, in identity comments and in a prompt's message and data; a copied entry's title, in the log |
 | A-6 | Signatures on the agent socket, under G-13 and G-14 |
 
 - **G-1 Read-only.** kpa never writes, creates, renames, truncates, or locks
@@ -224,6 +234,9 @@ for a channel and G-4 for anything persistent:
   - `copy` itself offers only for a requester on the desktop, while the
     display session is active and unlocked (`docs/headless.md` § 5);
     anything else fails with `no_display` before the clipboard is touched.
+    `status` tells a requester whether its own `copy` would pass that
+    check (`can_copy`). That is a hint for clients: `copy` runs the check
+    again, and nothing rests on the hint.
   - `list` omits every protected field and Notes rather than de-protecting
     them. `list`'s `fields` array is the one exception: it names which
     fields exist and are copyable, never a value, so a protected field's
@@ -249,7 +262,8 @@ for a channel and G-4 for anything persistent:
 - **G-4 No secret persisted.** kpa itself — the daemon and every CLI process
   — never writes A-1 or A-2 to disk or to its own stdout/stderr, and
   prevents its own core dumps.
-  - A-3 reaches stdout only as the answer the CLI was asked for. The
+  - A-3 reaches stdout only as the answer the CLI was asked for: a
+    listing, or the line `kpa pick` prints of the entry it copied from. The
     operation log names the operation, the database and how it ended. Of a
     vault it carries an entry's UUID and, for a `copy`, the entry's
     unprotected title; of an SSH key, its fingerprint and the name config
@@ -260,6 +274,9 @@ for a channel and G-4 for anything persistent:
   - The key cache holds public keys under config database names, none of
     A-1–A-3: no title, no comment, no attachment name. It is the one file
     kpa creates besides its sockets, mode `0600`.
+  - `kpa pick` writes nothing from a database to a file. Its list reaches
+    `fzf` through a pipe, and `fzf` keeps no history of what is typed into
+    it, whatever the user's `fzf` options say.
   - A-1 typed on a terminal is not echoed: the daemon turns echo off for
     the read and puts it back.
   - Keeping memory out of swap is the host's (ASM-6): kpa does not lock
@@ -312,9 +329,11 @@ for a channel and G-4 for anything persistent:
   terminal output, an identity comment or a log line, reshape the question
   a prompt asks, or change which entry or field a `copy` resolves to. They
   decide which SSH keys exist and what they are called, never their policy
-  (G-13). The same holds for the text a request carries (a database name,
-  a login's user, a signature's namespace, a command name) and for the
-  name a host goes by, from a `known_hosts` file or a host certificate.
+  (G-13). In `kpa pick`, an entry's text stays inside its own line of the
+  list, and the entry and field copied are those of the line the user
+  chose. The same holds for the text a request carries (a database name, a
+  login's user, a signature's namespace, a command name) and for the name
+  a host goes by, from a `known_hosts` file or a host certificate.
 - **G-11 Robust sockets.** Malformed, oversized, slow, or flooding clients,
   on the control socket or the agent socket, are refused without crashing
   the daemon or starving other clients, and forwarded connections cannot
@@ -419,19 +438,24 @@ the terminal with echo off, into a zeroizing buffer capped at
 `MAX_ANSWER_LEN` that never grows. In scope: a protected field, a TOTP
 seed or key material in any response, identity comment, error message,
 `Debug`/`Display` output, panic message, log line, prompt message or
-data, tray tooltip, or a child process's argv/env; the prompt's stdout,
-stderr, or exit status reaching a response, an error string, or kpa's own
-stdout/stderr/log; the master password echoed to the terminal it is typed
-on, or reaching a client in any form; a terminal a request passed
-reaching a child process.
+data, tray tooltip, line `kpa pick` hands `fzf`, or a child process's
+argv/env; the prompt's stdout, stderr, or exit status reaching a response,
+an error string, or kpa's own stdout/stderr/log; the master password
+echoed to the terminal it is typed on, or reaching a client in any form; a
+terminal a request passed reaching a child process.
 
-**T-5 · Secret persisted to disk** (I) — ACT-5, ACT-7 · TB-7 · A-1, A-2 → G-4  
+**T-5 · Secret persisted to disk** (I) — ACT-5, ACT-7 · TB-7 · A-1–A-3 → G-4  
 Response: `PR_SET_DUMPABLE=0` before config or unlock, in the daemon and in
 every CLI process; no logging of secrets (T-4); the key cache is written
-from public keys alone. Residual: swap and hibernation, which kpa leaves
-to the host, and `fs.suid_dumpable=2` root-owned dumps (NG-3). In scope: a
-core file; any file kpa creates other than its sockets and the key cache;
-anything in the cache beyond public keys.
+from public keys alone; `kpa pick` holds its list in memory and pipes it
+to `fzf`, with `fzf`'s history turned off on its command line, which wins
+over the user's `fzf` options. Residual: swap and hibernation, which kpa
+leaves to the host, and `fs.suid_dumpable=2` root-owned dumps (NG-3). The
+rest of the user's `fzf` options apply to `kpa pick`, a key they bind to a
+program included (NG-5), and `fzf` may still create the history file they
+name, empty. In scope: a core file; any file kpa creates other than its
+sockets and the key cache; anything in the cache beyond public keys; a
+`kpa pick` whose `fzf` writes a history.
 
 **T-6 · Clipboard read by history managers** (I) — ACT-5 · TB-4 · A-2 → G-7, G-5  
 Response: sensitivity tag; kpa owns the offer and drops it at expiry.
@@ -547,7 +571,10 @@ T-17.
 Response: line-delimited JSON is serialized, never concatenated; `copy`
 addresses entries by `(db, uuid, field)`; the CLI escapes DEL, C1 controls
 and Unicode bidi/format characters before writing to a terminal (JSON
-escaping covers only C0). A custom field's key is entry content too: the
+escaping covers only C0). `kpa pick` gives `fzf` one line per entry,
+escaped the same way with tab and newline escaped too, and reads the
+answer back through an index it put in front of the line, never out of
+the text shown. A custom field's key is entry content too: the
 collision rule (`docs/protocol.md`) makes a bare name that spells
 a built-in case-insensitively always mean the built-in, by type rather than
 by convention, so a custom key crafted to spell `password` or `title`
@@ -565,13 +592,17 @@ terminal escape or control sequences reaching the CLI's terminal output,
 an identity comment or a prompt unescaped; a field breaking framing; a
 title or UUID collision across databases that makes a `copy` resolve to a
 different entry than the one listed; a custom field's key reaching a
-built-in's `copy` target or vice versa; an attachment that crashes or
-hangs the key scan, or the unlock it runs in; vault content that makes a
-key forwardable, exempt from approval, or served from a database that
-doesn't opt in. Residual: whoever writes a shared vault's entries decides
-which keys a database that opts in serves, and what they are called, so a
-title can imitate another key's. Config's `name` and `serve = false` are
-the user's answer.
+built-in's `copy` target or vice versa; entry text that adds a line to
+`kpa pick`'s list, or makes it copy from an entry or field other than
+those of the line chosen; an attachment that crashes or hangs the key
+scan, or the unlock it runs in; vault content that makes a key
+forwardable, exempt from approval, or served from a database that doesn't
+opt in. Residual: whoever writes a shared vault's entries decides which
+keys a database that opts in serves, and what they are called, so a title
+can imitate another key's. Config's `name` and `serve = false` are the
+user's answer. An entry's title can imitate an entry of another database
+the same way: in `kpa pick` the database's name ends each line, and a
+long enough title pushes it out of view.
 
 **T-14 · Socket abuse** (D) — ACT-5 · TB-1 · — → G-11  
 Response: 64 KiB line cap, 5 s total deadline per request and per
@@ -736,20 +767,23 @@ until they stop it. That is a nuisance: NG-7 for same-uid code, and for a
 forwarded host it ends with the `ssh -A` session the user gave it.
 Look-alike prompts and answers the user didn't give are NG-8's.
 
-**T-24 · Prompt message read by another uid** (I) — ACT-1 · TB-5 · A-3 → G-2  
+**T-24 · Prompt message read by another uid** (I) — ACT-1 · TB-3, TB-5 · A-3 → G-2  
 A prompt's message names the database and, for the agent's prompts, the
 key, the remote user, the destination and the hosts a forwarded request
 came through. The data handed with it holds the same pieces, with the
 fingerprints of the key and the hosts. The key's name is its entry's
 title unless config gives it one. Response: kpa hands both to the prompt
 program in its environment (`KPA_PROMPT_MESSAGE`, `KPA_PROMPT_DATA`),
-which other uids cannot read, and never touches its argv. Residual: a
-prompt program that only takes its text as an argument needs a wrapper
-that copies it onto a command line (the built-in default `prompt` is
-one), and for as long as such a prompt is up, other uids can read what
-the wrapper copied in the process list (NG-5, ASM-6). A `name` in config
-keeps the entry's title out of it. In scope: kpa itself putting a
-message, its data, or anything from a vault, in a child's argv.
+which other uids cannot read, and never touches its argv. `kpa pick`
+hands `fzf` its list on a pipe, and turns off the preview a user's `fzf`
+options may name, which would put each line on a program's command line.
+Residual: a prompt program that only takes its text as an argument needs
+a wrapper that copies it onto a command line (the built-in default
+`prompt` is one), and for as long as such a prompt is up, other uids can
+read what the wrapper copied in the process list (NG-5, ASM-6). A `name`
+in config keeps the entry's title out of it. In scope: kpa itself putting
+a message, its data, or anything from a vault, in a child's argv, the
+`fzf` of `kpa pick` included; that `fzf` running a preview.
 
 **T-25 · A prompt that misleads** (S) — ACT-4, ACT-10, ACT-11, ACT-12 · TB-3, TB-5, TB-8 · A-6 → G-10, G-13  
 An approval is worth what the user was shown: which key, for what, going
@@ -805,13 +839,13 @@ scope, or at most hardening.
 - **NG-1 Persistent malicious same-uid code (ACT-8).** It can wait for an
   unlock, connect to either socket, copy any secret, sign with any served
   key and approve its own requests, read the clipboard, read the `.kdbx`,
-  log keystrokes, replace a prompt program or the `kpa` binary, and edit
-  the config. There is deliberately no per-caller authorization: inside
-  the uid boundary it would be theater. This includes "a same-uid process
-  can list/copy/sign/lock/unlock", "the sockets have no authentication"
-  and "a same-uid process can approve a signature". Short-lived code
-  (ACT-10) gets the same access but only while a database is unlocked
-  (T-18).
+  log keystrokes, replace a prompt program, `fzf` or the `kpa` binary, and
+  edit the config. There is deliberately no per-caller authorization:
+  inside the uid boundary it would be theater. This includes "a same-uid
+  process can list/copy/sign/lock/unlock", "the sockets have no
+  authentication" and "a same-uid process can approve a signature".
+  Short-lived code (ACT-10) gets the same access but only while a database
+  is unlocked (T-18).
 - **NG-2 root, kernel, firmware, hardware (ACT-9)**, including cold-boot and
   DMA attacks on RAM.
 - **NG-3 Host configuration (ASM-6).** Swap, hibernation, zram writeback,
@@ -827,6 +861,7 @@ scope, or at most hardening.
 - **NG-5 What other programs do with data kpa handed them**: the prompt
   programs' memory and command lines, the compositor, clipboard managers
   ignoring the tag, a launcher's display or storage of the `list` index,
+  what `fzf` does with `kpa pick`'s list under the user's own options,
   what an SSH client shows of a key's name, what a server does with a
   signature.
 - **NG-6 Offline attacks on the `.kdbx`.** KDF strength, password quality,

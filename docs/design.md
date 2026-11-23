@@ -386,11 +386,11 @@ It passes `--no-history` and `--no-preview`, which win over the user's
 `FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE`: a `--history` file named there
 is never written to (fzf may still create it, empty) and a `--preview` named
 there never runs. The rest of those defaults, colours and key bindings
-included, apply, and a binding that runs a program is the user's own. Every
-string `pick` shows is vault text, so each goes through kpa's own escaping
-(`src/output/escape.rs`, the one the other subcommands use,
-[`protocol.md`](./protocol.md) § CLI output) before it reaches fzf. There is
-no preview pane.
+included, apply, and a binding that runs a program is the user's own (threat
+model T-5, T-24). Every string `pick` shows is vault text, so each goes
+through kpa's own escaping (`src/output/escape.rs`, the one the other
+subcommands use, [`protocol.md`](./protocol.md) § CLI output) before it
+reaches fzf (T-13). There is no preview pane.
 
 ## Secrets
 
