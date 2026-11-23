@@ -139,15 +139,9 @@ fn log_response(response: &Response) {
 
         Response::Protocol(err) => log::warn(format_args!("rejected request: {err:?}")),
 
-        // `copy` is an access worth recording, same reasoning as `unlock`
-        // and `lock` above — unlike `list`/`status`, which stay silent
-        // (see the note on `Response::Status { .. } | Response::List(_)`
-        // below). The field, the entry's title and the database are logged,
-        // never the secret — and never a protected title.
-        Response::Copy(Ok(outcome)) => log::info(format_args!(
-            "copied {:?} of {:?} from {:?}",
-            outcome.field, outcome.entry, outcome.db
-        )),
+        // Success is logged by the handler, which knows the entry's title
+        // and the database; the response carries neither.
+        Response::Copy(Ok(_)) => {}
         Response::Copy(Err(err)) => log::warn(format_args!("copy failed: {err:?}")),
 
         // Success is logged by the handler.
