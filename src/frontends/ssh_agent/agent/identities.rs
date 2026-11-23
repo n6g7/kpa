@@ -159,6 +159,7 @@ mod tests {
         ConnectionClass::Forwarded {
             host: cached(9).key_data().clone().into(),
             session: vec![1],
+            onward: Vec::new(),
             dest: None,
         }
     }

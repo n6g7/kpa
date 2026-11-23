@@ -729,6 +729,82 @@ fn the_prompt_programs_get_the_data_behind_their_message() {
     assert_eq!(confirm["namespace"], "test");
 }
 
+/// A login forwarded through several hosts gives the confirm prompt the whole
+/// chain of them in `KPA_PROMPT_DATA`, in the order their bindings arrived,
+/// the forwarding host first (`docs/design.md`, "Configuration and logging").
+#[test]
+fn the_confirm_prompt_gets_the_chain_of_forwarding_hosts() {
+    use base64::Engine as _;
+    use ssh_key::HashAlg;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let confirm_data = dir.path().join("confirm");
+    let daemon = InProcessDaemon::start(&format!(
+        "prompt = [\"/bin/sh\", \"-c\", \"printf {password}\"]\n\n\
+         [ssh_agent]\n\
+         confirm_prompt = [\"/bin/sh\", \"-c\", \"printf %s \\\"$KPA_PROMPT_DATA\\\" > '{confirm_data}'; head -n1\"]\n\n\
+         [[database]]\n\
+         name = \"personal\"\n\
+         path = \"{path}\"\n\
+         serve_ssh_keys = true\n",
+        confirm_data = confirm_data.display(),
+        password = common::PASSWORD,
+        path = common::ssh_db().display(),
+    ));
+    let agent = start_ssh_agent(&daemon);
+    assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
+    let listed = stdout(&ssh_add(&agent, ["-L"]));
+    let key_blob = base64::engine::general_purpose::STANDARD
+        .decode(
+            public_key_line(&listed, "Ed25519")
+                .split_whitespace()
+                .nth(1)
+                .expect("ssh-add -L line has a base64 field"),
+        )
+        .expect("valid base64 key blob");
+
+    let hops = [
+        raw::throwaway_key(3),
+        raw::throwaway_key(4),
+        raw::throwaway_key(5),
+    ];
+    let destination = raw::throwaway_key(6);
+    let mut conn = raw::Connection::open(&agent.socket);
+    for (n, hop) in hops.iter().enumerate() {
+        let session = format!("hop-{n}");
+        assert_eq!(
+            conn.send(&raw::session_bind(hop, session.as_bytes(), true)),
+            6
+        );
+    }
+    assert_eq!(
+        conn.send(&raw::session_bind(&destination, b"login", false)),
+        6
+    );
+    let data = raw::login_data(b"login", "alice", "ssh-ed25519", &key_blob);
+    assert_eq!(conn.send(&raw::sign_request(&key_blob, &data)), 14);
+
+    let confirm: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&confirm_data).expect("the prompt ran"))
+            .expect("JSON data");
+    let fingerprint =
+        |key: &ssh_key::PrivateKey| key.public_key().fingerprint(HashAlg::Sha256).to_string();
+    assert_eq!(confirm["v"], 1);
+    assert_eq!(
+        confirm["forwarding_chain"],
+        serde_json::json!([
+            {"fingerprint": fingerprint(&hops[0])},
+            {"fingerprint": fingerprint(&hops[1])},
+            {"fingerprint": fingerprint(&hops[2])},
+        ])
+    );
+    assert_eq!(confirm["forwarding_host"], confirm["forwarding_chain"][0]);
+    assert_eq!(
+        confirm["destination"],
+        serde_json::json!({"fingerprint": fingerprint(&destination)})
+    );
+}
+
 /// A local, bound connection's first signature for a destination prompts;
 /// a second signature to that *same* destination, over the same
 /// connection, doesn't; a *different* destination — a fresh connection

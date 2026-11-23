@@ -275,8 +275,11 @@ Each connection is classified as one of:
   last binding's host key.
 - **Forwarded**: the first binding has `is_forwarding`. The forwarding
   host is that binding's host key, and the **forwarding session** is its
-  session identifier. The destination is the last non-forwarding binding,
-  if the remote `ssh` sent one.
+  session identifier. The **forwarding chain** is the forwarding host and
+  the hosts of the verified forwarding bindings after it, in the order they
+  arrived (a connection that only has the unverified forwarding claim has
+  the one host). The destination is the last non-forwarding binding, if the
+  remote `ssh` sent one.
 
 A binding that fails verification but claims `is_forwarding` still marks
 the connection forwarded. Failure always errs toward the strict side.
@@ -523,6 +526,8 @@ the pieces it is made of in `KPA_PROMPT_DATA`, see
 | Anything else | `Approve use of key "github"?`, with the same `on …` for a bound connection |
 | Forwarded login, through a host `known_hosts` names, to a host it names | `Approve use of key "github" on build-box to log in to git@github.com?` |
 | Forwarded login, through a host it doesn't name | `Approve use of key "github" on host key SHA256:… to log in to git@github.com?`, the destination worded as above |
+| Forwarded login, through two or three hosts | `Approve use of key "github" on build-box → jump-2 to log in to git@github.com?` |
+| Forwarded login, through more than three hosts, or with no room for them all | `Approve use of key "github" on build-box → … → jump-4 to log in to git@github.com?` |
 
 The destination is the connection's last binding's host, named as § 6.2
 ("Naming a host") names it, else by its fingerprint. On a forwarded
@@ -536,6 +541,21 @@ and newline escaped too so the message stays one line, and gets its own
 length budget, so no piece can push the destination past the prompt's cap.
 The key name's quotes are escaped, so a name can't end its quotation and
 carry on the sentence.
+
+A connection forwarded through further hosts (§ 6.2, the forwarding chain)
+says the hosts it came through: the forwarding host as above, then the hosts
+after it, in order, joined with `→`, each by its name, else by its whole
+fingerprint. The hosts after the forwarding host go in the room the rest of
+the message leaves under the prompt's cap, whole or not at all, never cut: all
+of them, if there are one or two; else `…` and the last; else `…` alone. So
+the destination is always whole, and a long name or a long chain costs the
+message hosts, not its end. `KPA_PROMPT_DATA` has the whole chain, each host
+whole, as `forwarding_chain` (`design.md`, "Configuration and logging"). The
+hosts after the first are as the first reports them: a remote `ssh` there
+binds each further hop over the same connection, and kpa verifies each
+signature, but the forwarding host decides what it relays, so the chain is
+what that host says about the rest of the path. The approval, the log line
+and the tables know the forwarding host only.
 
 Approvals live in memory only and are dropped on lock. A forwarded
 approval is remembered under (key, forwarding session identifier,

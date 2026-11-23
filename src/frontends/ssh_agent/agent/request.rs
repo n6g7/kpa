@@ -42,9 +42,11 @@ pub(super) struct Request<'a> {
     /// The connection's bound destination, if it has one. Unnamed until
     /// [`Request::named`].
     pub(super) destination: Option<NamedHost>,
-    /// The host the local `ssh` forwarded the agent to, on a forwarded
-    /// connection. Unnamed until [`Request::named`].
-    pub(super) forwarding_host: Option<NamedHost>,
+    /// The hosts the agent was forwarded through, on a forwarded
+    /// connection, in order: the host the local `ssh` forwarded it to first,
+    /// then the hosts that one relayed on (`docs/ssh-agent.md` § 6.7). Unnamed
+    /// until [`Request::named`].
+    pub(super) forwarding_chain: Vec<NamedHost>,
 }
 
 impl<'a> Request<'a> {
@@ -64,7 +66,7 @@ impl<'a> Request<'a> {
             purpose: classify::classify(&sign.data, &key),
             key,
             destination: destination_host(class).map(unnamed),
-            forwarding_host: forwarding_bound_host(class).map(unnamed),
+            forwarding_chain: class.forwarding_chain().into_iter().map(unnamed).collect(),
             class,
             sign,
             login_session_id,
@@ -82,13 +84,24 @@ impl<'a> Request<'a> {
                 .map(|name| escape_one_line(&name, MAX_HOST_NAME_LEN)),
         };
         self.destination = destination_host(self.class).map(named);
-        self.forwarding_host = forwarding_bound_host(self.class).map(named);
+        self.forwarding_chain = self
+            .class
+            .forwarding_chain()
+            .into_iter()
+            .map(named)
+            .collect();
         self
+    }
+
+    /// The host the local `ssh` forwarded the agent to, on a forwarded
+    /// connection: the first of the chain.
+    pub(super) fn forwarding_host(&self) -> Option<&NamedHost> {
+        self.forwarding_chain.first()
     }
 
     /// Whether the connection is bound to a host there could be a name for.
     pub(super) fn has_hosts(&self) -> bool {
-        self.destination.is_some() || self.forwarding_host.is_some()
+        self.destination.is_some() || !self.forwarding_chain.is_empty()
     }
 
     /// What this request is, for the user who is asked to approve it while
@@ -116,15 +129,6 @@ fn destination_host(class: &ConnectionClass) -> Option<&BoundHost> {
         ConnectionClass::LocalBound { dest } => Some(dest),
         ConnectionClass::Forwarded { dest, .. } => dest.as_ref(),
         ConnectionClass::LocalUnbound => None,
-    }
-}
-
-/// The host the local `ssh` forwarded the agent to, on a forwarded
-/// connection.
-fn forwarding_bound_host(class: &ConnectionClass) -> Option<&BoundHost> {
-    match class {
-        ConnectionClass::Forwarded { host, .. } => Some(host),
-        ConnectionClass::LocalUnbound | ConnectionClass::LocalBound { .. } => None,
     }
 }
 
@@ -180,8 +184,7 @@ pub(super) fn sign_line(
         .map(|dest| format!(", dest {}", host(dest)))
         .unwrap_or_default();
     let forwarding = request
-        .forwarding_host
-        .as_ref()
+        .forwarding_host()
         .map(|via| format!(", via {}", host(via)))
         .unwrap_or_default();
     format!(

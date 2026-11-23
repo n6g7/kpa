@@ -129,7 +129,7 @@ impl Agent {
             asked.approval.scope.key(),
             &request.purpose,
             request.destination.as_ref(),
-            request.forwarding_host.as_ref(),
+            &request.forwarding_chain,
         );
         self.confirm_prompt
             .ask(&question, &asked.unlock)
@@ -164,7 +164,7 @@ impl Agent {
             key,
             &request.purpose,
             request.destination.as_ref(),
-            request.forwarding_host.as_ref(),
+            &request.forwarding_chain,
         );
         let password = self
             .screen_unlock

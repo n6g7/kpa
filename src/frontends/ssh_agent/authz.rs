@@ -55,6 +55,7 @@ pub fn authorize_sign(
             host,
             session,
             dest,
+            ..
         } => {
             if !key.forwarded {
                 return Err(Refusal::NotForwardable);
@@ -158,6 +159,7 @@ mod tests {
         ConnectionClass::Forwarded {
             host: host_key(9).into(),
             session: vec![1],
+            onward: Vec::new(),
             dest: dest.map(|seed| host_key(seed).into()),
         }
     }
@@ -255,11 +257,13 @@ mod tests {
         let other_session = ConnectionClass::Forwarded {
             host: host_key(9).into(),
             session: vec![2],
+            onward: Vec::new(),
             dest: Some(host_key(8).into()),
         };
         let other_host = ConnectionClass::Forwarded {
             host: host_key(7).into(),
             session: vec![1],
+            onward: Vec::new(),
             dest: Some(host_key(8).into()),
         };
         assert_ne!(first, asked(&other_session));

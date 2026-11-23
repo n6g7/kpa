@@ -215,10 +215,7 @@ impl Agent {
                     .destination
                     .as_ref()
                     .and_then(|host| host.name.clone()),
-                request
-                    .forwarding_host
-                    .as_ref()
-                    .and_then(|host| host.name.clone()),
+                request.forwarding_host().and_then(|host| host.name.clone()),
             );
             approval
         });
@@ -1237,6 +1234,7 @@ mod tests {
         ConnectionClass::Forwarded {
             host: test_key(9).public_key().key_data().clone().into(),
             session: vec![session],
+            onward: Vec::new(),
             dest: Some(test_key(8).public_key().key_data().clone().into()),
         }
     }
@@ -1338,6 +1336,7 @@ mod tests {
         let unbound = ConnectionClass::Forwarded {
             host: test_key(9).public_key().key_data().clone().into(),
             session: vec![1],
+            onward: Vec::new(),
             dest: None,
         };
         assert!(!signed(&forwarded_login(
@@ -1639,6 +1638,7 @@ mod tests {
         let forwarded = |host: &PublicKey, dest: &PublicKey| ConnectionClass::Forwarded {
             host: host.key_data().clone().into(),
             session: vec![1],
+            onward: Vec::new(),
             dest: Some(dest.key_data().clone().into()),
         };
 
