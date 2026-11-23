@@ -30,7 +30,7 @@ Unscheduled:
 - [ ] Refactor the other existing commands to use the new output/reply system
 - [ ] Consider PGP agent support
 - [ ] `kpa pick`, a terminal entry picker over fzf, per `docs/design.md` § The picker
-  - [ ] `status` reports `can_copy`, whether a `copy` from the requester would land
+  - [x] `status` reports `can_copy`, whether a `copy` from the requester would land
   - [ ] The `pick` subcommand
   - [ ] home-manager module: kpa on `PATH`, and an optional shell key binding for `kpa pick`
 

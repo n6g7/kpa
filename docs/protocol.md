@@ -161,7 +161,7 @@ whose `name` is there when the daemon found one. `ssh_approve` answers
 each grant as `ssh-agent.md` § 6.8 shows it; like `ssh_pending` it has no
 failure, and nothing is logged for it.
 
-`status`'s `can_copy` (not built yet) is `true` when a `copy` from the requester that asked
+`status`'s `can_copy` is `true` when a `copy` from the requester that asked
 would be offered on the clipboard, and `false` when it would fail with
 `no_display` ([`headless.md`](./headless.md) § 5). It is the answer of the
 check `copy` runs, asked of the same requester and display session, and so is

@@ -78,6 +78,9 @@ pub enum Response {
         /// only when the peer is an older daemon that predates this field —
         /// the client reads it as an optional field for exactly that reason.
         version: String,
+        /// Whether a `copy` from the requester that asked would land
+        /// (`docs/protocol.md` § Responses). Advisory: `copy` decides again.
+        can_copy: bool,
     },
     /// `Ok` names the database that is now unlocked.
     Unlock(Result<String, UnlockError>),
@@ -112,10 +115,15 @@ impl Serialize for Response {
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("v", &VERSION)?;
         match self {
-            Response::Status { databases, version } => {
+            Response::Status {
+                databases,
+                version,
+                can_copy,
+            } => {
                 map.serialize_entry("ok", &true)?;
                 map.serialize_entry("databases", databases)?;
                 map.serialize_entry("version", version)?;
+                map.serialize_entry("can_copy", can_copy)?;
             }
             Response::Unlock(Ok(db)) => {
                 map.serialize_entry("ok", &true)?;
@@ -191,6 +199,7 @@ mod tests {
                 },
             ],
             version: "1.2.3".to_string(),
+            can_copy: true,
         };
         assert_eq!(
             serde_json::to_value(&status).expect("status should serialize"),
@@ -202,6 +211,7 @@ mod tests {
                     {"name": "work", "locked": true},
                 ],
                 "version": "1.2.3",
+                "can_copy": true,
             })
         );
 

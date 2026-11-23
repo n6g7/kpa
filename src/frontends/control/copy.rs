@@ -114,6 +114,14 @@ impl Observer for CopyState {
 }
 
 impl Api {
+    /// Whether a `copy` from `requester` passes the gate that decides where
+    /// it may land, asked of the display session as it is now. It is
+    /// `status`'s `can_copy`, so it says nothing of the database or the
+    /// field a `copy` would name.
+    pub(super) fn can_copy(&self, requester: &Requester) -> bool {
+        authz::authorize_copy(requester, &self.display.get()).is_ok()
+    }
+
     /// Only a requester on the desktop, with the display session active and
     /// unlocked, reaches the clipboard (`docs/headless.md` § 5). That is
     /// checked first, so a refused requester learns nothing about the
@@ -292,6 +300,48 @@ mod tests {
             assert_eq!(fx.api.copy(&request, &desktop()), Err(CopyError::NoDisplay));
         }
         assert!(fx.offered.lock().unwrap().is_empty());
+    }
+
+    /// `status`'s `can_copy` is the gate's answer for the requester that
+    /// asked: yes only on the desktop of an active, unlocked display session,
+    /// and it agrees with what a `copy` from the same requester then does.
+    #[test]
+    fn can_copy_is_yes_only_where_a_copy_would_pass_the_gate() {
+        let fx = fixture();
+        let uuid = unlock_with_entry(&fx, "personal");
+        let request = CopyRequest {
+            db: "personal".to_string(),
+            uuid,
+            field: Field::Password,
+        };
+        let session = |locked: bool, active: bool| {
+            let id = SESSION.to_string();
+            if locked {
+                DisplaySession::Locked { id, active }
+            } else {
+                DisplaySession::Unlocked { id, active }
+            }
+        };
+
+        for (display_session, requester, can_copy) in [
+            (session(false, true), desktop(), true),
+            (session(false, true), outside(), false),
+            (session(true, true), desktop(), false),
+            (session(false, false), desktop(), false),
+            (DisplaySession::None, desktop(), false),
+        ] {
+            fx.display.set(display_session.clone());
+            assert_eq!(
+                fx.api.can_copy(&requester),
+                can_copy,
+                "{requester:?} on {display_session:?}"
+            );
+            assert_eq!(
+                fx.api.copy(&request, &requester).is_ok(),
+                can_copy,
+                "{requester:?} on {display_session:?}"
+            );
+        }
     }
 
     #[test]
