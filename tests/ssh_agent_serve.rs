@@ -77,12 +77,19 @@ fn ssh_add_lists_nothing_without_a_cache_and_never_takes_a_key() {
     assert!(!ssh_add(&agent, ["-x"]).status.success());
 }
 
+/// The comment column of one `ssh-add -L` line (`<type> <base64> <comment>`).
+/// Matching against it, not the whole line, keeps a title from matching a
+/// stretch of the random base64 key.
+fn comment(line: &str) -> &str {
+    line.splitn(3, ' ').nth(2).unwrap_or("")
+}
+
 /// `ssh-add -L`'s comment column is each key's name — the entry title
 /// while unlocked, per `docs/ssh-agent.md` § 6.4 "Names".
 fn public_key_line(listed: &str, title: &str) -> String {
     listed
         .lines()
-        .find(|line| line.ends_with(title))
+        .find(|line| comment(line) == title)
         .unwrap_or_else(|| panic!("no identity named {title:?} in: {listed:?}"))
         .to_string()
 }
@@ -98,7 +105,7 @@ fn identities_list_from_the_cache_while_locked_and_live_once_unlocked() {
         public_key_line(&unlocked, title);
     }
     assert!(
-        !unlocked.contains("Pem"),
+        unlocked.lines().all(|line| comment(line) != "Pem"),
         "the skipped PEM attachment must never be listed"
     );
 
@@ -108,7 +115,7 @@ fn identities_list_from_the_cache_while_locked_and_live_once_unlocked() {
     // "<database> <fingerprint>" instead.
     for title in ["Ed25519", "Ecdsa", "Rsa"] {
         assert!(
-            !locked.contains(title),
+            locked.lines().all(|line| !comment(line).contains(title)),
             "a locked listing must not show titles: {locked:?}"
         );
     }
@@ -941,7 +948,7 @@ mod pending {
         let listed = stdout(&super::ssh_add(agent, ["-L"]));
         let line = listed
             .lines()
-            .find(|line| line.contains("Ed25519"))
+            .find(|line| super::comment(line).starts_with("Ed25519"))
             .unwrap_or_else(|| panic!("no Ed25519 identity in {listed:?}"));
         let key_only = line
             .split_whitespace()
@@ -1152,11 +1159,10 @@ mod pending {
             let listed = stdout(&super::ssh_add(agent, ["-L"]));
             listed
                 .lines()
-                .find(|line| line.contains("Ed25519"))
+                .map(super::comment)
+                .find(|comment| comment.starts_with("Ed25519"))
                 .unwrap_or_else(|| panic!("no Ed25519 identity in {listed:?}"))
-                .split_once("Ed25519")
-                .map(|(_, comment)| format!("Ed25519{comment}"))
-                .expect("the comment")
+                .to_string()
         };
 
         assert_eq!(comment(&agent), "Ed25519 (needs approval: kpa ssh pending)");
