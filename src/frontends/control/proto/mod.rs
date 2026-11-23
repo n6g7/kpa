@@ -23,7 +23,7 @@ mod ssh_pending;
 mod status;
 mod unlock;
 
-pub use copy::{CopyError, CopyOutcome, CopyRequest, CopyResponse, Field};
+pub use copy::{CopyError, CopyOutcome, CopyRequest, Field};
 pub use error::ErrorCode;
 pub use list::{ListError, ListRequest, ListResponse, WireEntry};
 pub use lock::{LockError, LockRequest};
@@ -129,8 +129,8 @@ impl Serialize for Response {
             Response::List(Err(err)) => serialize_error(&mut map, &err.fields())?,
             Response::Copy(Ok(outcome)) => {
                 map.serialize_entry("ok", &true)?;
-                map.serialize_entry("copied", &outcome.response.copied)?;
-                map.serialize_entry("expires_in", &outcome.response.expires_in)?;
+                map.serialize_entry("copied", &outcome.copied)?;
+                map.serialize_entry("expires_in", &outcome.expires_in)?;
             }
             Response::Copy(Err(err)) => serialize_error(&mut map, &err.fields())?,
             Response::SshKeys(Ok(report)) => {
@@ -236,12 +236,8 @@ mod tests {
         // `copy`'s success carries no secret and no `db` — just which field,
         // and for how long.
         let copy = Response::Copy(Ok(CopyOutcome {
-            db: "personal".to_string(),
-            entry: "GitHub".to_string(),
-            response: CopyResponse {
-                copied: Field::Password,
-                expires_in: 30,
-            },
+            copied: Field::Password,
+            expires_in: 30,
         }));
         assert_eq!(
             serde_json::to_value(&copy).expect("copy should serialize"),
@@ -364,20 +360,12 @@ mod tests {
         let wire = serde_json::to_string(&Response::List(Ok(list.clone()))).unwrap();
         assert_eq!(serde_json::from_str::<ListResponse>(&wire).unwrap(), list);
 
-        let response = CopyResponse {
+        let outcome = CopyOutcome {
             copied: Field::Custom("api-key".to_string()),
             expires_in: 30,
         };
-        let outcome = CopyOutcome {
-            db: "personal".to_string(),
-            entry: "GitHub".to_string(),
-            response: response.clone(),
-        };
-        let wire = serde_json::to_string(&Response::Copy(Ok(outcome))).unwrap();
-        assert_eq!(
-            serde_json::from_str::<CopyResponse>(&wire).unwrap(),
-            response
-        );
+        let wire = serde_json::to_string(&Response::Copy(Ok(outcome.clone()))).unwrap();
+        assert_eq!(serde_json::from_str::<CopyOutcome>(&wire).unwrap(), outcome);
     }
 
     /// A daemon that predates `can_copy` doesn't send it: the client reads

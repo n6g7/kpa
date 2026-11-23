@@ -7,13 +7,14 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-use super::proto::{CopyError, CopyOutcome, CopyRequest, CopyResponse, Field};
+use super::proto::{CopyError, CopyOutcome, CopyRequest, Field};
 use super::{Api, authz};
 use crate::authn::Requester;
 use crate::cancel::CancelToken;
 use crate::clipboard::{Backend, Offer};
 use crate::databases::{Databases, Entry, Observer, OpenError, fields};
 use crate::display_session::DisplaySession;
+use crate::log;
 
 /// The clipboard, and every offer a `copy` has made that may still be live,
 /// each with the database and unlock it came from. An observer that ends the
@@ -160,13 +161,16 @@ impl Api {
         if let Ok(mut open) = self.databases.open(name) {
             open.touch();
         }
+        // A record of which secret left is the point of logging a copy:
+        // the field, the entry's title (never a protected one) and the
+        // database, never the value.
+        log::info(format_args!(
+            "copied {:?} of {entry:?} from {name:?}",
+            request.field
+        ));
         Ok(CopyOutcome {
-            db: db(),
-            entry,
-            response: CopyResponse {
-                copied: request.field.clone(),
-                expires_in: self.clipboard_timeout.as_secs(),
-            },
+            copied: request.field.clone(),
+            expires_in: self.clipboard_timeout.as_secs(),
         })
     }
 }
@@ -354,8 +358,43 @@ mod tests {
         let outcome = copy(&fx, "personal", uuid, Field::Password).expect("copied");
 
         assert_eq!(*fx.offered.lock().unwrap(), ["entrypass1"]);
-        assert_eq!(outcome.entry, "site");
-        assert_eq!(outcome.db, "personal");
+        assert_eq!(outcome.copied, Field::Password);
+    }
+
+    /// The log says which field of which entry left which database, and
+    /// never the value.
+    #[test]
+    fn a_successful_copy_is_logged_without_the_secret() {
+        let fx = fixture();
+        let uuid = unlock_with_entry(&fx, "personal");
+
+        let log = capture_stderr(|| {
+            copy(&fx, "personal", uuid, Field::Password).expect("copied");
+        });
+
+        assert!(
+            log.contains(" INFO  copied Password of \"site\" from \"personal\"\n"),
+            "{log}"
+        );
+        assert!(!log.contains("entrypass1"), "{log}");
+    }
+
+    /// Runs `body` with fd 2 pointed at a temp file, puts the original back,
+    /// and returns what was written. `crate::log` writes to fd 2 directly,
+    /// so the test harness's output capture doesn't see it.
+    fn capture_stderr(body: impl FnOnce()) -> String {
+        use std::io::{Read, Seek};
+        use std::os::fd::AsFd;
+
+        let original = rustix::io::dup(std::io::stderr().as_fd()).expect("dup stderr");
+        let mut file = tempfile::tempfile().expect("tempfile");
+        rustix::stdio::dup2_stderr(&file).expect("point stderr at the file");
+        body();
+        rustix::stdio::dup2_stderr(&original).expect("restore stderr");
+        let mut log = String::new();
+        file.rewind().expect("rewind");
+        file.read_to_string(&mut log).expect("read log");
+        log
     }
 
     #[test]
