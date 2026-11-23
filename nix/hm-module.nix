@@ -106,15 +106,18 @@ in
     };
 
     pick.keyBinding = lib.mkOption {
-      type = lib.types.nullOr (lib.types.strMatching "ctrl-[a-wyz]|alt-[a-z]");
+      type = lib.types.nullOr (lib.types.strMatching "ctrl-[abefgklnopqrstuvwy]|alt-[a-z]");
       default = null;
       example = "ctrl-s";
       description = ''
         A key that runs `kpa pick` in your interactive zsh, bash and fish
         shells, in each one home-manager manages (`programs.<shell>.enable`).
         Null binds nothing. A key is `ctrl-` or `alt-` and a letter, such as
-        `ctrl-s` or `alt-s`. `ctrl-x` is left out because the shells use it
-        as the prefix of other bindings.
+        `ctrl-s` or `alt-s`. `ctrl-c`, `ctrl-d`, `ctrl-h`, `ctrl-i`,
+        `ctrl-j`, `ctrl-m`, `ctrl-x` and `ctrl-z` are not accepted, because
+        the terminal or the shell already uses them (interrupt, suspend,
+        end of input, Backspace, Tab, Enter, newline, and the prefix of
+        other bindings).
 
         The key types `kpa pick` as a command line and runs it, so `kpa pick`
         can read a master password from the terminal when it unlocks a
