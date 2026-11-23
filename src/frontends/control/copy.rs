@@ -379,18 +379,29 @@ mod tests {
         assert!(!log.contains("entrypass1"), "{log}");
     }
 
-    /// Runs `body` with fd 2 pointed at a temp file, puts the original back,
-    /// and returns what was written. `crate::log` writes to fd 2 directly,
-    /// so the test harness's output capture doesn't see it.
+    /// Runs `body` with fd 2 pointed at a temp file, puts the original back
+    /// (also when `body` panics, so the failure still reaches the test
+    /// harness's output), and returns what was written. `crate::log` writes
+    /// to fd 2 directly, so the harness's output capture doesn't see it.
     fn capture_stderr(body: impl FnOnce()) -> String {
         use std::io::{Read, Seek};
-        use std::os::fd::AsFd;
+        use std::os::fd::{AsFd, OwnedFd};
 
-        let original = rustix::io::dup(std::io::stderr().as_fd()).expect("dup stderr");
+        /// Points fd 2 back at the descriptor it holds when dropped.
+        struct Restore(OwnedFd);
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                rustix::stdio::dup2_stderr(&self.0).expect("restore stderr");
+            }
+        }
+
         let mut file = tempfile::tempfile().expect("tempfile");
-        rustix::stdio::dup2_stderr(&file).expect("point stderr at the file");
-        body();
-        rustix::stdio::dup2_stderr(&original).expect("restore stderr");
+        {
+            let _restore = Restore(rustix::io::dup(std::io::stderr().as_fd()).expect("dup stderr"));
+            rustix::stdio::dup2_stderr(&file).expect("point stderr at the file");
+            body();
+        }
         let mut log = String::new();
         file.rewind().expect("rewind");
         file.read_to_string(&mut log).expect("read log");
