@@ -163,6 +163,27 @@ fn ctrl_o_chooses_among_the_entrys_own_fields_custom_ones_included() {
             "{name} in {fields:?}"
         );
     }
+    // The second fzf is headed by the entry's title and keeps no history or
+    // preview either.
+    let args = fzf.args(2);
+    let at = args
+        .iter()
+        .position(|arg| arg == "--prompt")
+        .expect("--prompt");
+    assert_eq!(args[at + 1], "field> ");
+    let at = args
+        .iter()
+        .position(|arg| arg == "--header")
+        .expect("--header");
+    assert_eq!(args[at + 1], "GitHub");
+    for flag in [
+        "--no-history",
+        "--no-preview",
+        "--height=60%",
+        "--layout=reverse",
+    ] {
+        assert!(args.contains(&flag.to_string()), "{flag} in {args:?}");
+    }
 }
 
 #[test]
@@ -178,11 +199,12 @@ fn fzf_gets_the_query_and_a_line_per_entry_with_no_secret_in_it() {
         .position(|arg| arg == "--query")
         .expect("--query");
     assert_eq!(args[at + 1], "git hub");
-    assert!(
-        !args
-            .iter()
-            .any(|arg| arg == "--history" || arg == "--preview")
-    );
+    // Whatever the environment's fzf options say, no history is kept and no
+    // preview runs.
+    for flag in ["--no-history", "--no-preview"] {
+        assert!(args.contains(&flag.to_string()), "{flag} in {args:?}");
+    }
+    assert!(!args.iter().any(|arg| arg.starts_with("--history")));
     let lines = fzf.stdin(1);
     assert_eq!(lines.len(), 2);
     let all = lines.join("\n");
@@ -291,7 +313,7 @@ fn with_every_database_locked_each_is_unlocked_on_the_terminal() {
         lines.contains("Mine") && lines.contains("Theirs"),
         "{lines}"
     );
-    assert!(!fzf.args(1).contains(&"--header".to_string()));
+    assert!(!fzf.args(1).iter().any(|arg| arg.starts_with("locked:")));
     assert_eq!(offered(&fx), ["p2"]);
 }
 
@@ -309,7 +331,9 @@ fn with_some_database_unlocked_the_locked_ones_are_named_in_the_header_only() {
         .iter()
         .position(|arg| arg == "--header")
         .expect("--header");
-    assert_eq!(args[at + 1], "locked: work");
+    // The header is the keys, then the locked databases, a line each.
+    assert_eq!(args[at + 1], keys::HELP);
+    assert_eq!(args[at + 2], "locked: work");
     assert!(fx.prompts.shown().is_empty());
     assert!(
         fx.databases

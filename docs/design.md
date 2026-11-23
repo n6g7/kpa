@@ -359,12 +359,13 @@ fields. It is a client subcommand of the `control` front end
    it is taken to allow the copy.
 2. If every database is locked, it unlocks each one on the terminal, as `kpa
    unlock --tty`. If some are unlocked, it lists those and names the locked
-   ones in fzf's header, and unlocks nothing.
+   ones on a line of fzf's header, and unlocks nothing.
 3. It reads `list`, builds one line per entry in memory (the entry's title,
    username, database and group) and pipes the lines to `fzf`. Each line
    carries a hidden index into that in-memory list, and the answer is read
    back through the index, never parsed out of the displayed text.
-4. The key fzf exits with names the field to `copy`:
+4. The key fzf exits with names the field to `copy`. fzf opens below the
+   prompt (`--height=60% --layout=reverse`), and its header lists these keys:
 
 | Key | Copies |
 |---|---|
@@ -372,18 +373,23 @@ fields. It is a client subcommand of the `control` front end
 | Ctrl+U | `username` |
 | Ctrl+L | `url` |
 | Ctrl+T | `totp` |
-| Ctrl+O | a field chosen in a second fzf over the entry's own `fields`, custom ones included |
+| Ctrl+O | a field chosen in a second fzf over the entry's own `fields`, custom ones included, headed by the entry's title |
 
 `fzf` is looked up on `PATH` when `pick` runs. It is not a dependency of the
 package, and there is no setting to point at another binary. Without it `pick`
 fails with an error naming fzf.
 
 **Nothing from a database is written to disk.** The list lives in `pick`'s
-memory and reaches fzf through a pipe. `pick` runs fzf with no `--history` and
-creates no temporary file. Every string it shows is vault text, so each goes
-through kpa's own escaping (`src/output/escape.rs`, the one the other
-subcommands use, [`protocol.md`](./protocol.md) § CLI output) before it
-reaches fzf. There is no preview pane.
+memory and reaches fzf through a pipe, and `pick` creates no temporary file.
+It passes `--no-history` and `--no-preview`, which win over the user's
+`FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE`: a `--history` file named there
+is never written to (fzf may still create it, empty) and a `--preview` named
+there never runs. The rest of those defaults, colours and key bindings
+included, apply, and a binding that runs a program is the user's own. Every
+string `pick` shows is vault text, so each goes through kpa's own escaping
+(`src/output/escape.rs`, the one the other subcommands use,
+[`protocol.md`](./protocol.md) § CLI output) before it reaches fzf. There is
+no preview pane.
 
 ## Secrets
 

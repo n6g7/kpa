@@ -6,6 +6,10 @@ use crate::frontends::control::proto::Field;
 /// an [`action`].
 pub(super) const EXPECT: &str = "ctrl-u,ctrl-l,ctrl-t,ctrl-o";
 
+/// What fzf's header says each key copies.
+pub(super) const HELP: &str =
+    "enter: password  ctrl-u: username  ctrl-l: url  ctrl-t: totp  ctrl-o: any field";
+
 /// What a key asks for on the entry fzf ended on.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Action {
@@ -47,5 +51,12 @@ mod tests {
             assert!(action(key).is_some(), "{key}");
         }
         assert_eq!(EXPECT.split(',').count(), 4);
+    }
+
+    #[test]
+    fn the_header_names_every_key() {
+        for key in EXPECT.split(',').chain(["enter"]) {
+            assert!(HELP.contains(&format!("{key}: ")), "{key}");
+        }
     }
 }

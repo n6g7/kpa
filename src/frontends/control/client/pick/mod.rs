@@ -25,7 +25,7 @@ use crate::frontends::control::proto::{
     CopyRequest, DatabaseStatus, Field, ListRequest, Op, PromptOn, Request, UnlockRequest,
     WireEntry,
 };
-use crate::output::{escape_one_line, print_escaped, report_error};
+use crate::output::{print_escaped, report_error};
 
 /// The program that is run as fzf, looked up on `PATH`.
 const FZF: &str = "fzf";
@@ -86,7 +86,6 @@ enum PickError {
 #[derive(Deserialize)]
 struct Status {
     databases: Vec<DatabaseStatus>,
-    #[serde(default)]
     can_copy: Option<bool>,
 }
 
@@ -156,26 +155,7 @@ fn pick_with(
         return Err(PickError::NoEntries);
     }
 
-    let mut args = vec![
-        "--delimiter".to_string(),
-        lines::DELIMITER.to_string(),
-        "--with-nth".to_string(),
-        "2..".to_string(),
-        "--expect".to_string(),
-        keys::EXPECT.to_string(),
-        "--query".to_string(),
-        query.join(" "),
-    ];
-    if !locked.is_empty() {
-        let names: Vec<String> = locked
-            .iter()
-            .map(|name| escape_one_line(name, usize::MAX))
-            .collect();
-        args.extend([
-            "--header".to_string(),
-            format!("locked: {}", names.join(", ")),
-        ]);
-    }
+    let args = fzf::entry_args(&query.join(" "), &locked);
     let answer = fzf::run(fzf, &args, &lines::entry_lines(&entries))?;
 
     // The first line is the key fzf ended on, the second the line chosen.
@@ -200,7 +180,7 @@ fn pick_with(
     Ok(format!(
         "copied {} of {:?} from {:?}; the clipboard clears in {}s",
         copied.copied,
-        entry.title.as_deref().unwrap_or("(no title)"),
+        lines::title_of(entry),
         entry.db,
         copied.expires_in
     ))
@@ -211,12 +191,7 @@ fn choose_field(fzf: &OsStr, entry: &WireEntry) -> Result<Field, PickError> {
     if entry.fields.is_empty() {
         return Err(PickError::NoFields);
     }
-    let args = [
-        "--delimiter".to_string(),
-        lines::DELIMITER.to_string(),
-        "--with-nth".to_string(),
-        "2..".to_string(),
-    ];
+    let args = fzf::field_args(lines::title_of(entry));
     let answer = fzf::run(fzf, &args, &lines::field_lines(&entry.fields))?;
     let name = lines::index_of(
         answer.lines().next().unwrap_or_default(),

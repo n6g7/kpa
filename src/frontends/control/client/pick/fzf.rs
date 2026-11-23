@@ -1,15 +1,71 @@
-//! Running fzf over a list held in memory.
+//! Running fzf over a list held in memory, and what it is told on its command
+//! line.
 
 use std::ffi::OsStr;
 use std::io::{ErrorKind, Write};
 use std::process::{Command, Stdio};
 
 use super::PickError;
+use super::keys;
+use super::lines::DELIMITER;
+use crate::output::escape_one_line;
+
+/// What every fzf `kpa pick` runs is told: show the text after the index, open
+/// below the prompt, and never keep a history or run a preview. These two are
+/// off on the command line because a user's `FZF_DEFAULT_OPTS` or
+/// `FZF_DEFAULT_OPTS_FILE` could otherwise turn them on: `--history` would
+/// write what is typed to a file, and `--preview` would run a program on every
+/// highlighted line. Options on the command line win over those defaults.
+/// Everything else in them (colours, bindings) is left to the user.
+fn common_args(prompt: &str, header: &str) -> Vec<String> {
+    [
+        "--delimiter",
+        DELIMITER,
+        "--with-nth",
+        "2..",
+        "--height=60%",
+        "--layout=reverse",
+        "--no-history",
+        "--no-preview",
+        "--prompt",
+        prompt,
+        "--header",
+        header,
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+/// The arguments for choosing an entry: it ends on the keys of
+/// [`keys::EXPECT`], starts from `query`, and its header says what each key
+/// copies, and on a second line which databases are `locked` and so not
+/// listed.
+pub(super) fn entry_args(query: &str, locked: &[&str]) -> Vec<String> {
+    let mut header = keys::HELP.to_string();
+    if !locked.is_empty() {
+        let names: Vec<String> = locked
+            .iter()
+            .map(|name| escape_one_line(name, usize::MAX))
+            .collect();
+        header.push_str(&format!("\nlocked: {}", names.join(", ")));
+    }
+    let mut args = common_args("kpa> ", &header);
+    args.extend(
+        ["--expect", keys::EXPECT, "--query", query]
+            .iter()
+            .map(|arg| arg.to_string()),
+    );
+    args
+}
+
+/// The arguments for choosing one of the fields of the entry titled `title`.
+pub(super) fn field_args(title: &str) -> Vec<String> {
+    common_args("field> ", &escape_one_line(title, usize::MAX))
+}
 
 /// Runs `program` with `args`, feeds it `lines` on a pipe and returns what it
 /// printed. Its stderr and `/dev/tty` are the user's terminal, which is where
-/// fzf draws. Nothing is written to a file: the lines go through the pipe and
-/// no history is asked for.
+/// fzf draws. Nothing is written to a file: the lines go through the pipe.
 ///
 /// A user who ended fzf without choosing (Esc, Ctrl+C, or no line matching)
 /// is [`PickError::Cancelled`].
@@ -37,5 +93,51 @@ pub(super) fn run(program: &OsStr, args: &[String], lines: &[String]) -> Result<
         // fzf's own codes: 1 for no match, 130 for an interrupt.
         Some(1 | 130) => Err(PickError::Cancelled),
         _ => Err(PickError::FzfFailed(output.status)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value_of<'a>(args: &'a [String], flag: &str) -> &'a str {
+        let at = args.iter().position(|arg| arg == flag).expect(flag);
+        &args[at + 1]
+    }
+
+    #[test]
+    fn every_fzf_opens_below_the_prompt_and_keeps_no_history_or_preview() {
+        for args in [entry_args("", &[]), field_args("GitHub")] {
+            for flag in [
+                "--height=60%",
+                "--layout=reverse",
+                "--no-history",
+                "--no-preview",
+            ] {
+                assert!(args.iter().any(|arg| arg == flag), "{flag} in {args:?}");
+            }
+            assert_eq!(value_of(&args, "--with-nth"), "2..");
+        }
+    }
+
+    #[test]
+    fn the_entry_header_names_the_keys_and_then_the_locked_databases() {
+        let args = entry_args("hub", &["work", "arch\nive"]);
+        assert_eq!(value_of(&args, "--prompt"), "kpa> ");
+        assert_eq!(value_of(&args, "--query"), "hub");
+        assert_eq!(value_of(&args, "--expect"), keys::EXPECT);
+        assert_eq!(
+            value_of(&args, "--header"),
+            format!("{}\nlocked: work, arch\\u000aive", keys::HELP)
+        );
+        assert_eq!(value_of(&entry_args("", &[]), "--header"), keys::HELP);
+    }
+
+    #[test]
+    fn the_field_fzf_is_headed_by_the_entrys_escaped_title() {
+        let args = field_args("a\nb\u{1b}c");
+        assert_eq!(value_of(&args, "--prompt"), "field> ");
+        assert_eq!(value_of(&args, "--header"), "a\\u000ab\\u001bc");
+        assert!(!args.iter().any(|arg| arg == "--expect"));
     }
 }

@@ -18,6 +18,11 @@ fn line(index: usize, text: &str) -> String {
     format!("{index}{DELIMITER}{}", escape_one_line(text, usize::MAX))
 }
 
+/// The title `entry` is shown under: `list` leaves out a protected one.
+pub(super) fn title_of(entry: &WireEntry) -> &str {
+    entry.title.as_deref().unwrap_or("(no title)")
+}
+
 /// One line per entry, in the order given: its title, username, database and
 /// group.
 pub(super) fn entry_lines(entries: &[WireEntry]) -> Vec<String> {
@@ -25,7 +30,7 @@ pub(super) fn entry_lines(entries: &[WireEntry]) -> Vec<String> {
         .iter()
         .enumerate()
         .map(|(index, entry)| {
-            let title = entry.title.as_deref().unwrap_or("(no title)");
+            let title = title_of(entry);
             let username = entry.username.as_deref().unwrap_or("");
             line(
                 index,
