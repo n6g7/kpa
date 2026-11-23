@@ -252,11 +252,13 @@ fn without_fzf_the_error_names_it_and_nothing_is_copied() {
     assert!(offered(&fx).is_empty());
 }
 
-/// A requester that can't copy is stopped on `status`: nothing is unlocked,
-/// no prompt is asked and fzf is never started.
+/// A requester that can't copy is stopped on `status`, though there are
+/// entries to pick: fzf is never started and no prompt is asked.
 #[test]
-fn a_requester_that_cannot_copy_is_refused_before_anything_is_unlocked() {
+fn a_requester_that_cannot_copy_is_refused_before_anything_is_listed() {
     let fx = fixture();
+    fx.databases
+        .install_for_test("personal", vec![TestEntry::new("GitHub")]);
     let (_dir, socket) = serve(&fx, false);
     let fzf = FakeFzf::new(&[&choosing("", "x")]);
 
@@ -265,7 +267,7 @@ fn a_requester_that_cannot_copy_is_refused_before_anything_is_unlocked() {
     assert!(matches!(err, PickError::CannotCopy), "{err:?}");
     assert!(err.to_string().contains("no_display"), "{err}");
     assert_eq!(fzf.runs(), 0);
-    assert!(!fx.databases.any_unlocked());
+    assert!(fx.offered.lock().unwrap().is_empty());
     assert!(fx.prompts.shown().is_empty());
 }
 

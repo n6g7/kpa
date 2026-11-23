@@ -90,7 +90,7 @@ fn ask<T: serde::de::DeserializeOwned>(
 /// `run_pick` with fzf given: the sentence for what was copied.
 fn pick_with(socket_path: &Path, fzf: &OsStr, query: &[String]) -> Result<String, PickError> {
     let status: StatusResponse = ask(socket_path, &Request::new(Op::Status))?;
-    // Before anything is unlocked or fzf is up: a pick that can't copy is
+    // Before anything is listed or fzf is up: a pick that can't copy is
     // wasted.
     if !status.can_copy {
         return Err(PickError::CannotCopy);

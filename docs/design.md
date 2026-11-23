@@ -348,13 +348,13 @@ else's clipboard. A lock of the unlock the offer came from ends it earlier.
 
 `kpa pick [QUERY...]` picks an entry in a terminal and copies one of its
 fields. It is a client subcommand of the `control` front end
-(`src/frontends/control/client/`) and adds no op: it asks `status`, `unlock`,
-`list` and `copy`. `QUERY` is fzf's initial query.
+(`src/frontends/control/client/`) and adds no op: it asks `status`, `list`
+and `copy`. `QUERY` is fzf's initial query.
 
 1. It reads `status`. If a `copy` from this requester couldn't land (its
    `can_copy` is false: [`protocol.md`](./protocol.md) § Responses,
    [`headless.md`](./headless.md) § 5), it stops with `no_display` before it
-   unlocks anything or opens fzf, since a pick that can't copy is wasted. The
+   lists anything or opens fzf, since a pick that can't copy is wasted. The
    field is advisory: `copy` decides again, and a daemon that doesn't report
    it is taken to allow the copy.
 2. If every database is locked, it fails with an error that tells the user to

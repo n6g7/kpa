@@ -168,7 +168,7 @@ check `copy` runs, asked of the same requester and display session, and so is
 the one field of `status` that differs by requester. It is advisory: it says
 nothing of the database being unlocked or of the entry's field, and `copy`
 decides again when it runs, so a display session that locks in between still
-fails the copy. `kpa pick` reads it to stop before it unlocks anything
+fails the copy. `kpa pick` reads it to stop before it lists anything
 ([`design.md`](./design.md) § The picker).
 
 ### Errors
