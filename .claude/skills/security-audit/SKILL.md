@@ -51,6 +51,13 @@ clause at a time.
     `tests/ssh_forwarding.rs` does all of that for forwarded use.
   - The live clipboard tests take the user's real clipboard: run them only
     if the user agreed to it.
+  - `kpa pick` runs the `fzf` on `PATH` under the user's own `fzf` options,
+    which can name a history file and bind keys to programs, and ends in a
+    `copy`. Run it with `FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE` set
+    by you, on a terminal of your own (a pty), against the in-process
+    daemon and its fake clipboard, as
+    `src/frontends/control/client/pick/tests.rs` does. Where the test
+    isn't about the real `fzf`, put a script of yours first on `PATH`.
 - **Leave no processes behind.** Start every daemon under `timeout`, and
   record its PID under your work directory. Kill everything you started,
   including anything inside user namespaces you created, before you
@@ -266,6 +273,24 @@ the head of §6.
    recognizable strings, then search the log for them. G-4 names the few
    things a line may carry. A signature's line names its hosts, which are
    not assets.
+8. **`kpa pick`** (G-4, T-5, T-24;
+   `src/frontends/control/client/pick/`). It runs `fzf` twice when the
+   user asks for a field by name: record both runs. With a recording
+   `fzf` and under `strace -f -e trace=execve,openat,creat`, look at what
+   each `fzf` gets on its argv, in its environment and on its stdin, and
+   at every file the run creates: nothing from a vault on a command line,
+   no file from kpa. Then with the real `fzf`, set a `--history` file and
+   a `--preview` that leaves a mark, through `FZF_DEFAULT_OPTS` and
+   through `FZF_DEFAULT_OPTS_FILE`: the history stays empty and the
+   preview never runs. Read the line it prints and its errors for
+   anything beyond the entry's title and database.
+9. **Where a `copy` lands** (G-3). With the in-process daemon, place the
+   requester on and outside the desktop, against a display session that
+   is absent, locked, unlocked and inactive. `copy` offers only on the
+   desktop of an active, unlocked session, and fails with `no_display`
+   before the clipboard is touched anywhere else. `status`'s `can_copy`
+   says the same for the requester that asked. Change the display session
+   after reading it: `copy` follows the session, not the hint.
 
 ### W3: File input and vault integrity
 
@@ -349,12 +374,19 @@ the head of §6.
   sequences, BEL, `\r`, `\n`, NUL, bidi overrides, invalid surrogates, a
   JSON-looking string, and 1 MiB titles. Run them through every place
   entry content is shown: `list` and the CLI's actual terminal output,
+  the lines and the header `kpa pick` gives `fzf` and the line it prints,
   `kpa ssh keys`, `kpa ssh pending` and `kpa ssh grants`, an SSH identity
   comment (`ssh-add -l`), a prompt's message and its data (a scripted
   prompt that records `KPA_PROMPT_MESSAGE` and `KPA_PROMPT_DATA`), and the
   log. Raw control bytes reaching a terminal or a prompt break G-10. Check
   whether framing can be broken and whether `copy` addressing can be
   confused by duplicate titles or UUIDs across two databases.
+- **What `kpa pick` copies** (T-13). The entry and field are those of the
+  line the user chose. Try titles, usernames and field names that hold a
+  tab, a newline, an index of their own or a whole look-alike line, two
+  entries that show the same, and an `fzf` that answers with a line it
+  wasn't given, an index out of range, or a key `pick` didn't ask for.
+  T-13's residual says what a title may still imitate.
 - **Attachments as keys** (T-13). An attachment that starts like an
   OpenSSH private key is parsed when a database that serves keys unlocks,
   and on `ssh_keys`. Feed the scan truncated, oversized and malformed
