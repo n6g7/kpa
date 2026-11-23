@@ -15,12 +15,11 @@ use std::io;
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
 
-use serde::Deserialize;
-
 use self::keys::Action;
 use super::{ClientError, parse_response, report_client_error, send_request};
 use crate::frontends::control::proto::{
-    CopyRequest, DatabaseStatus, Field, ListRequest, Op, Request, WireEntry,
+    CopyRequest, CopyResponse, Field, ListRequest, ListResponse, Op, Request, StatusResponse,
+    WireEntry,
 };
 use crate::output::{print_escaped, report_error};
 
@@ -79,26 +78,6 @@ enum PickError {
     Cancelled,
 }
 
-/// What `status` answers that `pick` reads. `can_copy` is absent from a daemon
-/// that predates it, which is not a refusal: it is advisory, and `copy`
-/// decides.
-#[derive(Deserialize)]
-struct Status {
-    databases: Vec<DatabaseStatus>,
-    can_copy: Option<bool>,
-}
-
-#[derive(Deserialize)]
-struct Listed {
-    entries: Vec<WireEntry>,
-}
-
-#[derive(Deserialize)]
-struct Copied {
-    copied: String,
-    expires_in: u64,
-}
-
 /// Sends `request` and decodes the answer.
 fn ask<T: serde::de::DeserializeOwned>(
     socket_path: &Path,
@@ -110,10 +89,10 @@ fn ask<T: serde::de::DeserializeOwned>(
 
 /// `run_pick` with fzf given: the sentence for what was copied.
 fn pick_with(socket_path: &Path, fzf: &OsStr, query: &[String]) -> Result<String, PickError> {
-    let status: Status = ask(socket_path, &Request::new(Op::Status))?;
+    let status: StatusResponse = ask(socket_path, &Request::new(Op::Status))?;
     // Before anything is unlocked or fzf is up: a pick that can't copy is
     // wasted.
-    if status.can_copy == Some(false) {
+    if !status.can_copy {
         return Err(PickError::CannotCopy);
     }
     if status.databases.is_empty() {
@@ -130,11 +109,10 @@ fn pick_with(socket_path: &Path, fzf: &OsStr, query: &[String]) -> Result<String
         return Err(PickError::AllLocked(locked[0].to_string()));
     }
 
-    let listed: Listed = ask(
+    let ListResponse { entries } = ask(
         socket_path,
         &Request::new(Op::List(ListRequest { db: None })),
     )?;
-    let entries = listed.entries;
     if entries.is_empty() {
         return Err(PickError::NoEntries);
     }
@@ -160,7 +138,7 @@ fn pick_with(socket_path: &Path, fzf: &OsStr, query: &[String]) -> Result<String
         uuid: entry.uuid,
         field,
     }));
-    let copied: Copied = ask(socket_path, &request)?;
+    let copied: CopyResponse = ask(socket_path, &request)?;
     Ok(format!(
         "copied {} of {:?} from {:?}; the clipboard clears in {}s",
         copied.copied,
