@@ -266,7 +266,7 @@ and `@revoked` lines count from every file, so a key revoked in one file is
 revoked. A file that is missing or can't be read is skipped.
 
 A name is untrusted text, even a principal a trusted CA signed: it is
-escaped as the other texts of a prompt are, and cut to 56 bytes.
+escaped as the other texts of a prompt are, and cut to 56 bytes (T-25).
 
 Each connection is classified as one of:
 
@@ -555,8 +555,8 @@ whole, as `forwarding_chain` (`design.md`, "Configuration and logging"). The
 hosts after the first are as the first reports them: a remote `ssh` there
 binds each further hop over the same connection, and kpa verifies each
 signature, but the forwarding host decides what it relays, so the chain is
-what that host says about the rest of the path. The approval, the log line
-and the tables know the forwarding host only.
+what that host says about the rest of the path (T-25). The approval, the log
+line and the tables know the forwarding host only.
 
 Approvals live in memory only and are dropped on lock. A forwarded
 approval is remembered under (key, forwarding session identifier,

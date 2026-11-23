@@ -22,19 +22,23 @@ files decrypted in memory. It has four front ends:
 
 | Front end | What it carries |
 | --- | --- |
-| Control socket | One JSON request per connection, from the CLI (`kpa <subcommand>`) or anything else speaking the protocol: `status`, `unlock`, `lock`, an entry index (`list`), one field of one entry to the clipboard (`copy`), the SSH keys a database holds (`ssh_keys`), and the signatures waiting for an approval (`ssh_pending`, `ssh_approve`). A request can pass a terminal along with it, for the daemon to ask for the master password on, instead of prompting on screen |
+| Control socket | One JSON request per connection, from the CLI (`kpa <subcommand>`) or anything else speaking the protocol: `status`, `unlock`, `lock`, an entry index (`list`), one field of one entry to the clipboard (`copy`), the SSH keys a database holds (`ssh_keys`), the signatures waiting for an approval (`ssh_pending`, `ssh_approve`), and the approvals in force (`ssh_grants`). A request can pass a terminal along with it, for the daemon to ask for the master password on, instead of prompting on screen |
 | SSH agent socket | The SSH agent protocol, from `ssh`, `git` and whatever else is pointed at it: list the SSH keys stored in databases that opt in, sign with them, bind a connection to an SSH session. It exists only while a database opts in. A remote host reaches it when the user forwards the agent |
 | Tray | A status icon on the session bus: lock state, and a menu to lock and unlock |
 | Lock triggers | logind on the system bus (screen lock, suspend), an idle timer per database, and a vault file that changed on disk |
 
 The daemon asks the user two things: the master password, on screen through
 a configured prompt program or on the terminal a request passed, and whether
-a signature may be made, on screen through a second program.
+a signature may be made, on screen through a second program. A prompt
+program is handed the question as a line of text, and the pieces it is made
+of as data.
 
 There is no operation that returns a secret to the caller (a signature is
 not the key), and none that writes a database. Besides its two sockets, the
 one file kpa creates is a cache of the SSH keys' public halves, so they are
-listed while their database is locked.
+listed while their database is locked. Besides its config, the databases
+and their keyfiles, the files it reads are the `known_hosts` files config
+lists, to show the host a signature is for by its name.
 
 ```mermaid
 graph LR
@@ -42,7 +46,8 @@ graph LR
     ssh["ssh, git"] -->|"TB-8 agent socket"| serve
     remote["forwarded host,<br/>SSH server"] -.->|"through the user's ssh"| ssh
     file[".kdbx / keyfile"] -->|"TB-2 read once per unlock"| serve
-    serve <-->|"TB-5 message in,<br/>answer out"| prompt["prompt programs"]
+    hosts["known_hosts"] -->|"host names"| serve
+    serve <-->|"TB-5 message and data in,<br/>answer out"| prompt["prompt programs"]
     serve -->|"TB-4 data-control"| clip["clipboard"]
     serve <-->|"TB-6 D-Bus"| bus["tray host, logind,<br/>service manager"]
     serve -.->|"TB-7 must not cross"| disk["disk: swap, cores, logs"]
@@ -71,7 +76,9 @@ The keyfile is plaintext at rest: its protection is the filesystem's
 Public keys are not assets. They are public by design, which is what lets
 the key cache hold them. Lock state, entry counts and entry UUIDs are not
 assets either: the tray shows the first two, and the log names an entry by
-its UUID.
+its UUID. Nor are the hosts a key is used for: a host key is public, and
+the name shown for it is one a `known_hosts` file gives in the clear.
+Prompts, listings and the log name them.
 
 ## 3. Actors
 
@@ -87,8 +94,8 @@ its UUID.
 | ACT-8  | Malicious code running unsandboxed as the user, persistently: it can wait for an unlock, log keystrokes, replace binaries | **No** — NG-1 |
 | ACT-9  | root, the kernel, firmware, hardware                                                                                  | **No** — NG-2 |
 | ACT-10 | Short-lived malicious code running unsandboxed as the user: a package install script, a one-off exploited process. It runs once, briefly, and doesn't persist | Partly — T-18 |
-| ACT-11 | A host the user forwards the agent to: its root, or anything there that can reach the forwarded socket | Yes, for keys allowed on forwarded connections |
-| ACT-12 | An SSH server the user's `ssh` connects to, from this machine or from a forwarded host. It chooses the host key, session identifier and signature that reach kpa in a session-bind, and which of the offered keys it asks a signature from | Yes |
+| ACT-11 | A host the user forwards the agent to: its root, or anything there that can reach the forwarded socket. It sends what it likes on the forwarded connection, session-binds for further hosts included | Yes, for keys allowed on forwarded connections |
+| ACT-12 | An SSH server the user's `ssh` connects to, from this machine or from a forwarded host. It chooses the host key or host certificate, the session identifier and the signature that reach kpa in a session-bind, and which of the offered keys it asks a signature from | Yes |
 
 ## 4. Trust boundaries
 
@@ -96,12 +103,12 @@ its UUID.
 | ---- | ---------------------------------------------------------------------------------------------- | -------------- |
 | TB-1 | The control socket under `$XDG_RUNTIME_DIR`: uid separation via filesystem permissions. It accepts one inbound file descriptor with a request, a terminal, which the daemon writes a prompt to and reads A-1 from | Request bytes and the descriptor (ACT-1, ACT-6 must not reach it; ACT-5 clients may be buggy, and a same-uid client can pass any terminal it can open); for a client, whoever answers at the path (ACT-1 must not) |
 | TB-2 | Reading `.kdbx` and keyfile: header and KDF parameters before authentication, payload after     | File bytes (ACT-3) |
-| TB-3 | Decrypted entry content flowing out: to control clients and what they print, to agent clients as identity comments, into prompt messages, into the log | Entry content (ACT-4) |
+| TB-3 | Decrypted entry content flowing out: to control clients and what they print, to agent clients as identity comments, into prompt messages and their data, into the log | Entry content (ACT-4) |
 | TB-4 | The clipboard (Wayland data-control): visible to every client of the compositor                | Readers (ACT-5) |
-| TB-5 | The prompt subprocesses: each is handed a message; the unlock prompt's stdout carries the password, the confirm prompt's an `Allow` or a `Deny` | The user's view of a prompt: anything that can draw on screen (ACT-6) can imitate it (NG-8). The programs themselves are trusted (ASM-3) |
+| TB-5 | The prompt subprocesses: each is handed a message and the data behind it, in its environment; the unlock prompt's stdout carries the password, the confirm prompt's an `Allow` or a `Deny` | The user's view of a prompt: anything that can draw on screen (ACT-6) can imitate it (NG-8). The programs themselves are trusted (ASM-3) |
 | TB-6 | D-Bus: session bus (the tray menu, the service manager's environment naming the compositor), system bus (logind `Lock`, `LockedHint`, `PrepareForSleep`) | Callers and signal senders (ACT-6) |
 | TB-7 | Process memory → anything persistent: files, logs (including kpa's own operation log, which a supervisor may persist), stderr, swap, core dumps, child argv/env | Everything persistent (ACT-5, ACT-7) |
-| TB-8 | The agent socket under `$XDG_RUNTIME_DIR/kpa/`, bound and checked like TB-1. Same-uid clients reach it directly; remote hosts reach it through a forwarding channel the user opened | Request bytes, session-bind contents, and the data to be signed (ACT-5, ACT-6, ACT-10, ACT-11; inside a session-bind, ACT-12) |
+| TB-8 | The agent socket under `$XDG_RUNTIME_DIR/kpa/`, bound and checked like TB-1. Same-uid clients reach it directly; remote hosts reach it through a forwarding channel the user opened | Request bytes, session-bind contents (a host key or host certificate, a session identifier, a signature), and the data to be signed (ACT-5, ACT-6, ACT-10, ACT-11; inside a session-bind, ACT-12) |
 
 ## 5. Assumptions
 
@@ -114,13 +121,16 @@ kpa (see §9).
   `0700`, and on a non-persistent filesystem.
 - **ASM-3** — The config file, the prompt programs it names (`prompt`, or
   the built-in default, and `ssh_agent.confirm_prompt`), every `$PATH`
-  directory searched to find them, the paths the config points to,
-  `~/.ssh/known_hosts` and kpa's cache directory are chosen by the user and
-  writable only by them. The prompt programs are trusted: the unlock prompt
-  with the master password, which it doesn't store or send, and the confirm
-  prompt to report the answer the user gave. Where their output channels
-  lead is kpa's responsibility, not theirs (T-4). What they do with the
-  message kpa hands them is theirs (T-24).
+  directory searched to find them, the paths the config points to, the
+  `known_hosts` files it lists (by default the user's and the system's) and
+  kpa's cache directory are chosen by the user and writable only by them,
+  or by root. The prompt programs are trusted: the unlock prompt with the
+  master password, which it doesn't store or send, and the confirm prompt
+  to report the answer the user gave. Where their output channels lead is
+  kpa's responsibility, not theirs (T-4). What they do with the message and
+  the data kpa hands them is theirs (T-24). kpa trusts a `known_hosts` file
+  as `ssh` does: an entry to name its key, and a certificate authority to
+  name hosts under the patterns of its line.
 - **ASM-4** — The compositor is trusted. Clipboard contents are visible to
   the session by design; kpa can only tag and expire them. The compositor
   is the one named by `WAYLAND_DISPLAY` in the service manager's
@@ -184,7 +194,7 @@ for a channel and G-4 for anything persistent:
 | A-1 | The daemon and nothing else, for one unlock: the password from the user's own typing, the keyfile from its configured path |
 | A-2 field values other than a TOTP seed, and TOTP codes | The clipboard offer, after a `copy` naming that entry and field |
 | A-2 TOTP seeds, attachments, SSH private keys, old versions of entries | Nothing outside the process |
-| A-3 | The answers to `list`, `ssh_keys` and `ssh_pending`, and what the CLI prints of them; an SSH key's name, in identity comments and prompt messages; a copied entry's title, in the log |
+| A-3 | The answers to `list`, `ssh_keys`, `ssh_pending` and `ssh_grants`, and what the CLI prints of them; an SSH key's name, in identity comments and in a prompt's message and data; a copied entry's title, in the log |
 | A-6 | Signatures on the agent socket, under G-13 and G-14 |
 
 - **G-1 Read-only.** kpa never writes, creates, renames, truncates, or locks
@@ -208,9 +218,9 @@ for a channel and G-4 for anything persistent:
     sees no more than the answer. The daemon holds A-1 in a zeroizing
     buffer for that one unlock.
   - A-2 is never in a response on either socket, stdout, stderr, a log, an
-    error string, an identity comment, a prompt message, the tray, a
-    child's argv or environment — only in the clipboard offer, after a
-    `copy` naming that exact field.
+    error string, an identity comment, a prompt's message or data, the
+    tray, a child's argv or environment — only in the clipboard offer,
+    after a `copy` naming that exact field.
   - `copy` itself offers only for a requester on the desktop, while the
     display session is active and unlocked (`docs/headless.md` § 5);
     anything else fails with `no_display` before the clipboard is touched.
@@ -244,7 +254,9 @@ for a channel and G-4 for anything persistent:
     vault it carries an entry's UUID and, for a `copy`, the entry's
     unprotected title; of an SSH key, its fingerprint and the name config
     gives it. Nothing else from a vault is logged, at any level
-    (`docs/design.md` § Secrets).
+    (`docs/design.md` § Secrets). A signature's line also says what it was
+    for and names the hosts its connection is bound to, which are not
+    assets (§ 2).
   - The key cache holds public keys under config database names, none of
     A-1–A-3: no title, no comment, no attachment name. It is the one file
     kpa creates besides its sockets, mode `0600`.
@@ -261,8 +273,9 @@ for a channel and G-4 for anything persistent:
     successful `copy` from it, a successful local signature with one of
     its keys, and the unlock that installed it. Each database has its own
     idle timer, so using one does not keep another unlocked. `status`,
-    `lock`, `ssh_pending`, `ssh_approve`, listing identities, a forwarded
-    signature, and refused or malformed requests are not activity.
+    `lock`, `ssh_pending`, `ssh_approve`, `ssh_grants`, listing identities,
+    a forwarded signature, and refused or malformed requests are not
+    activity.
   - Locked means kpa has dropped that database and serves nothing from it
     but its public keys, which the agent lists from the key cache.
   - A lock that races an unlock wins.
@@ -299,8 +312,9 @@ for a channel and G-4 for anything persistent:
   terminal output, an identity comment or a log line, reshape the question
   a prompt asks, or change which entry or field a `copy` resolves to. They
   decide which SSH keys exist and what they are called, never their policy
-  (G-13). The same holds for the text a request carries: a database name,
-  a login's user, a signature's namespace, a command name.
+  (G-13). The same holds for the text a request carries (a database name,
+  a login's user, a signature's namespace, a command name) and for the
+  name a host goes by, from a `known_hosts` file or a host certificate.
 - **G-11 Robust sockets.** Malformed, oversized, slow, or flooding clients,
   on the control socket or the agent socket, are refused without crashing
   the daemon or starving other clients, and forwarded connections cannot
@@ -330,20 +344,28 @@ for a channel and G-4 for anything persistent:
     `ssh_approve` on the control socket for a request kept pending. It
     covers one key for one destination — the host key the connection is
     bound to, or unbound use — until lock (`confirm = "once"`) or for one
-    signature (`"always"`).
+    signature (`"always"`). A host that presents a certificate is the key
+    the certificate certifies. The name a host is shown by is no part of
+    an approval.
   - A login signed on a bound connection is for the session that
     connection is bound to.
-- **G-14 Forwarded signatures are confined.** A connection whose first
-  session-bind claims forwarding is forwarded, whether or not that bind
-  verifies. A key with `forwarded = false` is never listed or used over a
-  forwarded connection. The others are listed, by public key and name, and
-  sign SSH logins only, for a session the destination has bound, after an
-  approval for that (key, forwarding session, forwarding host,
-  destination), which `confirm = "never"` does not waive. Only the control
-  socket can approve, and forwarding never reaches it. Nothing on a
-  forwarded connection unlocks, locks, or counts as activity (G-5).
-  Forwarded signing is not built yet: kpa refuses every signature on a
-  forwarded connection (`docs/ssh-agent.md` § 1).
+- **G-14 Forwarded signatures are confined.**
+  - A connection whose first session-bind claims forwarding is forwarded,
+    whether or not that bind verifies, and no later bind makes it local.
+  - A key with `forwarded = false` is never listed or used over a
+    forwarded connection. The others are listed, by public key and name.
+  - They sign SSH logins only, for a session the destination has bound,
+    after an approval for that (key, forwarding session, forwarding host,
+    destination), which `confirm = "never"` does not waive. The approval
+    lasts until lock, or for one signature under `confirm = "always"`. No
+    other forwarding session can use it, and a local approval never covers
+    forwarded use.
+  - Nothing sent on the agent socket approves. An approval is the user's
+    answer on this machine's screen, or an `ssh_approve` on the control
+    socket, which forwarding never reaches.
+  - A forwarded request gets a locked database unlocked only by the user
+    answering the unlock prompt (G-13). Nothing on a forwarded connection
+    locks a database or counts as activity (G-5).
 - **G-15 The agent never accepts a key or a secret.** Add, remove, `LOCK`
   and `UNLOCK` all fail, and so does every extension but session-bind and
   `query`. No password crosses the agent socket.
@@ -388,18 +410,19 @@ keyfile; the key cache written anywhere but kpa's own cache directory.
 **T-4 · Secret leaks through an output channel** (I) — ACT-5 · TB-1, TB-3, TB-5, TB-7, TB-8 · A-1, A-2 → G-3  
 Response: no `get` op; `list` is an index with protected fields and Notes
 omitted; the agent returns signatures, never a key; errors carry codes,
-not vault content; a prompt's message is made of config, entry metadata
-and what the request says; the prompt gets its own stderr, never the
-daemon's; requests are never logged, and decode errors carry no request
-content. No request or response carries the master password, and the CLI
-never holds it: the daemon reads it from the terminal with echo off, into
-a zeroizing buffer capped at `MAX_ANSWER_LEN` that never grows. In scope:
-a protected field, a TOTP seed or key material in any response, identity
-comment, error message, `Debug`/`Display` output, panic message, log line,
-prompt message, tray tooltip, or a child process's argv/env; the prompt's
-stdout, stderr, or exit status reaching a response, an error string, or
-kpa's own stdout/stderr/log; the master password echoed to the terminal it
-is typed on, or reaching a client in any form; a terminal a request passed
+not vault content; a prompt's message and data are made of config, entry
+metadata, what the request says and the names of its hosts; the prompt
+gets its own stderr, never the daemon's; requests are never logged, and
+decode errors carry no request content. No request or response carries
+the master password, and the CLI never holds it: the daemon reads it from
+the terminal with echo off, into a zeroizing buffer capped at
+`MAX_ANSWER_LEN` that never grows. In scope: a protected field, a TOTP
+seed or key material in any response, identity comment, error message,
+`Debug`/`Display` output, panic message, log line, prompt message or
+data, tray tooltip, or a child process's argv/env; the prompt's stdout,
+stderr, or exit status reaching a response, an error string, or kpa's own
+stdout/stderr/log; the master password echoed to the terminal it is typed
+on, or reaching a client in any form; a terminal a request passed
 reaching a child process.
 
 **T-5 · Secret persisted to disk** (I) — ACT-5, ACT-7 · TB-7 · A-1, A-2 → G-4  
@@ -530,13 +553,14 @@ a built-in case-insensitively always mean the built-in, by type rather than
 by convention, so a custom key crafted to spell `password` or `title`
 cannot stand in for the real field or intercept a `copy` meant for it. A
 title that names an SSH key is escaped the same way wherever it is shown
-(an identity comment, a prompt's message, a listing), with tab and newline
-escaped too and a length cap of its own (T-25). An attachment is entry
-content too: one that starts like an OpenSSH private key is parsed, by
-`ssh-key`, when a database that serves SSH keys unlocks and on `ssh_keys`;
-other formats, passphrase-protected keys, old versions of entries and the
-recycle bin are left alone. Per-entry agent settings a KeePass client
-stores in the vault are ignored: policy is config's (G-13). In scope:
+(an identity comment, a prompt's message and data, a listing), with tab
+and newline escaped too and a length cap of its own (T-25). An attachment
+is entry content too: one that starts like an OpenSSH private key is
+parsed, by `ssh-key`, when a database that serves SSH keys unlocks and on
+`ssh_keys`; other formats, passphrase-protected keys, old versions of
+entries and the recycle bin are left alone. Per-entry agent settings a
+KeePass client stores in the vault are ignored: policy is config's
+(G-13). In scope:
 terminal escape or control sequences reaching the CLI's terminal output,
 an identity comment or a prompt unescaped; a field breaking framing; a
 title or UUID collision across databases that makes a `copy` resolve to a
@@ -573,8 +597,9 @@ G-12). It reads no entry content.
 **T-16 · No trace of reads** (R) — ACT-10 · TB-1, TB-8 · A-2, A-6 → —  
 Unaddressed: a `copy`, or a signature that an earlier approval covers,
 produces no user-visible notification, so an unexpected one goes
-unnoticed. The operation log records both after the fact, which is a
-trail, not a notification. Not a goal; read notifications are in
+unnoticed. The operation log records both after the fact, and
+`kpa ssh grants` says how often each approval was used and when last:
+trails, not notifications. Not a goal; read notifications are in
 `TODO.md`. Findings here are hardening.
 
 **T-17 · Substituted or rolled-back file** (S, T) — ACT-3 · TB-2 · A-2, A-3, A-6 → —  
@@ -636,37 +661,54 @@ to a passed descriptor that isn't a terminal; a terminal left with its
 echo off.
 
 **T-20 · Forwarded-agent abuse** (S, E) — ACT-11 · TB-8 · A-6, A-3 → G-14  
-Response: logins only; an approval scoped to the forwarding session and
-destination; `forwarded = false` per key; no approval path over the agent
-socket. All of it rests on the user's `ssh` marking a connection it opens
-for a forwarded channel before the remote side can send on it (ASM-8); a
-first bind that claims forwarding marks the connection even if it fails
-to verify. In scope: signing over a forwarded connection without a
-matching approval; forwarded signing of non-login data, or of a login for
-a session other than the bound one; a session-bind accepted without
-verification, or a later one that makes a forwarded connection local; an
-approval reused across forwarding sessions, forwarding hosts or
-destinations; a denied key listed or used over a forwarded connection; a
+Response: logins only; an approval scoped to the forwarding session, the
+forwarding host and the destination, asked on this machine's screen;
+`forwarded = false` per key; no approval path over the agent socket. All
+of it rests on the user's `ssh` marking a connection it opens for a
+forwarded channel before the remote side can send on it (ASM-8); a first
+bind that claims forwarding marks the connection even if it fails to
+verify. The forwarding session is that first bind's session identifier,
+so a remote host cannot put its requests under another session's
+approval. In scope: signing over a forwarded connection without a
+matching approval; forwarded signing of non-login data, of a login for a
+session other than the bound one, or with no destination bound; a
+session-bind accepted without verification, or a later one that makes a
+forwarded connection local; an approval reused across forwarding
+sessions, forwarding hosts or destinations, or a local approval covering
+forwarded use; a denied key listed or used over a forwarded connection; a
 forwarded signature resetting the idle timer; a forwarded host reaching
 the control socket, submitting a password, or learning whether one is
 right. Residual: a forwarded host sees the public keys and names of the
 keys allowed on forwarded connections, and a name is its entry's title
 unless config gives one. During an approved forwarding session, the remote
 host can use the key for that destination, which is inherent to
-forwarding. Forwarding that bypasses the OpenSSH client (an `ssh` older
-than 8.9, a tool that relays `SSH_AUTH_SOCK` itself) looks local (NG-9).
+forwarding. Nothing tells kpa that a forwarding session has ended, so its
+approval stays until the database locks, of use to that session's
+connections only; `kpa ssh grants` lists it and when it last covered a
+signature, and locking the database is the one way to take it back. A
+forwarded signature is not activity, so the idle timer runs on under it.
+Forwarding that bypasses the OpenSSH client (an `ssh` older than 8.9, a
+tool that relays `SSH_AUTH_SOCK` itself) looks local (NG-9).
 
 **T-21 · Malformed agent traffic** (D, T) — ACT-5, ACT-11, ACT-12 · TB-8 · — → G-11  
 Response: frames over 256 KiB close the connection, the rest of a frame
 must arrive within 5 s, a connection cap of its own with a smaller one
-for forwarded connections, at most 16 bindings per connection, and
-fuzzing like `decode_request`. Parsing and signature verification are
-`ssh-key`'s (ASM-5). A session-bind carries what an SSH server chose
-(ACT-12): verifying it runs public-key code on a key and a signature that
-server picked. In scope: frames, lengths, key blobs, session-bind contents
-and the data to be signed that crash, hang or grow memory without bound;
-verification whose cost the peer's key controls; forwarded connections
-taking every slot; one connection starving the others.
+for forwarded connections, at most 16 bindings per connection, at most
+4 KiB of a host certificate kept, and fuzzing like `decode_request`. What
+requests leave behind is bounded too: 16 pending requests, and 64
+forwarded approvals per unlock, the oldest going first. Parsing and
+signature verification are `ssh-key`'s (ASM-5). A session-bind carries
+what an SSH server chose (ACT-12), or on a forwarded connection whatever
+the forwarding host sends (ACT-11): verifying it runs public-key code on
+a key and a signature that peer picked, and naming a host that presented
+a certificate verifies the CA's signature on it. In scope: frames,
+lengths, key blobs, certificates, session-bind contents and the data to
+be signed that crash, hang or grow memory without bound; verification
+whose cost the peer's key controls; bindings, approvals or pending
+requests a peer can pile up without bound; forwarded connections taking
+every slot; one connection starving the others; the `known_hosts` read a
+signature on a bound connection causes holding up other clients or a
+lock.
 
 **T-22 · Key material in memory** (I) — ACT-7, ACT-11, ACT-12 · TB-7, TB-8 · A-2 → G-6, G-3  
 Response: private keys are cached only while their database is unlocked,
@@ -679,53 +721,81 @@ signatures, failures or the time either takes.
 
 **T-23 · Prompts on demand** (S, D) — ACT-6, ACT-10, ACT-11, ACT-12 · TB-5, TB-8 · A-1, A-6 → G-12, G-13  
 Anything that can reach the agent can raise an unlock or approval prompt,
-and a server that accepts every key it is offered makes `ssh` ask for a
-signature from each. Response: the prompt names its reason (T-25), and
-answering the unlock prompt approves nothing; backoff after a cancel; one
-prompt at a time, and one signature at a time asking about a database,
-the rest finding what it got; timeouts; no prompt while the screen is
-known to be locked or for a requester outside the desktop. In scope: a
-prompt that approves more than it says; a prompt raised during backoff; a
-second prompt on screen; a confirm prompt that approves by failing, being
-killed, timing out or printing anything but `Allow`. Residual: a `Deny`
-starts no backoff, so a requester can ask again at once, and the user is
-asked until they stop it: NG-7 (nuisance). Look-alike prompts and answers
-the user didn't give are NG-8's.
+a forwarded host on the desk's screen included, and a server that accepts
+every key it is offered makes `ssh` ask for a signature from each.
+Response: the prompt names its reason (T-25), and answering the unlock
+prompt approves nothing; backoff after a cancel; one prompt at a time,
+and one signature at a time asking about a database, the rest finding
+what it got; timeouts; no prompt while the screen is known to be locked
+or for a requester outside the desktop. In scope: a prompt that approves
+more than it says; a prompt raised during backoff; a second prompt on
+screen; a confirm prompt that approves by failing, being killed, timing
+out or printing anything but `Allow`. Residual: a `Deny` starts no
+backoff, so a requester can ask again at once, and the user is asked
+until they stop it. That is a nuisance: NG-7 for same-uid code, and for a
+forwarded host it ends with the `ssh -A` session the user gave it.
+Look-alike prompts and answers the user didn't give are NG-8's.
 
 **T-24 · Prompt message read by another uid** (I) — ACT-1 · TB-5 · A-3 → G-2  
 A prompt's message names the database and, for the agent's prompts, the
-key, the remote user and the destination. The key's name is its entry's
-title unless config gives it one. Response: kpa hands the message to the
-prompt program in its environment (`KPA_PROMPT_MESSAGE`), which other
-uids cannot read, and never touches its argv. Residual: a prompt program
-that only takes its text as an argument needs a wrapper that copies the
-variable onto a command line (the built-in default `prompt` is one), and
-for as long as such a prompt is up, other uids can read its message in
-the process list (NG-5, ASM-6). A `name` in config keeps the entry's
-title out of it. In scope: kpa itself putting a message, or anything from
-a vault, in a child's argv.
+key, the remote user, the destination and the hosts a forwarded request
+came through. The data handed with it holds the same pieces, with the
+fingerprints of the key and the hosts. The key's name is its entry's
+title unless config gives it one. Response: kpa hands both to the prompt
+program in its environment (`KPA_PROMPT_MESSAGE`, `KPA_PROMPT_DATA`),
+which other uids cannot read, and never touches its argv. Residual: a
+prompt program that only takes its text as an argument needs a wrapper
+that copies it onto a command line (the built-in default `prompt` is
+one), and for as long as such a prompt is up, other uids can read what
+the wrapper copied in the process list (NG-5, ASM-6). A `name` in config
+keeps the entry's title out of it. In scope: kpa itself putting a
+message, its data, or anything from a vault, in a child's argv.
 
 **T-25 · A prompt that misleads** (S) — ACT-4, ACT-10, ACT-11, ACT-12 · TB-3, TB-5, TB-8 · A-6 → G-10, G-13  
-An approval is worth what the confirm prompt says: which key, for what,
-going where. Response: the destination is the host key the connection is
-bound to, which that host proved by signing the session; it is shown as
-the plain host name `~/.ssh/known_hosts` gives that key, else as its
-fingerprint, and never taken from what the request says. The purpose is
-read from the data to be signed: a login and its user, an `SSHSIG`
-namespace, or neither. Every piece that isn't kpa's own text is escaped
-and cut to a budget of its own, and the key's name is quoted, so no piece
-can hide the destination or carry on the sentence (T-13). In scope: a
-prompt naming a destination the connection isn't bound to, or one taken
-from a `known_hosts` line that doesn't vouch for that key (revoked, a
-certificate authority, a wildcard or negated pattern); a purpose or user
-other than the one signed; text from a vault or a request that hides,
-displaces or continues the question; a signature made for something other
-than what the prompt asked about. Residual: an unbound connection names
-no destination, and data that is neither a login nor an `SSHSIG` names no
-purpose, so the prompt can only say that much. A host `known_hosts`
-doesn't name is shown by fingerprint. And an approval covers a key and a
-destination, not a purpose, a user or a client: approving one unbound use
-approves every unbound use of that key until lock.
+An approval is worth what the user was shown: which key, for what, going
+where, and for forwarded use through which host. That is the confirm
+prompt's message and data, or, for a request kept pending, what
+`kpa ssh pending` lists. Response:
+- The destination is the host key the connection is bound to, which that
+  host proved by signing the session. The forwarding host is the first
+  bind's, sent by the local `ssh`. Neither is taken from what the request
+  says.
+- A host is shown by a name only where the `known_hosts` files vouch for
+  one (ASM-3): a plain, unhashed entry for its key, or, for a host that
+  presented a certificate, a principal of that certificate, when a CA the
+  files trust for that name signed it and it is a host certificate, valid
+  now, with no critical options. A key the files revoke has no name. Any
+  other host is shown by its fingerprint.
+- The purpose is read from the data to be signed: a login and its user,
+  an `SSHSIG` namespace, or neither.
+- Every piece that isn't kpa's own text, a host's name included, is
+  escaped and cut to a budget of its own, and the key's name is quoted, so
+  no piece can hide the destination or carry on the sentence (T-13). The
+  message and the data are made from the same pieces.
+
+In scope: a prompt or a pending request naming a destination or a
+forwarding host the connection isn't bound to; a name the files don't
+vouch for (a revoked key; a hashed, wildcard or negated pattern; a
+certificate that is expired, isn't a host certificate, wasn't signed by
+its CA, or whose CA is revoked or isn't trusted for that name); a purpose
+or user other than the one signed; text from a vault, a request,
+`known_hosts` or a certificate that hides, displaces or continues the
+question; data that says something the message doesn't; a signature made
+for something other than what the prompt asked about. Residual:
+- An unbound connection names no destination, and data that is neither a
+  login nor an `SSHSIG` names no purpose, so the prompt can only say that
+  much. A host the files don't name in the clear is shown by fingerprint.
+- A name is one the files give the key, not the one the user typed: hosts
+  that share a key share its first name, and a certificate with several
+  principals shows the first one its CA's line matches.
+- On a forwarded connection, the hosts after the forwarding host are as
+  that host reports them. It can leave a hop out, or add any host it can
+  open a session with. The message drops the middle of a long chain,
+  which the data keeps. The approval is for the forwarding host and the
+  destination, not the path between.
+- An approval covers a key and a destination, not a purpose, a user or a
+  client: approving one unbound use approves every unbound use of that
+  key until lock.
 
 ## 8. Non-goals
 

@@ -520,7 +520,7 @@ its stdin), so one program used for both takes an argument to tell them apart.
 
 Both variables are in the program's environment, readable by processes of the
 same user; a wrapper that puts a piece into its own argv makes it visible to
-every user through `/proc/<pid>/cmdline`.
+every user through `/proc/<pid>/cmdline` (threat model T-24).
 
 `serve` writes one line per event to stderr at `error`, `warn`, `info` (the
 default) or `debug`; `log_level` sets it and `serve --log-level` overrides it.

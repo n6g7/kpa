@@ -12,7 +12,7 @@ Per `docs/ssh-agent.md`.
 - [x] Unlock on demand, and `kpa ssh approve` for requests from outside the desktop
 - [x] Forwarding with per-session approvals
 - [ ] Final security audit of all of kpa, the core rewrite included
-- [ ] Threat model: cover the agent's prompt data, host naming through `known_hosts` and certificates, and the forwarding chain
+- [x] Threat model: cover the agent's prompt data, host naming through `known_hosts` and certificates, and the forwarding chain
 - [ ] Move to `ssh-key` 0.7.0 once it is released (still 0.7.0-rc.12). The release doesn't wait for it
 
 ### 0.5.0: Login autofill in browsers
