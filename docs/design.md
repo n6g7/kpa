@@ -58,13 +58,15 @@ its `save_kdbx4` feature, so no code path can modify a database.
 | 14  | **Observers, not events, tell what a lock must clear** | State that must die with a lock belongs to the module that made it, and the core tells it through an `Observer` before the lock call returns. A `kpa lock` is then answered with the clipboard offer already ended; an event on a channel would arrive after. |
 | 15  | **The front end prompts; the core never does** | Where a prompt may appear is per requester, and its text and what its answer means differ per front end. The core hands out the token that ends the question. |
 | 16  | **Threads, not async** | `std::thread`, a core behind one mutex, and `ksni`'s blocking API. Most requests are sub-millisecond and the slow ones wait on a human, so a runtime would buy nothing. |
+| 17  | **`kpa pick` runs the user's `fzf`, found on `PATH`, with no preview pane** | `list` is an index and the matching is the picker's (`protocol.md` § What `list` returns), so kpa borrows one instead of writing a matcher. A package dependency would make every install carry a program only `pick` runs. A preview runs a program per highlighted line, and that program would need entry data passed through its argv or a file. |
 
 ## How it is put together
 
 One long-lived daemon, `kpa serve`, and short-lived clients (every other
 `kpa <subcommand>`, and whatever speaks the socket protocol). "Your launcher"
-is deliberately generic: kpa doesn't ship or assume a particular launcher,
-tray host or keybinding scheme.
+is deliberately generic: kpa doesn't ship or assume a particular launcher or
+tray host. It ships one terminal picker, `kpa pick` (§ The picker), and the
+home-manager module offers an optional shell key binding for it, off by default.
 
 ```mermaid
 graph TD
@@ -341,6 +343,48 @@ anything else fails with `no_display` and the clipboard is never touched.
 something else meanwhile, the compositor already replaced our source and ending
 it does nothing: no content comparison, no race, no risk of wiping someone
 else's clipboard. A lock of the unlock the offer came from ends it earlier.
+
+## The picker: `kpa pick`
+
+*Not built yet.*
+
+`kpa pick [QUERY...]` picks an entry in a terminal and copies one of its
+fields. It is a client subcommand of the `control` front end
+(`src/frontends/control/client/`) and adds no op: it asks `status`, `unlock`,
+`list` and `copy`. `QUERY` is fzf's initial query.
+
+1. It reads `status`. If a `copy` from this requester couldn't land (its
+   `can_copy` is false: [`protocol.md`](./protocol.md) § Responses,
+   [`headless.md`](./headless.md) § 5), it stops with that error before it
+   unlocks anything or opens fzf, since a pick that can't copy is wasted. The
+   field is advisory: `copy` decides again.
+2. If every database is locked, it unlocks each one on the terminal, as `kpa
+   unlock --tty`. If some are unlocked, it lists those and names the locked
+   ones in fzf's header, and unlocks nothing.
+3. It reads `list`, builds one line per entry in memory and pipes the lines to
+   `fzf`. Each line carries a hidden index into that in-memory list, and the
+   answer is read back through the index, never parsed out of the displayed
+   text.
+4. The key fzf exits with names the field to `copy`:
+
+| Key | Copies |
+|---|---|
+| Enter | `password` |
+| Ctrl+U | `username` |
+| Ctrl+L | `url` |
+| Ctrl+T | `totp` |
+| Ctrl+O | a field chosen in a second fzf over the entry's own `fields`, custom ones included |
+
+`fzf` is looked up on `PATH` when `pick` runs. It is not a dependency of the
+package, and there is no setting to point at another binary. Without it `pick`
+fails with an error naming fzf.
+
+**Nothing from a database is written to disk.** The list lives in `pick`'s
+memory and reaches fzf through a pipe. `pick` runs fzf with no `--history` and
+creates no temporary file. Every string it shows is vault text, so each goes
+through kpa's own escaping (`src/output/escape.rs`, the one the other
+subcommands use, [`protocol.md`](./protocol.md) § CLI output) before it
+reaches fzf. There is no preview pane.
 
 ## Secrets
 

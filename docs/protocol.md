@@ -67,7 +67,7 @@ daemon, on screen or on the terminal the request passed.
 
 | Op | What it does | Counts as activity |
 |---|---|---|
-| `status` | every database's lock state and entry count, and the daemon's build version | no |
+| `status` | every database's lock state and entry count, the daemon's build version, and whether a `copy` from this requester would land | no |
 | `unlock` | asks for the password and unlocks one database | the unlock does |
 | `lock` | locks one database, or every database | no |
 | `list` | the index of every unlocked database, or of one | yes, for each database read |
@@ -120,7 +120,8 @@ field is addressed by its bare key.
 
 ```json
 {"ok":true,"v":2,"databases":[{"name":"personal","locked":false,"entries":341},
-                              {"name":"work","locked":true}],"version":"1.2.3"}
+                              {"name":"work","locked":true}],"version":"1.2.3",
+                "can_copy":true}
 
 {"ok":true,"v":2,"entries":[{"db":"personal","uuid":"…","title":"GitHub",
                              "username":"alice","url":"https://github.com",
@@ -159,6 +160,16 @@ whose `name` is there when the daemon found one. `ssh_approve` answers
 `{"ok":true,"v":2}`. `ssh_grants` answers `{"ok":true,"v":2,"grants":[…]}`,
 each grant as `ssh-agent.md` § 6.8 shows it; like `ssh_pending` it has no
 failure, and nothing is logged for it.
+
+`status`'s `can_copy` (not built yet) is `true` when a `copy` from the requester that asked
+would be offered on the clipboard, and `false` when it would fail with
+`no_display` ([`headless.md`](./headless.md) § 5). It is the answer of the
+check `copy` runs, asked of the same requester and display session, and so is
+the one field of `status` that differs by requester. It is advisory: it says
+nothing of the database being unlocked or of the entry's field, and `copy`
+decides again when it runs, so a display session that locks in between still
+fails the copy. `kpa pick` reads it to stop before it unlocks anything
+([`design.md`](./design.md) § The picker).
 
 ### Errors
 

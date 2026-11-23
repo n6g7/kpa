@@ -25,7 +25,8 @@ terminal unlock in § 4. The claims are
 
 "Terminal prompt" means the terminal the request passed. Without one, the
 rows that ask on the terminal answer `no_prompt` too. `status`, `lock` and
-`list` answer the same wherever the requester is.
+`list` answer the same wherever the requester is, except for `status`'s
+`can_copy` (§ 5).
 
 Both operations ask where the user is, from the requester's
 classification. A prompt must appear where someone can answer it, and a
@@ -165,7 +166,10 @@ process can already do (NG-1, NG-7, T-19).
 - the requester is on the desktop (§ 3);
 - the display session is active and its `LockedHint` is false.
 
-Otherwise it fails with `no_display` and the clipboard is left alone. A
+Otherwise it fails with `no_display` and the clipboard is left alone.
+`status` reports the same check, for the requester that asks, as `can_copy`
+(not built yet; [`protocol.md`](./protocol.md) § Responses), so a client such as `kpa pick`
+can tell before it unlocks anything. A
 locker that only sends the `Lock` signal never reports the unlock (ASM-7),
 so kpa can't track its state, and with such a locker only the requester
 decides. The `Lock` signal still locks every database, so nothing is copied
