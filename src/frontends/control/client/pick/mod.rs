@@ -18,7 +18,7 @@ use std::process::{ExitCode, ExitStatus};
 use self::keys::Action;
 use super::{ClientError, parse_response, report_client_error, send_request};
 use crate::frontends::control::proto::{
-    CopyRequest, CopyResponse, Field, ListRequest, ListResponse, Op, Request, StatusResponse,
+    CopyOutcome, CopyRequest, Field, ListRequest, ListResponse, Op, Request, StatusResponse,
     WireEntry,
 };
 use crate::output::{print_escaped, report_error};
@@ -138,7 +138,7 @@ fn pick_with(socket_path: &Path, fzf: &OsStr, query: &[String]) -> Result<String
         uuid: entry.uuid,
         field,
     }));
-    let copied: CopyResponse = ask(socket_path, &request)?;
+    let copied: CopyOutcome = ask(socket_path, &request)?;
     Ok(format!(
         "copied {} of {:?} from {:?}; the clipboard clears in {}s",
         copied.copied,
