@@ -34,9 +34,10 @@ clause at a time.
   that config. Never connect to the default sockets, read the default
   config, or open a real vault. More of the user's setup is within a
   daemon's reach than its sockets:
-  - A spawned `kpa serve` writes its key cache under `$XDG_CACHE_HOME` and
-    reads `$HOME/.ssh/known_hosts`: start it with both variables set into
-    the scratchpad.
+  - A spawned `kpa serve` writes its key cache under `$XDG_CACHE_HOME`, and
+    reads the `known_hosts` files `ssh_agent.known_hosts` lists, by default
+    the user's and the system's: start it with `XDG_CACHE_HOME` set into
+    the scratchpad, and list files of your own in that setting.
   - It also talks to the real logind and session bus: it shows a tray icon
     and holds a sleep inhibitor while something is unlocked. Where the
     test isn't about `kpa serve` itself, build the daemon in-process
@@ -47,6 +48,7 @@ clause at a time.
     agent: give it `SSH_AUTH_SOCK` on the scratch socket, `-F` with a
     config of your own and a `UserKnownHostsFile` in the scratchpad, and
     log in only to an `sshd` you started on localhost.
+    `tests/ssh_forwarding.rs` does all of that for forwarded use.
   - The live clipboard tests take the user's real clipboard: run them only
     if the user agreed to it.
 - **Leave no processes behind.** Start every daemon under `timeout`, and
@@ -66,11 +68,11 @@ clause at a time.
   When the model itself seems wrong, that is a *model gap* finding, not a
   reason to re-rate.
 - **A known gap or an unbuilt design is not a finding.** The model records
-  the gaps it knows of (under G-3), and the docs say at the spot what isn't
-  built yet (forwarded signing, under G-14). Check that the gap still
-  stands and that what the doc says happens instead does happen, give the
-  clause its status, and move on. A gap that has closed, or a "not built
-  yet" that has been built, is a model gap: the doc is out of date.
+  the gaps it knows of (under G-3), and a doc says at the spot when what
+  it describes isn't built yet. Check that the gap still stands and that
+  what the doc says happens instead does happen, give the clause its
+  status, and move on. A gap that has closed, or a "not built yet" that
+  has been built, is a model gap: the doc is out of date.
 
 ## Phase 0: setup (orchestrator, before fanning out)
 
@@ -191,10 +193,16 @@ here before. They are starting points, not the limit of scope: test every
   a frame that stalls after its first byte, a connection that sits idle,
   a client that never reads, more connections than the cap, more forwarded
   ones than theirs, more bindings than a connection may hold, unknown
-  messages and extensions. A session-bind's host key and signature are an
-  SSH server's to choose (ACT-12): send malformed, oversized and
-  mismatched ones, and time the verification. Run the fuzz targets in
-  `fuzz/` for a bounded time (`nix develop .#fuzz`).
+  messages and extensions. A session-bind's host key or host certificate
+  and its signature are an SSH server's to choose (ACT-12), and a
+  forwarding host sends binds of its own (ACT-11): send malformed,
+  oversized and mismatched ones, a certificate larger than the daemon
+  keeps, and time the verification, a certificate's CA signature
+  included. Fill what requests leave behind: pending requests, forwarded
+  approvals, forwarding sessions. Time a signature on a bound connection
+  against a large `known_hosts`, which is read for each, and check that
+  the read holds up neither other clients nor a lock. Run the fuzz
+  targets in `fuzz/` for a bounded time (`nix develop .#fuzz`).
 - T-15 is split: what a process holding only the agent socket gets is
   W7's, and what the tray shows a session-bus peer is W4's. Here, check
   that nothing else reaches either socket.
@@ -248,13 +256,16 @@ the head of §6.
    mode.
 6. **What the prompt children get** (T-24). Look at the environment, fds
    and argv of the unlock prompt and of the confirm prompt. The message is
-   in `KPA_PROMPT_MESSAGE` and in no argv that kpa builds; a wrapper that
-   copies it onto a command line is the residual T-24 accepts, not a
-   finding. A terminal a request passed is not inherited.
+   in `KPA_PROMPT_MESSAGE`, the data behind it in `KPA_PROMPT_DATA`, and
+   neither in an argv that kpa builds; a wrapper that copies one onto a
+   command line is the residual T-24 accepts, not a finding. Check that
+   the data holds nothing of A-2. A terminal a request passed is not
+   inherited.
 7. **The log** (G-4). Run every operation, signatures included, at `debug`
    against a vault whose titles, usernames, URLs and field values are
    recognizable strings, then search the log for them. G-4 names the few
-   things a line may carry.
+   things a line may carry. A signature's line names its hosts, which are
+   not assets.
 
 ### W3: File input and vault integrity
 
@@ -297,8 +308,9 @@ the head of §6.
   is released.
 - **Idle timer.** G-5 names the activity that resets it. Check that
   nothing else does (a failed, malformed or `status` request,
-  `ssh_pending`, `ssh_approve`, listing identities, a refused signature),
-  and that the timer is per database.
+  `ssh_pending`, `ssh_approve`, `ssh_grants`, listing identities, a
+  refused signature, a forwarded one), and that the timer is per
+  database.
 - **D-Bus and logind** (`src/frontends/auto_lock/`). On a private bus with
   a mock logind, as `tests/logind.rs` runs one: signals from a peer that
   doesn't own logind's name, sent straight to kpa's connection; a
@@ -337,19 +349,20 @@ the head of §6.
   sequences, BEL, `\r`, `\n`, NUL, bidi overrides, invalid surrogates, a
   JSON-looking string, and 1 MiB titles. Run them through every place
   entry content is shown: `list` and the CLI's actual terminal output,
-  `kpa ssh keys` and `kpa ssh pending`, an SSH identity comment
-  (`ssh-add -l`), a prompt's message (a scripted prompt that records
-  `KPA_PROMPT_MESSAGE`), and the log. Raw control bytes reaching a
-  terminal or a prompt break G-10. Check whether framing can be broken and
-  whether `copy` addressing can be confused by duplicate titles or UUIDs
-  across two databases.
+  `kpa ssh keys`, `kpa ssh pending` and `kpa ssh grants`, an SSH identity
+  comment (`ssh-add -l`), a prompt's message and its data (a scripted
+  prompt that records `KPA_PROMPT_MESSAGE` and `KPA_PROMPT_DATA`), and the
+  log. Raw control bytes reaching a terminal or a prompt break G-10. Check
+  whether framing can be broken and whether `copy` addressing can be
+  confused by duplicate titles or UUIDs across two databases.
 - **Attachments as keys** (T-13). An attachment that starts like an
   OpenSSH private key is parsed when a database that serves keys unlocks,
   and on `ssh_keys`. Feed the scan truncated, oversized and malformed
   ones, and watch the unlock they run in.
-- **Request text as data.** A database name, a login's user, an `SSHSIG`
-  namespace and the requester's command name are shown too: put the same
-  hostile strings in each.
+- **Request text and host names as data.** A database name, a login's
+  user, an `SSHSIG` namespace and the requester's command name are shown
+  too, and so is the name a host goes by, from a `known_hosts` line or a
+  host certificate's principal: put the same hostile strings in each.
 
 ### W6: Claims and model gaps
 
@@ -396,9 +409,11 @@ is W5's.
 Drive the agent the way `tests/ssh_agent_serve.rs` does, with the real
 OpenSSH tools (`ssh-add -l`, `ssh-keygen -Y sign`, `ssh` to an `sshd` of
 your own on localhost) and with raw frames where a tool can't say what you
-need, such as a session-bind signed by a throwaway host key. A scripted
-confirm prompt that records `KPA_PROMPT_MESSAGE` and answers `Allow`,
-`Deny`, something else or nothing gives every outcome on demand.
+need, such as a session-bind signed by a throwaway host key.
+`tests/ssh_forwarding.rs` forwards the agent with the real `ssh -A`
+through a private `sshd`. A scripted confirm prompt that records
+`KPA_PROMPT_MESSAGE` and `KPA_PROMPT_DATA` and answers `Allow`, `Deny`,
+something else or nothing gives every outcome on demand.
 
 - **G-13.** A database that doesn't opt in, and a `serve = false` key:
   neither listed nor signed with. A locked database: listed from the key
@@ -414,10 +429,20 @@ confirm prompt that records `KPA_PROMPT_MESSAGE` and answers `Allow`,
   agent settings a KeePass client stores, a key present in two databases,
   a key in the recycle bin or in an entry's history.
 - **G-14.** Mark a connection forwarded with a first session-bind that
-  claims it, verified and not, then try to unmark it with a later one. On
-  it: which keys are listed, that every signature is refused (signing
-  there is not built yet), that the idle timer doesn't move, and that
-  nothing sent on the agent socket approves, unlocks or locks.
+  claims it: one that verifies, and one that doesn't, whether it was
+  forged or is an honest one the daemon can't verify. Then try to unmark
+  it with later binds. On a forwarded connection: which keys are listed;
+  that only a login signs, only for the session its destination bound,
+  and never without a destination; that `confirm = "never"` still asks,
+  and `"always"` asks each time; that the idle timer doesn't move; and
+  that nothing sent on the agent socket approves, locks, or unlocks
+  without the unlock prompt.
+- **What a forwarded approval covers** (T-20). After one `Allow`, try the
+  same key and destination from a second forwarding session through the
+  same host, through another forwarding host, for another destination,
+  and from a local connection; and try a local approval against
+  forwarded use. Check what `kpa ssh grants` and `kpa ssh pending` say of
+  each, and that a lock drops them all.
 - **G-15.** Add, remove, remove-all, smartcard, lock, unlock and unknown
   extensions: each fails, and changes nothing.
 - **T-23.** Count prompts. Several signers at once for one key raise one
@@ -425,10 +450,16 @@ confirm prompt that records `KPA_PROMPT_MESSAGE` and answers `Allow`,
   prompts back, a `Deny` doesn't. Unlock and confirm prompts never share
   the screen. A confirm prompt that fails, is killed, times out or prints
   anything but `Allow` approves nothing.
-- **T-25.** Read what each prompt says, for a login, an `SSHSIG` and
-  anything else, bound and unbound, against what is then signed. Give the
-  destination a `known_hosts` line that names it, a hashed one, a revoked
-  one, a certificate authority's and a wildcard.
+- **T-25.** Read what each prompt says, in its message and in its data,
+  and what `kpa ssh pending` lists, for a login, an `SSHSIG` and anything
+  else, bound, unbound and forwarded, against what is then signed. Name
+  the hosts every way `known_hosts` can: a plain line, a hashed one, a
+  revoked one, a wildcard and a negated pattern, the same key in two
+  files. For a host that presents a certificate: a CA line that matches a
+  principal, one that doesn't, a revoked CA, and a certificate that is
+  expired, a user certificate, carries a critical option, or that its CA
+  didn't sign. For a forwarding chain: one host, several, and more than
+  the message has room for.
 - **T-15.** From a process that holds the agent socket and nothing else:
   what it lists, and what it can get signed without the control socket.
 
