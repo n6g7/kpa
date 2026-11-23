@@ -361,9 +361,10 @@ and `copy`. `QUERY` is fzf's initial query.
    unlock one (`kpa unlock <name>`). If some are unlocked, it lists those and
    names the locked ones on a line of fzf's header. It never unlocks anything.
 3. It reads `list`, builds one line per entry in memory (the entry's title,
-   its username when it has one, and its database) and pipes the lines to `fzf`. Each line
-   carries a hidden index into that in-memory list, and the answer is read
-   back through the index, never parsed out of the displayed text.
+   its username when it has one, and its database) and pipes the lines to
+   `fzf`. Each line carries a hidden index into that in-memory list, and the
+   answer is read back through the index, never parsed out of the displayed
+   text.
 4. The key fzf exits with names the field to `copy`. fzf opens below the
    prompt (`--height=60% --layout=reverse`), and its header lists these keys:
 
