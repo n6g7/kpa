@@ -11,9 +11,12 @@ Roadmap, in release order. Each item gets its design written before its implemen
   - [x] Terminal unlock
   - [x] Copy gated on origin and the desk's state
 2. [ ] SSH agent, per `docs/ssh-agent.md`. The release waits for `ssh-key` 0.7.0
-  - [ ] Local agent: discovery, key cache, on-screen approvals, `kpa ssh keys`, session wiring
-  - [ ] Unlock on demand, and `kpa ssh approve` for requests from outside the desktop
-  - [ ] Forwarding with per-session approvals
+  - [x] Local agent: discovery, key cache, on-screen approvals, `kpa ssh keys`, session wiring
+  - [x] Unlock on demand, and `kpa ssh approve` for requests from outside the desktop
+  - [x] Forwarding with per-session approvals
+  - [ ] Move to `ssh-key` 0.7.0 once it is released (still 0.7.0-rc.12)
+  - [ ] Final security audit of all of kpa, the core rewrite included
+  - [ ] Threat model: cover the agent's prompt data, host naming through `known_hosts` and certificates, and the forwarding chain
 3. [ ] Passkey "agent" / provider (FIDO2 emulation). Shape to be decided
 4. [ ] Add macOS support (some time later)
 5. [ ] Passkey support via credentialsd (later)
@@ -24,6 +27,8 @@ Unscheduled:
 - [ ] A desktop notification on each `copy` and SSH signature, so a read you didn't make gets noticed (`docs/threat-model.md` T-16)
 - [ ] YubiKey challenge-response as a vault credential, without reusing the key's PIN as one
 - [ ] The legacy KeeOtp `TimeOtp-*` fields, which `keepass`'s `totp` feature doesn't parse
+- [ ] Refactor the other existing commands to use the new output/reply system
+- [ ] Consider PGP agent support
 
 ## Done
 
