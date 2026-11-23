@@ -12,9 +12,8 @@ use std::thread;
 use tempfile::TempDir;
 
 use super::*;
-use crate::databases::testing::{PASSWORD, TestEntry};
+use crate::databases::testing::TestEntry;
 use crate::frontends::control::testing::{Fixture, fixture, serve};
-use crate::prompt::testing::{pty, read_until};
 
 /// A fake fzf, and the directory it keeps what it saw in: its `n`th run
 /// leaves its stdin in `stdin.n` and its arguments, one per line, in
@@ -84,14 +83,9 @@ fn choosing_field(text: &str) -> String {
     format!("grep -m1 -F '{text}' \"$d/stdin.$n\"")
 }
 
-fn pick(
-    socket: &Path,
-    fzf: &FakeFzf,
-    query: &[&str],
-    terminal: Option<&File>,
-) -> Result<String, PickError> {
+fn pick(socket: &Path, fzf: &FakeFzf, query: &[&str]) -> Result<String, PickError> {
     let query: Vec<String> = query.iter().map(|word| word.to_string()).collect();
-    pick_with(socket, fzf.program().as_os_str(), &query, terminal)
+    pick_with(socket, fzf.program().as_os_str(), &query)
 }
 
 /// `personal` unlocked with entries, `work` locked.
@@ -129,13 +123,13 @@ fn each_key_copies_its_field_of_the_entry_chosen() {
         ("ctrl-l", "https://github.example"),
     ] {
         let fzf = FakeFzf::new(&[&choosing(key, "GitHub")]);
-        let said = pick(&socket, &fzf, &[], None).expect("picked");
+        let said = pick(&socket, &fzf, &[]).expect("picked");
         assert_eq!(offered(&fx).last().map(String::as_str), Some(expected));
         assert!(said.starts_with("copied "), "{said}");
     }
 
     let fzf = FakeFzf::new(&[&choosing("ctrl-t", "GitHub")]);
-    pick(&socket, &fzf, &[], None).expect("picked");
+    pick(&socket, &fzf, &[]).expect("picked");
     let code = offered(&fx).pop().expect("a code");
     assert!(
         code.len() >= 6 && code.chars().all(|c| c.is_ascii_digit()),
@@ -144,7 +138,7 @@ fn each_key_copies_its_field_of_the_entry_chosen() {
 
     // Another entry, so what is copied follows what was chosen.
     let fzf = FakeFzf::new(&[&choosing("", "Bank")]);
-    pick(&socket, &fzf, &[], None).expect("picked");
+    pick(&socket, &fzf, &[]).expect("picked");
     assert_eq!(offered(&fx).pop().as_deref(), Some("pw-bank"));
 }
 
@@ -153,7 +147,7 @@ fn ctrl_o_chooses_among_the_entrys_own_fields_custom_ones_included() {
     let (fx, _dir, socket) = with_entries();
     let fzf = FakeFzf::new(&[&choosing("ctrl-o", "GitHub"), &choosing_field("api-key")]);
 
-    pick(&socket, &fzf, &[], None).expect("picked");
+    pick(&socket, &fzf, &[]).expect("picked");
 
     assert_eq!(offered(&fx), ["key-github"]);
     let fields = fzf.stdin(2);
@@ -191,7 +185,7 @@ fn fzf_gets_the_query_and_a_line_per_entry_with_no_secret_in_it() {
     let (_fx, _dir, socket) = with_entries();
     let fzf = FakeFzf::new(&[&choosing("", "Bank")]);
 
-    pick(&socket, &fzf, &["git", "hub"], None).expect("picked");
+    pick(&socket, &fzf, &["git", "hub"]).expect("picked");
 
     let args = fzf.args(1);
     let at = args
@@ -232,7 +226,7 @@ fn hostile_entry_text_is_escaped_and_the_choice_still_names_its_entry() {
     let (_dir, socket) = serve(&fx, true);
     let fzf = FakeFzf::new(&[&choosing("", "evil")]);
 
-    pick(&socket, &fzf, &[], None).expect("picked");
+    pick(&socket, &fzf, &[]).expect("picked");
 
     let lines = fzf.stdin(1);
     assert_eq!(lines.len(), 2, "{lines:?}");
@@ -251,7 +245,7 @@ fn without_fzf_the_error_names_it_and_nothing_is_copied() {
     let (fx, _dir, socket) = with_entries();
     let missing = Path::new("/nonexistent/fzf");
 
-    let err = pick_with(&socket, missing.as_os_str(), &[], None).expect_err("no fzf");
+    let err = pick_with(&socket, missing.as_os_str(), &[]).expect_err("no fzf");
 
     assert!(matches!(err, PickError::NoFzf), "{err:?}");
     assert!(err.to_string().contains("fzf"), "{err}");
@@ -265,10 +259,8 @@ fn a_requester_that_cannot_copy_is_refused_before_anything_is_unlocked() {
     let fx = fixture();
     let (_dir, socket) = serve(&fx, false);
     let fzf = FakeFzf::new(&[&choosing("", "x")]);
-    let (_master, slave) = pty();
-    let terminal = File::from(slave);
 
-    let err = pick(&socket, &fzf, &[], Some(&terminal)).expect_err("refused");
+    let err = pick(&socket, &fzf, &[]).expect_err("refused");
 
     assert!(matches!(err, PickError::CannotCopy), "{err:?}");
     assert!(err.to_string().contains("no_display"), "{err}");
@@ -277,44 +269,21 @@ fn a_requester_that_cannot_copy_is_refused_before_anything_is_unlocked() {
     assert!(fx.prompts.shown().is_empty());
 }
 
-/// Every database locked: each is unlocked on the terminal, in turn, and
-/// then both are listed.
+/// Every database locked: `pick` says so and names one to unlock, and
+/// neither unlocks nor asks anything.
 #[test]
-fn with_every_database_locked_each_is_unlocked_on_the_terminal() {
+fn with_every_database_locked_it_fails_naming_one_to_unlock() {
     let fx = fixture();
-    fx.databases.write_for_test(
-        "personal",
-        vec![TestEntry::new("Mine").field("Password", "p1")],
-    );
-    fx.databases.write_for_test(
-        "work",
-        vec![TestEntry::new("Theirs").field("Password", "p2")],
-    );
     let (_dir, socket) = serve(&fx, true);
-    let fzf = FakeFzf::new(&[&choosing("", "Theirs")]);
-    let (mut master, slave) = pty();
-    let terminal = File::from(slave);
+    let fzf = FakeFzf::new(&[&choosing("", "x")]);
 
-    let result = thread::scope(|scope| {
-        let picking = scope.spawn(|| pick(&socket, &fzf, &[], Some(&terminal)));
-        for db in ["personal", "work"] {
-            read_until(&mut master, &format!("Unlock {db}: "));
-            master
-                .write_all(format!("{PASSWORD}\n").as_bytes())
-                .expect("type");
-        }
-        picking.join().expect("pick thread")
-    });
+    let err = pick(&socket, &fzf, &[]).expect_err("all locked");
 
-    result.expect("picked");
-    assert!(fx.prompts.shown().is_empty(), "asked on screen");
-    let lines = fzf.stdin(1).join("\n");
-    assert!(
-        lines.contains("Mine") && lines.contains("Theirs"),
-        "{lines}"
-    );
-    assert!(!fzf.args(1).iter().any(|arg| arg.starts_with("locked:")));
-    assert_eq!(offered(&fx), ["p2"]);
+    assert!(matches!(err, PickError::AllLocked(_)), "{err:?}");
+    assert!(err.to_string().contains("kpa unlock personal"), "{err}");
+    assert_eq!(fzf.runs(), 0);
+    assert!(!fx.databases.any_unlocked());
+    assert!(fx.prompts.shown().is_empty());
 }
 
 /// Some database unlocked: the locked ones are named in fzf's header, and
@@ -324,7 +293,7 @@ fn with_some_database_unlocked_the_locked_ones_are_named_in_the_header_only() {
     let (fx, _dir, socket) = with_entries();
     let fzf = FakeFzf::new(&[&choosing("", "Bank")]);
 
-    pick(&socket, &fzf, &[], None).expect("picked");
+    pick(&socket, &fzf, &[]).expect("picked");
 
     let args = fzf.args(1);
     let at = args
@@ -348,7 +317,7 @@ fn leaving_fzf_without_choosing_copies_nothing() {
     let (fx, _dir, socket) = with_entries();
     let fzf = FakeFzf::new(&["exit 130"]);
 
-    let err = pick(&socket, &fzf, &[], None).expect_err("cancelled");
+    let err = pick(&socket, &fzf, &[]).expect_err("cancelled");
 
     assert!(matches!(err, PickError::Cancelled), "{err:?}");
     assert!(offered(&fx).is_empty());
@@ -359,7 +328,7 @@ fn a_field_the_entry_lacks_is_the_daemons_refusal() {
     let (fx, _dir, socket) = with_entries();
     let fzf = FakeFzf::new(&[&choosing("ctrl-u", "Bank")]);
 
-    let err = pick(&socket, &fzf, &[], None).expect_err("no username");
+    let err = pick(&socket, &fzf, &[]).expect_err("no username");
 
     assert!(err.to_string().contains("field_empty"), "{err}");
     assert!(offered(&fx).is_empty());
@@ -398,7 +367,7 @@ fn a_status_without_can_copy_is_not_a_refusal() {
     ]);
     let fzf = FakeFzf::new(&[&choosing("", "GitHub")]);
 
-    let said = pick(&socket, &fzf, &[], None).expect("picked");
+    let said = pick(&socket, &fzf, &[]).expect("picked");
 
     let requests = server.join().expect("daemon thread");
     assert_eq!(requests.len(), 3);
@@ -418,7 +387,7 @@ fn a_status_saying_no_stops_after_that_one_request() {
     ]);
     let fzf = FakeFzf::new(&[&choosing("", "x")]);
 
-    let err = pick(&socket, &fzf, &[], None).expect_err("refused");
+    let err = pick(&socket, &fzf, &[]).expect_err("refused");
 
     assert!(matches!(err, PickError::CannotCopy), "{err:?}");
     assert_eq!(server.join().expect("daemon thread").len(), 1);

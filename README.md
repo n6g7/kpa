@@ -141,9 +141,9 @@ cargo run -- list personal     # just the one
 cargo run -- pick [query...]   # choose an entry in fzf (which has to be on PATH)
                                 # and copy a field: Enter the password, Ctrl+U
                                 # the username, Ctrl+L the URL, Ctrl+T the TOTP
-                                # code, Ctrl+O one of the entry's fields. If
-                                # every database is locked it unlocks each on
-                                # your terminal first
+                                # code, Ctrl+O one of the entry's fields. It
+                                # lists the unlocked databases and fails if
+                                # every one is locked
 cargo run -- lock personal     # lock one
 cargo run -- lock              # lock all of them
 cargo run -- ssh keys          # the SSH keys every unlocked database holds, by

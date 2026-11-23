@@ -11,19 +11,16 @@ mod keys;
 mod lines;
 
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::process::{ExitCode, ExitStatus};
 
 use serde::Deserialize;
-use serde::de::IgnoredAny;
 
 use self::keys::Action;
-use super::{ClientError, exchange, parse_response, report_client_error, tty};
+use super::{ClientError, parse_response, report_client_error, send_request};
 use crate::frontends::control::proto::{
-    CopyRequest, DatabaseStatus, Field, ListRequest, Op, PromptOn, Request, UnlockRequest,
-    WireEntry,
+    CopyRequest, DatabaseStatus, Field, ListRequest, Op, Request, WireEntry,
 };
 use crate::output::{print_escaped, report_error};
 
@@ -34,8 +31,7 @@ const FZF: &str = "fzf";
 /// `query`, and the field its key names copied from the one chosen. Nothing
 /// is printed but what was copied, or why nothing was.
 pub fn run_pick(socket_path: &Path, query: &[String]) -> ExitCode {
-    let terminal = tty::controlling_terminal();
-    match pick_with(socket_path, OsStr::new(FZF), query, terminal.as_ref()) {
+    match pick_with(socket_path, OsStr::new(FZF), query) {
         Ok(copied) => {
             print_escaped(&format!("{copied}\n"));
             ExitCode::SUCCESS
@@ -63,6 +59,9 @@ enum PickError {
     CannotCopy,
     #[error("no database is configured")]
     NoDatabases,
+    /// Carries the name of one of them, for the sentence.
+    #[error("every database is locked; run `kpa unlock {0}` and try again")]
+    AllLocked(String),
     #[error("the unlocked databases hold no entries")]
     NoEntries,
     #[error("fzf is not on PATH; `kpa pick` needs it to choose an entry")]
@@ -100,26 +99,18 @@ struct Copied {
     expires_in: u64,
 }
 
-/// Sends `op` and decodes the answer; `terminal` is passed along for a
-/// daemon that has to ask on it.
+/// Sends `request` and decodes the answer.
 fn ask<T: serde::de::DeserializeOwned>(
     socket_path: &Path,
     request: &Request,
-    terminal: Option<&File>,
 ) -> Result<T, PickError> {
-    let line = exchange(socket_path, request, terminal)?;
+    let line = send_request(socket_path, request)?;
     parse_response(&line).map_err(PickError::Daemon)
 }
 
-/// `run_pick` with fzf and the terminal given: the sentence for what was
-/// copied.
-fn pick_with(
-    socket_path: &Path,
-    fzf: &OsStr,
-    query: &[String],
-    terminal: Option<&File>,
-) -> Result<String, PickError> {
-    let status: Status = ask(socket_path, &Request::new(Op::Status), None)?;
+/// `run_pick` with fzf given: the sentence for what was copied.
+fn pick_with(socket_path: &Path, fzf: &OsStr, query: &[String]) -> Result<String, PickError> {
+    let status: Status = ask(socket_path, &Request::new(Op::Status))?;
     // Before anything is unlocked or fzf is up: a pick that can't copy is
     // wasted.
     if status.can_copy == Some(false) {
@@ -129,26 +120,19 @@ fn pick_with(
         return Err(PickError::NoDatabases);
     }
 
-    let mut locked: Vec<&str> = status
+    let locked: Vec<&str> = status
         .databases
         .iter()
         .filter(|database| database.locked)
         .map(|database| database.name.as_str())
         .collect();
     if locked.len() == status.databases.len() {
-        for db in std::mem::take(&mut locked) {
-            let request = Request {
-                preferred_prompt: Some(PromptOn::Terminal),
-                ..Request::new(Op::Unlock(UnlockRequest { db: db.to_string() }))
-            };
-            ask::<IgnoredAny>(socket_path, &request, terminal)?;
-        }
+        return Err(PickError::AllLocked(locked[0].to_string()));
     }
 
     let listed: Listed = ask(
         socket_path,
         &Request::new(Op::List(ListRequest { db: None })),
-        None,
     )?;
     let entries = listed.entries;
     if entries.is_empty() {
@@ -176,7 +160,7 @@ fn pick_with(
         uuid: entry.uuid,
         field,
     }));
-    let copied: Copied = ask(socket_path, &request, None)?;
+    let copied: Copied = ask(socket_path, &request)?;
     Ok(format!(
         "copied {} of {:?} from {:?}; the clipboard clears in {}s",
         copied.copied,

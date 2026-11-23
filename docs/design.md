@@ -357,9 +357,9 @@ fields. It is a client subcommand of the `control` front end
    unlocks anything or opens fzf, since a pick that can't copy is wasted. The
    field is advisory: `copy` decides again, and a daemon that doesn't report
    it is taken to allow the copy.
-2. If every database is locked, it unlocks each one on the terminal, as `kpa
-   unlock --tty`. If some are unlocked, it lists those and names the locked
-   ones on a line of fzf's header, and unlocks nothing.
+2. If every database is locked, it fails with an error that tells the user to
+   unlock one (`kpa unlock <name>`). If some are unlocked, it lists those and
+   names the locked ones on a line of fzf's header. It never unlocks anything.
 3. It reads `list`, builds one line per entry in memory (the entry's title,
    username, database and group) and pipes the lines to `fzf`. Each line
    carries a hidden index into that in-memory list, and the answer is read
