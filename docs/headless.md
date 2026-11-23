@@ -174,7 +174,7 @@ until the next unlock anyway.
 
 `status` reports the same check, for the requester that asks, as `can_copy`
 ([`protocol.md`](./protocol.md) § Responses), so a client such
-as `kpa pick` can tell before it unlocks anything.
+as `kpa pick` can tell before it lists anything.
 
 A copy's offer lasts until `clipboard_timeout` or until a lock ends the
 unlock the entry was read from, whichever comes first. A lock of another

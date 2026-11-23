@@ -39,8 +39,8 @@ struct Cli {
 
     /// Print the daemon's raw JSON response line. `ssh keys` prints text
     /// without it; the other commands print the JSON line either way,
-    /// until they have a text output of their own. `version` has no JSON
-    /// form and ignores it.
+    /// until they have a text output of their own. `version` and `pick`
+    /// have no JSON form and ignore it.
     #[arg(long, global = true)]
     json: bool,
 
@@ -86,6 +86,12 @@ enum Command {
         uuid: Uuid,
         field: Field,
     },
+    /// Choose an entry of the unlocked databases in fzf, which has to be on
+    /// PATH, and copy one of its fields: Enter the password, Ctrl+U the
+    /// username, Ctrl+L the URL, Ctrl+T the TOTP code, Ctrl+O one of the
+    /// entry's fields chosen in a second fzf. `query` is fzf's initial query
+    /// (`docs/design.md` § The picker).
+    Pick { query: Vec<String> },
     /// The SSH agent: its keys, and the requests refused for want of an
     /// approval.
     Ssh {
@@ -181,6 +187,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         Command::Copy { db, uuid, field } => {
             client::run_client(&socket_path, Op::Copy(CopyRequest { db, uuid, field }))
         }
+        Command::Pick { query } => client::run_pick(&socket_path, &query),
         Command::Ssh {
             command:
                 SshCommand::Keys {

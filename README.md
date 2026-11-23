@@ -138,6 +138,12 @@ cargo run -- unlock personal   # runs the configured prompt for a password
                                 # even when there is)
 cargo run -- list              # every entry in every unlocked database (alias: ls)
 cargo run -- list personal     # just the one
+cargo run -- pick [query...]   # choose an entry in fzf (which has to be on PATH)
+                                # and copy a field: Enter the password, Ctrl+U
+                                # the username, Ctrl+L the URL, Ctrl+T the TOTP
+                                # code, Ctrl+O one of the entry's fields. It
+                                # lists the unlocked databases and fails if
+                                # every one is locked
 cargo run -- lock personal     # lock one
 cargo run -- lock              # lock all of them
 cargo run -- ssh keys          # the SSH keys every unlocked database holds, by
@@ -161,9 +167,13 @@ non-zero when `ok` is `false`. The `ssh` commands are the exception: they
 print text, and a refusal as an error on stderr. `--json`, which every
 client command takes, before or after the subcommand, prints the raw JSON
 response line for them too; the commands without a text output yet print it either way,
-and `version`, which has no JSON form, ignores it. The
+and `version` and `pick`, which have no JSON form, ignore it. The
 socket defaults to `$XDG_RUNTIME_DIR/kpa/sock`; pass `--socket <path>` to
 both sides to use a different one.
+
+`pick` is interactive: it prints one line saying what it copied, or a refusal
+as an error on stderr. Nothing from a database is written to disk by it: the
+list goes to fzf through a pipe.
 
 `version` is the exception: it prints plain text, not JSON, and always
 exits `0`. It always prints the CLI's own build version as `client: …`,

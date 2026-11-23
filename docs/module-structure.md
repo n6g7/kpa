@@ -114,7 +114,8 @@ src/
       authz.rs          authorize_copy, choose_unlock_prompt
       proto/            the wire types
       client/           the CLI's side: mod.rs, tty.rs, ssh_keys_report.rs,
-                        ssh_requests_report.rs
+                        ssh_requests_report.rs; pick/ is `kpa pick` (the
+                        flow, the keys, what fzf is shown, running fzf)
     ssh_agent/          the agent socket: wire, bind, classify, authz, serve
       agent/            the agent's logic: SshState (state.rs), Hold (hold.rs),
                         identities, the sign flow, prompts, signing

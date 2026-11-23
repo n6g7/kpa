@@ -4,6 +4,8 @@
 //! owns the clipboard, so the secret never enters the client's address
 //! space").
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -117,6 +119,13 @@ impl Field {
     }
 }
 
+/// The wire name, as `list`'s `fields` spells it.
+impl fmt::Display for Field {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.encode())
+    }
+}
+
 impl Serialize for Field {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -226,6 +235,17 @@ pub struct CopyOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A field is written as it is on the wire, `custom:` prefix included.
+    #[test]
+    fn a_field_displays_as_its_wire_name() {
+        assert_eq!(Field::Totp.to_string(), "totp");
+        assert_eq!(Field::Custom("api-key".to_string()).to_string(), "api-key");
+        assert_eq!(
+            Field::Custom("Password".to_string()).to_string(),
+            "custom:Password"
+        );
+    }
 
     /// Every name `copy` recognizes without a `custom:` prefix, both
     /// directions — this is the wire vocabulary `docs/protocol.md` documents.

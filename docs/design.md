@@ -58,7 +58,7 @@ its `save_kdbx4` feature, so no code path can modify a database.
 | 14  | **Observers, not events, tell what a lock must clear** | State that must die with a lock belongs to the module that made it, and the core tells it through an `Observer` before the lock call returns. A `kpa lock` is then answered with the clipboard offer already ended; an event on a channel would arrive after. |
 | 15  | **The front end prompts; the core never does** | Where a prompt may appear is per requester, and its text and what its answer means differ per front end. The core hands out the token that ends the question. |
 | 16  | **Threads, not async** | `std::thread`, a core behind one mutex, and `ksni`'s blocking API. Most requests are sub-millisecond and the slow ones wait on a human, so a runtime would buy nothing. |
-| 17  | **`kpa pick` runs the user's `fzf`, found on `PATH`, with no preview pane** | `list` is an index and the matching is the picker's (`protocol.md` § What `list` returns), so kpa borrows one instead of writing a matcher. A package dependency would make every install carry a program only `pick` runs. Each line already shows the title, username, database and group, and a preview would add only the URL and field names, at the cost of a program run and a request per cursor move. |
+| 17  | **`kpa pick` runs the user's `fzf`, found on `PATH`, with no preview pane** | `list` is an index and the matching is the picker's (`protocol.md` § What `list` returns), so kpa borrows one instead of writing a matcher. A package dependency would make every install carry a program only `pick` runs. Each line already shows the title, username and database, and a preview would add only the URL and field names, at the cost of a program run and a request per cursor move. |
 
 ## How it is put together
 
@@ -346,26 +346,27 @@ else's clipboard. A lock of the unlock the offer came from ends it earlier.
 
 ## The picker: `kpa pick`
 
-*Not built yet.*
-
 `kpa pick [QUERY...]` picks an entry in a terminal and copies one of its
 fields. It is a client subcommand of the `control` front end
-(`src/frontends/control/client/`) and adds no op: it asks `status`, `unlock`,
-`list` and `copy`. `QUERY` is fzf's initial query.
+(`src/frontends/control/client/`) and adds no op: it asks `status`, `list`
+and `copy`. `QUERY` is fzf's initial query.
 
 1. It reads `status`. If a `copy` from this requester couldn't land (its
    `can_copy` is false: [`protocol.md`](./protocol.md) § Responses,
    [`headless.md`](./headless.md) § 5), it stops with `no_display` before it
-   unlocks anything or opens fzf, since a pick that can't copy is wasted. The
-   field is advisory: `copy` decides again.
-2. If every database is locked, it unlocks each one on the terminal, as `kpa
-   unlock --tty`. If some are unlocked, it lists those and names the locked
-   ones in fzf's header, and unlocks nothing.
+   lists anything or opens fzf, since a pick that can't copy is wasted. The
+   field is advisory: `copy` decides again, and a daemon that doesn't report
+   it is taken to allow the copy.
+2. If every database is locked, it fails with an error that tells the user to
+   unlock one (`kpa unlock <name>`). If some are unlocked, it lists those and
+   names the locked ones on a line of fzf's header. It never unlocks anything.
 3. It reads `list`, builds one line per entry in memory (the entry's title,
-   username, database and group) and pipes the lines to `fzf`. Each line
-   carries a hidden index into that in-memory list, and the answer is read
-   back through the index, never parsed out of the displayed text.
-4. The key fzf exits with names the field to `copy`:
+   its username when it has one, and its database) and pipes the lines to
+   `fzf`. Each line carries a hidden index into that in-memory list, and the
+   answer is read back through the index, never parsed out of the displayed
+   text.
+4. The key fzf exits with names the field to `copy`. fzf opens below the
+   prompt (`--height=60% --layout=reverse`), and its header lists these keys:
 
 | Key | Copies |
 |---|---|
@@ -373,18 +374,23 @@ fields. It is a client subcommand of the `control` front end
 | Ctrl+U | `username` |
 | Ctrl+L | `url` |
 | Ctrl+T | `totp` |
-| Ctrl+O | a field chosen in a second fzf over the entry's own `fields`, custom ones included |
+| Ctrl+O | a field chosen in a second fzf over the entry's own `fields`, custom ones included, headed by the entry's title |
 
 `fzf` is looked up on `PATH` when `pick` runs. It is not a dependency of the
 package, and there is no setting to point at another binary. Without it `pick`
 fails with an error naming fzf.
 
 **Nothing from a database is written to disk.** The list lives in `pick`'s
-memory and reaches fzf through a pipe. `pick` runs fzf with no `--history` and
-creates no temporary file. Every string it shows is vault text, so each goes
-through kpa's own escaping (`src/output/escape.rs`, the one the other
-subcommands use, [`protocol.md`](./protocol.md) § CLI output) before it
-reaches fzf. There is no preview pane.
+memory and reaches fzf through a pipe, and `pick` creates no temporary file.
+It passes `--no-history` and `--no-preview`, which win over the user's
+`FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE`: a `--history` file named there
+is never written to (fzf may still create it, empty) and a `--preview` named
+there never runs. The rest of those defaults, colours and key bindings
+included, apply, and a binding that runs a program is the user's own. Every
+string `pick` shows is vault text, so each goes through kpa's own escaping
+(`src/output/escape.rs`, the one the other subcommands use,
+[`protocol.md`](./protocol.md) § CLI output) before it reaches fzf. There is
+no preview pane.
 
 ## Secrets
 
