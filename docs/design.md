@@ -14,6 +14,7 @@ the doc or the module that owns it:
 | [`module-structure.md`](./module-structure.md) | the subsystems, who uses whom, the file layout, how tests are built |
 | [`headless.md`](./headless.md) | where a request is asked and where a copy lands, for a requester outside the desktop |
 | [`ssh-agent.md`](./ssh-agent.md) | the SSH agent: policy, approvals, the sign flow |
+| [`passkeys.md`](./passkeys.md) | passkey sign-in through an emulated security key. Designed, not built yet: nothing else in this doc describes it |
 | [`threat-model.md`](./threat-model.md) | what kpa claims to protect, against whom |
 | [`portability.md`](./portability.md) | the OS seams, and the rules for keeping them replaceable |
 | [`config.example.toml`](../config.example.toml) | every config key |
