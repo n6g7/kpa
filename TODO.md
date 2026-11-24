@@ -17,9 +17,17 @@ Roadmap, in release order. Each item gets its design written before its implemen
   - [ ] Move to `ssh-key` 0.7.0 once it is released (still 0.7.0-rc.12)
   - [ ] Final security audit of all of kpa, the core rewrite included
   - [ ] Threat model: cover the agent's prompt data, host naming through `known_hosts` and certificates, and the forwarding chain
-3. [ ] Passkey "agent" / provider (FIDO2 emulation). Shape to be decided
+3. [ ] Passkey sign-in through an emulated security key, per `docs/passkeys.md`
+  - [ ] Find passkeys: discovery, `serve_passkeys`, `kpa passkeys`, and the private key out of `copy` and `list`
+  - [ ] The emulated key: the `/dev/uhid` device following the display session, CTAPHID, `getInfo`, `kpa status`, and the NixOS module that grants `/dev/uhid`
+  - [ ] Sign-in from an unlocked database: the approval and account prompts, the assertion, registration refused
+  - [ ] Unlock on demand, with the cache of hashes
+  - [ ] `confirm` per site: `"once"` and `"never"`
+  - [ ] Fuzz targets for the key's input and for passkey entries, and a NixOS VM test that drives the key with `libfido2`
+  - [ ] The other docs: `design.md`, `protocol.md`, `module-structure.md`, `portability.md`, `config.example.toml`, the README
+  - [ ] Threat model: cover the emulated key, the cache of hashes and the `/dev/uhid` grant (`docs/passkeys.md` § 10)
 4. [ ] Add macOS support (some time later)
-5. [ ] Passkey support via credentialsd (later)
+5. [ ] Passkey support via credentialsd (later): it has no interface for a password manager to provide passkeys through yet
 
 Unscheduled:
 
@@ -29,6 +37,7 @@ Unscheduled:
 - [ ] The legacy KeeOtp `TimeOtp-*` fields, which `keepass`'s `totp` feature doesn't parse
 - [ ] Refactor the other existing commands to use the new output/reply system
 - [ ] Consider PGP agent support
+- [ ] Consider creating passkeys, which needs a way to write a database (`docs/passkeys.md` § 9)
 - [ ] `kpa pick`, a terminal entry picker over fzf, per `docs/design.md` § The picker
   - [x] `status` reports `can_copy`, whether a `copy` from the requester would land
   - [x] The `pick` subcommand
