@@ -1,6 +1,6 @@
 # kpa — portability
 
-kpa runs on Linux. macOS support is planned (`TODO.md`); Windows is out of
+kpa runs on Linux. macOS support is planned (`ROADMAP.md`); Windows is out of
 scope. Until macOS lands, kpa is written so that a macOS implementation can
 slot in behind each OS-specific part without its callers changing.
 
