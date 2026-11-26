@@ -43,7 +43,8 @@ and everything else merged since 0.3.0. The code is done.
 A browser extension for Chromium and Firefox, and the native messaging host
 it starts, which relays to kpa's browser socket. The extension fills
 usernames, passwords and TOTP codes into a site's login form, from the
-entries whose URL matches the page. Design: [`docs/browser.md`](./docs/browser.md).
+entries whose URL matches the page. Design: [`docs/browser.md`](./docs/browser.md),
+in review on [#140](https://github.com/n6g7/kpa/pull/140).
 
 - **Why an extension:** desktop browsers on Linux take no outside password
   provider. Their own password managers keep their own stores, and the
