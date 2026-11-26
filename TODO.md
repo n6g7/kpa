@@ -4,7 +4,7 @@
 
 Grouped by the milestones in [`ROADMAP.md`](./ROADMAP.md), in order. Each milestone gets its design written before its implementation.
 
-### 1. SSH agent release (0.4.0)
+### 0.4.0: SSH agent
 
 Per `docs/ssh-agent.md`.
 
@@ -15,20 +15,20 @@ Per `docs/ssh-agent.md`.
 - [ ] Threat model: cover the agent's prompt data, host naming through `known_hosts` and certificates, and the forwarding chain
 - [ ] Move to `ssh-key` 0.7.0 once it is released (still 0.7.0-rc.12). The release doesn't wait for it
 
-### 2. Passkey sign-in on Linux
+### 0.5.0: Passkey sign-in on Linux
 
 - [ ] Design: an emulated security key, per `docs/passkeys.md` (in review)
 
-### 3. Login autofill in browsers
+### 0.6.0: Login autofill in browsers
 
 - [ ] Design: the browser extension and its native messaging host
 
-### 4. macOS
+### 0.7.0: macOS
 
 - [ ] Design: the macOS side of each seam in `docs/portability.md`
 - [ ] Design: autofill and passkeys through a credential provider extension
 
-### 5. Android
+### 0.8.0: Android
 
 - [ ] Design: the read-only app, its autofill and its passkeys
 

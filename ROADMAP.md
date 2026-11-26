@@ -5,6 +5,10 @@ the current one. Each gets its design written in `docs/` before its
 implementation starts, and its tasks are listed in [`TODO.md`](./TODO.md)
 under the same name.
 
+Each milestone is one minor release. The numbers are tentative: a patch
+release can come between two milestones, and a change of order or scope
+moves them.
+
 Every milestone keeps kpa read-only (`docs/design.md` § Scope). Creating a
 passkey, saving a new login or editing an entry happens in a KeePass client
 over the same file.
@@ -13,14 +17,14 @@ over the same file.
 
 | Capability | Linux | macOS | Android |
 |---|---|---|---|
-| Search and copy: the CLI, `kpa pick`, the tray | Built | 4 | Not planned: autofill covers it |
-| SSH agent | Built, ships in 1 | 4 | 5, if an SSH client there can use an outside agent |
-| Passkey sign-in | 2: an emulated security key | 4: a credential provider extension | 5: Credential Manager |
-| Login autofill | 3: a browser extension | 4: the same extension, and the credential provider extension | 5: the Autofill service and Credential Manager |
+| Search and copy: the CLI, `kpa pick`, the tray | Built | 0.7.0 | Not planned: autofill covers it |
+| SSH agent | Built, ships in 0.4.0 | 0.7.0 | 0.8.0, if an SSH client there can use an outside agent |
+| Passkey sign-in | 0.5.0: an emulated security key | 0.7.0: a credential provider extension | 0.8.0: Credential Manager |
+| Login autofill | 0.6.0: a browser extension | 0.7.0: the same extension, and the credential provider extension | 0.8.0: the Autofill service and Credential Manager |
 
 Windows is out of scope ([`docs/portability.md`](./docs/portability.md)).
 
-## 1. SSH agent release (0.4.0)
+## 0.4.0: SSH agent
 
 The SSH agent ([`docs/ssh-agent.md`](./docs/ssh-agent.md)), `kpa pick`
 and everything else merged since 0.3.0. The code is done.
@@ -28,13 +32,13 @@ and everything else merged since 0.3.0. The code is done.
 - **Gate:** a security audit of all of kpa against
   [`docs/threat-model.md`](./docs/threat-model.md), with its high and medium
   findings fixed, and the threat model covering the agent.
-- **`ssh-key` 0.7.0:** kpa pins `=0.7.0-rc.12`. The release takes 0.7.0 if
-  it is out by the time the audit is done; otherwise it ships on the
-  release candidate, and the move to 0.7.0 is a patch release. kpa is a
+- **`ssh-key` 0.7.0:** kpa pins `=0.7.0-rc.12`. The release takes `ssh-key`
+  0.7.0 if it is out by the time the audit is done; otherwise it ships on
+  the release candidate, and the move to `ssh-key` 0.7.0 is kpa 0.4.1. kpa is a
   binary built from its committed `Cargo.lock`, so an exact pin on a
   release candidate affects no one else's build.
 
-## 2. Passkey sign-in on Linux
+## 0.5.0: Passkey sign-in on Linux
 
 kpa signs in to websites with the passkeys stored in its databases, as an
 emulated USB security key that unmodified Chromium and Firefox use. Design:
@@ -47,7 +51,7 @@ emulated USB security key that unmodified Chromium and Firefox use. Design:
   username field is out of reach for a USB key.
 - Linux only: the key is created through `/dev/uhid`.
 
-## 3. Login autofill in browsers
+## 0.6.0: Login autofill in browsers
 
 A browser extension for Chromium and Firefox, and the native messaging host
 it starts, which talks to kpa's socket. The extension fills usernames,
@@ -58,7 +62,7 @@ URL matches the page.
   provider. Their own password managers keep their own stores, and the
   routes below the browser (the emulated key, `credentialsd`) carry
   passkeys, never passwords.
-- **Passwords only.** Passkeys stay on the emulated key (milestone 2).
+- **Passwords only.** Passkeys stay on the emulated key (0.5.0).
 - **Scope:** `docs/design.md` § Scope lists a browser backend under *Is
   not*. This milestone's design changes that.
 - **Its design settles:** how a page matches entries, what a fill asks of
@@ -69,7 +73,7 @@ URL matches the page.
 - The extension and host follow [`docs/portability.md`](./docs/portability.md),
   so they carry over to macOS.
 
-## 4. macOS
+## 0.7.0: macOS
 
 In two steps:
 
@@ -86,7 +90,7 @@ The emulated security key stays Linux-only. The milestone comes after the
 browser work because the extension and its host carry over, and on a Mac
 an existing KeePass client already covers autofill and passkeys.
 
-## 5. Android
+## 0.8.0: Android
 
 A read-only kpa app on the same Rust core. It serves logins to other apps
 through the Autofill service and Credential Manager, and passkey sign-in
