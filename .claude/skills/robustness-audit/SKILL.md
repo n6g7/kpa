@@ -43,6 +43,10 @@ debug = true
 EOF
 ```
 
+Copy the repo's `Cargo.lock` into the harness before its first build, and
+give `keepass` the version that lock pins: a fresh resolve picks newer
+versions than the ones kpa ships, and the harness would test those.
+
 Each check becomes a `src/bin/<check>.rs`. Build with
 `CARGO_TARGET_DIR=<scratchpad>/harnesstarget cargo build --release --bin <check>`.
 
@@ -52,10 +56,13 @@ audit is done, confirm the repo is untouched with `git status --porcelain`.
 
 Two practical notes for this repo: the toolchain comes from the flake, so
 prefix commands with `nix develop -c` when not already in the dev shell; and
-`rpassword` reads from `/dev/tty`, not stdin, so the `kpa` binary itself needs
-`script -qec "<cmd>" /dev/null` to drive non-interactively. Calling
-`kpa::vault::*` from the harness avoids the problem entirely and is usually
-the better move.
+the daemon asks for the master password through its prompt program, or on
+a terminal the request passes, so driving the `kpa` binary takes a config
+whose `prompt` prints the fixture's password, or a pty for
+`kpa unlock --tty`. Calling `kpa::databases` from the harness
+(`Databases::begin_unlock`, then `finish` with the password, as
+`tests/common/mod.rs` does) avoids the problem entirely and is usually the
+better move.
 
 ## Checks
 
@@ -171,14 +178,15 @@ grep -rn 'never\|always\|cannot\|guaranteed\|no code path\|impossible' src docs
 
 For each, construct the case it forbids. Findings from this check are often
 the most valuable in the report, because they are the places where someone
-is relying on a property that is not there. `tests/common/mod.rs`'s claim
-that `Once` guards against cross-process races is the shape to look for:
-plausible, specific, and wrong.
+is relying on a property that is not there. The shape to look for is a
+claim that is plausible, specific, and wrong: a `Once` said to guard
+against races between processes, when it only dedupes calls within one.
 
 ## Reporting
 
-Write findings to `docs/review-<YYYY-MM>.md`, following the structure of the
-existing one. Per finding:
+Run by `security-audit`, the findings go in its workstream file as finding
+records. Run on its own, write them to
+`docs/audits/<YYYY-MM-DD>-robustness.md` (git-ignored). Per finding:
 
 - **Severity**, and be honest about it — deprioritise anything whose threat
   model does not hold. Input the user fully controls is not an attack
