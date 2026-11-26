@@ -41,9 +41,9 @@ and everything else merged since 0.3.0. The code is done.
 ## 0.5.0: Login autofill in browsers
 
 A browser extension for Chromium and Firefox, and the native messaging host
-it starts, which talks to kpa's socket. The extension fills usernames,
-passwords and TOTP codes into a site's login form, from the entries whose
-URL matches the page.
+it starts, which relays to kpa's browser socket. The extension fills
+usernames, passwords and TOTP codes into a site's login form, from the
+entries whose URL matches the page. Design: [`docs/browser.md`](./docs/browser.md).
 
 - **Why an extension:** desktop browsers on Linux take no outside password
   provider. Their own password managers keep their own stores, and the
@@ -51,12 +51,12 @@ URL matches the page.
   passkeys, never passwords.
 - **Passwords only.** Passkeys come with the emulated key (0.6.0).
 - **Scope:** `docs/design.md` § Scope lists a browser backend under *Is
-  not*. This milestone's design changes that.
-- **Its design settles:** how a page matches entries, what a fill asks of
-  the user, how the extension is distributed (the Chrome Web Store, and
-  addons.mozilla.org signing for Firefox), how the home-manager module
-  installs the host for each browser, and sandboxed (Flatpak, Snap)
-  browsers.
+  not*. This milestone changes that.
+- **No store listings.** Chromium-based browsers load the extension
+  unpacked, and Firefox installs an unlisted package Mozilla has signed,
+  attached to each release. Listings on the Chrome Web Store and
+  addons.mozilla.org are unscheduled.
+- **Unsandboxed browsers only.** Flatpak and Snap browsers are unscheduled.
 - The extension and host follow [`docs/portability.md`](./docs/portability.md),
   so they carry over to macOS.
 
