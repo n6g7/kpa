@@ -94,7 +94,8 @@ an existing KeePass client already covers autofill and passkeys.
 
 A read-only kpa app on the same Rust core. It serves logins to other apps
 through the Autofill service and Credential Manager, and passkey sign-in
-through Credential Manager. Not designed yet.
+through Credential Manager. Design: `docs/android.md`, in review on
+[#139](https://github.com/n6g7/kpa/pull/139).
 
 - **No SSH agent.** Most Android SSH clients keep their own keys. Two
   routes reach those that don't: a bridge inside Termux that serves
