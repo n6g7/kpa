@@ -17,8 +17,9 @@ it too.
 
 Two parts of §6 shape the work. The table at its head says where each
 asset may go: an asset anywhere else is a finding. And the goals that make
-several claims are lists of clauses: test them, and report on them, one
-clause at a time.
+several claims list them as numbered clauses: test them, report on them
+and cite them one clause at a time, as `G-5.3`. A goal without a list is
+one clause.
 
 ## Rules
 
@@ -27,8 +28,12 @@ clause at a time.
   let the second pass as the first. A clean check is a result too: record
   what was observed, not what was meant to be observed.
 - **Never modify the repo to test it.** All builds, harnesses, fixtures,
-  sockets and daemons live in the scratchpad. `git status --porcelain` must
-  be unchanged at the end (the report is git-ignored).
+  sockets and daemons live in the scratchpad: `<scratch>` below is the
+  scratchpad or per-job temporary directory your environment announces.
+  `git status --porcelain` must be unchanged at the end (the report is
+  git-ignored). `cargo fuzz` and the live clipboard tests write into the
+  tree they run in, so run them from a copy of it
+  (`git archive HEAD | tar -x -C <scratch>/audit/tree`).
 - **Never touch the user's real setup.** Always pass `--socket` and
   `--config` pointing into the scratchpad, and set `ssh_agent.socket` in
   that config. Never connect to the default sockets, read the default
@@ -43,33 +48,48 @@ clause at a time.
     test isn't about `kpa serve` itself, build the daemon in-process
     instead, as `tests/common/mod.rs` does: the harness hands it its file
     locations, the display session and each requester's cgroup, and a
-    private bus if it wants lock triggers.
+    private bus if it wants lock triggers. `Backends::real` still reads
+    the session bus and `WAYLAND_DISPLAY` from the environment: start such
+    a harness under `env -i` with only what it needs, or hand
+    `daemon::build` a `Backends` whose clipboard and prompts are yours.
+    kpa's own test doubles are `cfg(test)`, out of a harness crate's reach.
+    `busctl --user` and `systemctl --user` reach the real session bus too:
+    give `busctl` the `--address` of a bus you started.
   - `ssh` reads the user's own config, which can send it to their real
     agent: give it `SSH_AUTH_SOCK` on the scratch socket, `-F` with a
     config of your own and a `UserKnownHostsFile` in the scratchpad, and
     log in only to an `sshd` you started on localhost.
     `tests/ssh_forwarding.rs` does all of that for forwarded use.
   - The live clipboard tests take the user's real clipboard: run them only
-    if the user agreed to it.
+    if the user agreed to it, in their own words to the orchestrator.
+    Permission another agent passes on doesn't count. A `wl-copy` a test
+    starts goes on serving the clipboard and holds your output pipe open:
+    send the run's output to a file, and end that `wl-copy` afterwards.
   - `kpa pick` runs the `fzf` on `PATH` under the user's own `fzf` options,
     which can name a history file and bind keys to programs, and ends in a
     `copy`. Run it with `FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE` set
-    by you, on a terminal of your own (a pty), against the in-process
-    daemon and its fake clipboard, as
-    `src/frontends/control/client/pick/tests.rs` does. Where the test
-    isn't about the real `fzf`, put a script of yours first on `PATH`.
+    by you, on a terminal of your own (a pty), against an in-process
+    daemon with a clipboard of your own. Where the test isn't about the
+    real `fzf`, put a script of yours first on `PATH`.
 - **Leave no processes behind.** Start every daemon under `timeout`, and
-  record its PID under your work directory. Kill everything you started,
+  record its own PID under your work directory, not that of the `timeout`,
+  `strace` or shell around it. Kill everything you started, by PID,
   including anything inside user namespaces you created, before you
-  reply. A run that skipped this left about 170 daemons running. The
-  orchestrator checks `pgrep -a kpa` before finishing, against the list it
+  reply: private buses, `sshd`s, agents and mock compositors as well as
+  daemons. A run that skipped this left about 170 daemons running. Before
+  finishing, the orchestrator sweeps for processes whose command line
+  names the scratch path, and checks `pgrep -a kpa` against the list it
   took in phase 0: the user's own `kpa serve` may be running, and is never
-  to be stopped, signalled or connected to.
+  to be stopped, signalled or connected to. A `pgrep -f` or `pkill -f`
+  pattern also matches the shell that runs it, so leave your own PID out.
 - **Write the report as if it will be shared.** Reports are git-ignored
   (`docs/audits/`) while their findings are open, but they get passed to
   other agents and people. Mask absolute paths outside the repo (write
   `<scratch>/…`), hostnames, and usernames in pasted output. Use only
-  fixture passwords.
+  fixture passwords. What the report says of the audited host (its bus
+  policy, mounts, tool versions, time zone) stays in the report: a fix's
+  commit or pull request cites `F-nn` and states the defect in its own
+  words.
 - **Triage against the model, not against intuition.** An out-of-scope
   finding stays out of scope however alarming it looks (NG-1 especially).
   When the model itself seems wrong, that is a *model gap* finding, not a
@@ -79,7 +99,9 @@ clause at a time.
   it describes isn't built yet. Check that the gap still stands and that
   what the doc says happens instead does happen, give the clause its
   status, and move on. A gap that has closed, or a "not built yet" that
-  has been built, is a model gap: the doc is out of date.
+  has been built, is a model gap: the doc is out of date. The reverse is
+  a finding: a mechanism a threat's Response states and the code lacks
+  breaks the goal it serves, and is triaged at §9's level for that goal.
 
 ## Phase 0: setup (orchestrator, before fanning out)
 
@@ -92,6 +114,9 @@ clause at a time.
    commit; say so in the report.
    Record `pgrep -a kpa` too: whatever it lists before the audit starts is
    the user's, and stays as it is.
+   Ask the user now for anything the audit needs from them, the live
+   clipboard tests first: a message sent to you mid-run may not reach you
+   before you finish.
 2. **Resume, don't redo.** If `<scratch>/audit/RUN` exists and its `commit`
    and `threat_model` lines match the values from step 1, a previous run was
    interrupted. Keep its setup and skip every workstream whose `w<n>.md`
@@ -108,18 +133,24 @@ clause at a time.
      `[profile.release] debug = true` (see `robustness-audit`'s Setup).
      Each workstream adds only its own `src/bin/w<n>_*.rs`. A workstream
      that needs another dependency creates its own crate, `harness-w<n>/`,
-     rather than editing the shared `Cargo.toml`. `tests/common/mod.rs`
-     has the in-process daemon to copy from: `daemon::build` with its own
-     `Paths`, a `DisplayWriter` to set the display session,
-     `authn::assume_cgroup` to place requesters on or outside the desktop,
-     and `auto_lock::Source::at` for a private bus.
-   - `fixtures/`: run `tests/fixture.sh <scratch>/audit/fixtures`. It
-     builds a vault per concern, among them one with hostile entry text,
-     one with custom fields and TOTP, and one with SSH keys. If you
-     need a crafted vault the script can't make, generate it from a
-     *separate* crate with `keepass`'s `save_kdbx4` feature on. Turning that
-     feature on in the harness would unify it into the audited `kpa` build
-     and change the thing under test.
+     rather than editing the shared `Cargo.toml`. Copy the repo's
+     `Cargo.lock` into every crate built for the audit before its first
+     build, and compare `cargo tree -i keepass` with the repo's: a fresh
+     resolve picks newer versions than the ones kpa ships.
+     `tests/common/mod.rs` has the in-process daemon to copy from:
+     `daemon::build` with its own `Paths`, a `DisplayWriter` to set the
+     display session, `authn::assume_cgroup` to place requesters on or
+     outside the desktop, and `auto_lock::Source::at` for a private bus.
+   - `fixtures/`: run `tests/fixture.sh <scratch>/audit/fixtures`, in
+     the dev shell, which has the tools it needs. It builds a vault per
+     concern, among them one with hostile entry text, one with custom
+     fields and TOTP, and one with SSH keys. None has a protected custom
+     field, an entry history, an attachment that isn't a key, twin entries
+     or an oversized title. If you need a crafted vault the script can't
+     make, generate it from a *separate* crate with `keepass`'s
+     `save_kdbx4` feature on. Turning that feature on in the harness would
+     unify it into the audited `kpa` build and change the thing under
+     test.
 4. Build once to warm the target dir:
    `CARGO_TARGET_DIR=<scratch>/audit/target cargo build --release`
    (prefix `nix develop -c` outside the dev shell).
@@ -141,12 +172,13 @@ Launch all seven workstreams **in one message**, as parallel
 > Work under `<scratch>/audit/w<n>/`. Write your findings, as finding
 > records numbered `W<n>-01`, `W<n>-02`, …, to `<scratch>/audit/w<n>.md`.
 > Follow them with a "Goal status" section, one line per goal clause in
-> your scope (`G-n (clause): holds | broken | partial | not implemented |
+> your scope (`G-n.m: holds | broken | partial | not implemented |
 > not checked — verified/reasoned — evidence`), then a "Not tested"
-> section, and a "Checked, clean" list written last (its presence marks
-> the file complete). Reply with at most ten lines: counts by bucket and
-> severity, plus anything you couldn't test and why. Do not edit the repo.
-> Do not write the final report.
+> section, a "Handed off" list, a "Skill notes" list (where the skill was
+> unclear, wrong or out of date), and a "Checked, clean" list written
+> last (its presence marks the file complete). Reply with at most ten
+> lines: counts by bucket and severity, plus anything you couldn't test
+> and why. Do not edit the repo. Do not write the final report.
 
 | WS | Name | Goals | Threats | Boundaries |
 | -- | ---- | ----- | ------- | ---------- |
@@ -160,7 +192,15 @@ Launch all seven workstreams **in one message**, as parallel
 
 Both sockets are W1's as transports: who may connect, and what malformed
 traffic does. What the agent signs, for whom and after which prompt, is
-W7's.
+W7's. What reaches a child's command line, its environment or a file is
+W2's, for `kpa pick` as for the prompts. How text looks once it is shown
+is W5's, in `kpa pick`'s list and in a prompt's message, for vault text
+and request text alike.
+
+A subagent's reply may never reach you. A workstream is done when its
+`w<n>.md` has its "Checked, clean" section, and a verifier when its
+verdict file exists: watch for the files and read the results from them.
+Launch the subagents unnamed.
 
 ## Workstreams
 
@@ -174,7 +214,9 @@ here before. They are starting points, not the limit of scope: test every
   socket's default path is resolved in `src/main.rs`, the agent's in
   `config::SshAgentConfig::socket_path`. Test each with
   `$XDG_RUNTIME_DIR` unset, empty, relative, pointing at a world-writable
-  dir, and at a dir owned by another uid you can simulate. Test a
+  dir, and at a dir owned by another uid you can simulate
+  (`unshare --user --map-users=auto` gives a kernel uid the daemon's peer
+  check sees as another user's). Test a
   pre-existing path that is a symlink, a regular file, a live socket, or a
   dead one. Test the parent directory's mode and creation, and a
   user-supplied `--socket` and `ssh_agent.socket`.
@@ -242,9 +284,13 @@ the head of §6.
    it has signed. **Pre-allocate the scan buffer and the maps string
    before the vault is loaded, and do a warm-up scan.** A scanner that
    allocates while scanning reuses the very chunks it's looking for, which
-   produces false "cleared" results. Classify each surviving copy as
-   kpa-owned (G-6, in scope) or inside `keepass` or `ssh-key` (NG-4,
-   hardening at most).
+   produces false "cleared" results. A scan alone can't say whose copy
+   it found: a `#[global_allocator]` that zeroes each new block and
+   searches each freed one for the needle, with a mode that records
+   without allocating, says which code freed it. Classify each surviving
+   copy as kpa-owned (G-6, in scope, however the bytes got into the
+   block) or inside `keepass` or `ssh-key` (NG-4, hardening at most).
+   Bytes left on a thread's stack are NG-4's.
 3. **De-protecting getters.** In `keepass`, `Entry::get` and therefore
    `get_title`/`get_username`/`get_url` call `expose_secret()` on
    protected values. `Value`'s `Clone` re-exposes the value, its
@@ -257,10 +303,11 @@ the head of §6.
 5. **Persistence.** Confirm `PR_SET_DUMPABLE=0` takes effect before the
    config is read or any unlock, in the daemon and in a CLI process
    (`grep Dumpable`-equivalent: call `prctl(PR_GET_DUMPABLE)` from the
-   harness, or check that `/proc/<pid>` files become root-owned). Check
-   that nothing writes secrets to a file. The one file kpa creates besides
-   its sockets is the key cache: read what an unlock wrote there, and its
-   mode.
+   harness, or check that `/proc/<pid>` files become root-owned). Don't
+   crash a process to see whether it dumps core: the host may keep the
+   core. Check that nothing writes secrets to a file. The one file kpa
+   creates besides its sockets is the key cache: read what an unlock
+   wrote there, and its mode.
 6. **What the prompt children get** (T-24). Look at the environment, fds
    and argv of the unlock prompt and of the confirm prompt. The message is
    in `KPA_PROMPT_MESSAGE`, the data behind it in `KPA_PROMPT_DATA`, and
@@ -295,21 +342,24 @@ the head of §6.
 ### W3: File input and vault integrity
 
 - **G-1.** Run unlock, list, lock and a signature under
-  `strace -f -e trace=openat,open,creat,rename,unlink,truncate,ftruncate,flock,fcntl,chmod,utimensat,write`
+  `strace -f -e trace=openat,open,creat,rename,renameat,renameat2,unlink,unlinkat,mkdir,mkdirat,link,linkat,symlink,symlinkat,truncate,ftruncate,flock,fcntl,chmod,fchmod,fchmodat,utimensat,write`
   against fixtures in a directory you snapshot before and after
-  (`find -printf '%p %m %T@ %s\n'`). Any open with write intent, any new
+  (`find -printf '%p %m %i %T@ %C@ %s\n'`). Any open with write intent, any new
   file, any changed timestamp, and any fd on the vault that outlives the
   read is a finding. The key cache is the one file kpa creates: check that
   it lands under the cache directory, wherever the vault is. Confirm in
-  `Cargo.lock`/`cargo tree -e features` that `keepass` is built without
-  save support.
+  `Cargo.lock`/`cargo tree -e no-dev,features` that `keepass` is built
+  without save support.
 - **G-9.** Follow `robustness-audit` checks 1–5: unsafe inventory
   including the dependency tree (`rust-argon2` has `unsafe` driven by KDF
   parameters), panic inventory, recursion depth on a 2 MiB thread stack,
   header and KDF values that drive loops or allocations (are they
   authenticated *before* use?), and mutation fuzzing with a per-iteration
-  timeout. Also test that one database's crafted file cannot affect
-  another database's state in the same daemon.
+  timeout. A header edit only gets past the unkeyed header hash if you
+  recompute it after each mutation. List every format the parser accepts,
+  not only the ones kpa documents, and open one of each. Also test that
+  one database's crafted file cannot affect another database's state in
+  the same daemon.
 - **G-8.** Change the file between unlock and the next request in every
   way a sync tool might: atomic rename, in-place rewrite at the same size,
   a rewrite followed by `touch -d` to restore the mtime, a same-second
@@ -325,7 +375,9 @@ the head of §6.
   and during the KDF), a double unlock, and lock-all against a concurrent
   `list`, `copy` and signature. A request served or a signature made after
   lock, or an unlock installing after a lock, breaks G-5. Use a fake
-  prompt program that sleeps, so the timing is deterministic.
+  prompt program that sleeps, so the timing is deterministic. A
+  compositor of your own, speaking the data-control protocol to kpa's
+  real backend, lets these run without the user's clipboard.
 - **What a lock ends.** Clipboard offers, approvals, pending requests, the
   agent's private keys and any prompt in flight, for every kind of lock:
   explicit, idle, screen lock, suspend, a lost watch, a file found
@@ -339,9 +391,11 @@ the head of §6.
 - **D-Bus and logind** (`src/frontends/auto_lock/`). On a private bus with
   a mock logind, as `tests/logind.rs` runs one: signals from a peer that
   doesn't own logind's name, sent straight to kpa's connection; a
-  subscription that drops and comes back, and a database unlocked while
-  there was none; `PrepareForSleep(true)`; a display session that changes.
-  A spoofed signal that only locks is out of scope (NG-7).
+  subscription that drops and comes back, also in the middle of a
+  suspend, and a database unlocked while there was none;
+  `PrepareForSleep(true)`; a display session that changes. On the system
+  bus the sender can be another uid (TB-6). A spoofed signal that only
+  locks is out of scope (NG-7).
 - **The tray** (`src/frontends/tray.rs`). Introspect what it exports
   (`busctl --user introspect`, on a session bus of your own), and test
   whether any method can unlock without a prompt, read entry data, or
@@ -406,10 +460,11 @@ conflicting triage.
 
 - **Claims versus code.** Grep `README.md`, every doc in `docs/`,
   `config.example.toml`, `nix/hm-module.nix` and source comments for
-  `never|always|cannot|guaranteed|zeroiz|only|no code path`. Test the
-  assertions no goal covers, and the ones that span several goals. When
-  code and doc disagree, decide which one is wrong and say so. An accurate
-  doc is a valid fix.
+  `never|always|cannot|guaranteed|zeroiz|only|no code path`. Go through
+  the docs' matches one by one, and sample the source comments', which
+  run to hundreds. Test the assertions no goal covers, and the ones that
+  span several goals. When code and doc disagree, decide which one is
+  wrong and say so. An accurate doc is a valid fix.
 - **Built or not.** The docs say at the spot what isn't built yet. Check
   that each such mark is still true, and that nothing else is described
   as built that isn't.
@@ -445,7 +500,9 @@ need, such as a session-bind signed by a throwaway host key.
 `tests/ssh_forwarding.rs` forwards the agent with the real `ssh -A`
 through a private `sshd`. A scripted confirm prompt that records
 `KPA_PROMPT_MESSAGE` and `KPA_PROMPT_DATA` and answers `Allow`, `Deny`,
-something else or nothing gives every outcome on demand.
+something else or nothing gives every outcome on demand. When a result
+through the real `ssh` surprises you, reproduce it with raw frames against
+the same agent before you record it: a stale `sshd` gives false leads.
 
 - **G-13.** A database that doesn't opt in, and a `serve = false` key:
   neither listed nor signed with. A locked database: listed from the key
@@ -508,19 +565,25 @@ fresh `general-purpose` subagent, all in one message:
 > `<scratch>/audit/verify/<id>.finding.md`. Reproduce it independently
 > under `<scratch>/audit/verify/<id>/`, or show why it fails, or show that
 > it reduces to an assumption violation, a non-goal, or an existing entry.
+> Build crates of your own there, each with the repo's `Cargo.lock`;
+> `tests/common/mod.rs` shows how to run the daemon in-process. Where the
+> file merges several workstream records, check each claim, and say under
+> Corrections which ones to split off.
 > Write `<scratch>/audit/verify/<id>.verdict.md` in exactly this shape:
 > a `Verdict:` line (Confirmed | Confirmed with changes | Refuted), an
 > `Evidence:` line (Verified | Reasoned), a `Bucket:` line and a
 > `Severity:` line (what you would assign), then `## Corrections` (each
 > claim in the record that is wrong, and the correct text) and
-> `## Reproduction` (the commands and trimmed output, at most 40 lines).
+> `## Reproduction` (the commands and trimmed output, at most 40 lines),
+> and `## Skill notes` (where the skill or the model left you guessing).
 > Reply with the four header lines only.
 
 Apply the verdicts: drop refuted findings to Appendix B with the reason,
 fold corrections into the record, and take the verifier's bucket and
 severity unless you can say in one sentence why the original triage was
-right. Raise "reasoned" to "verified" only when the verifier reproduced
-it.
+right, or the verdict departs from §9 (Hardening is Informational,
+whatever the verifier rated it). Raise "reasoned" to "verified" only when
+the verifier reproduced it.
 
 ## Phase 3: consolidate and report
 
@@ -530,8 +593,16 @@ and list the source IDs in one line at the top of Appendix A
 (`W1-1→F-03, W1-2→F-02, …`). Re-check each bucket and severity against §9
 yourself rather than trusting the workstream. When workstreams triaged the
 same root cause differently, decide and say why in the record. Order by
-severity, then bucket. Number the findings `F-01`, `F-02` and so on. Write
+severity, then bucket. Number the findings `F-01`, `F-02` and so on,
+keeping every workstream ID as it is wherever a record or Appendix A
+cites a source: a blanket substitution turns `W2-02, W2-03` into
+`F-15, F-15`. Write
 `docs/audits/<YYYY-MM-DD>.md`, adding `-2`, `-3`, … if that file exists.
+
+Appendix A lists clean results only. Something odd that breaks no goal
+still gets a record, as Hardening. Where several records share a rig,
+describe it once under "Harness rigs" at the head of Appendix A and point
+to it from each.
 
 ### Report structure
 
@@ -566,7 +637,7 @@ memory-safety verdict.
 | Goal | Status | Evidence | Findings |
 | ---- | ------ | -------- | -------- |
 | G-1 Read-only | holds / broken / partial / not implemented / not checked | verified / reasoned | F-nn, … |
-| G-5 (idle timeout) | …one row per goal; split a goal into one row per clause when its clauses differ in status… |
+| G-5.1 Lock triggers | …one row per goal; split a goal into one row per numbered clause when its clauses differ in status… |
 
 ## 3. Findings summary
 
@@ -647,7 +718,9 @@ price it.
 
 Severity follows threat model §9. Hardening, assumption violations and
 out-of-scope items are **Informational**. A model gap takes the severity it
-would have once the proposed entry is adopted.
+would have once the proposed entry is adopted, and is Informational when
+that entry only records what kpa already accepts. In the summary table's
+Goal column, the first goal is the one the finding is triaged under.
 
 `Status` is for remediation. Fixers change it to `Fixed in <sha>` or
 `Won't fix: <reason>`, and cite findings in commits as
@@ -657,6 +730,7 @@ would have once the proposed entry is adopted.
 
 - Confirm `git status --porcelain` is unchanged.
 - Lead your reply with the executive summary's verdict and the findings
-  summary table, then the path of the report.
+  summary table, then the path of the report. End it with the skill notes
+  the workstreams and verifiers left, and your own.
 - Don't commit unless asked. Don't apply the threat-model changes from §5
   unless asked: they're proposals.
