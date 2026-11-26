@@ -20,7 +20,7 @@ over the same file.
 | Search and copy: the CLI, `kpa pick`, the tray | Built | 0.7.0 | Not planned: autofill covers it |
 | SSH agent | Built, ships in 0.4.0 | 0.7.0 | Unscheduled: few SSH clients there use another app's keys |
 | Login autofill | 0.5.0: a browser extension | 0.7.0: the same extension, and the credential provider extension | 0.8.0: the Autofill service and Credential Manager |
-| Passkey sign-in | 0.6.0: an emulated security key | 0.7.0: a credential provider extension | 0.8.0: Credential Manager |
+| Passkey sign-in | 0.6.0: the same browser extension | 0.7.0: the same extension, and the credential provider extension | 0.8.0: Credential Manager |
 
 Windows is out of scope ([`docs/portability.md`](./docs/portability.md)).
 
@@ -47,9 +47,12 @@ URL matches the page.
 
 - **Why an extension:** desktop browsers on Linux take no outside password
   provider. Their own password managers keep their own stores, and the
-  routes below the browser (the emulated key, `credentialsd`) carry
+  routes below the browser (an emulated security key, `credentialsd`) carry
   passkeys, never passwords.
-- **Passwords only.** Passkeys come with the emulated key (0.6.0).
+- **Logins first.** Passkeys come through the same extension in 0.6.0, so
+  its design gives them what they rely on (`docs/passkeys.md` § 6.1): a
+  way to kpa that a prompt can wait on, the page's origin from the
+  browser, and a menu under a field that the page can't read.
 - **Scope:** `docs/design.md` § Scope lists a browser backend under *Is
   not*. This milestone's design changes that.
 - **Its design settles:** how a page matches entries, what a fill asks of
@@ -62,16 +65,19 @@ URL matches the page.
 
 ## 0.6.0: Passkey sign-in on Linux
 
-kpa signs in to websites with the passkeys stored in its databases, as an
-emulated USB security key that unmodified Chromium and Firefox use. Design:
-`docs/passkeys.md`, in review on
+kpa signs in to websites with the passkeys stored in its databases, through
+the browser extension of 0.5.0. Its page script takes a page's passkey
+requests, hands kpa those it has a passkey for, and leaves every other one
+to the browser. Design: `docs/passkeys.md`, in review on
 [#45](https://github.com/n6g7/kpa/pull/45).
 
 - Sign-in only, following the SSH agent's rules: a database opts in, every
   use is approved on screen, a locked database is unlocked on demand.
-- The browser shows its security-key dialog. Passkey autofill under a
-  username field is out of reach for a USB key.
-- Linux only: the key is created through `/dev/uhid`.
+- A site's passkeys appear in the extension's menu under its username
+  field, beside its logins.
+- Hardware keys, phones and the browser's own passkeys keep working
+  through the browser's own dialog.
+- Nothing from the system: no device, group or kernel module.
 
 ## 0.7.0: macOS
 
@@ -86,9 +92,9 @@ In two steps:
    It needs a signed app bundle and a paid Apple Developer Program
    membership.
 
-The emulated security key stays Linux-only. The milestone comes after the
-browser work because the extension and its host carry over, and on a Mac
-an existing KeePass client already covers autofill and passkeys.
+The milestone comes after the browser work because the extension and its
+host carry over, with logins and passkeys in Chromium and Firefox, and on
+a Mac an existing KeePass client already covers autofill and passkeys.
 
 ## 0.8.0: Android
 
