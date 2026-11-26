@@ -11,9 +11,11 @@ Per `docs/ssh-agent.md`.
 - [x] Local agent: discovery, key cache, on-screen approvals, `kpa ssh keys`, session wiring
 - [x] Unlock on demand, and `kpa ssh approve` for requests from outside the desktop
 - [x] Forwarding with per-session approvals
-- [ ] Final security audit of all of kpa, the core rewrite included
+- [x] Final security audit of all of kpa, the core rewrite included
 - [x] Threat model: cover the agent's prompt data, host naming through `known_hosts` and certificates, and the forwarding chain
 - [ ] Move to `ssh-key` 0.7.0 once it is released (still 0.7.0-rc.12). The release doesn't wait for it
+- [ ] Fix the high and medium findings of the final security audit
+- [ ] Triage the low and informational findings of the final security audit
 
 ### 0.5.0: Login autofill in browsers
 
