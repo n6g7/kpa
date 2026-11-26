@@ -18,7 +18,7 @@ over the same file.
 | Capability | Linux | macOS | Android |
 |---|---|---|---|
 | Search and copy: the CLI, `kpa pick`, the tray | Built | 0.7.0 | Not planned: autofill covers it |
-| SSH agent | Built, ships in 0.4.0 | 0.7.0 | 0.8.0, if an SSH client there can use an outside agent |
+| SSH agent | Built, ships in 0.4.0 | 0.7.0 | Unscheduled: few SSH clients there use another app's keys |
 | Login autofill | 0.5.0: a browser extension | 0.7.0: the same extension, and the credential provider extension | 0.8.0: the Autofill service and Credential Manager |
 | Passkey sign-in | 0.6.0: an emulated security key | 0.7.0: a credential provider extension | 0.8.0: Credential Manager |
 
@@ -96,7 +96,10 @@ A read-only kpa app on the same Rust core. It serves logins to other apps
 through the Autofill service and Credential Manager, and passkey sign-in
 through Credential Manager. Not designed yet.
 
-- **SSH agent:** depends on an Android SSH client that can use an agent
-  outside its own app, and on how it reaches one.
+- **No SSH agent.** Most Android SSH clients keep their own keys. Two
+  routes reach those that don't: a bridge inside Termux that serves
+  `SSH_AUTH_SOCK`, as OkcAgent does for OpenKeychain, and the OpenIntents
+  SSH Authentication API, which TermBot uses. An agent over them is
+  unscheduled ([`TODO.md`](./TODO.md)).
 - **Its design settles:** how the app reads a database file another app
   syncs, how it unlocks and locks, and which parts of the core it shares.
