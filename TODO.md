@@ -15,13 +15,13 @@ Per `docs/ssh-agent.md`.
 - [ ] Threat model: cover the agent's prompt data, host naming through `known_hosts` and certificates, and the forwarding chain
 - [ ] Move to `ssh-key` 0.7.0 once it is released (still 0.7.0-rc.12). The release doesn't wait for it
 
-### 0.5.0: Passkey sign-in on Linux
-
-- [ ] Design: an emulated security key, per `docs/passkeys.md` (in review)
-
-### 0.6.0: Login autofill in browsers
+### 0.5.0: Login autofill in browsers
 
 - [ ] Design: the browser extension and its native messaging host
+
+### 0.6.0: Passkey sign-in on Linux
+
+- [ ] Design: an emulated security key, per `docs/passkeys.md` (in review)
 
 ### 0.7.0: macOS
 

@@ -19,8 +19,8 @@ over the same file.
 |---|---|---|---|
 | Search and copy: the CLI, `kpa pick`, the tray | Built | 0.7.0 | Not planned: autofill covers it |
 | SSH agent | Built, ships in 0.4.0 | 0.7.0 | 0.8.0, if an SSH client there can use an outside agent |
-| Passkey sign-in | 0.5.0: an emulated security key | 0.7.0: a credential provider extension | 0.8.0: Credential Manager |
-| Login autofill | 0.6.0: a browser extension | 0.7.0: the same extension, and the credential provider extension | 0.8.0: the Autofill service and Credential Manager |
+| Login autofill | 0.5.0: a browser extension | 0.7.0: the same extension, and the credential provider extension | 0.8.0: the Autofill service and Credential Manager |
+| Passkey sign-in | 0.6.0: an emulated security key | 0.7.0: a credential provider extension | 0.8.0: Credential Manager |
 
 Windows is out of scope ([`docs/portability.md`](./docs/portability.md)).
 
@@ -38,7 +38,29 @@ and everything else merged since 0.3.0. The code is done.
   binary built from its committed `Cargo.lock`, so an exact pin on a
   release candidate affects no one else's build.
 
-## 0.5.0: Passkey sign-in on Linux
+## 0.5.0: Login autofill in browsers
+
+A browser extension for Chromium and Firefox, and the native messaging host
+it starts, which talks to kpa's socket. The extension fills usernames,
+passwords and TOTP codes into a site's login form, from the entries whose
+URL matches the page.
+
+- **Why an extension:** desktop browsers on Linux take no outside password
+  provider. Their own password managers keep their own stores, and the
+  routes below the browser (the emulated key, `credentialsd`) carry
+  passkeys, never passwords.
+- **Passwords only.** Passkeys come with the emulated key (0.6.0).
+- **Scope:** `docs/design.md` § Scope lists a browser backend under *Is
+  not*. This milestone's design changes that.
+- **Its design settles:** how a page matches entries, what a fill asks of
+  the user, how the extension is distributed (the Chrome Web Store, and
+  addons.mozilla.org signing for Firefox), how the home-manager module
+  installs the host for each browser, and sandboxed (Flatpak, Snap)
+  browsers.
+- The extension and host follow [`docs/portability.md`](./docs/portability.md),
+  so they carry over to macOS.
+
+## 0.6.0: Passkey sign-in on Linux
 
 kpa signs in to websites with the passkeys stored in its databases, as an
 emulated USB security key that unmodified Chromium and Firefox use. Design:
@@ -50,28 +72,6 @@ emulated USB security key that unmodified Chromium and Firefox use. Design:
 - The browser shows its security-key dialog. Passkey autofill under a
   username field is out of reach for a USB key.
 - Linux only: the key is created through `/dev/uhid`.
-
-## 0.6.0: Login autofill in browsers
-
-A browser extension for Chromium and Firefox, and the native messaging host
-it starts, which talks to kpa's socket. The extension fills usernames,
-passwords and TOTP codes into a site's login form, from the entries whose
-URL matches the page.
-
-- **Why an extension:** desktop browsers on Linux take no outside password
-  provider. Their own password managers keep their own stores, and the
-  routes below the browser (the emulated key, `credentialsd`) carry
-  passkeys, never passwords.
-- **Passwords only.** Passkeys stay on the emulated key (0.5.0).
-- **Scope:** `docs/design.md` § Scope lists a browser backend under *Is
-  not*. This milestone's design changes that.
-- **Its design settles:** how a page matches entries, what a fill asks of
-  the user, how the extension is distributed (the Chrome Web Store, and
-  addons.mozilla.org signing for Firefox), how the home-manager module
-  installs the host for each browser, and sandboxed (Flatpak, Snap)
-  browsers.
-- The extension and host follow [`docs/portability.md`](./docs/portability.md),
-  so they carry over to macOS.
 
 ## 0.7.0: macOS
 
