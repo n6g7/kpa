@@ -32,7 +32,8 @@ timeouts and the screen-lock rules are [`headless.md`](./headless.md) § 6.
   (§ 5.3).
 - **A locked database is unlocked on demand.** kpa caches a hash of each
   passkey's site and credential id, and nothing else, so it knows which
-  locked database to offer. The unlock prompt names the site.
+  locked databases to offer, beside the accounts of the unlocked ones. The
+  unlock prompt names the site.
 - **No prompt where nobody can see it.** Prompts appear on screen only. The
   key is unplugged while the screen is locked or the display session isn't
   the active one, and there is no key at all without a display session.
@@ -138,7 +139,8 @@ scans it:
    by its entry's uuid, and listed by `kpa passkeys`.
 
 A credential id found in two opted-in databases is served from the first in
-config order.
+config order of those unlocked, and a locked database isn't offered for a
+credential an unlocked one already serves (§ 5.2).
 
 **The account name** kpa shows is the passkey's username, else the entry's
 username, else the entry's title. It is entry content, escaped and
@@ -170,13 +172,13 @@ locked, this file is how kpa knows that a request is for one of its
 passkeys (§ 5.2).
 
 - A passkey removed from the vault stays in the file until the next unlock
-  rewrites it. The unlock it causes then finds nothing and the sign-in is
-  refused.
+  rewrites it. An unlock picked for it then finds nothing, and the sign-in
+  is refused.
 - A passkey added to the vault is known from the next unlock on.
 - With no cache file yet, as on a fresh machine, a locked database answers
   nothing until its first unlock.
-- Tampering with the file needs the user's uid. The most it does is raise
-  an unlock prompt for a site the database has no passkey for.
+- Tampering with the file needs the user's uid. The most it does is offer
+  the database's unlock for a site it has no passkey for.
 
 The hash of a site's id is no secret: it is in every assertion the site
 receives. What the file gives its reader is a way to test a guessed site
@@ -192,11 +194,12 @@ lookup needs.
 | --- | --- | --- | --- |
 | P1 | Sign-in to a site with one passkey | The approval prompt, unless the site's `confirm` says otherwise, then the signature | The unlock prompt naming the site, then as unlocked |
 | P2 | Sign-in to a site with several accounts | The account prompt | The unlock prompt, then the account prompt |
-| P3 | A site kpa holds no passkey for | Refused at once, no prompt | The same: the cache has no hash for it |
-| P4 | A registration | Refused at once (§ 6.4) | The same |
-| P5 | Screen locked, display session not active, or no display session | The key is unplugged | The key is unplugged |
-| P6 | Another program that opens the device: a script, a second browser | Indistinguishable from P1 | Indistinguishable from P1 |
-| P7 | A sandboxed app without device access | It has no device | It has no device |
+| P3 | Sign-in to a site with passkeys in two databases, one of them locked | The account prompt: the unlocked database's accounts, and a line to unlock the other | Picking that line raises the unlock prompt, then as unlocked |
+| P4 | A site kpa holds no passkey for | Refused at once, no prompt | The same: the cache has no hash for it |
+| P5 | A registration | Refused at once (§ 6.4) | The same |
+| P6 | Screen locked, display session not active, or no display session | The key is unplugged | The key is unplugged |
+| P7 | Another program that opens the device: a script, a second browser | Indistinguishable from P1 | Indistinguishable from P1 |
+| P8 | A sandboxed app without device access | It has no device | It has no device |
 
 ### 5.2 Which passkey answers
 
@@ -209,26 +212,36 @@ the site already knows the account). kpa works through it in this order:
    id is on the allow list if there is one. There is no subdomain or suffix
    matching: the browser has already checked the site's id against the
    page's origin.
-2. **With no candidate**, kpa looks at the caches of the locked, opted-in
-   databases, for the site's hash and, with an allow list, one of its ids'
-   hashes. If none has it, the request is refused with no prompt. Otherwise
-   kpa unlocks the first such database in config order (below), and starts
-   again from step 1 with what the database really holds.
-3. **A probe** is answered here (§ 6.5): no prompt, and not a sign-in.
-4. **Approval** (§ 5.3) picks the one passkey that signs.
-5. **The signature** is made (§ 5.4) if the database is still in the unlock
+2. **Locked databases on offer** are the locked, opted-in databases whose
+   cache has the site's hash and, with an allow list, one of its ids'
+   hashes, for a passkey that isn't a candidate already. A database whose
+   unlock is already in progress isn't offered.
+3. **With neither**, the request is refused, with no prompt.
+4. **A probe** is answered here (§ 6.5): no prompt, and not a sign-in.
+5. **Approval** (§ 5.3) picks the one passkey that signs. With one
+   candidate and no locked database on offer, it is the approval prompt,
+   or nothing, as the site's `confirm` says. With one locked database and
+   no candidate, it starts with that database's unlock prompt. Otherwise
+   the account prompt lists them all: an account picked is approved, and a
+   database picked raises its unlock prompt.
+6. **After an unlock**, the request goes on from step 1 with that
+   database's passkeys alone. The approval follows, for the account the
+   database really holds.
+7. **The signature** is made (§ 5.4) if the database is still in the unlock
    the approval was for. A lock in between refuses the request.
 
-Unlocked databases answer first: a locked database is only offered an
-unlock when no unlocked one has a passkey for the site.
+A locked database is offered beside the unlocked ones, not only when they
+have nothing for the site: the account this sign-in is for may be in
+either, and only the user knows which. kpa can't name a locked database's
+accounts, so its line names the database. One whose cached passkeys for
+the site are all candidates already has nothing to add, and isn't offered.
 
 **Unlock on demand** is the unlock `kpa unlock` runs, with the same
 `prompt` in the same queue, and the four steps every front end follows
 ([`design.md`](./design.md) § Unlocking): take the database's unlock and
 its token, check that the display session allows a prompt, ask, finish. The
 question says what for: `Unlock database personal to sign in to
-github.com?`. Answering it approves nothing; the approval follows. A
-database whose unlock is already in progress refuses the request.
+github.com?`. Answering it approves nothing; the approval follows.
 
 ### 5.3 Approval
 
@@ -240,9 +253,10 @@ A per-site setting, `confirm`, decides when a sign-in asks:
   the site's other accounts.
 - `"never"`: a sign-in never asks.
 
-When a site has several candidates the prompt always appears, whatever
-their `confirm`: choosing the account is the question. So `"once"` and
-`"never"` change something only where one passkey can answer.
+With more than one choice, candidates or locked databases on offer, the
+account prompt always appears, whatever their `confirm`: choosing is the
+question. So `"once"` and `"never"` change something only where one
+passkey can answer and no locked database is on offer.
 
 **The prompt.** `passkeys.confirm_prompt` is an argv with the contract of
 the SSH agent's `confirm_prompt` ([`ssh-agent.md`](./ssh-agent.md) § 6.7):
@@ -255,19 +269,22 @@ can serve both settings. It is required once a database has
 | Request | Message | Choices |
 | --- | --- | --- |
 | One candidate | `Approve sign-in to github.com as "alice"?` | `Allow`, `Deny` |
-| Several candidates | `Sign in to github.com with which account?` | One line per account, `alice [personal]`, then `Deny` |
+| Several candidates, or locked databases on offer | `Sign in to github.com with which account?` | One line per account, `alice [personal]`, one per locked database, `Unlock work`, then `Deny` |
 
-An account line is the account name and its database. Two lines that would
-be equal are numbered (`alice [personal] (2)`), so every line is distinct
-and none can equal `Deny`. The answer is matched against the lines kpa
-wrote, never parsed.
+An account line is the account name and its database, and a locked
+database's line is `Unlock` and its name. Two lines that would be equal are
+numbered (`alice [personal] (2)`), so every line is distinct and none can
+equal `Deny`. The answer is matched against the lines kpa wrote, never
+parsed.
 
 `KPA_PROMPT_DATA` has the members `relying_party`, the site's id, and
 `accounts`, a list of `{"name", "database"}` in the order of the lines (one
-element for an Allow/Deny prompt). The unlock prompt has `database` and
-`relying_party`. Every piece that isn't kpa's own text (the site's id, an
-account name, a database name) is escaped as the SSH agent's prompt pieces
-are, and each has its own length budget. The site's id is never cut.
+element for an Allow/Deny prompt), and `unlock`, the names of the locked
+databases on offer, in the order of their lines after the accounts'. The
+unlock prompt has `database` and `relying_party`. Every piece that isn't
+kpa's own text (the site's id, an account name, a database name) is escaped
+as the SSH agent's prompt pieces are, and each has its own length budget.
+The site's id is never cut.
 
 **Where prompts may appear.** On screen only, and only while there is a
 display session that isn't known to be locked: the tray's gate
@@ -429,13 +446,17 @@ sign-in with an allow list.
 - **With an allow list**, kpa answers a probe without a prompt, with an
   assertion whose user-present and user-verified flags are clear. No site
   accepts that as a sign-in. It tells the caller that a credential id it
-  already knew is in the vault.
+  already knew is in the vault. An unlocked candidate answers it whatever
+  else is on offer, and the real request that follows offers them all
+  (§ 5.2).
 - **Without an allow list**, a probe is refused. Nothing lists a site's
   accounts silently.
-- **For a locked database's passkey**, the probe raises the unlock prompt
-  and is held until it is answered. Refusing it would end the sign-in: no
-  browser probes again after an unlock. The real request follows, and with
-  it the approval.
+- **With only locked databases on offer**, the probe raises the prompt a
+  sign-in would start with: the unlock prompt for one database, the
+  account prompt with its unlock lines for several. It is held until that
+  is answered, then answered from what the unlock brought. Refusing it
+  would end the sign-in: no browser probes again after an unlock. The real
+  request follows, and with it the approval.
 
 A probe counts as no activity and needs no approval, and `confirm` has no
 say in it.
@@ -449,8 +470,8 @@ say in it.
 - **The browser's patience** is the page's timeout: at most two minutes in
   Firefox, three minutes or more in Chromium. kpa's own prompt timeouts
   apply inside it.
-- **Firefox never cancels a probe.** A probe held for an unlock prompt
-  (§ 6.5) stays until the prompt is answered or times out.
+- **Firefox never cancels a probe.** A probe held for a prompt (§ 6.5)
+  stays until the prompt is answered or times out.
 - **A separate thread reads the device.** The kernel queues few reports and
   drops the rest, so a `CANCEL` must not wait behind the request it
   cancels.
