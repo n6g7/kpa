@@ -41,6 +41,7 @@ Per `docs/ssh-agent.md`.
 - [ ] Refactor the other existing commands to use the new output/reply system
 - [ ] Consider PGP agent support
 - [ ] Passkey support via credentialsd, once it has a provider interface a password manager can implement
+- [ ] An SSH agent on Android, for the clients that can use another app's keys: Termux through a bridge serving `SSH_AUTH_SOCK` (as OkcAgent does), and the OpenIntents SSH Authentication API (TermBot, Android Password Store)
 
 ## Done
 
