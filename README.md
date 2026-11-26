@@ -16,7 +16,8 @@ client that already has write access to the same files.
 
 See [`docs/design.md`](./docs/design.md) for the design,
 [`docs/module-structure.md`](./docs/module-structure.md) for how the code is
-divided, and [`TODO.md`](./TODO.md) for what is planned.
+divided, [`ROADMAP.md`](./ROADMAP.md) for where kpa is going, and
+[`TODO.md`](./TODO.md) for the work under way.
 
 ## Platform
 

@@ -48,8 +48,8 @@ the present tense, never as a list of changes to make to kpa or to another
 doc.
 
 - No recommendations, proposals, options left to choose between, or open
-  questions. Work still to do, and ideas kpa might take up, go in
-  `TODO.md`.
+  questions. The milestones kpa works toward go in `ROADMAP.md`; work
+  still to do, and ideas kpa might take up, go in `TODO.md`.
 - An alternative kpa turned down may stay, as the reason for what it does.
 - Where a doc describes a design that isn't built yet, it says so plainly
   at that spot.

@@ -2,26 +2,37 @@
 
 ## Open
 
-Roadmap, in release order. Each item gets its design written before its implementation.
+Grouped by the milestones in [`ROADMAP.md`](./ROADMAP.md), in order. Each milestone gets its design written before its implementation.
 
-1. [x] Support headless use (no window manager or GUI), per `docs/headless.md`
-  - [x] Prompt safety nets: prompt timeout, a lock kills open prompts, no prompt while the screen is locked
-  - [x] Zeroizing request buffer
-  - [x] Origin classifier
-  - [x] Terminal unlock
-  - [x] Copy gated on origin and the desk's state
-2. [ ] SSH agent, per `docs/ssh-agent.md`. The release waits for `ssh-key` 0.7.0
-  - [x] Local agent: discovery, key cache, on-screen approvals, `kpa ssh keys`, session wiring
-  - [x] Unlock on demand, and `kpa ssh approve` for requests from outside the desktop
-  - [x] Forwarding with per-session approvals
-  - [ ] Move to `ssh-key` 0.7.0 once it is released (still 0.7.0-rc.12)
-  - [ ] Final security audit of all of kpa, the core rewrite included
-  - [ ] Threat model: cover the agent's prompt data, host naming through `known_hosts` and certificates, and the forwarding chain
-3. [ ] Passkey "agent" / provider (FIDO2 emulation). Shape to be decided
-4. [ ] Add macOS support (some time later)
-5. [ ] Passkey support via credentialsd (later)
+### 1. SSH agent release (0.4.0)
 
-Unscheduled:
+Per `docs/ssh-agent.md`.
+
+- [x] Local agent: discovery, key cache, on-screen approvals, `kpa ssh keys`, session wiring
+- [x] Unlock on demand, and `kpa ssh approve` for requests from outside the desktop
+- [x] Forwarding with per-session approvals
+- [ ] Final security audit of all of kpa, the core rewrite included
+- [ ] Threat model: cover the agent's prompt data, host naming through `known_hosts` and certificates, and the forwarding chain
+- [ ] Move to `ssh-key` 0.7.0 once it is released (still 0.7.0-rc.12). The release doesn't wait for it
+
+### 2. Passkey sign-in on Linux
+
+- [ ] Design: an emulated security key, per `docs/passkeys.md` (in review)
+
+### 3. Login autofill in browsers
+
+- [ ] Design: the browser extension and its native messaging host
+
+### 4. macOS
+
+- [ ] Design: the macOS side of each seam in `docs/portability.md`
+- [ ] Design: autofill and passkeys through a credential provider extension
+
+### 5. Android
+
+- [ ] Design: the read-only app, its autofill and its passkeys
+
+### Unscheduled
 
 - [ ] Document assumptions (Linux only, logind, etc)
 - [ ] A desktop notification on each `copy` and SSH signature, so a read you didn't make gets noticed (`docs/threat-model.md` T-16)
@@ -29,10 +40,7 @@ Unscheduled:
 - [ ] The legacy KeeOtp `TimeOtp-*` fields, which `keepass`'s `totp` feature doesn't parse
 - [ ] Refactor the other existing commands to use the new output/reply system
 - [ ] Consider PGP agent support
-- [ ] `kpa pick`, a terminal entry picker over fzf, per `docs/design.md` § The picker
-  - [x] `status` reports `can_copy`, whether a `copy` from the requester would land
-  - [x] The `pick` subcommand
-  - [ ] home-manager module: kpa on `PATH`, and an optional shell key binding for `kpa pick`
+- [ ] Passkey support via credentialsd, once it has a provider interface a password manager can implement
 
 ## Done
 
@@ -46,3 +54,13 @@ Unscheduled:
 - [x] Fix the high and medium findings from the latest security audit
 - [x] `kpa list` returns a list of copyable fields for each entry
 - [x] Triage the low and informational findings from the latest security audit
+- [x] Support headless use (no window manager or GUI), per `docs/headless.md`
+  - [x] Prompt safety nets: prompt timeout, a lock kills open prompts, no prompt while the screen is locked
+  - [x] Zeroizing request buffer
+  - [x] Origin classifier
+  - [x] Terminal unlock
+  - [x] Copy gated on origin and the desk's state
+- [x] `kpa pick`, a terminal entry picker over fzf, per `docs/design.md` § The picker
+  - [x] `status` reports `can_copy`, whether a `copy` from the requester would land
+  - [x] The `pick` subcommand
+  - [x] home-manager module: kpa on `PATH`, and an optional shell key binding for `kpa pick`
