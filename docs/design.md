@@ -16,6 +16,7 @@ the doc or the module that owns it:
 | [`ssh-agent.md`](./ssh-agent.md) | the SSH agent: policy, approvals, the sign flow |
 | [`threat-model.md`](./threat-model.md) | what kpa claims to protect, against whom |
 | [`portability.md`](./portability.md) | the OS seams, and the rules for keeping them replaceable |
+| [`android.md`](./android.md) | the Android app: its fill and credential services, and unlocking and locking on a phone. Designed, not built yet: nothing else in this doc describes it |
 | [`config.example.toml`](../config.example.toml) | every config key |
 
 ## Scope
