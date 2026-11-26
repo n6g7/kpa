@@ -112,7 +112,7 @@ Prompts, listings and the log name them.
 | TB-3 | Decrypted entry content flowing out: to control clients and what they print, from `kpa pick` to `fzf`, to agent clients as identity comments, into prompt messages and their data, into the log | Entry content (ACT-4) |
 | TB-4 | The clipboard (Wayland data-control): visible to every client of the compositor                | Readers (ACT-5) |
 | TB-5 | The prompt subprocesses: each is handed a message and the data behind it, in its environment; the unlock prompt's stdout carries the password, the confirm prompt's an `Allow` or a `Deny` | The user's view of a prompt: anything that can draw on screen (ACT-6) can imitate it (NG-8). The programs themselves are trusted (ASM-3) |
-| TB-6 | D-Bus: session bus (the tray menu, the service manager's environment naming the compositor), system bus (logind `Lock`, `LockedHint`, `PrepareForSleep`) | Callers and signal senders (ACT-6) |
+| TB-6 | D-Bus: session bus (the tray menu, the service manager's environment naming the compositor), system bus (logind `Lock`, `LockedHint`, `PrepareForSleep`) | Callers and signal senders: a sandboxed peer on either bus (ACT-6), and on the system bus any local uid, which the stock bus policy lets send a signal to any connection (ACT-1) |
 | TB-7 | Process memory → anything persistent: files, logs (including kpa's own operation log, which a supervisor may persist), stderr, swap, core dumps, child argv/env | Everything persistent (ACT-5, ACT-7) |
 | TB-8 | The agent socket under `$XDG_RUNTIME_DIR/kpa/`, bound and checked like TB-1. Same-uid clients reach it directly; remote hosts reach it through a forwarding channel the user opened | Request bytes, session-bind contents (a host key or host certificate, a session identifier, a signature), and the data to be signed (ACT-5, ACT-6, ACT-10, ACT-11; inside a session-bind, ACT-12) |
 
@@ -194,7 +194,9 @@ hardening.
 ## 6. Security goals
 
 What kpa claims. A finding is a vulnerability when it shows one of these
-failing for an in-scope actor.
+failing for an in-scope actor. A goal that makes several claims lists them
+as numbered clauses, cited as `G-5.3`. A new clause goes at the end of its
+list, so the numbers stay put.
 
 Where each asset may go. An asset anywhere else is a finding, against G-3
 for a channel and G-4 for anything persistent:
@@ -221,32 +223,32 @@ for a channel and G-4 for anything persistent:
   what G-14 allows it. And what a prompt says is out of kpa's hands once a
   prompt program puts it on its command line (T-24).
 - **G-3 Secrets leave only by explicit `copy`, only to the clipboard.**
-  - A-1 never leaves the process, and only the user's own typing enters
-    it: on screen, into the prompt program, or on a terminal the daemon
-    itself reads from. It is never in a request, never in a response, and
-    never passes through a client: `kpa unlock` passes its terminal and
-    sees no more than the answer. The daemon holds A-1 in a zeroizing
-    buffer for that one unlock.
-  - A-2 is never in a response on either socket, stdout, stderr, a log, an
-    error string, an identity comment, a prompt's message or data, the
-    tray, a child's argv or environment — only in the clipboard offer,
-    after a `copy` naming that exact field.
-  - `copy` itself offers only for a requester on the desktop, while the
-    display session is active and unlocked (`docs/headless.md` § 5);
-    anything else fails with `no_display` before the clipboard is touched.
-    `status` tells a requester whether its own `copy` would pass that
-    check (`can_copy`). That is a hint for clients: `copy` runs the check
-    again, and nothing rests on the hint.
-  - `list` omits every protected field and Notes rather than de-protecting
-    them. `list`'s `fields` array is the one exception: it names which
-    fields exist and are copyable, never a value, so a protected field's
-    or a protected Notes' *name* still appears there — a name alone
-    carries none of A-2, the same way a title's existence isn't A-2
-    either.
-  - A TOTP seed never leaves the process: what `copy` offers for `totp` is
-    the code of the moment.
-  - SSH private keys never leave the process: only signatures do, only on
-    the agent socket, only for keys in databases that opt in.
+  1. A-1 never leaves the process, and only the user's own typing enters
+     it: on screen, into the prompt program, or on a terminal the daemon
+     itself reads from. It is never in a request, never in a response, and
+     never passes through a client: `kpa unlock` passes its terminal and
+     sees no more than the answer. The daemon holds A-1 in a zeroizing
+     buffer for that one unlock.
+  2. A-2 is never in a response on either socket, stdout, stderr, a log, an
+     error string, an identity comment, a prompt's message or data, the
+     tray, a child's argv or environment — only in the clipboard offer,
+     after a `copy` naming that exact field.
+  3. `copy` itself offers only for a requester on the desktop, while the
+     display session is active and unlocked (`docs/headless.md` § 5);
+     anything else fails with `no_display` before the clipboard is touched.
+     `status` tells a requester whether its own `copy` would pass that
+     check (`can_copy`). That is a hint for clients: `copy` runs the check
+     again, and nothing rests on the hint.
+  4. `list` omits every protected field and Notes rather than de-protecting
+     them. `list`'s `fields` array is the one exception: it names which
+     fields exist and are copyable, never a value, so a protected field's
+     or a protected Notes' *name* still appears there — a name alone
+     carries none of A-2, the same way a title's existence isn't A-2
+     either.
+  5. A TOTP seed never leaves the process: what `copy` offers for `totp` is
+     the code of the moment.
+  6. SSH private keys never leave the process: only signatures do, only on
+     the agent socket, only for keys in databases that opt in.
 
   **Known gap (keepass 0.15.0).** The `ProtectInMemory="True"` marker is
   part of A-2, but the pinned `keepass` crate cannot see it. Its XML
@@ -262,51 +264,51 @@ for a channel and G-4 for anything persistent:
 - **G-4 No secret persisted.** kpa itself — the daemon and every CLI process
   — never writes A-1 or A-2 to disk or to its own stdout/stderr, and
   prevents its own core dumps.
-  - A-3 reaches stdout only as the answer the CLI was asked for: a
-    listing, or the line `kpa pick` prints of the entry it copied from. The
-    operation log names the operation, the database and how it ended. Of a
-    vault it carries an entry's UUID and, for a `copy`, the entry's
-    unprotected title; of an SSH key, its fingerprint and the name config
-    gives it. Nothing else from a vault is logged, at any level
-    (`docs/design.md` § Secrets). A signature's line also says what it was
-    for and names the hosts its connection is bound to, which are not
-    assets (§ 2).
-  - The key cache holds public keys under config database names, none of
-    A-1–A-3: no title, no comment, no attachment name. It is the one file
-    kpa creates besides its sockets, mode `0600`.
-  - `kpa pick` writes nothing from a database to a file. Its list reaches
-    `fzf` through a pipe, and `fzf` keeps no history of what is typed into
-    it, whatever the user's `fzf` options say.
-  - A-1 typed on a terminal is not echoed: the daemon turns echo off for
-    the read and puts it back.
-  - Keeping memory out of swap is the host's (ASM-6): kpa does not lock
-    its memory.
+  1. A-3 reaches stdout only as the answer the CLI was asked for: a
+     listing, or the line `kpa pick` prints of the entry it copied from. The
+     operation log names the operation, the database and how it ended. Of a
+     vault it carries an entry's UUID and, for a `copy`, the name of the
+     field copied and the entry's unprotected title; of an SSH key, its
+     fingerprint and the name config gives it. Nothing else from a vault is
+     logged, at any level (`docs/design.md` § Secrets). A signature's line
+     also says what it was for and names the hosts its connection is bound
+     to, which are not assets (§ 2).
+  2. The key cache holds public keys under config database names, none of
+     A-1–A-3: no title, no comment, no attachment name. It is the one file
+     kpa creates besides its sockets, mode `0600`.
+  3. `kpa pick` writes nothing from a database to a file. Its list reaches
+     `fzf` through a pipe, and `fzf` keeps no history of what is typed into
+     it, whatever the user's `fzf` options say.
+  4. A-1 typed on a terminal is not echoed: the daemon turns echo off for
+     the read and puts it back.
+  5. Keeping memory out of swap is the host's (ASM-6): kpa does not lock
+     its memory.
 - **G-5 Bounded exposure time.**
-  - A database locks on screen lock; on suspend, before the machine
-    sleeps; when the watch on the display session is lost; after
-    `idle_timeout` without activity on it; on explicit request, from the
-    control socket or the tray; and when its file is found changed (G-8).
-  - Activity is a successful `list` or `ssh_keys` of that database, a
-    successful `copy` from it, a successful local signature with one of
-    its keys, and the unlock that installed it. Each database has its own
-    idle timer, so using one does not keep another unlocked. `status`,
-    `lock`, `ssh_pending`, `ssh_approve`, `ssh_grants`, listing identities,
-    a forwarded signature, and refused or malformed requests are not
-    activity.
-  - Locked means kpa has dropped that database and serves nothing from it
-    but its public keys, which the agent lists from the key cache.
-  - A lock that races an unlock wins.
-  - A lock ends any prompt in flight for its database, on screen or on a
-    terminal, and everything its unlock made: clipboard offers, SSH
-    approvals and pending requests, the agent's private keys.
-  - A prompt ends after `prompt_timeout` (a confirm prompt, after
-    `ssh_agent.confirm_prompt_timeout` if that is set), and a terminal
-    prompt ends when its requester leaves or the terminal hangs up.
-  - A copied secret expires after `clipboard_timeout`, and sooner if a
-    lock ends the unlock it was read from, even a lock that lands while
-    the `copy` is in flight (the copy answers `locked`).
-  - A pending request expires five minutes after it was last refused, and
-    an approval for one signature after `ssh_agent.retry_window`.
+  1. A database locks on screen lock; on suspend, before the machine
+     sleeps; when the watch on the display session is lost; after
+     `idle_timeout` without activity on it; on explicit request, from the
+     control socket or the tray; and when its file is found changed (G-8).
+  2. Activity is a successful `list` or `ssh_keys` of that database, a
+     successful `copy` from it, a successful local signature with one of
+     its keys, and the unlock that installed it. Each database has its own
+     idle timer, so using one does not keep another unlocked. `status`,
+     `lock`, `ssh_pending`, `ssh_approve`, `ssh_grants`, listing identities,
+     a forwarded signature, and refused or malformed requests are not
+     activity.
+  3. Locked means kpa has dropped that database and serves nothing from it
+     but its public keys, which the agent lists from the key cache.
+  4. A lock that races an unlock wins.
+  5. A lock ends any prompt in flight for its database, on screen or on a
+     terminal, and everything its unlock made: clipboard offers, SSH
+     approvals and pending requests, the agent's private keys.
+  6. A prompt ends after `prompt_timeout` (a confirm prompt, after
+     `ssh_agent.confirm_prompt_timeout` if that is set), and a terminal
+     prompt ends when its requester leaves or the terminal hangs up.
+  7. A copied secret expires after `clipboard_timeout`, and sooner if a
+     lock ends the unlock it was read from, even a lock that lands while
+     the `copy` is in flight (the copy answers `locked`).
+  8. A pending request expires five minutes after it was last refused, and
+     an approval for one signature after `ssh_agent.retry_window`.
 - **G-6 Lock clears what kpa owns.** On lock, every copy of A-2 that kpa
   itself made or controls is zeroized, the agent's private keys included.
   A-1 is not held that long: kpa's copies go once the key is derived.
@@ -321,9 +323,10 @@ for a channel and G-4 for anything persistent:
   time counts as changed.
 - **G-9 Untrusted file input is only data.** A crafted `.kdbx` or keyfile
   (ACT-3) cannot corrupt memory, execute code, or affect other databases.
-  It may fail to open, but a file that opens is authentic: kpa never
-  serves content from a file whose header or payload was altered without
-  the key.
+  It may fail to open, but what a file that opens serves is authentic: kpa
+  never serves content that was altered without the key. Bytes the format
+  authenticates nowhere and kpa serves nothing from, the block that ends
+  the payload and whatever follows it, are no part of that.
 - **G-10 Entry content is only data.** Entry fields and attachments (ACT-4)
   cannot alter protocol framing on either socket, inject into the CLI's
   terminal output, an identity comment or a log line, reshape the question
@@ -331,60 +334,62 @@ for a channel and G-4 for anything persistent:
   decide which SSH keys exist and what they are called, never their policy
   (G-13). In `kpa pick`, an entry's text stays inside its own line of the
   list, and the entry and field copied are those of the line the user
-  chose. The same holds for the text a request carries (a database name, a
-  login's user, a signature's namespace, a command name) and for the name
-  a host goes by, from a `known_hosts` file or a host certificate.
+  chose. Nor can entry content crash or hang a request or an unlock, or
+  make an unlock take memory out of proportion to its file. The same holds
+  for the text a request carries (a database name, a login's user, a
+  signature's namespace, a command name) and for the name a host goes by,
+  from a `known_hosts` file or a host certificate.
 - **G-11 Robust sockets.** Malformed, oversized, slow, or flooding clients,
   on the control socket or the agent socket, are refused without crashing
   the daemon or starving other clients, and forwarded connections cannot
   take every slot on the agent socket.
 - **G-12 No prompt where nobody can see it.**
-  - A request from outside the desktop, or one that arrives while the
-    screen is known to be locked, never raises a prompt on screen.
-  - `unlock` asks such a request on the terminal it passed instead, and
-    answers `no_prompt` if it passed none. A request that asks for the
-    terminal gets only the terminal, however the screen stands.
-  - The tray has no requester to place, so a click on its "Unlock" is
-    asked on screen only while there is a display session that isn't known
-    to be locked, and answers `no_prompt` otherwise.
-  - The same holds for the agent's prompts: a signature that would need
-    one for such a request is refused. If what it lacks is an approval, it
-    is kept pending for `kpa ssh approve`. The agent socket takes no
-    terminal, so a locked database is unlocked with `kpa unlock`.
-  - Prompts take the screen one at a time.
+  1. A request from outside the desktop, or one that arrives while the
+     screen is known to be locked, never raises a prompt on screen.
+  2. `unlock` asks such a request on the terminal it passed instead, and
+     answers `no_prompt` if it passed none. A request that asks for the
+     terminal gets only the terminal, however the screen stands.
+  3. The tray has no requester to place, so a click on its "Unlock" is
+     asked on screen only while there is a display session that isn't known
+     to be locked, and answers `no_prompt` otherwise.
+  4. The same holds for the agent's prompts: a signature that would need
+     one for such a request is refused. If what it lacks is an approval, it
+     is kept pending for `kpa ssh approve`. The agent socket takes no
+     terminal, so a locked database is unlocked with `kpa unlock`.
+  5. Prompts take the screen one at a time.
 - **G-13 Signatures need an unlocked database that opts in, and an
   approval when the key's policy asks for one.** An on-demand unlock is a
   prompt the user answers. Vault content cannot change a key's policy.
-  - Only keys in a database with `serve_ssh_keys = true` sign, and never
-    one that `serve = false` names. RSA keys sign with SHA-2 only.
-  - Nothing signs while its database is locked, and answering the unlock
-    prompt approves nothing.
-  - An approval is the user's `Allow` to the confirm prompt, or an
-    `ssh_approve` on the control socket for a request kept pending. It
-    covers one key for one destination — the host key the connection is
-    bound to, or unbound use — until lock (`confirm = "once"`) or for one
-    signature (`"always"`). A host that presents a certificate is the key
-    the certificate certifies. The name a host is shown by is no part of
-    an approval.
-  - A login signed on a bound connection is for the session that
-    connection is bound to.
+  1. Only keys in a database with `serve_ssh_keys = true` sign, and never
+     one that `serve = false` names. RSA keys sign with SHA-2 only.
+  2. Nothing signs while its database is locked, and answering the unlock
+     prompt approves nothing.
+  3. An approval is the user's `Allow` to the confirm prompt, or an
+     `ssh_approve` on the control socket for a request kept pending. It
+     covers one key for one destination — the host key the connection is
+     bound to, or unbound use — until lock (`confirm = "once"`) or for one
+     signature (`"always"`). A host that presents a certificate is the key
+     the certificate certifies. The name a host is shown by is no part of
+     an approval.
+  4. A login signed on a bound connection is for the session that
+     connection is bound to.
 - **G-14 Forwarded signatures are confined.**
-  - A connection whose first session-bind claims forwarding is forwarded,
-    whether or not that bind verifies, and no later bind makes it local.
-  - A key with `forwarded = false` is never listed or used over a
-    forwarded connection. The others are listed, by public key and name.
-  - They sign SSH logins only, for a session the destination has bound,
-    after an approval for that (key, forwarding session, forwarding host,
-    destination), which `confirm = "never"` does not waive. The approval
-    lasts until lock, or for one signature under `confirm = "always"`. No
-    other forwarding session can use it, and a local approval never covers
-    forwarded use.
-  - Nothing sent on the agent socket approves. An approval is the user's
-    answer on this machine's screen, or an `ssh_approve` on the control
-    socket, which forwarding never reaches.
-  - A forwarded request gets a locked database unlocked only by the user
-    answering the unlock prompt (G-13). Nothing on a forwarded connection
-    locks a database or counts as activity (G-5).
+  1. A connection whose first session-bind claims forwarding is forwarded,
+     whether or not that bind verifies, and no later bind makes it local.
+  2. A key with `forwarded = false` is never listed or used over a
+     forwarded connection. The others are listed, by public key and name.
+  3. They sign SSH logins only, for a session the destination has bound,
+     after an approval for that (key, forwarding session, forwarding host,
+     destination), which `confirm = "never"` does not waive. The approval
+     lasts until lock, or for one signature under `confirm = "always"`. No
+     other forwarding session can use it, and a local approval never covers
+     forwarded use.
+  4. Nothing sent on the agent socket approves. An approval is the user's
+     answer on this machine's screen, or an `ssh_approve` on the control
+     socket, which forwarding never reaches.
+  5. A forwarded request gets a locked database unlocked only by the user
+     answering the unlock prompt (G-13). Nothing on a forwarded connection
+     locks a database or counts as activity (G-5).
 - **G-15 The agent never accepts a key or a secret.** Add, remove, `LOCK`
   and `UNLOCK` all fail, and so does every extension but session-bind and
   `query`. No password crosses the agent socket.
@@ -453,7 +458,11 @@ over the user's `fzf` options. Residual: swap and hibernation, which kpa
 leaves to the host, and `fs.suid_dumpable=2` root-owned dumps (NG-3). The
 rest of the user's `fzf` options apply to `kpa pick`, a key they bind to a
 program included (NG-5), and `fzf` may still create the history file they
-name, empty. In scope: a core file; any file kpa creates other than its
+name, empty. A prompt program is a process of its own, which `exec` makes
+dumpable again and which inherits the daemon's core-file limit: one that
+crashes while it holds the typed password can leave a core where that
+limit allows one (the home-manager unit sets it to zero). In scope: a core
+file of the daemon or a CLI process; any file kpa creates other than its
 sockets and the key cache; anything in the cache beyond public keys; a
 `kpa pick` whose `fzf` writes a history.
 
@@ -486,7 +495,7 @@ at once. `PrepareForSleep(true)` locks every database, then releases a
 unlocked, takes it again on each successful unlock and after
 `PrepareForSleep(false)`, and does not hold it while sleeping. If the
 signal subscription drops, every database locks, and the subscription is
-re-established with backoff. A per-database idle timer, reset only by the
+retried every 5 s until it is back. A per-database idle timer, reset only by the
 activity G-5 names; a per-database lock signal, so a lock beats an
 in-flight unlock and ends what that unlock made: its prompt, its
 clipboard offers, its approvals and pending requests, the agent's private
@@ -519,9 +528,9 @@ getters that copy a protected value into an unprotected type, kpa's own
 use of `keepass` types whose `Clone`, `Debug` or `Serialize` expose
 protected values, and a private key or the attachment it came from copied
 into a buffer nobody wipes. Residual: copies inside `keepass` and
-`ssh-key` (NG-4).
+`ssh-key`, and what they leave on a thread's stack (NG-4).
 
-**T-10 · Spoofed D-Bus input** (S, D) — ACT-6 · TB-6 · A-2, A-3 → G-5, G-12  
+**T-10 · Spoofed D-Bus input** (S, D) — ACT-1, ACT-6 · TB-6 · A-2, A-3 → G-5, G-12  
 Response: logind's signals are accepted only from the unique name that owns
 `org.freedesktop.login1`, resolved when the watch subscribes and
 re-resolved on `NameOwnerChanged` (a change is a lost watch, which locks
@@ -567,7 +576,7 @@ the write lands in the same tick, or a writer that sets the system clock
 back, which needs root. A file replaced while the database is locked is
 T-17.
 
-**T-13 · Hostile entry content** (T, S) — ACT-4 · TB-3 · A-2, A-3, A-6 → G-10  
+**T-13 · Hostile entry content** (T, S, D) — ACT-4 · TB-2, TB-3 · A-2, A-3, A-6 → G-10  
 Response: line-delimited JSON is serialized, never concatenated; `copy`
 addresses entries by `(db, uuid, field)`; the CLI escapes DEL, C1 controls
 and Unicode bidi/format characters before writing to a terminal (JSON
@@ -594,8 +603,10 @@ title or UUID collision across databases that makes a `copy` resolve to a
 different entry than the one listed; a custom field's key reaching a
 built-in's `copy` target or vice versa; entry text that adds a line to
 `kpa pick`'s list, or makes it copy from an entry or field other than
-those of the line chosen; an attachment that crashes or hangs the key
-scan, or the unlock it runs in; vault content that makes a key
+those of the line chosen; entry content that panics or hangs a request,
+an unlock or the key scan, or makes an unlock take memory out of
+proportion to its file (an attachment the scan parses, a field `copy`
+computes from, a payload that inflates); vault content that makes a key
 forwardable, exempt from approval, or served from a database that doesn't
 opt in. Residual: whoever writes a shared vault's entries decides which
 keys a database that opts in serves, and what they are called, so a title
@@ -607,8 +618,9 @@ long enough title pushes it out of view.
 **T-14 · Socket abuse** (D) — ACT-5 · TB-1 · — → G-11  
 Response: 64 KiB line cap, 5 s total deadline per request and per
 response, bounded concurrent connections, failed spawns drop one
-connection. Low severity: any same-uid process can kill the daemon
-outright (NG-7). The agent socket's traffic is T-21.
+connection. These guard against clients that are slow, stuck or broken. A
+same-uid process that means to stop the daemon can kill it outright
+(NG-7), so a finding here is Low. The agent socket's traffic is T-21.
 
 **T-15 · Sandboxed process reaches kpa** (E, I) — ACT-6 · TB-1, TB-6, TB-8 · A-1–A-3, A-6 → G-2, G-13  
 Response: both sockets are filesystem paths, absent from a sandbox unless
@@ -643,23 +655,31 @@ G-8 covers only a change after unlock. Residual: NG-6.
 
 **T-18 · Short-lived code harvests an unlocked vault** (I, E) — ACT-10 · TB-1, TB-8 · A-2, A-3, A-6 → G-5  
 Accepted risk. Response: time only — a locked database yields nothing but
-its public keys, and unlocking needs the user to answer a prompt. The
-daemon is non-dumpable, so same-uid code cannot attach to it or read its
-memory: what ACT-10 gets is what the sockets serve. Residual: while a
-database is unlocked, ACT-10 can `list` and `copy` everything those two
-serve; per-caller authorization is ruled out for the reasons in NG-1, and
-read notifications (T-16) are the planned mitigation. It can also sign
-with any key already approved, and get its own local requests approved:
-on screen its request looks like the user's own, and from outside the
-desktop it can send `ssh_approve` itself. That is accepted on the same
-terms as `copy`, and is less severe, because the key itself doesn't
-leave: ACT-10 gets no A-1, TOTP seed, attachment or private key. In
-scope: anything that lets ACT-10 reach data or a signature while every
-database is locked, unlock without the user, read secrets out of the
-daemon's memory, or leave something behind in kpa that outlives it. The
-key cache is the user's own file, so ACT-10 can add a key to it: that key
-is listed while its database is locked and can raise an unlock prompt,
-signs nothing, and goes when the next unlock rewrites the cache.
+its public keys, and unlocking takes its credentials: a password only the
+user can type, a keyfile, or both. The daemon is non-dumpable, so same-uid
+code cannot attach to it or read its memory: what ACT-10 gets is what the
+sockets serve. Residual: while a database is unlocked, ACT-10 can `list`
+and `copy` everything those two serve; per-caller authorization is ruled
+out for the reasons in NG-1, and read notifications (T-16) are the planned
+mitigation. It can also sign with any key already approved, and get its
+own local requests approved: on screen its request looks like the user's
+own, and from outside the desktop it can send `ssh_approve` itself. That
+is accepted on the same terms as `copy`, and is less severe, because the
+key itself doesn't leave: ACT-10 gets no A-1, TOTP seed, attachment or
+private key. A database whose only credential is a keyfile is no harder
+for ACT-10 to unlock than to read: it passes a terminal of its own with
+the request and answers the prompt with an empty line (T-19), and kpa
+reads the keyfile, which ACT-10 could have read too (ASM-1). And the
+daemon's protection stops at its own process: a prompt program is
+dumpable, so while a prompt is up the password typed into it sits in a
+process that same-uid code can read where the host lets it attach (ASM-6,
+NG-5). In scope: anything that lets ACT-10 reach data or a signature
+while every database is locked, unlock a database that has a password
+without the user typing it, read secrets out of the daemon's memory, or
+leave something behind in kpa that outlives it. The key cache is the
+user's own file, so ACT-10 can add a key to it: that key is listed while
+its database is locked and can raise an unlock prompt, signs nothing, and
+goes when the next unlock rewrites the cache.
 
 **T-19 · Misrouted prompt** (S) — ACT-5, ACT-10 · TB-1, TB-8 · A-1, A-6 → G-12  
 A prompt raised where nobody can answer it, or answer it unnoticed: on an
@@ -684,12 +704,19 @@ the desktop's cgroup, and gets a prompt on screen for it (NG-7). And a
 same-uid client can aim a prompt at any terminal it can open, including
 one the user is typing in: the daemon switches its echo off, takes one
 line and puts it back. The client learns only whether that line unlocked
-the database, never what it was. That is no more than a same-uid process
-can already do to a terminal it can open (NG-1), and the prompts it can
-raise are NG-7's. In scope: a prompt on screen for a requester outside
-the desktop, or while the screen is known to be locked; a prompt written
-to a passed descriptor that isn't a terminal; a terminal left with its
-echo off.
+the database, never what it was, unless it opened the terminal itself:
+then it holds the other end and can type the line too (T-18). That is no
+more than a same-uid process can already do to a terminal it can open
+(NG-1), and the prompts it can raise are NG-7's. A prompt also goes up on
+a display session that is unlocked but not in front, after a switch to
+another virtual terminal: to place a prompt kpa reads whether the session
+is locked, not whether it is active, and nobody sees that prompt until
+the user is back or its timeout ends it. And being on the desktop does
+not mean a person asked: a timer unit under the user's service manager is
+on the desktop, and its request raises a prompt on screen. In scope: a
+prompt on screen for a requester outside the desktop, or while the screen
+is known to be locked; a prompt written to a passed descriptor that isn't
+a terminal; a terminal left with its echo off.
 
 **T-20 · Forwarded-agent abuse** (S, E) — ACT-11 · TB-8 · A-6, A-3 → G-14  
 Response: logins only; an approval scoped to the forwarding session, the
@@ -748,7 +775,9 @@ Private-key operations are constant-time, so a forwarded host or a server
 cannot recover a key from signatures or their timing; this is why kpa
 needs `rsa` 0.10 or later (`docs/ssh-agent.md` § 6.5). In scope: a
 private key that outlives its database's lock; a key recoverable from
-signatures, failures or the time either takes.
+signatures, failures or the time either takes. Residual: decoding a key
+and signing with it leave bytes of it on the stack of the thread that did
+so, which no lock wipes (NG-4).
 
 **T-23 · Prompts on demand** (S, D) — ACT-6, ACT-10, ACT-11, ACT-12 · TB-5, TB-8 · A-1, A-6 → G-12, G-13  
 Anything that can reach the agent can raise an unlock or approval prompt,
@@ -855,9 +884,10 @@ scope, or at most hardening.
   unprotected fields as plain strings, and does not zeroize its decrypted
   payload buffers, KDF intermediates, or keyfile parser copies; these can
   survive a lock. So can whatever `ssh-key` allocates while it decodes a
-  private key. This covers memory hygiene only: parser bugs are in scope
-  (G-9, G-11, ASM-5). A finding that kpa could avoid such a copy (a
-  different API, not cloning) is hardening.
+  private key, and what it leaves on a thread's stack while it decodes one
+  or signs with it: kpa does not wipe stacks. This covers memory hygiene
+  only: parser bugs are in scope (G-9, G-11, ASM-5). A finding that kpa
+  could avoid such a copy (a different API, not cloning) is hardening.
 - **NG-5 What other programs do with data kpa handed them**: the prompt
   programs' memory and command lines, the compositor, clipboard managers
   ignoring the tag, a launcher's display or storage of the `list` index,
@@ -914,5 +944,8 @@ Severity follows the asset and the actor's reach, not CVSS:
 - **Low** — crash, hang, or resource exhaustion from file or socket input;
   a prompt raised where G-12 forbids one; anything reachable only by ACT-6
   that can neither read data nor sign.
+
+How likely the conditions are does not move the level: a finding that
+needs rare ones says so and keeps its severity.
 
 Model gaps are the most useful findings: update this file alongside the fix.
