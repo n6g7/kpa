@@ -17,11 +17,19 @@ Per `docs/ssh-agent.md`.
 
 ### 0.5.0: Login autofill in browsers
 
-- [ ] Design: the browser extension and its native messaging host
+- [ ] Design: the browser extension and its native messaging host, with what passkeys rely on (`docs/passkeys.md` § 6.1)
 
 ### 0.6.0: Passkey sign-in on Linux
 
-- [ ] Design: an emulated security key, per `docs/passkeys.md` (in review)
+- [ ] Design: passkeys through the browser extension, per `docs/passkeys.md` (in review)
+- [ ] Find passkeys: discovery, `serve_passkeys`, `kpa passkeys`, and the private key out of `copy` and `list`
+- [ ] Sign-in from an unlocked database: the page script, the origin check and the client data, the approval and account prompts, `Use another authenticator`
+- [ ] Unlock on demand, with the cache of hashes
+- [ ] `confirm` per site: `"once"` and `"never"`
+- [ ] Autofill: a site's passkeys in the extension's menu
+- [ ] Fuzz targets for the passkey requests and for passkey entries, and passkey sign-ins in a NixOS VM test through a browser with the extension
+- [ ] The other docs: `design.md`, `module-structure.md`, `config.example.toml`, the README, and the extension's own
+- [ ] Threat model: cover the passkey requests, the origin check and the cache of hashes (`docs/passkeys.md` § 10)
 
 ### 0.7.0: macOS
 
@@ -41,6 +49,8 @@ Per `docs/ssh-agent.md`.
 - [ ] Refactor the other existing commands to use the new output/reply system
 - [ ] Consider PGP agent support
 - [ ] Passkey support via credentialsd, once it has a provider interface a password manager can implement
+- [ ] Consider creating passkeys, which needs a way to write a database (`docs/passkeys.md` § 9)
+- [ ] Consider an emulated USB security key over `/dev/uhid`, for programs the browser extension doesn't reach (`docs/passkeys.md` § 3)
 - [ ] An SSH agent on Android, for the clients that can use another app's keys: Termux through a bridge serving `SSH_AUTH_SOCK` (as OkcAgent does), and the OpenIntents SSH Authentication API (TermBot, Android Password Store)
 
 ## Done

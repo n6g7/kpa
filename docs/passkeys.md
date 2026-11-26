@@ -1,15 +1,20 @@
 # kpa — passkeys
 
 kpa signs in to websites with the passkeys stored in its databases, through
-its own browser extension for Chromium and Firefox. The extension takes a
-page's passkey requests, hands those kpa can answer to `kpa serve` through
-a native messaging host the browser starts, and gives every other one back
-to the browser untouched. A KeePass client creates the passkeys and kpa
-uses them, as it does TOTP seeds and SSH keys.
+its browser extension for Chromium and Firefox, the one that fills logins.
+The extension takes a page's passkey requests, hands those kpa can answer
+to `kpa serve`, and gives every other one back to the browser untouched. A
+KeePass client creates the passkeys and kpa uses them, as it does TOTP
+seeds and SSH keys.
 
 **Not built yet.** This doc is the design the implementation follows.
-Nothing in `src/` implements it, the extension doesn't exist yet, and the
-other docs don't describe it. The steps are in [`TODO.md`](../TODO.md).
+Nothing in `src/` or in the extension implements it, and the other docs
+don't describe it. The steps are in [`TODO.md`](../TODO.md).
+
+**It builds on the browser extension**, its native messaging host and kpa's
+browser socket, which login autofill brings
+([`ROADMAP.md`](../ROADMAP.md), 0.5.0) and which are designed with it. This
+doc describes what passkeys add to them. § 6.1 lists what passkeys rely on.
 
 It follows the rules the SSH agent set ([`ssh-agent.md`](./ssh-agent.md)): a
 database opts in, private keys never leave kpa, a use is approved on screen,
@@ -18,17 +23,16 @@ timeouts and the screen-lock rules are [`headless.md`](./headless.md) § 6.
 
 ## 1. Overview
 
-- **The extension takes the request.** It replaces the page's call for a
-  passkey. A request for a site kpa has a passkey for goes to `kpa serve`;
-  any other goes to the browser's own implementation, so hardware keys,
-  phones and the browser's own passkeys work as they did.
+- **The extension takes the request.** Its page script replaces the page's
+  call for a passkey. A request for a site kpa has a passkey for goes to
+  `kpa serve`; any other goes to the browser's own implementation, so
+  hardware keys, phones and the browser's own passkeys work as they did.
 - **Sign-in only.** kpa answers `get`, a signature over the site's
   challenge. It never registers a passkey: that would write the database,
   and kpa is read-only (§ 9). The extension leaves registration to the
   browser.
-- **Autofill.** Under a username field marked for passkeys, the extension
-  lists the site's accounts kpa holds, in a menu of its own that the page
-  can't read (§ 6.4).
+- **Autofill.** A site's passkeys appear in the extension's menu under its
+  username field, beside its logins (§ 6.5).
 - **Databases opt in, and kpa finds the passkeys.** A database with
   `serve_passkeys = true` has every passkey among its entries served: the
   `KPEX_PASSKEY_*` attributes KeePass clients store one under (§ 4).
@@ -45,7 +49,7 @@ timeouts and the screen-lock rules are [`headless.md`](./headless.md) § 6.
   and the browser carries on as if kpa weren't there.
 - **kpa checks the origin.** The extension takes the page's origin from the
   browser, never from the page. kpa checks the site's id against it and
-  writes the client data it signs (§ 6.3).
+  writes the client data it signs (§ 6.4).
 - **Private keys never leave kpa.** Only signatures do. `copy` refuses the
   attribute that holds one and `list` doesn't name it.
 - **ES256, EdDSA and RS256**, through the RustCrypto crates the SSH agent
@@ -75,23 +79,24 @@ kpa.
   approved on screen or not at all (§ 5.3).
 - **A request from an embedded frame** of another origin than the page's,
   and a site id that isn't the page's host or one of its parent domains
-  (WebAuthn's related origins) (§ 6.3).
-- **Programs other than a browser with the extension**: a browser without
-  it, one whose sandbox can't start the host (§ 8), an application that
-  embeds a browser engine, `libfido2`'s tools.
+  (WebAuthn's related origins) (§ 6.4).
+- **Programs the extension doesn't reach**: a browser without it, one whose
+  sandbox keeps it from kpa (§ 6.1), a browser older than the page script
+  needs (§ 6.8), an application that embeds a browser engine, `libfido2`'s
+  tools.
 - **Passkeys kpa can't read**: an algorithm outside the three above, or a
   key that doesn't parse (§ 4.1). `kpa passkeys` says which and why.
 
 **Machines without kpa** keep their KeePass client's browser integration
 over the same synced vault. kpa changes nothing in the file.
 
-## 3. Why a browser extension
+## 3. Why the browser extension
 
 A password manager reaches a browser at one of three layers:
 
 | Route | How it works | For kpa |
 | --- | --- | --- |
-| Browser extension and native host | The extension replaces the page's `navigator.credentials` calls and forwards them to a local program | One extension for both browsers. It serves autofill, and leaves every other request to the browser |
+| Browser extension and native host | The extension replaces the page's `navigator.credentials` calls and forwards them to a local program | kpa's own, already there for logins. It serves autofill, and leaves every other request to the browser |
 | OS credential service | The browser asks a system service, which asks a registered provider | Linux's (`credentialsd`, the experimental Credential portal) has no provider interface a password manager can implement, and no browser calls it without an extension |
 | Emulated security key | A virtual USB HID device speaks CTAP2 | Works with unmodified browsers, as a security key only |
 
@@ -119,23 +124,20 @@ the browser handles (`webAuthenticationProxy`), made for remote desktops.
 Once an extension attaches, the browser handles no request itself, so none
 could go to a hardware key, and Firefox has nothing like it.
 
-What the extension costs:
+What passkeys add to the extension's own costs:
 
-- **An extension to write and ship**, in JavaScript, for two browsers and
-  through their stores (§ 8). It runs in every page, and it stands in for
-  part of a browser API that sites test against, so it follows WebAuthn as
-  the API changes.
-- **Pages can tell it is there.** The calls it replaces aren't the
-  browser's own.
-- **The origin is the extension's word.** For a security key the browser
-  checks a site's id against the page; here kpa does, with the origin the
-  browser gave the extension. Any process of the user can reach kpa's
-  socket and claim one (§ 10).
-- **One such extension per browser profile.** Another extension that
-  replaces the same calls, as a KeePass client's own does, takes them from
-  kpa's or loses them, depending on which installs its replacement last.
-- **Sandboxed browsers** start a native host only through a desktop portal.
-  The Firefox snap does; a Flatpak browser can't (§ 8).
+- **A page script that stands in for a browser API.** Filling a login needs
+  nothing in the page's own world; a passkey does (§ 6.2). Sites test
+  against the API, so the script follows WebAuthn as it changes, and pages
+  can tell it is there.
+- **The origin check is kpa's.** For a security key the browser checks a
+  site's id against the page; here kpa does, with the origin the browser
+  gave the extension (§ 6.4).
+- **One passkey extension per browser profile.** Another extension that
+  replaces the same call, as a KeePass client's own does, takes it from
+  kpa's or loses it, depending on which installs its replacement last.
+- **Newer browsers.** The page script needs Chromium 111 or Firefox 128
+  (§ 6.8).
 
 ## 4. Passkeys in a database
 
@@ -231,7 +233,7 @@ lookup needs.
 | P1 | Sign-in to a site with one passkey | The approval prompt, unless the site's `confirm` says otherwise, then the signature | The unlock prompt naming the site, then as unlocked |
 | P2 | Sign-in to a site with several accounts | The account prompt | The unlock prompt, then the account prompt |
 | P3 | Sign-in to a site with passkeys in two databases, one of them locked | The account prompt: the unlocked database's accounts, and a line to unlock the other | Picking that line raises the unlock prompt, then as unlocked |
-| P4 | Autofill: a page with a username field marked for passkeys | The extension's menu lists the accounts. One picked is approved as in P1 | The menu has a line to unlock the database. Picking it is P1 |
+| P4 | Autofill: a page with a username field marked for passkeys | The extension's menu lists the passkeys beside the logins. One picked is approved as in P1 | The menu has a line to unlock the database. Picking it is P1 |
 | P5 | A site kpa holds no passkey for | The browser handles it, with no prompt from kpa | The same: the cache has no hash for it |
 | P6 | A registration | The browser handles it (§ 9) | The same |
 | P7 | Screen locked, or no display session | kpa asks nothing and signs nothing; the browser handles the request | The same |
@@ -248,7 +250,7 @@ knows the account). kpa works through it in this order:
 1. **Who is asking.** A request from outside the desktop, or while the
    display session doesn't allow a prompt (§ 5.3), goes back to the
    browser at once. kpa doesn't look at the vault for it.
-2. **The origin** is checked against the site's id (§ 6.3). A request that
+2. **The origin** is checked against the site's id (§ 6.4). A request that
    fails the check goes back to the browser, which refuses it or serves it
    by its own rules.
 3. **Candidates** are the passkeys of unlocked, opted-in databases whose
@@ -327,11 +329,11 @@ before the browser does, so this is how a site that also has the user's
 hardware key or phone reaches them. A request from the autofill menu
 doesn't offer it: the user has already picked kpa's account.
 
-`KPA_PROMPT_DATA` has the members `relying_party`, the site's id,
-`origin`, the page's origin, and `accounts`, a list of `{"name",
-"database"}` in the order of the lines (one element for an Allow/Deny
-prompt), and `unlock`, the names of the locked databases on offer, in the
-order of their lines after the accounts'. The unlock prompt has
+`KPA_PROMPT_DATA` has four members: `relying_party`, the site's id;
+`origin`, the page's origin; `accounts`, a list of `{"name", "database"}`
+in the order of the lines (one element for an Allow/Deny prompt); and
+`unlock`, the names of the locked databases on offer, in the order of
+their lines after the accounts'. The unlock prompt has
 `database`, `relying_party` and `origin`. Every piece that isn't kpa's own
 text (the site's id, the origin, an account name, a database name) is
 escaped as the SSH agent's prompt pieces are, and each has its own length
@@ -339,15 +341,14 @@ budget. The site's id is never cut.
 
 **Where prompts may appear.** On screen only, for a requester on the
 desktop, and only while there is a display session that isn't known to be
-locked. The requester is the host the browser starts (§ 6.6), which runs in
-the browser's own cgroup, so it is classified as `control` classifies its
-peers ([`headless.md`](./headless.md) § 3). A request that may not prompt
+locked. The requester is the host the browser starts, classified as
+`control` classifies its peers (§ 6.1). A request that may not prompt
 goes back to the browser (§ 5.2, step 1). The display session is read after
 the unlock's token is taken, the order every unlock keeps. There is no
 pending list and no approval from a terminal. A prompt is ended by its
 timeout (`prompt_timeout` for the unlock, `passkeys.confirm_prompt_timeout`
 for the approval), by a lock of its database, and by the page or the
-browser ending the request (§ 6.5). Unlock and approval prompts share the
+browser ending the request (§ 6.6). Unlock and approval prompts share the
 one prompt queue, with the SSH agent's and `kpa unlock`'s.
 
 ### 5.4 The assertion
@@ -398,55 +399,62 @@ anything. KeePass clients set them the same way.
   autofill listing, and a request kpa hands back to the browser, are logged
   at `debug` only: the extension sends kpa every site's requests.
 
-## 6. The browser extension
+## 6. In the browser extension
 
-### 6.1 What runs where
+### 6.1 What passkeys rely on
+
+The extension, its host and kpa's browser front end are login autofill's.
+Passkeys rely on these of their properties:
+
+- **Every page and frame.** The extension runs in Chromium and Firefox, with
+  a content script in every frame and a background that talks to kpa.
+- **A way to kpa.** The background reaches `kpa serve`'s browser front end
+  through the native messaging host and kpa's browser socket, under the
+  protocol's version check. A request may wait on a prompt, and the
+  extension ends it by closing its connection, which ends the prompt.
+- **The origin from the browser.** The background adds the frame's origin
+  and the tab's top-level origin to each request, from the browser's own
+  record of who sent the message, which a page can't write.
+- **Who is asking.** The front end classifies its peer, the host the
+  browser starts, which runs in the browser's own cgroup, as `control`
+  classifies its own ([`headless.md`](./headless.md) § 3).
+- **A menu under a field.** An extension page in a frame the page can
+  neither read nor script, which lists the choices kpa sends and reports
+  the one picked.
+- **Installing and reaching kpa.** The host manifests, the stores, and
+  which sandboxed browsers can start the host. A browser that can't has no
+  passkeys from kpa either, and handles every request itself.
+
+### 6.2 The page script
 
 ```
 page ──── navigator.credentials.get ────▶ page script      (the page's world)
                                               │ DOM events
                                           content script   (the extension's world)
-                                              │ extension messages, with the sender's origin
-                                          background
-                                              │ native messaging: stdin and stdout
-                                          kpa browser-host
-                                              │ $XDG_RUNTIME_DIR/kpa/browser
-                                          kpa serve        (frontends::browser)
+                                              │
+                                          background ──▶ kpa serve (§ 6.1)
 ```
 
 - **The page script** runs in the page's own JavaScript world, installed
   before any of the page's scripts run (a content script in the main world,
-  at `document_start`). It replaces the calls of § 6.2, keeps the
+  at `document_start`). It replaces the calls of § 6.3, keeps the
   browser's originals, and calls them for every request kpa doesn't take.
   It holds nothing the page couldn't: the page's own request, and the
   answer the page gets.
-- **The content script** runs in the extension's isolated world, in every
-  frame. It relays between the page script and the background, and places
-  the autofill menu (§ 6.4).
-- **The background** (a service worker in Chromium, an event page in
-  Firefox) is the one part that talks to kpa. It adds the frame's origin
-  and the tab's, from the browser's own record of who sent the message,
-  and opens one native port per request.
-- **The host**, `kpa browser-host`, is started by the browser for each
-  port. It relays messages between the browser's pipes and kpa's socket
-  without reading them, and exits when the port closes (§ 6.6).
-- **`kpa serve`** answers through its `browser` front end.
+- **The content script** relays between the page script and the
+  background, and puts the site's passkeys in the menu (§ 6.5).
 
 The page can see and send the DOM events between the page script and the
 content script. That gives it nothing: everything on that path is the
 page's own request and the answer to it. The origin is never taken from
 it, and account names never cross it.
 
-The extension's toolbar button says whether kpa answers: reachable, not
-reachable (no host installed, `kpa serve` not running, or no database that
-serves passkeys), or speaking another version of the socket's protocol.
-
-### 6.2 Which calls kpa takes
+### 6.3 Which calls kpa takes
 
 | Call | What the extension does |
 | --- | --- |
 | `navigator.credentials.get` with `publicKey`, from the site's button (`mediation` absent, `optional` or `required`) | Asks kpa (§ 5.2). If kpa hands it back, calls the browser's own `get` with the same options |
-| The same with `mediation: "conditional"` | Asks kpa for the site's accounts and shows the autofill menu (§ 6.4), or calls the browser's own when kpa has none |
+| The same with `mediation: "conditional"` | Asks kpa for the site's passkeys and puts them in the menu (§ 6.5), or calls the browser's own when kpa has none |
 | `get` with `mediation: "silent"`, or without `publicKey` (passwords, federated sign-in) | The browser's own |
 | `navigator.credentials.create` and `store` | Not replaced: the browser's own |
 | `PublicKeyCredential.isConditionalMediationAvailable()` | `true` |
@@ -461,11 +469,10 @@ request, it first waits for the page to have the focus again: Firefox
 refuses a WebAuthn call from a page without it, and kpa's prompt has just
 had it.
 
-### 6.3 The origin
+### 6.4 The origin
 
-- **From the browser.** The background takes the frame's origin and the
-  tab's top-level origin from the browser's description of the message's
-  sender, which a page can't write, and sends both to kpa.
+- **From the browser.** kpa receives the frame's origin and the tab's
+  top-level origin as the browser described the message's sender (§ 6.1).
 - **What kpa serves.** An `https` origin, or `http://localhost`; a frame
   whose origin is the top-level page's; and a site's id that equals the
   origin's host or is one of its parent domains, on a label boundary
@@ -479,35 +486,38 @@ had it.
 - **The client data names the origin** kpa checked (§ 5.4), so a site
   rejects an assertion relayed from a page of another origin.
 
-### 6.4 Autofill
+This check is the passkeys' own. Which logins the extension offers a page
+is login autofill's rule, and the two don't share one.
 
-- **The request.** A page asks for autofill with a conditional `get`, and
-  marks a field `autocomplete="username webauthn"`. The extension asks kpa
-  for the site's accounts: the account names and databases of its
-  candidates, and the locked databases on offer, the same lines the account
-  prompt shows. The listing needs the same requester and screen as a
-  prompt (§ 5.3, step 1 of § 5.2), raises no prompt, and counts as no
+### 6.5 Autofill
+
+- **The request.** A page asks for passkey autofill with a conditional
+  `get`, and marks a field `autocomplete="username webauthn"`. The
+  extension asks kpa for the site's passkeys: the account names and
+  databases of its candidates, and the locked databases on offer, the same
+  lines the account prompt shows. The listing needs the same requester and
+  screen as a prompt (step 1 of § 5.2), raises no prompt, and counts as no
   activity.
 - **Nothing for the site**: the extension hands the request to the
   browser, so the browser's own suggestions appear.
-- **The menu.** Otherwise, when the field has the focus, the content script
-  places the menu under it: a page of the extension's in a frame, which the
-  page can neither read nor script. The names go from the background to
-  that frame directly, never through the page.
-- **Picking.** An account picked sends kpa a sign-in for that passkey
-  alone, approved as § 5.3 says, and a locked database's line sends its
-  unlock. The page's pending `get` resolves with the assertion. Escape, or
-  leaving the field, closes the menu, and the request stays pending, as the
-  page expects of a conditional request.
-- **The extension's own menu**, because neither browser lets an extension
-  add a line to the browser's autofill list.
+- **In the menu.** When the field has the focus, the site's passkeys appear
+  in the extension's menu (§ 6.1), each marked as a passkey, beside the
+  logins the menu lists for the page. An entry that holds a login and a
+  passkey shows as each. The names go from the background to the menu's
+  frame, never through the page.
+- **Picking.** A passkey picked sends kpa a sign-in for it alone, approved
+  as § 5.3 says, and a locked database's line sends its unlock. The page's
+  pending `get` resolves with the assertion. A login picked fills as it
+  does without passkeys, and the `get` stays pending, as the page expects
+  of a conditional request. So does closing the menu.
+- **Only with a request pending.** Without a conditional `get`, the menu
+  lists no passkeys: there is nothing for a signature to answer.
 
-### 6.5 Cancelling, timeouts and errors
+### 6.6 Cancelling, timeouts and errors
 
 - **The page ends the request** (its `AbortSignal`, a navigation, a closed
-  tab): the background closes the native port, the browser stops the host,
-  the host's connection to kpa closes, and kpa ends the prompt for that
-  request. A prompt never outlives its page.
+  tab): the extension closes the request's connection to kpa (§ 6.1), and
+  kpa ends the prompt for it. A prompt never outlives its page.
 - **The page's `timeout`** is the extension's too: when it runs out the
   extension ends the request the same way. kpa's own prompt timeouts apply
   inside it.
@@ -516,43 +526,26 @@ had it.
   gives when the user declines. An abort is `AbortError`. A request handed
   back to the browser gets whatever the browser answers.
 
-### 6.6 The host and kpa's socket
+### 6.7 kpa's side
 
-- **Starting the host.** The browser starts the program a host manifest
-  names, and only for the extensions it lists (§ 8). It gives the program
-  arguments of its own: the extension's origin in Chromium, the manifest's
-  path and the extension's id in Firefox.
-- **Relaying.** Native messaging frames are a 32-bit length in the
-  machine's byte order and that many bytes of UTF-8 JSON, at most 1 MB
-  toward the browser. The host sends each frame's JSON as one line on a
-  new connection to `$XDG_RUNTIME_DIR/kpa/browser`, and the answer back as
-  a frame.
-- **The socket** follows the control socket's rules
-  ([`protocol.md`](./protocol.md) § Connections): mode 0600, only the
-  daemon's uid, line-delimited JSON, one request and one response per
-  connection, a request line capped at 64 KiB. A sign-in's connection stays
-  open until its answer, and its closing ends the request. The socket
-  exists while a database has `serve_passkeys = true`; failing to bind it
-  stops `kpa serve`, as the agent's socket does.
-- **The version.** `v` is this protocol's own. The extension updates from
-  its store and kpa from its package, so the two can differ: a request
-  with another version is answered with the one kpa speaks, and the
-  extension hands every request to the browser until they match.
+Passkeys add two requests to the browser socket:
 
 | Request | Carries | Answer |
 | --- | --- | --- |
-| `accounts` | the origin, the top-level origin, the site's id, the allow list | the account lines and the locked databases on offer, possibly none |
-| `sign_in` | the same, the challenge, and what the autofill menu picked, if it did | the assertion (§ 5.4), `refused`, or `to_browser` |
+| `passkey_accounts` | the origin, the top-level origin, the site's id, the allow list | the account lines and the locked databases on offer, possibly none |
+| `passkey_sign_in` | the same, the challenge, and what the menu picked, if it did | the assertion (§ 5.4), `refused`, or `to_browser` |
 
 `to_browser` is the answer for every request kpa doesn't take: one from
 outside the desktop or without a screen, one that fails the origin check,
 one for a site kpa has no passkey for, and `Use another authenticator`.
 The extension can't tell these apart.
 
-### 6.7 Browser versions
+### 6.8 Browser versions
 
-Chromium 111 and Firefox 128 are the first that run a content script in
-the page's own world, which the page script needs.
+The page script needs a content script in the page's own world, which
+Chromium has from version 111 and Firefox from version 128. On older
+versions the extension leaves passkeys to the browser and fills logins as
+before.
 
 ## 7. Configuration and commands
 
@@ -600,37 +593,12 @@ which shows what opting in would serve. It sends one request, `passkeys`,
 which reads like `ssh_keys`: it counts as activity for each database it
 reads, and it never returns a credential id, a user handle or a key.
 
-## 8. Installing the extension
+## 8. Setting up
 
-kpa needs nothing from the system: no group, rule or kernel module. Three
-things are installed per user:
-
-1. **The extension**, in each browser profile: from the Chrome Web Store,
-   from addons.mozilla.org, or unpacked from the repo's `extension/` in
-   Chromium's developer mode. Firefox installs only an extension Mozilla
-   has signed, except in its Developer Edition, Nightly and ESR builds with
-   that check turned off.
-2. **A host manifest**, `kpa.json`, in each browser's own directory for
-   them: `~/.mozilla/native-messaging-hosts/` for Firefox,
-   `~/.config/chromium/NativeMessagingHosts/` and
-   `~/.config/google-chrome/NativeMessagingHosts/` for Chromium and Chrome.
-   Other Chromium-based browsers each have their own. It names the host
-   program by absolute path, and the extension that may start it.
-3. **The host program**, a wrapper that runs `kpa browser-host`: a browser
-   starts the program with arguments of its own and none of kpa's.
-
-The extension's id is fixed, so the manifests can name it: Firefox's by the
-id in the extension's manifest, Chromium's by the public key it carries.
-The home-manager module writes the host manifests and the wrapper for the
-browsers it is told of, behind one option. Installing the extension in a
-profile is the user's step.
-
-**Sandboxed browsers.** The Firefox snap starts a native host through the
-desktop portal, which reads the manifests in
-`~/.mozilla/native-messaging-hosts/` and runs the host outside the sandbox.
-A Flatpak browser has no such path: its extension can't start the host,
-and the browser handles every request itself. This is the state of both as
-of November 2026.
+Passkeys need nothing installed beyond the extension and its host (§ 6.1),
+and nothing from the system: no group, rule or kernel module. A database
+opts in with `serve_passkeys = true`, and `[passkeys].confirm_prompt` names
+the approval program (§ 7).
 
 **Day to day**
 
@@ -639,7 +607,7 @@ of November 2026.
 | "Sign in with a passkey" on a site, vault unlocked | kpa asks `Approve sign-in to github.com as "alice"?`. Allow signs in. No browser dialog opens |
 | The same, vault locked | kpa asks `Unlock database personal to sign in to github.com?`, then for the approval |
 | A site with two accounts | kpa asks `Sign in to github.com with which account?` and lists them |
-| The username field of a site kpa has a passkey for | The extension's menu lists the accounts; one picked is approved as above |
+| The username field of a site kpa has a passkey for | The extension's menu lists its passkeys beside its logins; one picked is approved as above |
 | A site with `confirm = "once"`, used earlier in this unlock | The sign-in goes through with no prompt |
 | A site whose passkey is on a hardware key or a phone | kpa has none for it, and the browser's own dialog opens |
 | A site with one in kpa and one on a hardware key | Pick `Use another authenticator` to reach the hardware key |
@@ -666,11 +634,13 @@ idea.
 ## 10. Claims
 
 What this design claims and what it accepts, in the terms of
-[`threat-model.md`](./threat-model.md), which doesn't carry them yet.
+[`threat-model.md`](./threat-model.md), which doesn't carry them yet. The
+extension's own claims, about its socket, its menu and how it is
+distributed, are login autofill's. These are what passkeys add.
 
-**The boundaries.** kpa's browser socket, whose untrusted side is every
-process of the user: the host a browser starts, and anything else running
-as the user. And, inside the browser, the page, whose untrusted side is
+**The boundaries** are the extension's: kpa's browser socket, whose
+untrusted side is every process of the user, the host a browser starts
+among them; and, inside the browser, the page, whose untrusted side is
 everything it sends the page script. Requests are untrusted bytes on both.
 
 **Claims**
@@ -685,12 +655,12 @@ everything it sends the page script. Requests are untrusted bytes on both.
   site's `confirm` asks for.** By default that is a prompt naming the site
   and the account for every sign-in. An on-demand unlock is a prompt the
   user answers. Vault content cannot change a site's policy.
-- **The origin is the browser's, and kpa checks it** (§ 6.3). A page can't
+- **The origin is the browser's, and kpa checks it** (§ 6.4). A page can't
   name its own origin, and gets no signature for a site its origin isn't
   under. The client data kpa signs names that origin.
 - **A page gets only the answer to its own request.** Account names reach
-  the extension's menu frame, never the page. A refused request tells the
-  page nothing beyond the refusal, and a request handed back to the browser
+  the extension's menu, never the page. A refused request tells the page
+  nothing beyond the refusal, and a request handed back to the browser
   looks to it as if kpa weren't installed.
 - **No prompt where nobody can see it** (G-12). Prompts are on screen only,
   for a requester on the desktop, never while the screen is known to be
@@ -698,11 +668,10 @@ everything it sends the page script. Requests are untrusted bytes on both.
 - **A lock ends it** (G-5, G-6). Approvals and open prompts go with the
   database, and kpa keeps no parsed key between sign-ins.
 - **Nothing from a vault is persisted but hashes** (G-4): the cache holds
-  the two hashes of § 4.3. The extension stores nothing.
-- **The socket's input is only data** (G-11). Requests are bounded, a
-  malformed or flooding client is refused without crashing the daemon, and
-  the decoder is fuzzed. The host relays bytes it doesn't read. A passkey
-  entry is file input like any other (G-9): a crafted key is skipped.
+  the two hashes of § 4.3. The extension stores nothing about passkeys.
+- **The requests are only data** (G-11). The two requests are bounded and
+  their decoder is fuzzed. A passkey entry is file input like any other
+  (G-9): a crafted key is skipped.
 
 **Accepted**
 
@@ -711,9 +680,9 @@ everything it sends the page script. Requests are untrusted bytes on both.
   `confirm` allows: a prompt the user sees by default, a silent signature
   for a `"once"` passkey already approved and for every `"never"` one. The
   prompt is visibility, not a boundary, inside the uid.
-- **Any process of the user can list a site's accounts** while a database
-  that holds them is unlocked and the screen allows a prompt, as `list`
-  lists every entry's username.
+- **Any process of the user can list a site's passkey accounts** while a
+  database that holds them is unlocked and the screen allows a prompt, as
+  `list` lists every entry's username.
 - **The extension is trusted inside the browser.** It sees every passkey
   request a page makes, the assertions, and the account names it lists. A
   compromised extension, such as a malicious update through a store, gets
@@ -721,11 +690,11 @@ everything it sends the page script. Requests are untrusted bytes on both.
 - **The browser is trusted for the origin**, as it is by every security
   key and every extension. The prompt shows the site's id kpa signs for,
   and a look-alike domain has no passkey in the vault to match.
-- **Pages can tell the extension is installed** (§ 3).
+- **Pages can tell the page script is there** (§ 3).
 - **Whoever writes entries in a served database can add an account.** An
   entry planted in a shared vault shows up as one more account for its
-  site, in the prompt and in the autofill menu, under the name its author
-  chose (ACT-4).
+  site, in the prompt and in the menu, under the name its author chose
+  (ACT-4).
 - **Prompts on demand** (NG-7, NG-8). Only a request for a site the vault
   or a cache has a passkey for raises one, one at a time, with timeouts.
   There is no backoff: no browser repeats a refused sign-in by itself.
@@ -735,13 +704,13 @@ everything it sends the page script. Requests are untrusted bytes on both.
 
 ## 11. Code
 
-Two subsystems ([`module-structure.md`](./module-structure.md)), small
-additions to two others, and the extension.
+A subsystem, additions to the browser front end and the extension, and
+small additions to two others ([`module-structure.md`](./module-structure.md)).
 
-| Subsystem | Is | Uses |
+| Part | Is | Uses |
 | --- | --- | --- |
 | `passkeys` | what `control` and the browser front end share about passkeys: finding them in an open database, the cache of hashes, making an assertion | `databases` (reads only), `config`, `paths` |
-| `frontends::browser` | the extension's side in the daemon: the socket and its protocol, the origin check and the client data, the sign-in flow, the autofill listing, the `"once"` approvals, and the host | `databases`, `passkeys`, `authn`, `authz`, `prompt`, `display_session`, `config`, `paths` |
+| `frontends::browser::passkeys` | the two requests, the origin check and the client data, the sign-in flow, the listing for the menu, the `"once"` approvals, the prompts | `databases`, `passkeys`, `authz`, `prompt`, `display_session`, `config` |
 
 ```
 src/
@@ -751,22 +720,18 @@ src/
     key.rs              the private key: PKCS#8 in, a signature out
     assertion.rs        authenticator data and the signed assertion
     cache.rs            the cache of hashes
-  frontends/browser/
-    mod.rs              the socket: one connection, one request
-    proto.rs            requests and answers
+  frontends/browser/passkeys/
+    mod.rs              the two requests
     origin.rs           the page's origin against the site's id
     client_data.rs      the client data kpa signs
     sign_in.rs          the sign-in flow (§ 5.2)
-    accounts.rs         the autofill listing
+    accounts.rs         the listing for the menu
     approvals.rs        "once" approvals, per database and unlock
     prompts.rs          the questions and their data
-    host.rs             kpa browser-host: frames in and out, one connection each
-extension/
-  manifest.json         one source; each browser's package differs only where it must
+extension/passkeys/
   page.js               the replaced calls, in the page's world
-  content.js            the relay, and the autofill menu's frame
-  background.js         one native port per request; the sender's origin
-  menu.html, menu.js    the autofill menu
+  content.js            the page script's relay; the site's passkeys in the menu
+  background.js         the two requests to kpa
 ```
 
 - **`databases`** gains one read on `Open`: the current entries outside the
@@ -774,22 +739,18 @@ extension/
   the core's to know.
 - **`control`** gains the `passkeys` request and its report, and leaves the
   private-key attribute out of `list` and `copy` (§ 4.2).
-- **Lock state.** The browser front end's approvals are an observer,
-  registered with the others that hold what must die with a lock. The cache
-  is written by an observer of `passkeys` that hears `unlocked`.
-- **Portability.** The socket, the host and the extension are OS-neutral.
-  On macOS the host manifests have other directories and the socket's path
-  comes from `paths.rs`, so Chromium and Firefox there use the same code.
-  Who is asking goes through the request-origin seam
-  ([`portability.md`](./portability.md)). `passkeys` takes a site's id, a
-  hash and an allow list and returns an assertion, and knows nothing of
-  browsers, so a front end for an OS credential service sits over it
-  without changing it.
+- **Lock state.** The passkey approvals are an observer, registered with
+  the others that hold what must die with a lock. The cache is written by
+  an observer of `passkeys` that hears `unlocked`.
+- **Portability.** Nothing here is OS-specific: the extension and its host
+  carry over to macOS, so Chromium and Firefox there serve passkeys with
+  the same code. `passkeys` takes a site's id, a hash and an allow list and
+  returns an assertion, and knows nothing of browsers, so a front end for
+  an OS credential service sits over it without changing it.
 - **Dependencies.** No new crate. `p256`, `ed25519-dalek` and `rsa` are in
   the tree through `ssh-key`; kpa names them directly, at the same
   versions, for their PKCS#8 parsing. `rsa` 0.10 is constant-time (T-22).
-  The extension uses no libraries, and its packages are its files as
-  written, so what is reviewed is what ships.
+  The passkey scripts add no library to the extension.
 
 **Testing**
 
@@ -797,26 +758,21 @@ extension/
   algorithms, keys without line breaks, both flag spellings, the older
   attribute names), every skip reason, and assertions checked against the
   public key.
-- **The browser front end** against a real `Databases`, with scripted
-  prompts, through its socket: the origin rules, the client data's bytes,
+- **The two requests** against a real `Databases`, with scripted prompts,
+  through the browser socket: the origin rules, the client data's bytes,
   each step of § 5.2. The races are tests: a lock while a prompt is up, a
   connection closed while a prompt is up, a lock between the approval and
   the signature, the display session locking mid-request.
-- **The host**: frames in and out against a socket, an oversized frame, a
-  pipe closed mid-request.
-- **The extension**, with Node's own test runner and no other tool: which
-  calls go to kpa and which to the browser, the objects a page receives
-  (`instanceof PublicKeyCredential`, `toJSON()`), aborts and timeouts.
-- **Fuzzing**: the socket's requests, and passkey entries (attributes and
-  keys).
+- **The passkey scripts**, with the extension's own tests: which calls go
+  to kpa and which to the browser, the objects a page receives
+  (`instanceof PublicKeyCredential`, `toJSON()`), aborts and timeouts, the
+  passkeys in the menu.
+- **Fuzzing**: the two requests, and passkey entries (attributes and keys).
 - **End to end**: a NixOS VM test in the flake's `checks` runs a browser
   with the extension against a test site in the VM, signs in from an
-  unlocked database, from one unlocked on demand, through the autofill
-  menu, and with a deny, and verifies each assertion against its public
-  key.
+  unlocked database, from one unlocked on demand, through the menu, and
+  with a deny, and verifies each assertion against its public key.
 
 ## Sources
 
 - [Web Authentication, Level 3](https://www.w3.org/TR/webauthn-3/)
-- [Native messaging (MDN)](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging)
-- [Native messaging (Chrome)](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging)
