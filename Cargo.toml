@@ -38,6 +38,10 @@ rustix = { version = "1", features = ["stdio", "pty"] }
 # `clipboard::wayland`'s tests. Already built for `wayland-client`.
 wayland-backend = "0.3"
 
+# `tests/databases/kdb.rs` builds a KeePass 1.x file, which `keepass` can read but not write.
+aes = "0.9"
+cbc = "0.2"
+
 [profile.dev]
 debug = "line-tables-only"
 

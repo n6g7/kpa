@@ -1283,7 +1283,9 @@ dependencies = [
 name = "kpa"
 version = "0.3.0"
 dependencies = [
+ "aes",
  "base64 0.22.1",
+ "cbc",
  "chrono",
  "clap",
  "humantime-serde",

@@ -316,7 +316,7 @@ fn failure_label(failure: UnlockFailure) -> &'static str {
             "not_found"
         }
         UnlockFailure::Vault(VaultError::WrongCredentials) => "wrong_credentials",
-        UnlockFailure::Vault(VaultError::Corrupt(_)) => "corrupt",
+        UnlockFailure::Vault(VaultError::Corrupt(_) | VaultError::UnsupportedFormat) => "corrupt",
         UnlockFailure::Vault(VaultError::Io(_)) => "io",
         UnlockFailure::Vault(VaultError::Changed) => "stale",
         UnlockFailure::LockedMeanwhile => "locked",
@@ -1193,7 +1193,7 @@ mod tests {
     #[test]
     fn every_failure_has_a_short_label_and_never_its_text() {
         let path = || std::path::PathBuf::from("/secret/path");
-        let cases: [(UnlockFailure, &str); 7] = [
+        let cases: [(UnlockFailure, &str); 8] = [
             (
                 UnlockFailure::Vault(VaultError::NotFound(path())),
                 "not_found",
@@ -1208,6 +1208,10 @@ mod tests {
             ),
             (
                 UnlockFailure::Vault(VaultError::Corrupt("secret stuff".to_string())),
+                "corrupt",
+            ),
+            (
+                UnlockFailure::Vault(VaultError::UnsupportedFormat),
                 "corrupt",
             ),
             (

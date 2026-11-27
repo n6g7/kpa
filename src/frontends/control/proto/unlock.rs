@@ -47,6 +47,11 @@ pub enum UnlockError {
     Corrupt {
         db: String,
     },
+    /// The file is a KeePass format kpa doesn't read (KeePass 1.x, say).
+    /// Reported as `corrupt`, with a `detail` that names the cause.
+    UnsupportedFormat {
+        db: String,
+    },
     Io {
         db: String,
     },
@@ -92,6 +97,9 @@ impl UnlockError {
             }
             UnlockError::NotFound { db } => ErrorFields::new(ErrorCode::NotFound).db(db),
             UnlockError::Corrupt { db } => ErrorFields::new(ErrorCode::Corrupt).db(db),
+            UnlockError::UnsupportedFormat { db } => ErrorFields::new(ErrorCode::Corrupt)
+                .db(db)
+                .detail("not a KDBX3 or KDBX4 file; kpa reads only those"),
             UnlockError::Io { db } => ErrorFields::new(ErrorCode::Io).db(db),
             UnlockError::InProgress { db } => ErrorFields::new(ErrorCode::UnlockInProgress).db(db),
             UnlockError::LockedDuringUnlock { db } => ErrorFields::new(ErrorCode::Locked).db(db),
