@@ -246,7 +246,11 @@ for a channel and G-4 for anything persistent:
      carries none of A-2, the same way a title's existence isn't A-2
      either.
   5. A TOTP seed never leaves the process: what `copy` offers for `totp` is
-     the code of the moment.
+     the code of the moment. "TOTP seed" means the entry's `otp` field, the
+     one kpa generates codes from, and `copy` answers `field_empty` for that
+     key under any name. A seed stored under another name (such as
+     `TimeOtp-Secret-Base32` or `TOTP Seed`) is an ordinary custom field,
+     which `copy` may offer.
   6. SSH private keys never leave the process: only signatures do, only on
      the agent socket, only for keys in databases that opt in.
 

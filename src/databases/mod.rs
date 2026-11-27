@@ -361,6 +361,13 @@ impl Entry<'_> {
         vault::entry_field(self.db, self.uuid, key).flatten()
     }
 
+    /// A user-defined field's value, by its exact key. None: absent, empty,
+    /// or the `otp` field, which holds the TOTP seed and is read only through
+    /// [`Entry::totp`].
+    pub fn custom_field(&self, key: &str) -> Option<Zeroizing<String>> {
+        vault::entry_custom_field(self.db, self.uuid, key).flatten()
+    }
+
     /// The current code of the entry's `otp` field. None: no such field, or
     /// it doesn't parse.
     pub fn totp(&self) -> Option<Zeroizing<String>> {

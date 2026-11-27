@@ -568,6 +568,23 @@ pub fn entry_field(db: &Database, uuid: Uuid, key: &str) -> Option<Option<Zeroiz
     })
 }
 
+/// A user-defined field's value, by its exact KeePass key: the read behind
+/// `copy`'s custom fields. The entry's `otp` field holds the TOTP seed, so it
+/// is never one: `list` keeps it out of the custom names
+/// ([`RESERVED_ENTRY_KEYS`]) and this answers `None` for it, so no name `copy`
+/// accepts reaches the seed. A key that differs from `otp` only in case is a
+/// different field and reads normally.
+pub fn entry_custom_field(
+    db: &Database,
+    uuid: Uuid,
+    key: &str,
+) -> Option<Option<Zeroizing<String>>> {
+    if key == SEED_KEY {
+        return Some(None);
+    }
+    entry_field(db, uuid, key)
+}
+
 /// Whether an entry with this uuid exists, regardless of its fields.
 /// `copy`'s bare `title` request needs exactly this and nothing more: it
 /// never resolves to any field (`proto::copy::Field::ReservedTitle`), but
@@ -661,6 +678,10 @@ fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
     }
 }
 
+/// The key of the entry's TOTP seed. `list` never names it and `copy` never
+/// reads it: only the code made from it leaves.
+const SEED_KEY: &str = keepass::db::fields::OTP;
+
 /// Exact KeePass key spellings that are never "custom": the four built-ins
 /// `copy` supports, `otp`, and `Title` — kpa never makes `Title` copyable
 /// itself, but it is still KeePass's own reserved key, not a user-defined
@@ -673,7 +694,7 @@ const RESERVED_ENTRY_KEYS: [&str; 6] = [
     keepass::db::fields::PASSWORD,
     keepass::db::fields::URL,
     keepass::db::fields::NOTES,
-    keepass::db::fields::OTP,
+    SEED_KEY,
 ];
 
 /// Field names `copy` can be asked for on this entry — never values.
@@ -708,7 +729,7 @@ fn copyable_field_names(entry: &keepass::db::Entry) -> Vec<String> {
         ("password", fields::PASSWORD),
         ("url", fields::URL),
         ("notes", fields::NOTES),
-        ("totp", fields::OTP),
+        ("totp", SEED_KEY),
     ]
     .into_iter()
     .filter(|(_, key)| has_value(key))

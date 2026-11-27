@@ -185,7 +185,7 @@ fn field_value(entry: &Entry<'_>, field: &Field) -> Option<Zeroizing<String>> {
         Field::Notes => entry.field(fields::NOTES),
         // Generated now from the `otp` field's seed, which is never returned.
         Field::Totp => entry.totp(),
-        Field::Custom(key) => entry.field(key),
+        Field::Custom(key) => entry.custom_field(key),
         Field::ReservedTitle => None,
     }
 }
@@ -278,6 +278,39 @@ mod tests {
             );
         }
         assert!(fx.offered.lock().unwrap().is_empty());
+    }
+
+    /// The entry's `otp` field holds the TOTP seed: `totp` offers the code
+    /// made from it, and no name reaches the seed itself. A custom field that
+    /// differs from `otp` only in case is a different field and copies.
+    #[test]
+    fn the_otp_field_is_never_copied_only_its_code() {
+        let fx = fixture();
+        fx.databases.install_for_test(
+            "personal",
+            vec![
+                TestEntry::new("site")
+                    .field("otp", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=6")
+                    .field("OTP", "custom-value"),
+            ],
+        );
+        let uuid = fx.databases.open("personal").ok().unwrap().entries()[0].uuid;
+
+        assert_eq!(
+            copy(&fx, "personal", uuid, Field::Custom("otp".to_string())),
+            Err(CopyError::FieldEmpty {
+                db: "personal".to_string()
+            })
+        );
+        assert!(fx.offered.lock().unwrap().is_empty());
+
+        copy(&fx, "personal", uuid, Field::Totp).expect("the code is offered");
+        copy(&fx, "personal", uuid, Field::Custom("OTP".to_string())).expect("copied");
+        let offered = fx.offered.lock().unwrap().clone();
+        assert_eq!(offered.len(), 2);
+        assert_eq!(offered[0].len(), 6);
+        assert!(offered[0].chars().all(|c| c.is_ascii_digit()));
+        assert_eq!(offered[1], "custom-value");
     }
 
     #[test]
