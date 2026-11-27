@@ -536,12 +536,18 @@ Response: logind's signals are accepted only from the unique name that owns
 re-resolved on `NameOwnerChanged` (a change is a lost watch, which locks
 every database). A signal from any other peer is ignored, so a peer can't
 unmark a locked screen, move the watch to another session or stop a later
-unlock taking the sleep inhibitor. On the session bus, the tray exports
+unlock taking the sleep inhibitor. A flood of signals addressed to kpa's
+connection, more than its message queue holds, doesn't suppress a lock
+either: a thread that does nothing else reads the connection, so the
+watcher's calls to the bus and to logind get their replies however many
+signals queue behind them. On the session bus, the tray exports
 its state and its menu and nothing else (T-15), and the service manager's
 answer about the compositor is a hint, checked before a secret follows it
 (T-6). In scope: anything on either bus that can *unlock*, read entry
 data, or suppress a lock, including a signal sent directly to kpa's
-connection by another peer (match rules don't filter those); a bus peer
+connection by another peer (match rules don't filter those), and a flood
+of them, sent while the watch subscribes or the display session changes;
+a bus peer
 steering a `copy` to a socket T-6's checks should refuse. Out of scope: a
 spoofed or bus-reachable lock (NG-7).
 

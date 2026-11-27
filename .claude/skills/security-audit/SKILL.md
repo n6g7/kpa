@@ -390,8 +390,11 @@ the head of §6.
   database.
 - **D-Bus and logind** (`src/frontends/auto_lock/`). On a private bus with
   a mock logind, as `tests/logind.rs` runs one: signals from a peer that
-  doesn't own logind's name, sent straight to kpa's connection; a
-  subscription that drops and comes back, also in the middle of a
+  doesn't own logind's name, sent straight to kpa's connection, one at a
+  time and as a flood, while the watch subscribes and while the display
+  session changes (hold the mock's answers back until the flood is queued
+  behind them, so the timing is deterministic; the queue holds 64
+  messages); a subscription that drops and comes back, also in the middle of a
   suspend, and a database unlocked while there was none;
   `PrepareForSleep(true)`; a display session that changes. On the system
   bus the sender can be another uid (TB-6). A spoofed signal that only

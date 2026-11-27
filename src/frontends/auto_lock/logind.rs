@@ -13,6 +13,15 @@
 //! so no request ever waits on D-Bus. The watcher acts only on messages sent
 //! by the connection that owns logind's name.
 //!
+//! A peer can fill the connection's message queue: any signal sent straight
+//! to kpa's connection lands in it, whatever the match rules say, and on the
+//! system bus any local uid may send one. zbus holds 64 queued messages and
+//! stops reading the socket once they are full, so a call's reply that sits
+//! behind them is never read. Nothing in the watcher may wait on the bus
+//! while the queue goes unread: a thread of its own only moves messages
+//! from the connection into an unbounded channel, and the watcher thread
+//! reads that channel and makes its calls.
+//!
 //! This module needs systemd-logind reachable on the bus it's given
 //! (`Bus::System` in production), which means a systemd Linux host. It
 //! works unmodified on any such host. On a Linux host without systemd, or
@@ -134,7 +143,12 @@ fn watch_forever(bus: &Bus, uid: u32, events: &Sender<Event>) {
     loop {
         let mut subscribed = false;
         let error = match bus.connect() {
-            Ok(conn) => watch(&conn, uid, events, &mut subscribed),
+            Ok(conn) => {
+                let error = watch(&conn, uid, events, &mut subscribed);
+                // Ends the thread that is still reading the connection.
+                let _ = conn.close();
+                error
+            }
             Err(err) => err.to_string(),
         };
         if subscribed {
@@ -152,8 +166,9 @@ fn watch_forever(bus: &Bus, uid: u32, events: &Sender<Event>) {
 /// changes owner. Always returns an error: a watch doesn't end on purpose.
 fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut bool) -> String {
     // Created before the match rules are added, so nothing sent after the
-    // subscription is missed.
-    let messages = MessageIterator::from(conn);
+    // subscription is missed, and read from here on, so that no call below
+    // waits behind a full queue.
+    let messages = drain(MessageIterator::from(conn));
     for rule in MATCH_RULES {
         if let Err(err) = conn.call_method(
             Some(DBUS),
@@ -226,6 +241,25 @@ fn watch(conn: &Connection, uid: u32, events: &Sender<Event>, subscribed: &mut b
         }
     }
     "the system bus connection closed".to_string()
+}
+
+/// Moves every message of `stream` into the returned channel, on a thread
+/// that does nothing else, so the connection's queue never stays full while
+/// the caller waits for a reply. The thread ends with the connection, or
+/// once the channel's receiver is gone and a message comes to be sent. The
+/// channel is unbounded: it holds what arrives while the receiver is in a
+/// call, and the receiver sets each message aside after one look.
+fn drain(stream: MessageIterator) -> Receiver<zbus::Result<Message>> {
+    let (queue, messages) = mpsc::channel();
+    thread::spawn(move || {
+        for message in stream {
+            let failed = message.is_err();
+            if queue.send(message).is_err() || failed {
+                return;
+            }
+        }
+    });
+    messages
 }
 
 /// The user's display session: its logind id and object path, from
