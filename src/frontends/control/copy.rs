@@ -185,7 +185,7 @@ fn field_value(entry: &Entry<'_>, field: &Field) -> Option<Zeroizing<String>> {
         Field::Notes => entry.field(fields::NOTES),
         // Generated now from the `otp` field's seed, which is never returned.
         Field::Totp => entry.totp(),
-        Field::Custom(key) => entry.custom_field(key),
+        Field::Custom(key) => entry.field(key),
         Field::ReservedTitle => None,
     }
 }
