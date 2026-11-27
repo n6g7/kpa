@@ -552,13 +552,21 @@ fn unprotected_field<'a>(entry: &'a keepass::db::Entry, key: &str) -> Option<&'a
 /// `copy` reads straight through `Value::get()` instead of filtering
 /// through `unprotected_field`.
 ///
+/// A key in [`WITHHELD_KEYS`] (today `otp`, the TOTP seed) is never served:
+/// this is the only read of a field by a caller-supplied key, and only
+/// [`entry_totp`] uses such a field. A key that differs from one of them only
+/// in case is a different field and reads normally.
+///
 /// Returns `None` if no entry with that uuid exists. Returns `Some(None)`
-/// if the entry exists but the field is absent or empty — both count as
-/// nothing to copy. Same explicit-worklist traversal as
+/// if the entry exists but the field is absent, empty or withheld — all
+/// count as nothing to copy. Same explicit-worklist traversal as
 /// `collect_entries`/`entry_count`, for the same reason: a deeply nested
 /// `.kdbx` must not recurse.
 pub fn entry_field(db: &Database, uuid: Uuid, key: &str) -> Option<Option<Zeroizing<String>>> {
     with_entry(db, uuid, |entry| {
+        if WITHHELD_KEYS.contains(&key) {
+            return None;
+        }
         entry
             .fields
             .get(key)
@@ -661,20 +669,31 @@ fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
     }
 }
 
+/// Exact keys of the fields whose value is never served, only something
+/// derived from it: `entry_field` answers nothing for them and `list` never
+/// names them as custom fields. Today that is `otp`, the TOTP seed, of which
+/// only the code made from it leaves. Another such field is one more key
+/// here.
+const WITHHELD_KEYS: [&str; 1] = [keepass::db::fields::OTP];
+
 /// Exact KeePass key spellings that are never "custom": the four built-ins
-/// `copy` supports, `otp`, and `Title` — kpa never makes `Title` copyable
-/// itself, but it is still KeePass's own reserved key, not a user-defined
-/// one. Exact-case: a differently-cased key (e.g. a custom `USERNAME`) is
-/// a distinct `HashMap` entry and *is* a custom field — see
+/// `copy` supports and `Title` — kpa never makes `Title` copyable itself,
+/// but it is still KeePass's own reserved key, not a user-defined one.
+/// [`WITHHELD_KEYS`] are reserved too, see [`is_reserved_entry_key`].
+/// Exact-case: a differently-cased key (e.g. a custom `USERNAME`) is a
+/// distinct `HashMap` entry and *is* a custom field — see
 /// `copyable_field_names`.
-const RESERVED_ENTRY_KEYS: [&str; 6] = [
+const RESERVED_ENTRY_KEYS: [&str; 5] = [
     keepass::db::fields::TITLE,
     keepass::db::fields::USERNAME,
     keepass::db::fields::PASSWORD,
     keepass::db::fields::URL,
     keepass::db::fields::NOTES,
-    keepass::db::fields::OTP,
 ];
+
+fn is_reserved_entry_key(key: &str) -> bool {
+    RESERVED_ENTRY_KEYS.contains(&key) || WITHHELD_KEYS.contains(&key)
+}
 
 /// Field names `copy` can be asked for on this entry — never values.
 /// Built-ins in the fixed order `docs/protocol.md` documents
@@ -718,9 +737,7 @@ fn copyable_field_names(entry: &keepass::db::Entry) -> Vec<String> {
     let mut custom: Vec<&String> = entry
         .fields
         .iter()
-        .filter(|(key, value)| {
-            !RESERVED_ENTRY_KEYS.contains(&key.as_str()) && !value.get().is_empty()
-        })
+        .filter(|(key, value)| !is_reserved_entry_key(key) && !value.get().is_empty())
         .map(|(key, _)| key)
         .collect();
     custom.sort();
@@ -860,6 +877,30 @@ mod tests {
         let entries = list_entries(&db);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title.as_deref(), Some("deep"));
+    }
+
+    /// `entry_field` answers nothing for the `otp` field, and still reads a
+    /// key that differs from it only in case.
+    #[test]
+    fn entry_field_withholds_the_otp_seed() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::OTP, "otpauth://totp/x?secret=ABC");
+            entry.set_unprotected("OTP", "other");
+            entry.id().uuid()
+        };
+
+        assert_eq!(entry_field(&db, uuid, fields::OTP), Some(None));
+        assert_eq!(entry_field(&db, Uuid::new_v4(), fields::OTP), None);
+        assert_eq!(
+            entry_field(&db, uuid, "OTP")
+                .flatten()
+                .as_deref()
+                .map(String::as_str),
+            Some("other")
+        );
     }
 
     /// `entry_field` reads a protected field through, unlike

@@ -116,6 +116,12 @@ copyable, but only via the `custom:` prefix (`custom:Password`), never its
 bare key, so a bare request always means the built-in. Any other custom
 field is addressed by its bare key.
 
+**The `otp` field.** The entry's `otp` field holds the TOTP seed, so it is
+never addressable: `copy` offers only the code made from it, as `totp`. `otp`
+and `custom:otp` fail with `field_empty`, and `list` never names the field.
+A custom field whose key differs only in case (`OTP`) is a different field
+and is addressed like any other custom field.
+
 ## Responses
 
 ```json

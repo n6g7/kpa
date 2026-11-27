@@ -356,7 +356,8 @@ impl Entry<'_> {
         vault::entry_title(self.db, self.uuid)
     }
 
-    /// One field's value, protected or not. None: absent or empty.
+    /// One field's value, protected or not. None: absent, empty, or withheld:
+    /// the `otp` field holds the TOTP seed, which only [`Entry::totp`] uses.
     pub fn field(&self, key: &str) -> Option<Zeroizing<String>> {
         vault::entry_field(self.db, self.uuid, key).flatten()
     }
