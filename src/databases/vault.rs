@@ -836,11 +836,8 @@ fn is_reserved_entry_key(key: &str) -> bool {
 /// Built-ins in the fixed order `docs/protocol.md` documents
 /// (`username`, `password`, `url`, `notes`, `totp`), each listed only when
 /// present and non-empty; then this entry's custom (user-defined) string
-/// fields, by their KeePass key, `custom:`-prefixed exactly when that key
-/// collides case-insensitively with a built-in name or with `title`
-/// (the collision rule — also implemented, independently, by
-/// `proto::copy::Field`'s own encode/decode, which this must stay
-/// consistent with).
+/// fields, by their KeePass key, spelled by [`custom_field_wire_name`] (the
+/// collision rule, which `proto::copy::Field` encodes with too).
 ///
 /// `keepass`'s `Entry::fields` is an unordered `HashMap`
 /// (`db/types/entry.rs`), so the database's own field order is not
@@ -883,26 +880,31 @@ fn copyable_field_names(entry: &keepass::db::Entry) -> Vec<String> {
     names
 }
 
-/// Whether `key` collides, case-insensitively, with a name
-/// `docs/protocol.md` reserves on the wire — the five built-ins
-/// `copyable_field_names` lists plus `title`. Kept in lockstep with
-/// `proto::copy::Field`'s own `RESERVED_NAMES`: that one decides what a
-/// *request* means, this one decides how a *listed* custom key is spelled,
-/// and they have to agree or a name `list` prints would not be the one
-/// `copy` resolves back to the same field.
-fn collides_with_a_reserved_name(key: &str) -> bool {
-    ["username", "password", "url", "notes", "totp", "title"]
-        .iter()
-        .any(|reserved| key.eq_ignore_ascii_case(reserved))
-}
+/// The prefix that makes a `copy` field name mean a custom field by its
+/// literal key. Protocol syntax: `proto::copy::Field` strips it when it
+/// decodes a name, and [`custom_field_wire_name`] adds it when a key could
+/// not be told from a built-in or from prefixed syntax.
+pub const CUSTOM_PREFIX: &str = "custom:";
 
-/// The wire name for a custom field keyed `key`: the bare key itself,
-/// unless it collides case-insensitively with a reserved name, in which
-/// case it is prefixed `custom:` so a bare request for that spelling still
-/// means the built-in (or, for `title`, means nothing copyable at all).
-fn custom_field_wire_name(key: &str) -> String {
-    if collides_with_a_reserved_name(key) {
-        format!("custom:{key}")
+/// The names `copy` reads as something other than a custom field's key:
+/// the five built-ins `copyable_field_names` lists, and `title`.
+const RESERVED_WIRE_NAMES: [&str; 6] = ["username", "password", "url", "notes", "totp", "title"];
+
+/// The wire name for a custom field keyed `key`: the bare key itself, unless
+/// a bare request for it would mean something else, in which case it is
+/// prefixed [`CUSTOM_PREFIX`]. That is a key that collides case-insensitively
+/// with a reserved name (a bare request means the built-in, or for `title`
+/// nothing copyable at all), and a key that itself starts with the prefix (a
+/// bare request would have the prefix stripped and read another key).
+/// `proto::copy::Field` encodes with this function and decodes by stripping
+/// the prefix once, so a name `list` shows for a key always decodes to that
+/// key and no other, whatever the key's text is.
+pub fn custom_field_wire_name(key: &str) -> String {
+    let collides = RESERVED_WIRE_NAMES
+        .iter()
+        .any(|reserved| key.eq_ignore_ascii_case(reserved));
+    if collides || key.starts_with(CUSTOM_PREFIX) {
+        format!("{CUSTOM_PREFIX}{key}")
     } else {
         key.to_string()
     }
@@ -1203,6 +1205,38 @@ mod tests {
         let entries = list_entries(&db);
         let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
         assert_eq!(entry.fields, vec!["password", "custom:PASSWORD"]);
+    }
+
+    /// A custom field whose key starts with `custom:` is listed behind
+    /// another `custom:`, so the one the wire strips leaves the key and a
+    /// bare request cannot read it as the key without the prefix (a
+    /// built-in, or another custom field).
+    #[test]
+    fn a_custom_field_keyed_like_prefixed_syntax_is_prefixed() {
+        let mut db = Database::new();
+        let uuid = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::PASSWORD, "hunter2");
+            entry.set_unprotected("custom:Password", "one");
+            entry.set_unprotected("custom:x", "two");
+            entry.set_unprotected("custom:custom:x", "three");
+            entry.set_unprotected("x", "four");
+            entry.id().uuid()
+        };
+
+        let entries = list_entries(&db);
+        let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
+        assert_eq!(
+            entry.fields,
+            vec![
+                "password",
+                "custom:custom:Password",
+                "custom:custom:custom:x",
+                "custom:custom:x",
+                "x",
+            ]
+        );
     }
 
     /// An empty custom value is skipped, same rule as the built-ins.

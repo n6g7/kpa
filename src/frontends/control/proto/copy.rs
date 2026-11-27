@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::error::{ErrorCode, ErrorFields};
+use crate::databases::{CUSTOM_PREFIX, custom_field_wire_name};
 
 /// What `{"op":"copy", ...}` carries; `Op::Copy` wraps it. `field` accepts
 /// any name a KeePass client wrote for this entry — see [`Field`].
@@ -19,15 +20,6 @@ pub struct CopyRequest {
     pub uuid: Uuid,
     pub field: Field,
 }
-
-/// Names colliding, case-insensitively, with one of the five built-ins
-/// below or with `title` — KeePass's own reserved key, which `copy` never
-/// serves. A custom field keyed any of these (always in a different case:
-/// KeePass's own keys are exact-case, so a same-spelled custom key is a
-/// distinct, genuine field) needs the `custom:` prefix to be addressed by
-/// its key; a bare name among these always means the built-in instead
-/// (`docs/protocol.md`'s collision rule).
-const RESERVED_NAMES: [&str; 6] = ["username", "password", "url", "notes", "totp", "title"];
 
 /// The fields `copy` can be asked for: the four it always could, `totp`
 /// (the code generated at copy time from the entry's `otp` field), and
@@ -51,9 +43,10 @@ pub enum Field {
     /// the `copy` — never the seed itself. `docs/protocol.md`.
     Totp,
     /// A custom (user-defined) field, addressed by its literal KeePass
-    /// key: either a bare name that doesn't collide with a reserved one,
-    /// or any key at all when given with the `custom:` prefix (which
-    /// always means a custom field, bypassing the collision rule).
+    /// key: either a bare name that neither collides with a reserved one
+    /// nor starts with `custom:`, or any key at all when given with the
+    /// `custom:` prefix (which always means a custom field, bypassing the
+    /// collision rule).
     Custom(String),
     /// A bare `title` request. KeePass reserves `Title` (exact case) for
     /// the entry's own title, which `copy` never serves, and the
@@ -76,29 +69,21 @@ impl Field {
             Field::Notes => "notes".to_string(),
             Field::Totp => "totp".to_string(),
             Field::ReservedTitle => "title".to_string(),
-            Field::Custom(key) => {
-                if RESERVED_NAMES
-                    .iter()
-                    .any(|name| key.eq_ignore_ascii_case(name))
-                {
-                    format!("custom:{key}")
-                } else {
-                    key.clone()
-                }
-            }
+            Field::Custom(key) => custom_field_wire_name(key),
         }
     }
 
     /// Decodes one wire field name. The `custom:` prefix is matched
     /// literally (lowercase, exact) — it is protocol syntax, not vault
     /// content — and always yields `Custom` with the rest of the string as
-    /// the literal key, bypassing the collision check below entirely.
+    /// the literal key, bypassing the collision check below entirely. Only
+    /// one prefix is stripped, so `custom:custom:x` is the key `custom:x`.
     /// Otherwise, a name that matches one of the four built-ins or `totp`
     /// case-insensitively is that built-in; a bare `title`
     /// (case-insensitively) is `ReservedTitle`; anything else is `Custom`
     /// with the raw string as the literal key.
     fn decode(raw: &str) -> Field {
-        if let Some(key) = raw.strip_prefix("custom:") {
+        if let Some(key) = raw.strip_prefix(CUSTOM_PREFIX) {
             return Field::Custom(key.to_string());
         }
         if raw.eq_ignore_ascii_case("username") {
@@ -305,10 +290,11 @@ mod tests {
         );
     }
 
-    /// A custom field re-encodes with the `custom:` prefix exactly when its
-    /// key collides with a reserved name — never otherwise.
+    /// A custom field encodes with the `custom:` prefix exactly when a bare
+    /// request for its key would mean something else: the key collides with
+    /// a reserved name, or starts with the prefix itself.
     #[test]
-    fn custom_fields_encode_the_prefix_only_when_colliding() {
+    fn custom_fields_encode_the_prefix_only_when_needed() {
         assert_eq!(Field::Custom("api-key".to_string()).encode(), "api-key");
         assert_eq!(
             Field::Custom("Password".to_string()).encode(),
@@ -316,6 +302,51 @@ mod tests {
         );
         assert_eq!(Field::Custom("TOTP".to_string()).encode(), "custom:TOTP");
         assert_eq!(Field::Custom("Title".to_string()).encode(), "custom:Title");
+        assert_eq!(
+            Field::Custom("custom:Password".to_string()).encode(),
+            "custom:custom:Password"
+        );
+        assert_eq!(
+            Field::Custom("custom:x".to_string()).encode(),
+            "custom:custom:x"
+        );
+    }
+
+    /// Whatever a custom key says, the name it is encoded under decodes to
+    /// that key and to no other field: a key spelled like a built-in, like
+    /// `title`, or like prefixed syntax cannot make its name mean another
+    /// field.
+    #[test]
+    fn a_custom_key_decodes_from_its_own_encoding() {
+        let keys = [
+            "Password",
+            "PASSWORD",
+            "pAssWord",
+            "Username",
+            "URL",
+            "Notes",
+            "TOTP",
+            "totp",
+            "title",
+            "Title",
+            "TITLE",
+            "custom:Password",
+            "custom:password",
+            "custom:x",
+            "custom:",
+            "custom:custom:x",
+            "Custom:x",
+            "x",
+            "api-key",
+            "otp",
+            "OTP",
+            "",
+            "🙂",
+        ];
+        for key in keys {
+            let field = Field::Custom(key.to_string());
+            assert_eq!(Field::decode(&field.encode()), field, "key {key:?}");
+        }
     }
 
     /// A bare `title` is reserved but never copyable, and round-trips as

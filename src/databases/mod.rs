@@ -45,7 +45,7 @@ pub mod fields {
     pub use keepass::db::fields::{NOTES, PASSWORD, URL, USERNAME};
 }
 pub use kdf::KdfCeiling;
-pub use vault::{EntrySummary, VaultError, VaultFile};
+pub use vault::{CUSTOM_PREFIX, EntrySummary, VaultError, VaultFile, custom_field_wire_name};
 
 /// Every configured database and the lifecycle around it. `Send + Sync`,
 /// built once, shared as an `Arc`.

@@ -110,12 +110,18 @@ about fails with `field_empty`, the same as an empty or absent field.
 **Collision rule.** `username`, `password`, `url`, `notes`, `totp`, and
 KeePass's own reserved `title` are matched case-insensitively and always
 mean the built-in (`title` has no built-in `copy` serves, so a bare request
-for it never resolves to anything). A custom field is legal in KeePass even
-when its key collides with one of these only in case (e.g. a custom
-`Password` field alongside the real one): that field is still listed and
-copyable, but only via the `custom:` prefix (`custom:Password`), never its
-bare key, so a bare request always means the built-in. Any other custom
-field is addressed by its bare key.
+for it never resolves to anything). A name that begins `custom:` always
+means the custom field whose key is the rest of the name, with that one
+prefix removed. A custom field is legal in KeePass even when its key
+collides with a reserved name only in case (e.g. a custom `Password` field
+alongside the real one), or when its key itself begins `custom:`. Such a
+field is still listed and copyable, but only under its key behind one more
+`custom:`: `custom:Password` for the key `Password`, and
+`custom:custom:Password` for the key `custom:Password`. Any other custom
+field is addressed by its bare key. So every name `list` shows for an entry
+is the name `copy` resolves to that same field, whatever the entry's keys
+say: a key spelled like a built-in or like the prefix cannot make its name
+mean another field.
 
 **The `otp` field.** The entry's `otp` field holds the TOTP seed, so it is
 never addressable: `copy` offers only the code made from it, as `totp`. `otp`
@@ -236,8 +242,8 @@ Each entry's `fields` array names every field `copy` can be asked for on it:
 the built-ins present and non-empty on the entry, in the order `username`,
 `password`, `url`, `notes`, `totp`, then its custom fields by their KeePass
 key (sorted: `keepass`'s own field storage is an unordered map, so the
-database's own field order isn't recoverable), `custom:`-prefixed per the
-collision rule. Protectedness never hides a field's *name* here, unlike
+database's own field order isn't recoverable), named per the collision rule
+(`custom:`-prefixed where the bare key would mean something else). Protectedness never hides a field's *name* here, unlike
 `title`, `username` and `url`: a protected `Password` still lists `password`,
 and a custom field colliding with a protected built-in still lists
 `custom:<key>`. `fields` is omitted from the wire when empty, like the other

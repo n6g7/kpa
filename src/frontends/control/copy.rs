@@ -230,6 +230,57 @@ mod tests {
         )
     }
 
+    /// Every name `list` shows for an entry reads, in `copy`, the field the
+    /// name was made from, whatever the entry's keys say: keys spelled like
+    /// built-ins, like `title` and like the `custom:` syntax included.
+    #[test]
+    fn every_listed_name_copies_the_field_it_was_listed_for() {
+        let keys = [
+            "PASSWORD",
+            "Username",
+            "TOTP",
+            "title",
+            "Title2",
+            "custom:Password",
+            "custom:PASSWORD",
+            "custom:x",
+            "custom:custom:x",
+            "Custom:x",
+            "x",
+            "api-key",
+        ];
+        let fx = fixture();
+        let mut entry = TestEntry::new("site").field("Password", "the-real-password");
+        for key in keys {
+            entry = entry.field(key, &format!("value-of-{key}"));
+        }
+        fx.databases.install_for_test("personal", vec![entry]);
+        let open = fx.databases.open("personal").ok().unwrap();
+        let listed = open.entries()[0].fields.clone();
+        let read = open.entry(open.entries()[0].uuid).unwrap();
+
+        assert_eq!(
+            listed.len(),
+            keys.len() + 1,
+            "one name per field: {listed:?}"
+        );
+        for key in keys {
+            let name = crate::databases::custom_field_wire_name(key);
+            assert!(listed.contains(&name), "{key:?} is listed as {name:?}");
+            let field: Field = name.parse().unwrap();
+            assert_eq!(
+                field_value(&read, &field).as_deref().map(String::as_str),
+                Some(format!("value-of-{key}").as_str()),
+                "{name:?} reads the field keyed {key:?}"
+            );
+        }
+        let password: Field = "password".parse().unwrap();
+        assert_eq!(
+            field_value(&read, &password).as_deref().map(String::as_str),
+            Some("the-real-password")
+        );
+    }
+
     fn live(fx: &Fixture, index: usize) -> bool {
         fx.offers.lock().unwrap()[index].is_live()
     }

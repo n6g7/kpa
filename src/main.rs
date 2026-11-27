@@ -78,8 +78,8 @@ enum Command {
     /// Copy one field of one entry to the clipboard; the daemon drops it
     /// again after `clipboard_timeout`. `field` is `username`, `password`,
     /// `url`, `notes`, a custom field's bare key, or `custom:<key>` for a
-    /// custom key that collides with one of those (`docs/protocol.md`'s
-    /// collision rule).
+    /// custom key that collides with one of those or begins `custom:`
+    /// (`docs/protocol.md`'s collision rule).
     #[command(visible_alias = "cp")]
     Copy {
         db: String,
