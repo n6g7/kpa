@@ -655,8 +655,9 @@ the fields the extension reads and fills.
 
 **Claims**
 
-- **Read-only holds** (G-1). No request writes a database, and kpa writes
-  no file for the browser.
+- **Read-only holds** (G-1). No request writes a database, and the daemon
+  writes no file for the browser. The one file kpa writes for it is a host
+  manifest, from `kpa browser register`, which the user runs (§ 9.4).
 - **Secrets leave by a second route** (G-3): a `fill` answer on the
   browser socket, carrying only the fields the request names (username,
   password, the current TOTP code; never notes, other fields, attachments
