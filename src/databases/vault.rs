@@ -569,17 +569,17 @@ pub fn entry_field(db: &Database, uuid: Uuid, key: &str) -> Option<Option<Zeroiz
 }
 
 /// A user-defined field's value, by its exact KeePass key: the read behind
-/// `copy`'s custom fields. The entry's `otp` field holds the TOTP seed, so it
-/// is never one: `list` keeps it out of the custom names
-/// ([`RESERVED_ENTRY_KEYS`]) and this answers `None` for it, so no name `copy`
-/// accepts reaches the seed. A key that differs from `otp` only in case is a
-/// different field and reads normally.
+/// `copy`'s custom fields. A key in [`SECRET_KEYS`] (today the entry's `otp`
+/// field, the TOTP seed) is never one: `list` keeps it out of the custom
+/// names and this answers `None` for it, so no name `copy` accepts reaches
+/// it. A key that differs from one of those only in case is a different
+/// field and reads normally.
 pub fn entry_custom_field(
     db: &Database,
     uuid: Uuid,
     key: &str,
 ) -> Option<Option<Zeroizing<String>>> {
-    if key == SEED_KEY {
+    if SECRET_KEYS.contains(&key) {
         return Some(None);
     }
     entry_field(db, uuid, key)
@@ -678,24 +678,30 @@ fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
     }
 }
 
-/// The key of the entry's TOTP seed. `list` never names it and `copy` never
-/// reads it: only the code made from it leaves.
-const SEED_KEY: &str = keepass::db::fields::OTP;
+/// Exact keys of the fields whose value never leaves the process, under any
+/// name: `list` never names them as custom fields and `copy` never reads
+/// them as one. Today that is `otp`, the TOTP seed, of which only the code
+/// made from it leaves. Another such field is one more key here.
+const SECRET_KEYS: [&str; 1] = [keepass::db::fields::OTP];
 
 /// Exact KeePass key spellings that are never "custom": the four built-ins
-/// `copy` supports, `otp`, and `Title` — kpa never makes `Title` copyable
-/// itself, but it is still KeePass's own reserved key, not a user-defined
-/// one. Exact-case: a differently-cased key (e.g. a custom `USERNAME`) is
-/// a distinct `HashMap` entry and *is* a custom field — see
+/// `copy` supports and `Title` — kpa never makes `Title` copyable itself,
+/// but it is still KeePass's own reserved key, not a user-defined one.
+/// [`SECRET_KEYS`] are reserved too, see [`is_reserved_entry_key`].
+/// Exact-case: a differently-cased key (e.g. a custom `USERNAME`) is a
+/// distinct `HashMap` entry and *is* a custom field — see
 /// `copyable_field_names`.
-const RESERVED_ENTRY_KEYS: [&str; 6] = [
+const RESERVED_ENTRY_KEYS: [&str; 5] = [
     keepass::db::fields::TITLE,
     keepass::db::fields::USERNAME,
     keepass::db::fields::PASSWORD,
     keepass::db::fields::URL,
     keepass::db::fields::NOTES,
-    SEED_KEY,
 ];
+
+fn is_reserved_entry_key(key: &str) -> bool {
+    RESERVED_ENTRY_KEYS.contains(&key) || SECRET_KEYS.contains(&key)
+}
 
 /// Field names `copy` can be asked for on this entry — never values.
 /// Built-ins in the fixed order `docs/protocol.md` documents
@@ -729,7 +735,7 @@ fn copyable_field_names(entry: &keepass::db::Entry) -> Vec<String> {
         ("password", fields::PASSWORD),
         ("url", fields::URL),
         ("notes", fields::NOTES),
-        ("totp", SEED_KEY),
+        ("totp", fields::OTP),
     ]
     .into_iter()
     .filter(|(_, key)| has_value(key))
@@ -739,9 +745,7 @@ fn copyable_field_names(entry: &keepass::db::Entry) -> Vec<String> {
     let mut custom: Vec<&String> = entry
         .fields
         .iter()
-        .filter(|(key, value)| {
-            !RESERVED_ENTRY_KEYS.contains(&key.as_str()) && !value.get().is_empty()
-        })
+        .filter(|(key, value)| !is_reserved_entry_key(key) && !value.get().is_empty())
         .map(|(key, _)| key)
         .collect();
     custom.sort();
