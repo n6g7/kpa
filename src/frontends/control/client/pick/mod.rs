@@ -153,8 +153,8 @@ fn choose_field(fzf: &OsStr, entry: &WireEntry) -> Result<Field, PickError> {
     if entry.fields.is_empty() {
         return Err(PickError::NoFields);
     }
-    let args = fzf::field_args(lines::title_of(entry));
-    let answer = fzf::run(fzf, &args, &lines::field_lines(&entry.fields))?;
+    let lines = lines::field_lines(lines::title_of(entry), &entry.fields);
+    let answer = fzf::run(fzf, &fzf::field_args(), &lines)?;
     let name = lines::index_of(
         answer.lines().next().unwrap_or_default(),
         entry.fields.len(),

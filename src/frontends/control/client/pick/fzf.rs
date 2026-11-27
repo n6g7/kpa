@@ -17,7 +17,7 @@ use crate::output::escape_one_line;
 /// write what is typed to a file, and `--preview` would run a program on every
 /// highlighted line. Options on the command line win over those defaults.
 /// Everything else in them (colours, bindings) is left to the user.
-fn common_args(prompt: &str, header: &str) -> Vec<String> {
+fn common_args(prompt: &str) -> Vec<String> {
     [
         "--delimiter",
         DELIMITER,
@@ -29,8 +29,6 @@ fn common_args(prompt: &str, header: &str) -> Vec<String> {
         "--no-preview",
         "--prompt",
         prompt,
-        "--header",
-        header,
     ]
     .map(str::to_string)
     .to_vec()
@@ -49,18 +47,30 @@ pub(super) fn entry_args(query: &str, locked: &[&str]) -> Vec<String> {
             .collect();
         header.push_str(&format!("\nlocked: {}", names.join(", ")));
     }
-    let mut args = common_args("kpa> ", &header);
+    let mut args = common_args("kpa> ");
     args.extend(
-        ["--expect", keys::EXPECT, "--query", query]
-            .iter()
-            .map(|arg| arg.to_string()),
+        [
+            "--header",
+            &header,
+            "--expect",
+            keys::EXPECT,
+            "--query",
+            query,
+        ]
+        .iter()
+        .map(|arg| arg.to_string()),
     );
     args
 }
 
-/// The arguments for choosing one of the fields of the entry titled `title`.
-pub(super) fn field_args(title: &str) -> Vec<String> {
-    common_args("field> ", &escape_one_line(title, usize::MAX))
+/// The arguments for choosing one of the fields of an entry. Its title heads
+/// the list as the first line, which fzf shows and never lets be chosen
+/// ([`super::lines::field_lines`]): the title is vault text, so it travels on the
+/// pipe and never on the command line.
+pub(super) fn field_args() -> Vec<String> {
+    let mut args = common_args("field> ");
+    args.push("--header-lines=1".to_string());
+    args
 }
 
 /// Runs `program` with `args`, feeds it `lines` on a pipe and returns what it
@@ -107,7 +117,7 @@ mod tests {
 
     #[test]
     fn every_fzf_opens_below_the_prompt_and_keeps_no_history_or_preview() {
-        for args in [entry_args("", &[]), field_args("GitHub")] {
+        for args in [entry_args("", &[]), field_args()] {
             for flag in [
                 "--height=60%",
                 "--layout=reverse",
@@ -134,10 +144,14 @@ mod tests {
     }
 
     #[test]
-    fn the_field_fzf_is_headed_by_the_entrys_escaped_title() {
-        let args = field_args("a\nb\u{1b}c");
+    fn the_field_fzf_takes_its_header_from_the_list_and_has_no_text_of_the_entry() {
+        let args = field_args();
         assert_eq!(value_of(&args, "--prompt"), "field> ");
-        assert_eq!(value_of(&args, "--header"), "a\\u000ab\\u001bc");
-        assert!(!args.iter().any(|arg| arg == "--expect"));
+        assert!(args.iter().any(|arg| arg == "--header-lines=1"));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--header" || arg == "--expect")
+        );
     }
 }
