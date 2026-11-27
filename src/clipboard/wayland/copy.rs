@@ -58,8 +58,8 @@ impl State {
     }
 
     /// Answers one paste. Only the two offered MIME types get an answer,
-    /// and none does once the unlock is locked: the reader gets end of file,
-    /// whatever else is still in flight.
+    /// and none does once the unlock is locked: the reader gets end of file.
+    /// A paste checked just before the lock still gets its answer.
     pub(super) fn send(&mut self, mime_type: &str, fd: OwnedFd) {
         if self.unlock.is_cancelled() {
             return;

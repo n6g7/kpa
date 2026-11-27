@@ -346,10 +346,12 @@ else's clipboard. A lock of the unlock the offer came from ends it earlier.
 
 **A lock is authoritative where the secret is served.** Every offer is started
 with the `CancelToken` of the unlock its secret was read from, and the thread
-that answers pastes checks it on each one: a lock cancels the token before it
-returns, so no paste is answered with the secret after that, whether or not the
-offer has been recorded and ended yet. That covers a `copy` still being handed
-to the compositor, where the selection is set before the offer is returned.
+that answers pastes checks it before each answer: a lock cancels the token
+before it returns, so no paste asked after that is answered with the secret,
+whether or not the offer has been recorded and ended yet. That covers a `copy`
+still being handed to the compositor, where the selection is set before the
+offer is returned. A lock doesn't wait for that thread, so a paste whose answer
+had already begun when the lock landed may finish.
 
 ## The picker: `kpa pick`
 

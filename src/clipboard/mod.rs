@@ -9,11 +9,12 @@
 //!   until something else takes the clipboard.
 //!
 //! **A lock stops the serving itself.** Every offer is started with the
-//! [`CancelToken`] of the unlock its secret came from, and answers no paste
-//! once that token is cancelled. A lock cancels the token before it returns,
-//! so a paste asked after a lock returns gets nothing, even while the offer
-//! is still being handed to the compositor and nobody has had the chance to
-//! [`Offer::end`] it yet.
+//! [`CancelToken`] of the unlock its secret came from, and checks it before
+//! answering each paste. A lock cancels the token before it returns, so a
+//! paste asked after a lock gets nothing, even while the offer is still
+//! being handed to the compositor and nobody has had the chance to
+//! [`Offer::end`] it yet. A paste whose answer had already begun when the
+//! lock landed may finish: the lock doesn't wait for the offer's thread.
 //!
 //! **Why `clipboard_timeout` isn't enforced inside this module.** Driving a
 //! timeout needs a sleep somewhere, and a backend that slept would make
@@ -66,8 +67,9 @@ pub trait Backend: Send + Sync {
     /// backend's own.
     ///
     /// `unlock` is the unlock `secret` was read from. Once it is cancelled
-    /// the offer answers no paste with the secret, from that moment on and
-    /// whether or not the offer has been handed back yet.
+    /// the offer answers no paste asked after that with the secret, whether
+    /// or not the offer has been handed back yet. A paste whose answer had
+    /// already begun may finish.
     fn start(
         &self,
         secret: Zeroizing<String>,
