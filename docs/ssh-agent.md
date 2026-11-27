@@ -279,11 +279,15 @@ Each connection is classified as one of:
   session identifier. The **forwarding chain** is the forwarding host and
   the hosts of the verified forwarding bindings after it, in the order they
   arrived (a connection that only has the unverified forwarding claim has
-  the one host). The destination is the last non-forwarding binding, if the
+  the one host). The destination is the non-forwarding binding, if the
   remote `ssh` sent one.
 
-A binding that fails verification but claims `is_forwarding` still marks
-the connection forwarded. Failure always errs toward the strict side.
+A first binding that fails verification but claims `is_forwarding` still
+marks the connection forwarded, with that binding's host and session as the
+forwarding host and session, and no later binding, forwarding or not, can
+unmark it. A later binding that verifies is a hop (forwarding) or the
+destination (not), whatever the first did. Failure always errs toward the
+strict side.
 
 Limit: forwarding that bypasses the OpenSSH client looks local. That covers
 an `ssh` older than 8.9, and tools that relay `SSH_AUTH_SOCK` themselves

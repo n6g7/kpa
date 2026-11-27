@@ -19,13 +19,15 @@
 //! - At most [`MAX_BINDINGS`] bindings are ever recorded.
 //! - Once a binding for authentication (not forwarding) is recorded, no
 //!   later binding — forwarding or not — is accepted.
-//! - *kpa's addition*: a first binding attempt that fails verification but
-//!   claims `is_forwarding` still marks the connection forwarded. OpenSSH's
+//! - *kpa's addition*: a first binding attempt that claims `is_forwarding`
+//!   marks the connection forwarded whether or not it verifies. OpenSSH's
 //!   own agent simply refuses such a message and forgets it; kpa can't
 //!   afford to, since forwarded connections are held to the stricter rules
-//!   in § 6.3 and § 6.7 — a forged first message must not be able to make
-//!   those rules disappear by failing to verify. Once anything does verify,
-//!   though, [`SessionBindState::class`] trusts that over the unverified claim.
+//!   in § 6.3 and § 6.7 — a forged or unverifiable first message must not be
+//!   able to make those rules disappear by failing to verify. Nothing that
+//!   verifies afterwards, forwarding or not, unmarks the connection or
+//!   replaces the forwarding host and session the claim names: a verified
+//!   later binding is a hop (forwarding) or the destination (not).
 
 use signature::Verifier;
 use ssh_key::encoding::{Decode, Reader};
@@ -94,8 +96,8 @@ struct Binding {
     is_forwarding: bool,
 }
 
-/// The first binding attempt's claim, kept only for the case the real
-/// bindings list never ends up with anything in it — see the module doc.
+/// The first binding attempt's claim to be forwarding, kept whether or not
+/// the attempt verified — see the module doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ForwardingClaim {
     host_key: BoundHost,
@@ -144,11 +146,12 @@ pub enum ConnectionClass {
     /// Authentication bindings only. `dest` is the (one and only, since no
     /// further binding can follow it) binding's host.
     LocalBound { dest: BoundHost },
-    /// The first binding has `is_forwarding`. `host` is that binding's
-    /// host and `session` its session identifier; `onward` are the hosts of
-    /// the forwarding bindings after it, in the order they arrived, which
-    /// the first host relayed on (`docs/ssh-agent.md` § 6.7); `dest` is the
-    /// last non-forwarding binding, if the remote `ssh` sent one.
+    /// The first binding attempt has `is_forwarding`, verified or not.
+    /// `host` is that attempt's host and `session` its session identifier;
+    /// `onward` are the hosts of the verified forwarding bindings after it,
+    /// in the order they arrived, which the first host relayed on
+    /// (`docs/ssh-agent.md` § 6.7); `dest` is the non-forwarding binding, if
+    /// the remote `ssh` sent one.
     Forwarded {
         host: BoundHost,
         session: Vec<u8>,
@@ -273,48 +276,53 @@ impl SessionBindState {
     }
 
     /// This connection's class, per `docs/ssh-agent.md` § 6.2.
+    ///
+    /// The first attempt decides once whether the connection is forwarded:
+    /// it is when that attempt claimed forwarding (verified or not), or when
+    /// the first binding that did verify is a forwarding one. Nothing that
+    /// verifies later changes that.
     pub fn class(&self) -> ConnectionClass {
-        match self.verified.first() {
-            Some(first) if first.is_forwarding => {
-                let dest = self
-                    .verified
-                    .iter()
-                    .rev()
-                    .find(|binding| !binding.is_forwarding)
-                    .map(|binding| binding.host_key.clone());
-                ConnectionClass::Forwarded {
-                    host: first.host_key.clone(),
-                    session: first.session_id.clone(),
-                    onward: self
-                        .verified
-                        .iter()
-                        .skip(1)
-                        .filter(|binding| binding.is_forwarding)
-                        .map(|binding| binding.host_key.clone())
-                        .collect(),
-                    dest,
-                }
+        // The forwarding host and session are the claim's when there is one.
+        // A verified binding that is the claim itself stands in for it, to
+        // keep the certificate it presented; any other verified forwarding
+        // binding is a hop after it.
+        let (host, session, head_verified) = match (&self.forwarding_claim, self.verified.first()) {
+            (Some(claim), Some(binding))
+                if binding.is_forwarding
+                    && binding.session_id == claim.session_id
+                    && binding.host_key == claim.host_key =>
+            {
+                (binding.host_key.clone(), binding.session_id.clone(), true)
             }
-            // Only one binding can ever exist in this branch: recording a
-            // non-forwarding binding blocks every binding after it, so
-            // `.last()` and `.first()` name the same entry.
-            Some(_) => ConnectionClass::LocalBound {
-                dest: self
-                    .verified
-                    .last()
-                    .expect("just matched Some")
-                    .host_key
-                    .clone(),
-            },
-            None => match &self.forwarding_claim {
-                Some(claim) => ConnectionClass::Forwarded {
-                    host: claim.host_key.clone(),
-                    session: claim.session_id.clone(),
-                    onward: Vec::new(),
-                    dest: None,
-                },
-                None => ConnectionClass::LocalUnbound,
-            },
+            (Some(claim), _) => (claim.host_key.clone(), claim.session_id.clone(), false),
+            (None, Some(binding)) if binding.is_forwarding => {
+                (binding.host_key.clone(), binding.session_id.clone(), true)
+            }
+            // Only one binding can ever exist here: recording a
+            // non-forwarding binding blocks every binding after it.
+            (None, Some(binding)) => {
+                return ConnectionClass::LocalBound {
+                    dest: binding.host_key.clone(),
+                };
+            }
+            (None, None) => return ConnectionClass::LocalUnbound,
+        };
+
+        ConnectionClass::Forwarded {
+            host,
+            session,
+            onward: self
+                .verified
+                .iter()
+                .filter(|binding| binding.is_forwarding)
+                .skip(usize::from(head_verified))
+                .map(|binding| binding.host_key.clone())
+                .collect(),
+            dest: self
+                .verified
+                .iter()
+                .find(|binding| !binding.is_forwarding)
+                .map(|binding| binding.host_key.clone()),
         }
     }
 }
@@ -340,6 +348,7 @@ fn host_key_from_bytes(bytes: &[u8]) -> ssh_key::Result<BoundHost> {
 mod tests {
     use super::super::testing::{certified_bind, signed_bind};
     use super::super::wire::AgentRequest;
+    use ssh_key::PrivateKey;
     use ssh_key::certificate::{Builder, CertType};
 
     use super::*;
@@ -524,6 +533,117 @@ mod tests {
         msg.hostkey = host.public_key().to_bytes().expect("key encodes");
         assert_eq!(bindings.apply(&msg), BindOutcome::Refused);
         assert_eq!(bindings.class(), ConnectionClass::LocalUnbound);
+    }
+
+    /// A bind for `host` whose signature doesn't verify: the one a host key
+    /// kpa can't check would produce, as far as kpa can tell.
+    fn unverifiable_bind(host: &PrivateKey, session_id: &[u8], is_forwarding: bool) -> SessionBind {
+        let mut msg = signed_bind(host, session_id, is_forwarding);
+        let last = msg.signature.len() - 1;
+        msg.signature[last] ^= 1;
+        msg
+    }
+
+    /// A first bind that claims forwarding and doesn't verify keeps the
+    /// connection forwarded when a non-forwarding bind verifies after it: the
+    /// later bind is the destination, and the forwarding host and session
+    /// stay the claim's.
+    #[test]
+    fn a_verified_non_forwarding_binding_after_an_unverified_claim_is_the_destination() {
+        let (claimed, dest_host) = (test_key(30), test_key(31));
+        let mut bindings = SessionBindState::new();
+        assert_eq!(
+            bindings.apply(&unverifiable_bind(&claimed, b"claimed-sid", true)),
+            BindOutcome::Refused
+        );
+        assert_eq!(
+            bindings.apply(&signed_bind(&dest_host, b"dest-sid", false)),
+            BindOutcome::Accepted
+        );
+
+        assert_eq!(
+            bindings.class(),
+            ConnectionClass::Forwarded {
+                host: claimed.public_key().key_data().clone().into(),
+                session: b"claimed-sid".to_vec(),
+                onward: Vec::new(),
+                dest: Some(dest_host.public_key().key_data().clone().into()),
+            }
+        );
+        // The destination still ends the bindings.
+        assert_eq!(
+            bindings.apply(&signed_bind(&dest_host, b"later-sid", true)),
+            BindOutcome::Refused
+        );
+        assert!(bindings.class().is_forwarded());
+    }
+
+    /// A forwarding bind that verifies after an unverified claim is a hop
+    /// after the claimed host, and doesn't take its place as the forwarding
+    /// host or session.
+    #[test]
+    fn a_verified_forwarding_binding_after_an_unverified_claim_does_not_replace_it() {
+        let (claimed, other, dest_host) = (test_key(32), test_key(33), test_key(34));
+        let mut bindings = SessionBindState::new();
+        assert_eq!(
+            bindings.apply(&unverifiable_bind(&claimed, b"claimed-sid", true)),
+            BindOutcome::Refused
+        );
+        assert_eq!(
+            bindings.apply(&signed_bind(&other, b"other-sid", true)),
+            BindOutcome::Accepted
+        );
+        assert_eq!(
+            bindings.class(),
+            ConnectionClass::Forwarded {
+                host: claimed.public_key().key_data().clone().into(),
+                session: b"claimed-sid".to_vec(),
+                onward: vec![other.public_key().key_data().clone().into()],
+                dest: None,
+            }
+        );
+        assert_eq!(
+            chain_keys(&bindings.class()),
+            vec![
+                claimed.public_key().key_data().clone(),
+                other.public_key().key_data().clone()
+            ]
+        );
+
+        assert_eq!(
+            bindings.apply(&signed_bind(&dest_host, b"dest-sid", false)),
+            BindOutcome::Accepted
+        );
+        let ConnectionClass::Forwarded { host, dest, .. } = bindings.class() else {
+            panic!("expected a forwarded connection");
+        };
+        assert_eq!(host.key(), claimed.public_key().key_data());
+        assert_eq!(
+            dest.expect("a destination").key(),
+            dest_host.public_key().key_data()
+        );
+    }
+
+    /// A first forwarding bind that verifies is the forwarding host itself,
+    /// with the certificate it presented, and not one of the hops after it.
+    #[test]
+    fn a_verified_first_forwarding_binding_is_the_host_and_keeps_its_certificate() {
+        let (host, ca) = (test_key(35), test_key(36));
+        let mut bindings = SessionBindState::new();
+        assert_eq!(
+            bindings.apply(&certified_bind(&host, &ca, "build-box", b"sid", true)),
+            BindOutcome::Accepted
+        );
+        let ConnectionClass::Forwarded {
+            host: forwarding,
+            onward,
+            ..
+        } = bindings.class()
+        else {
+            panic!("expected a forwarded connection");
+        };
+        assert!(forwarding.certificate().is_some());
+        assert!(onward.is_empty());
     }
 
     #[test]
