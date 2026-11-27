@@ -386,11 +386,11 @@ It passes `--no-history` and `--no-preview`, which win over the user's
 `FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE`: a `--history` file named there
 is never written to (fzf may still create it, empty) and a `--preview` named
 there never runs. The rest of those defaults, colours and key bindings
-included, apply, and a binding that runs a program is the user's own. Every
-string `pick` shows is vault text, so each goes through kpa's own escaping
-(`src/output/escape.rs`, the one the other subcommands use,
-[`protocol.md`](./protocol.md) § CLI output) before it reaches fzf. There is
-no preview pane.
+included, apply, and a binding that runs a program is the user's own (threat
+model T-5, T-24). Every string `pick` shows is vault text, so each goes
+through kpa's own escaping (`src/output/escape.rs`, the one the other
+subcommands use, [`protocol.md`](./protocol.md) § CLI output) before it
+reaches fzf (T-13). There is no preview pane.
 
 ## Secrets
 
@@ -520,7 +520,7 @@ its stdin), so one program used for both takes an argument to tell them apart.
 
 Both variables are in the program's environment, readable by processes of the
 same user; a wrapper that puts a piece into its own argv makes it visible to
-every user through `/proc/<pid>/cmdline`.
+every user through `/proc/<pid>/cmdline` (threat model T-24).
 
 `serve` writes one line per event to stderr at `error`, `warn`, `info` (the
 default) or `debug`; `log_level` sets it and `serve --log-level` overrides it.
