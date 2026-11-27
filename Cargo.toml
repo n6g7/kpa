@@ -34,6 +34,9 @@ signature = { version = "3", default-features = false }
 keepass = { version = "0.15.0", default-features = false, features = ["totp", "save_kdbx4"] }
 tempfile = "3"
 rustix = { version = "1", features = ["stdio", "pty"] }
+# The server end of the Wayland protocol, for a compositor of our own in
+# `clipboard::wayland`'s tests. Already built for `wayland-client`.
+wayland-backend = "0.3"
 
 [profile.dev]
 debug = "line-tables-only"

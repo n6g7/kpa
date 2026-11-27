@@ -377,7 +377,9 @@ the head of §6.
   lock, or an unlock installing after a lock, breaks G-5. Use a fake
   prompt program that sleeps, so the timing is deterministic. A
   compositor of your own, speaking the data-control protocol to kpa's
-  real backend, lets these run without the user's clipboard.
+  real backend, lets these run without the user's clipboard. For a lock
+  that lands while a `copy` is in flight, one that asks for a paste at once
+  shows whether the secret is still served.
 - **What a lock ends.** Clipboard offers, approvals, pending requests, the
   agent's private keys and any prompt in flight, for every kind of lock:
   explicit, idle, screen lock, suspend, a lost watch, a file found

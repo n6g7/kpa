@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 
 use super::Error;
 use super::data_control::{Device, Manager, Source};
+use crate::cancel::CancelToken;
 
 /// The MIME type the secret itself is offered as.
 const TEXT_MIME_TYPE: &str = "text/plain;charset=utf-8";
@@ -44,6 +45,9 @@ const END_TIMEOUT: Duration = Duration::from_secs(2);
 /// The serving thread's state: the secret and kpa's own protocol objects.
 pub struct State {
     secret: Zeroizing<Vec<u8>>,
+    /// The unlock the secret came from. A paste is answered with nothing
+    /// once it is cancelled.
+    unlock: CancelToken,
     devices: Vec<Device>,
     sources: Vec<Source>,
 }
@@ -53,8 +57,13 @@ impl State {
         self.sources.iter().any(Source::is_alive)
     }
 
-    /// Answers one paste. Only the two offered MIME types get an answer.
+    /// Answers one paste. Only the two offered MIME types get an answer,
+    /// and none does once the unlock is locked: the reader gets end of file,
+    /// whatever else is still in flight.
     pub(super) fn send(&mut self, mime_type: &str, fd: OwnedFd) {
+        if self.unlock.is_cancelled() {
+            return;
+        }
         let data: &[u8] = match mime_type {
             TEXT_MIME_TYPE => &self.secret,
             HINT_MIME_TYPE => b"secret",
@@ -130,10 +139,15 @@ impl Offer {
 }
 
 /// Offers `secret` on every seat of the compositor at `stream`, and serves
-/// it on a thread of its own. Returns once the compositor has the offer.
-pub fn offer(stream: UnixStream, secret: Zeroizing<String>) -> Result<Offer, Error> {
+/// it on a thread of its own until `unlock` is cancelled, after which no
+/// paste gets it. Returns once the compositor has the offer.
+pub fn offer(
+    stream: UnixStream,
+    secret: Zeroizing<String>,
+    unlock: CancelToken,
+) -> Result<Offer, Error> {
     let secret = Zeroizing::new(secret.as_bytes().to_vec());
-    let (queue, state) = start(stream, secret)?;
+    let (queue, state) = start(stream, secret, unlock)?;
     spawn(move |stop| serve(queue, state, stop))
 }
 
@@ -178,6 +192,7 @@ impl Offer {
 fn start(
     stream: UnixStream,
     secret: Zeroizing<Vec<u8>>,
+    unlock: CancelToken,
 ) -> Result<(EventQueue<State>, State), Error> {
     let conn = Connection::from_socket(stream)
         .map_err(|err| Error(format!("couldn't connect to the compositor: {err}")))?;
@@ -201,6 +216,7 @@ fn start(
 
     let mut state = State {
         secret,
+        unlock,
         devices: Vec::new(),
         sources: Vec::new(),
     };
@@ -315,9 +331,96 @@ mod tests {
     use std::io::Read;
     use std::os::fd::OwnedFd;
     use std::os::unix::net::UnixStream;
+    use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
 
-    use super::{END_TIMEOUT, Offer, write_all_by};
+    use zeroize::Zeroizing;
+
+    use super::super::fake::Fake;
+    use super::{END_TIMEOUT, HINT_MIME_TYPE, Offer, TEXT_MIME_TYPE, offer, write_all_by};
+    use crate::cancel::CancelSource;
+
+    /// What the owner of the selection answered a paste with: everything it
+    /// wrote before it closed its end.
+    fn answer(mut reader: UnixStream) -> String {
+        reader
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut answer = String::new();
+        reader
+            .read_to_string(&mut answer)
+            .expect("the owner closes its end");
+        answer
+    }
+
+    /// Offers `hunter2` to the compositor at `client` as the secret of `source`'s unlock.
+    fn offer_to(client: UnixStream, source: &CancelSource) -> Offer {
+        offer(
+            client,
+            Zeroizing::new("hunter2".to_string()),
+            source.token(),
+        )
+        .expect("the compositor takes the offer")
+    }
+
+    /// Without a lock the compositor's paste is answered, so the tests
+    /// below show a refusal and not a compositor that never asked.
+    #[test]
+    fn a_paste_of_an_unlocked_secret_gets_it_and_the_hint() {
+        let (compositor, client) = Fake::start();
+        let source = CancelSource::new();
+        let offer = offer_to(client, &source);
+
+        assert_eq!(answer(compositor.paste(TEXT_MIME_TYPE)), "hunter2");
+        assert_eq!(answer(compositor.paste(HINT_MIME_TYPE)), "secret");
+        offer.end();
+    }
+
+    /// A lock that lands after the compositor has the selection and before
+    /// the offer is handed back, with a paste already asked: the answer is
+    /// nothing. A recording backend can't show this, it has no compositor
+    /// to ask.
+    #[test]
+    fn a_lock_between_set_selection_and_the_roundtrip_leaves_a_paste_unanswered() {
+        let (compositor, client) = Fake::start();
+        let source = CancelSource::new();
+        let token = source.token();
+        let (asked, pastes) = channel();
+        let mut source = Some(source);
+        compositor.on_set_selection(move |selection| {
+            // The lock lands as the compositor processes `set_selection`.
+            drop(source.take());
+            for mime in [TEXT_MIME_TYPE, HINT_MIME_TYPE] {
+                asked.send(selection.paste(mime)).unwrap();
+            }
+        });
+
+        let offer = offer(client, Zeroizing::new("hunter2".to_string()), token)
+            .expect("the compositor took the offer before it was locked");
+
+        let pastes: Vec<_> = pastes.try_iter().collect();
+        assert_eq!(pastes.len(), 2, "the compositor asked");
+        for paste in pastes {
+            assert_eq!(answer(paste), "");
+        }
+        offer.end();
+    }
+
+    /// A paste asked after the offer is being served is answered until the
+    /// lock, and not after.
+    #[test]
+    fn a_paste_asked_after_a_lock_gets_nothing() {
+        let (compositor, client) = Fake::start();
+        let source = CancelSource::new();
+        let offer = offer_to(client, &source);
+        assert_eq!(answer(compositor.paste(TEXT_MIME_TYPE)), "hunter2");
+
+        drop(source);
+
+        assert_eq!(answer(compositor.paste(TEXT_MIME_TYPE)), "");
+        assert_eq!(answer(compositor.paste(HINT_MIME_TYPE)), "");
+        offer.end();
+    }
 
     #[test]
     fn ending_an_offer_ends_it_and_ending_it_again_does_nothing() {

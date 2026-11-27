@@ -179,7 +179,9 @@ as `kpa pick` can tell before it lists anything.
 A copy's offer lasts until `clipboard_timeout` or until a lock ends the
 unlock the entry was read from, whichever comes first. A lock of another
 database leaves it. A `copy` that a lock overtakes before its offer is
-recorded answers `locked` and leaves nothing on the clipboard.
+recorded answers `locked` and leaves nothing on the clipboard, and no paste is
+answered with the secret from the moment the lock returns, even one the
+compositor asks for while the `copy` is still in flight.
 
 Why:
 

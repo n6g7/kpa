@@ -310,7 +310,8 @@ for a channel and G-4 for anything persistent:
      prompt ends when its requester leaves or the terminal hangs up.
   7. A copied secret expires after `clipboard_timeout`, and sooner if a
      lock ends the unlock it was read from, even a lock that lands while
-     the `copy` is in flight (the copy answers `locked`).
+     the `copy` is in flight (the copy answers `locked`). Once the lock has
+     returned, no paste is answered with the secret.
   8. A pending request expires five minutes after it was last refused, and
      an approval for one signature after `ssh_agent.retry_window`.
 - **G-6 Lock clears what kpa owns.** On lock, every copy of A-2 that kpa
@@ -520,7 +521,8 @@ than the activity G-5 names; a database's idle timer reset by activity on
 a different database; a request served or a signature made after lock; an
 unlock that installs after a lock; a prompt outliving a lock or its
 timeout; a clipboard offer, an approval, a pending request or a private
-key outliving its database's lock.
+key outliving its database's lock (an offer outlives it if a paste is
+answered with the secret once the lock has returned).
 
 **T-9 · Plaintext survives a lock in kpa-owned memory** (I) — ACT-7 · TB-7 · A-1, A-2 → G-6  
 Response: protected values and every kpa-made copy (prompt buffer,

@@ -9,6 +9,8 @@
 mod compositor;
 mod copy;
 mod data_control;
+#[cfg(test)]
+mod fake;
 
 pub use compositor::connect;
 pub use copy::{Offer, offer};

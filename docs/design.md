@@ -344,6 +344,13 @@ something else meanwhile, the compositor already replaced our source and ending
 it does nothing: no content comparison, no race, no risk of wiping someone
 else's clipboard. A lock of the unlock the offer came from ends it earlier.
 
+**A lock is authoritative where the secret is served.** Every offer is started
+with the `CancelToken` of the unlock its secret was read from, and the thread
+that answers pastes checks it on each one: a lock cancels the token before it
+returns, so no paste is answered with the secret after that, whether or not the
+offer has been recorded and ended yet. That covers a `copy` still being handed
+to the compositor, where the selection is set before the offer is returned.
+
 ## The picker: `kpa pick`
 
 `kpa pick [QUERY...]` picks an entry in a terminal and copies one of its
