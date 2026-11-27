@@ -423,7 +423,7 @@ impl Rig {
     fn question(&self, title: &str) -> String {
         let host = format!("[127.0.0.1]:{}", self.sshd.port);
         format!(
-            "Approve use of key \"{title}\" on {host} to log in to {}@{host}?",
+            "Approve use of key \"{title}\" on {host} to log in to \"{}\"@{host}?",
             self.user
         )
     }
@@ -565,7 +565,7 @@ fn a_forwarded_login_to_a_host_with_a_certificate_asks_and_signs() {
     assert_eq!(
         rig.confirmations(),
         [format!(
-            "Approve use of key \"Ed25519\" on {via} to log in to {}@{dest}?",
+            "Approve use of key \"Ed25519\" on {via} to log in to \"{}\"@{dest}?",
             rig.user
         )]
     );
@@ -588,7 +588,7 @@ fn a_destination_certified_by_a_trusted_ca_is_named_by_its_principal() {
     assert_eq!(
         rig.confirmations(),
         [format!(
-            "Approve use of key \"Ed25519\" on {via} to log in to {}@build-box.example?",
+            "Approve use of key \"Ed25519\" on {via} to log in to \"{}\"@build-box.example?",
             rig.user
         )]
     );
@@ -621,7 +621,7 @@ fn a_login_through_two_forwarding_hosts_names_both() {
     assert_eq!(
         rig.confirmations(),
         [format!(
-            "Approve use of key \"Ed25519\" on {first} → {second} to log in to {}@{first}?",
+            "Approve use of key \"Ed25519\" on {first} → {second} to log in to \"{}\"@{first}?",
             rig.user
         )]
     );

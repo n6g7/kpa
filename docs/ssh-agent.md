@@ -443,8 +443,8 @@ queue. A `kpa unlock` typed while a signature's unlock prompt is up gets
 
 **What the prompt says.** It asks to unlock, and says what for in the
 confirm prompt's words (§ 6.7): "Unlock database personal to use key
-"github" to log in as git?" for a connection with no binding, and "Unlock
-database personal to use key "github" to log in to git@github.com?" for
+"github" to log in as "git"?" for a connection with no binding, and "Unlock
+database personal to use key "github" to log in to "git"@github.com?" for
 one bound to a destination. A key without a `name` override is named
 `<database> <fingerprint>` there, since the vault is locked and its entry
 titles are unknown. Answering it approves nothing: the confirm prompt follows
@@ -524,28 +524,36 @@ the pieces it is made of in `KPA_PROMPT_DATA`, see
 
 | Request | Message |
 | --- | --- |
-| Login, no binding | `Approve use of key "github" to log in as git?` |
-| Login, bound to a host `known_hosts` names | `Approve use of key "github" to log in to git@github.com?` |
-| Login, bound to any other host | `Approve use of key "github" to log in as git to host key SHA256:…?` |
-| `SSHSIG` | `Approve use of key "github" to sign for namespace git?`, with `on github.com` or `on host key SHA256:…` after the namespace for a bound connection |
+| Login, no binding | `Approve use of key "github" to log in as "git"?` |
+| Login, bound to a host `known_hosts` names | `Approve use of key "github" to log in to "git"@github.com?` |
+| Login, bound to any other host | `Approve use of key "github" to log in as "git" to host key SHA256:…?` |
+| `SSHSIG` | `Approve use of key "github" to sign for namespace "git"?`, with `on github.com` or `on host key SHA256:…` after the namespace for a bound connection |
 | Anything else | `Approve use of key "github"?`, with the same `on …` for a bound connection |
-| Forwarded login, through a host `known_hosts` names, to a host it names | `Approve use of key "github" on build-box to log in to git@github.com?` |
-| Forwarded login, through a host it doesn't name | `Approve use of key "github" on host key SHA256:… to log in to git@github.com?`, the destination worded as above |
-| Forwarded login, through two or three hosts | `Approve use of key "github" on build-box → jump-2 to log in to git@github.com?` |
-| Forwarded login, through more than three hosts, or with no room for them all | `Approve use of key "github" on build-box → … → jump-4 to log in to git@github.com?` |
+| Forwarded login, through a host `known_hosts` names, to a host it names | `Approve use of key "github" on build-box to log in to "git"@github.com?` |
+| Forwarded login, through a host it doesn't name | `Approve use of key "github" on host key SHA256:… to log in to "git"@github.com?`, the destination worded as above |
+| Forwarded login, through two or three hosts | `Approve use of key "github" on build-box → jump-2 to log in to "git"@github.com?` |
+| Forwarded login, through more than three hosts, or with no room for them all | `Approve use of key "github" on build-box → … → jump-4 to log in to "git"@github.com?` |
 
 The destination is the connection's last binding's host, named as § 6.2
 ("Naming a host") names it, else by its fingerprint. On a forwarded
 connection the forwarding host, the first binding's host key, is named the
 same way after the key, and the unlock prompt (§ 6.6) says the same: `Unlock
 database personal to use key "github" on build-box to log in to
-git@github.com?`. Every piece that comes from outside kpa's own text (the key
+"git"@github.com?`. Every piece that comes from outside kpa's own text (the key
 name, the database name, the remote user, the namespace, the host name)
 passes through the escaping the CLI uses for terminal output (T-13), with tab
 and newline escaped too so the message stays one line, and gets its own
 length budget, so no piece can push the destination past the prompt's cap.
-The key name's quotes are escaped, so a name can't end its quotation and
-carry on the sentence.
+The key name, the remote user and the namespace are quoted, and inside the
+quotes a `"` is written `\"` and a `\` is written `\\`, so none of them can
+end its quotation, nor make its closing quote look escaped, and carry on the
+sentence: a user `root on trusted.example` reads as `"root on
+trusted.example"`, and a key name ending in `\"` as `\\\"`. A `\` that kpa's
+escaping wrote, the `\u000a` for a newline, is left as it is. The budgets
+(64 bytes for the key name, 32 for the user and the namespace) count what is
+between the quotes after this, and the message cuts a piece between whole
+characters and whole escapes. `KPA_PROMPT_DATA` holds each piece escaped, not
+quoted, as JSON holds it.
 
 A connection forwarded through further hosts (§ 6.2, the forwarding chain)
 says the hosts it came through: the forwarding host as above, then the hosts
@@ -960,7 +968,7 @@ programs' settings.
 
 | Action                                                     | What happens                                                                                                                                         |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git push` at the desk, vault locked                       | The unlock prompt asks "Unlock database personal to use key "github" to log in to git@github.com?", then a confirm prompt asks for the key. Once approved, the destination doesn't ask until lock    |
+| `git push` at the desk, vault locked                       | The unlock prompt asks "Unlock database personal to use key "github" to log in to "git"@github.com?", then a confirm prompt asks for the key. Once approved, the destination doesn't ask until lock    |
 | `git push` at the desk, vault unlocked, key not yet used   | A confirm prompt names the key and destination. Later uses of that destination don't ask until lock                                                |
 | `ssh -A` to a headless host, then `git pull` there         | The login is local use. The pull is forwarded, and the desktop asks once, naming the host, the destination, the key and the remote user. The approval covers the rest of that SSH session |
 | IDE remote session to a headless host, then a fetch        | The same: one approval per destination per connection                                                                                                |

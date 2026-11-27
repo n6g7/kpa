@@ -841,8 +841,11 @@ prompt's message and data, or, for a request kept pending, what
 - The purpose is read from the data to be signed: a login and its user,
   an `SSHSIG` namespace, or neither.
 - Every piece that isn't kpa's own text, a host's name included, is
-  escaped and cut to a budget of its own, and the key's name is quoted, so
-  no piece can hide the destination or carry on the sentence (T-13). The
+  escaped and cut to a budget of its own. The key's name, a login's user
+  and a signature's namespace, the pieces a vault author or a requester
+  writes freely, are also quoted, with the `"` and the `\` inside the quotes
+  escaped, so none can end its quotation, make its closing quote look
+  escaped, hide the destination or carry on the sentence (T-13). The
   message and the data are made from the same pieces.
 
 In scope: a prompt or a pending request naming a destination or a

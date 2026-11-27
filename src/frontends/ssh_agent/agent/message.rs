@@ -4,8 +4,10 @@
 //! them (`KPA_PROMPT_DATA`, `docs/design.md`).
 //!
 //! Each prompt's [`Pieces`] are filled first, with every piece escaped and
-//! cut to its budget, and the message is formatted from that data and
-//! nothing else, so the two can't disagree.
+//! cut to its budget, and the message is formatted from those pieces and
+//! nothing else, so the two can't disagree. The pieces that come from outside
+//! kpa (the key's name, a login's user, a signature's namespace) are quoted
+//! in the message.
 
 use serde_json::{Map, Value, json};
 use ssh_key::HashAlg;
@@ -16,18 +18,20 @@ use crate::output::escape_one_line;
 use crate::prompt::{MAX_PROMPT_MESSAGE_LEN, Question};
 use crate::ssh::keys::ServedKey;
 
-/// The most bytes (escaped) each piece of a message may take. The message
+/// The most bytes (escaped, and quoted where the message quotes it, but not
+/// counting the quote marks) each piece of a message may take. The message
 /// is one line the prompt caps at 320 bytes, and the destination comes last,
 /// so every variable piece is cut well short of that: the worst message,
 /// an unlock prompt for a login forwarded through a host `known_hosts`
-/// doesn't name to one it doesn't name either, is 291 bytes
+/// doesn't name to one it doesn't name either, is 293 bytes
 /// (`the_worst_message_fits_the_prompt_cap`), and the destination is always
 /// whole. The hosts after the forwarding host have no budget of their own:
 /// they are shown whole in what room that leaves, else not (see
 /// [`onward`]).
 const MAX_DATABASE_LEN: usize = 24;
 const MAX_KEY_NAME_LEN: usize = 64;
-/// The login user or `SSHSIG` namespace, from the request.
+/// The login user or `SSHSIG` namespace, from the request, in the data and
+/// between the quotes of the message.
 const MAX_REQUESTED_LEN: usize = 32;
 /// A host name from `known_hosts`.
 const MAX_HOST_NAME_LEN: usize = 56;
@@ -80,10 +84,21 @@ struct Pieces {
     user: Option<String>,
     /// The namespace of an `SSHSIG` request.
     namespace: Option<String>,
+    /// The key's name, the user and the namespace as the message writes them
+    /// between its quotes.
+    quoted: Quoted,
     destination: Option<HostPiece>,
     /// The hosts the agent was forwarded through, in order, the forwarding
     /// host first.
     forwarding_chain: Vec<HostPiece>,
+}
+
+/// The text of a message between a pair of quotes: [`quoted`] of the raw
+/// text, which can't end the quotation or carry on the sentence.
+struct Quoted {
+    key_name: String,
+    user: Option<String>,
+    namespace: Option<String>,
 }
 
 impl Pieces {
@@ -95,20 +110,25 @@ impl Pieces {
         forwarding: &[NamedHost],
     ) -> Pieces {
         let (user, namespace) = match purpose {
-            Purpose::Login(login) => (Some(escape_one_line(&login.user, MAX_REQUESTED_LEN)), None),
-            Purpose::SshSig { namespace } => {
-                (None, Some(escape_one_line(namespace, MAX_REQUESTED_LEN)))
-            }
+            Purpose::Login(login) => (Some(login.user.as_str()), None),
+            Purpose::SshSig { namespace } => (None, Some(namespace.as_str())),
             Purpose::Other => (None, None),
         };
+        let escaped = |text: &str| escape_one_line(text, MAX_REQUESTED_LEN);
+        let quote = |text: &str| quoted(text, MAX_REQUESTED_LEN);
         Pieces {
             database: escape_one_line(&served.database, MAX_DATABASE_LEN),
             key_name: escape_one_line(&served.name, MAX_KEY_NAME_LEN),
             key_fingerprint: served.fingerprint.to_string(),
             key_type: served.public_key.algorithm().to_string(),
             purpose: purpose.label(),
-            user,
-            namespace,
+            user: user.map(escaped),
+            namespace: namespace.map(escaped),
+            quoted: Quoted {
+                key_name: quoted(&served.name, MAX_KEY_NAME_LEN),
+                user: user.map(quote),
+                namespace: namespace.map(quote),
+            },
             destination: destination.map(piece),
             forwarding_chain: forwarding.iter().map(piece).collect(),
         }
@@ -147,16 +167,16 @@ impl Pieces {
 }
 
 /// The confirm prompt's question, which the user answers yes or no to:
-/// "Approve use of key "github" to log in to git@github.com?". The key is
+/// "Approve use of key "github" to log in to \"git\"@github.com?". The key is
 /// shown by its name, quoted. What follows says what it is for and, for a
 /// connection bound to a `destination`, where: the host name `known_hosts`
 /// gives its host key if it has one, else the host key's fingerprint. A
 /// forwarded connection says which host it comes through too: "Approve use
-/// of key "github" on build-box to log in to git@github.com?", and one that
+/// of key "github" on build-box to log in to \"git\"@github.com?", and one that
 /// was relayed on says the hosts it went through: "on build-box → jump-2".
 /// Every piece
-/// that comes from outside kpa's own text is escaped and cut to its own
-/// budget, so none can hide the destination.
+/// that comes from outside kpa's own text is escaped, quoted and cut to its
+/// own budget, so none can hide the destination or carry on the sentence.
 pub(super) fn approval(
     served: &ServedKey,
     purpose: &Purpose,
@@ -169,7 +189,7 @@ pub(super) fn approval(
 }
 
 /// The unlock prompt's question, about unlocking, which says what for:
-/// "Unlock database personal to use key "github" to log in as git?". It
+/// "Unlock database personal to use key "github" to log in as \"git\"?". It
 /// doesn't ask to approve the key; the confirm prompt does.
 pub(super) fn unlock(
     served: &ServedKey,
@@ -189,7 +209,7 @@ pub(super) fn unlock(
 
 /// `key "github"`, the key's name quoted.
 fn key(pieces: &Pieces) -> String {
-    format!("key \"{}\"", quoted(&pieces.key_name))
+    format!("key \"{}\"", pieces.quoted.key_name)
 }
 
 /// `lead`, then which host the request is forwarded through, then what the
@@ -201,16 +221,16 @@ fn message(lead: &str, pieces: &Pieces) -> String {
         Some((first, further)) => (on(Some(first)), further),
         None => (String::new(), &[][..]),
     };
-    let user = pieces.user.as_deref().unwrap_or_default();
+    let user = pieces.quoted.user.as_deref().unwrap_or_default();
     let what = match (pieces.purpose, pieces.destination.as_ref()) {
         ("login", Some(dest)) => match &dest.name {
-            Some(_) => format!(" to log in to {user}@{}", shown(dest)),
-            None => format!(" to log in as {user} to {}", shown(dest)),
+            Some(_) => format!(" to log in to \"{user}\"@{}", shown(dest)),
+            None => format!(" to log in as \"{user}\" to {}", shown(dest)),
         },
-        ("login", None) => format!(" to log in as {user}"),
+        ("login", None) => format!(" to log in as \"{user}\""),
         ("sshsig", destination) => format!(
-            " to sign for namespace {}{}",
-            pieces.namespace.as_deref().unwrap_or_default(),
+            " to sign for namespace \"{}\"{}",
+            pieces.quoted.namespace.as_deref().unwrap_or_default(),
             on(destination)
         ),
         (_, destination) => on(destination),
@@ -268,29 +288,28 @@ fn on(host: Option<&HostPiece>) -> String {
         .unwrap_or_default()
 }
 
-/// A key's name for the message, with its quotes escaped, so it can't end
-/// its own quotation and continue the sentence. The name is cut again to its
-/// budget after, between whole characters and whole escapes, so quoting
-/// can't push the message's other pieces out.
-fn quoted(name: &str) -> String {
+/// `text` for the message between a pair of quotes, at most `max_len` bytes
+/// of it: escaped as [`escape_one_line`] does, with a `"` written as `\"` and
+/// a `\` as `\\`, so the text can't end its own quotation, nor make the
+/// closing quote look escaped, and carry on the sentence. It works from the
+/// raw text, not from what [`escape_one_line`] made of it, where a `\` of the
+/// text and the one that begins a `\uXXXX` escape can't be told apart. The cut
+/// falls between whole characters and whole escapes, after quoting, so
+/// quoting can't push the message's other pieces out.
+fn quoted(text: &str, max_len: usize) -> String {
     let mut quoted = String::new();
-    let mut rest = name;
-    while let Some(next) = rest.chars().next() {
-        let len = escape_len(rest).unwrap_or(next.len_utf8());
-        let piece = if next == '"' { "\\\"" } else { &rest[..len] };
-        if quoted.len() + piece.len() > MAX_KEY_NAME_LEN {
+    for c in text.chars() {
+        let piece = match c {
+            '"' => "\\\"".to_string(),
+            '\\' => "\\\\".to_string(),
+            c => escape_one_line(c.encode_utf8(&mut [0; 4]), "\\u0000".len()),
+        };
+        if quoted.len() + piece.len() > max_len {
             break;
         }
-        quoted.push_str(piece);
-        rest = &rest[len..];
+        quoted.push_str(&piece);
     }
     quoted
-}
-
-/// The length of the `\uXXXX` escape `text` starts with, if it does.
-fn escape_len(text: &str) -> Option<usize> {
-    let escape = text.strip_prefix("\\u")?.get(..4)?;
-    escape.chars().all(|c| c.is_ascii_hexdigit()).then_some(6)
 }
 
 #[cfg(test)]
@@ -415,18 +434,18 @@ mod tests {
 
         assert_eq!(
             forwarded(approval, Some("build-box"), Some("github.com")),
-            "Approve use of key \"github\" on build-box to log in to git@github.com?"
+            "Approve use of key \"github\" on build-box to log in to \"git\"@github.com?"
         );
         assert_eq!(
             forwarded(unlock, Some("build-box"), Some("github.com")),
             "Unlock database personal to use key \"github\" on build-box \
-             to log in to git@github.com?"
+             to log in to \"git\"@github.com?"
         );
         assert_eq!(
             forwarded(approval, None, None),
             format!(
                 "Approve use of key \"github\" on host key {via} \
-                 to log in as git to host key {fingerprint}?"
+                 to log in as \"git\" to host key {fingerprint}?"
             )
         );
     }
@@ -438,23 +457,25 @@ mod tests {
 
         assert_eq!(
             approved(&login("git"), None, None),
-            "Approve use of key \"github\" to log in as git?"
+            "Approve use of key \"github\" to log in as \"git\"?"
         );
         assert_eq!(
             approved(&login("git"), Some(&dest), Some("github.com")),
-            "Approve use of key \"github\" to log in to git@github.com?"
+            "Approve use of key \"github\" to log in to \"git\"@github.com?"
         );
         assert_eq!(
             approved(&login("git"), Some(&dest), None),
-            format!("Approve use of key \"github\" to log in as git to host key {fingerprint}?")
+            format!(
+                "Approve use of key \"github\" to log in as \"git\" to host key {fingerprint}?"
+            )
         );
         assert_eq!(
             approved(&sshsig("git"), None, None),
-            "Approve use of key \"github\" to sign for namespace git?"
+            "Approve use of key \"github\" to sign for namespace \"git\"?"
         );
         assert_eq!(
             approved(&sshsig("git"), Some(&dest), Some("github.com")),
-            "Approve use of key \"github\" to sign for namespace git on github.com?"
+            "Approve use of key \"github\" to sign for namespace \"git\" on github.com?"
         );
         assert_eq!(
             approved(&Purpose::Other, None, None),
@@ -474,22 +495,22 @@ mod tests {
 
         assert_eq!(
             unlocked(&login("git"), None, None),
-            "Unlock database personal to use key \"github\" to log in as git?"
+            "Unlock database personal to use key \"github\" to log in as \"git\"?"
         );
         assert_eq!(
             unlocked(&login("git"), Some(&dest), Some("github.com")),
-            "Unlock database personal to use key \"github\" to log in to git@github.com?"
+            "Unlock database personal to use key \"github\" to log in to \"git\"@github.com?"
         );
         assert_eq!(
             unlocked(&login("git"), Some(&dest), None),
             format!(
                 "Unlock database personal to use key \"github\" \
-                 to log in as git to host key {fingerprint}?"
+                 to log in as \"git\" to host key {fingerprint}?"
             )
         );
         assert_eq!(
             unlocked(&sshsig("git"), None, None),
-            "Unlock database personal to use key \"github\" to sign for namespace git?"
+            "Unlock database personal to use key \"github\" to sign for namespace \"git\"?"
         );
         assert_eq!(
             unlocked(&Purpose::Other, Some(&dest), None),
@@ -552,7 +573,7 @@ mod tests {
             }
         }
         // The hosts after the forwarding host fill what is left of the cap.
-        assert_eq!(longest, 291);
+        assert_eq!(longest, 293);
     }
 
     /// A key name can't close its quotes and carry on the sentence, nor
@@ -581,28 +602,179 @@ mod tests {
         assert!(question.message.contains("say \\\"hi\\\""));
     }
 
-    /// Quoting a name can't push it past its budget, nor cut a `\uXXXX`
-    /// escape or leave a `\` that would escape the closing quote.
-    #[test]
-    fn quoting_keeps_a_key_name_within_its_budget_between_whole_pieces() {
-        for name in ["\"".repeat(100), "\u{202e}\"".repeat(100)] {
-            let question = approval(&served(&name), &Purpose::Other, None, &[]);
+    /// A message read as a person reads it: its text outside quotes with
+    /// each quoted span left empty (`""`), and each span's text as the
+    /// quotes hold it, unescaped. Panics on a `\` that doesn't begin `\"`,
+    /// `\\` or `\uXXXX`, and on a quote left open.
+    fn read(message: &str) -> (String, Vec<String>) {
+        let (mut outside, mut spans) = (String::new(), Vec::new());
+        let mut chars = message.chars();
+        while let Some(c) = chars.next() {
+            outside.push(c);
+            if c != '"' {
+                continue;
+            }
+            let mut span = String::new();
+            loop {
+                match chars.next().expect("a closing quote") {
+                    '"' => break,
+                    '\\' => match chars.next().expect("an escape") {
+                        c @ ('"' | '\\') => span.push(c),
+                        'u' => {
+                            let hex: String = chars.by_ref().take(4).collect();
+                            let c = u32::from_str_radix(&hex, 16).expect("four hex digits");
+                            span.push(char::from_u32(c).expect("a character"));
+                        }
+                        other => panic!("`\\{other}` in {message}"),
+                    },
+                    c => span.push(c),
+                }
+            }
+            outside.push('"');
+            spans.push(span);
+        }
+        (outside, spans)
+    }
 
-            let quoted = question
-                .message
-                .strip_prefix("Approve use of key \"")
-                .and_then(|rest| rest.strip_suffix("\"?"))
-                .expect("a quoted key");
-            assert!(quoted.len() <= MAX_KEY_NAME_LEN, "{quoted}");
-            assert!(
-                !quoted.ends_with('\\') || quoted.ends_with("\\\\"),
-                "{quoted}"
+    /// A key name that closes its quotes (audit finding F-06), whether it
+    /// ends in `\"` or in a lone `\`, stays whole inside them.
+    #[test]
+    fn a_backslash_in_a_key_name_cannot_end_its_quotation() {
+        let name = "x\\\" to log in to a@b? #";
+        let question = approval(&served(name), &sshsig("file"), None, &[]);
+
+        assert_eq!(
+            question.message,
+            "Approve use of key \"x\\\\\\\" to log in to a@b? #\" \
+             to sign for namespace \"file\"?"
+        );
+        assert_eq!(
+            read(&question.message),
+            (
+                "Approve use of key \"\" to sign for namespace \"\"?".to_string(),
+                vec![name.to_string(), "file".to_string()]
+            )
+        );
+
+        let question = approval(&served("trailing\\"), &Purpose::Other, None, &[]);
+        assert_eq!(question.message, "Approve use of key \"trailing\\\\\"?");
+    }
+
+    /// The escapes `escape_one_line` writes are kept as they are, and a
+    /// `\u000a` the name spells out is a `\` and text, not a newline.
+    #[test]
+    fn a_backslash_is_doubled_and_the_escapes_of_the_name_are_not() {
+        let question = approval(&served("a\nb\\u000ac"), &Purpose::Other, None, &[]);
+
+        assert_eq!(
+            question.message,
+            "Approve use of key \"a\\u000ab\\\\u000ac\"?"
+        );
+    }
+
+    /// The user of a login and the namespace of a signature, which the
+    /// request writes (audit finding F-07), are quoted like the key's name:
+    /// nothing of them reads outside the quotes, and a bound login still ends
+    /// with its destination.
+    #[test]
+    fn a_requested_user_or_namespace_stays_inside_its_quotes() {
+        let (dest, fingerprint) = (dest(), fingerprint());
+        for user in [
+            "a\" to log in to b@c? #",
+            "a\\\" to log in to b@c? #",
+            "root on trusted.example",
+            "root\\",
+        ] {
+            for (destination, name, skeleton) in [
+                (None, None, "to log in as \"\"?".to_string()),
+                (
+                    Some(&dest),
+                    Some("real.example"),
+                    "to log in to \"\"@real.example?".to_string(),
+                ),
+                (
+                    Some(&dest),
+                    None,
+                    format!("to log in as \"\" to host key {fingerprint}?"),
+                ),
+            ] {
+                let question = approval(
+                    &served("github"),
+                    &login(user),
+                    host(destination, name).as_ref(),
+                    &[],
+                );
+
+                assert_eq!(
+                    read(&question.message),
+                    (
+                        format!("Approve use of key \"\" {skeleton}"),
+                        vec!["github".to_string(), user.to_string()]
+                    ),
+                    "{}",
+                    question.message
+                );
+            }
+        }
+
+        for namespace in ["f? x", "f\" on trusted.example? #"] {
+            let question = unlock(
+                &served("github"),
+                &sshsig(namespace),
+                host(Some(&dest), Some("real.example")).as_ref(),
+                &[],
             );
-            assert!(!quoted.rsplit('\\').next().is_some_and(|tail| {
-                tail.starts_with('u')
-                    && tail.len() < 5
-                    && tail.chars().all(|c| c.is_ascii_hexdigit() || c == 'u')
-            }));
+
+            assert_eq!(
+                read(&question.message),
+                (
+                    "Unlock database personal to use key \"\" \
+                     to sign for namespace \"\" on real.example?"
+                        .to_string(),
+                    vec!["github".to_string(), namespace.to_string()]
+                )
+            );
+        }
+    }
+
+    /// The message and the data agree: what the quotes hold is the piece
+    /// the data names, whatever the piece has in it.
+    #[test]
+    fn the_quotes_hold_what_the_data_names() {
+        let name = "k\"e\\y\\\"";
+        let user = "u\"\\s\\\\er\"";
+        let question = approval(&served(name), &login(user), None, &[]);
+
+        assert_eq!(read(&question.message).1, [name, user].map(str::to_string));
+        assert_eq!(question.data["key"]["name"], name);
+        assert_eq!(question.data["user"], user);
+
+        let question = approval(&served("k"), &sshsig(user), None, &[]);
+        assert_eq!(read(&question.message).1[1], user);
+        assert_eq!(question.data["namespace"], user);
+    }
+
+    /// Quoting a piece can't push it past its budget, nor cut a `\uXXXX`
+    /// escape or a `\\` or `\"` pair: what is left is a whole prefix of the
+    /// text, as long as the budget allows.
+    #[test]
+    fn quoting_keeps_each_piece_within_its_budget_between_whole_pieces() {
+        for text in [
+            "\"".repeat(100),
+            "\\".repeat(100),
+            "\u{202e}\"".repeat(100),
+            "\u{202e}\\".repeat(100),
+            "\\\"".repeat(100),
+        ] {
+            for budget in [MAX_KEY_NAME_LEN, MAX_REQUESTED_LEN] {
+                let body = quoted(&text, budget);
+                let (_, spans) = read(&format!("\"{body}\""));
+
+                assert!(text.starts_with(&spans[0]), "{body}");
+                assert!(body.len() <= budget, "{body}");
+                // The next piece, at most a `\uXXXX`, would not have fit.
+                assert!(body.len() + 6 > budget, "{body}");
+            }
         }
     }
 
@@ -640,7 +812,7 @@ mod tests {
         assert_eq!(
             question.message,
             format!(
-                "Approve use of key \"github\" on host key {} to log in to git@github.com?",
+                "Approve use of key \"github\" on host key {} to log in to \"git\"@github.com?",
                 via_fingerprint()
             )
         );
@@ -662,7 +834,7 @@ mod tests {
         assert!(!unlocked.data.contains_key("forwarding_chain"));
         assert_eq!(
             unlocked.message,
-            "Unlock database personal to use key \"github\" to sign for namespace git?"
+            "Unlock database personal to use key \"github\" to sign for namespace \"git\"?"
         );
     }
 
@@ -670,7 +842,7 @@ mod tests {
     /// all of them up to three, and past that the first, `…` and the last.
     #[test]
     fn a_chain_of_hops_is_shown_in_order_and_shortened_past_three() {
-        let to = " to log in to git@github.com?";
+        let to = " to log in to \"git\"@github.com?";
         let lead = "Approve use of key \"github\"";
         let names = [
             Some("build-box"),
@@ -712,7 +884,7 @@ mod tests {
             through(&[None, None]),
             format!(
                 "Approve use of key \"github\" on host key {first} → {second} \
-                 to log in to git@github.com?"
+                 to log in to \"git\"@github.com?"
             )
         );
     }
