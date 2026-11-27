@@ -40,6 +40,7 @@ Per `docs/ssh-agent.md`.
 - [ ] The legacy KeeOtp `TimeOtp-*` fields, which `keepass`'s `totp` feature doesn't parse
 - [ ] A browser autofill menu under a page's login fields, defended against clickjacking (`docs/browser.md` § 3)
 - [ ] Filling login forms in frames of another origin than the page's, which needs a host permission per site
+- [ ] Choosing the fields by hand on a page the browser extension reads wrong, remembered per site (`docs/browser.md` § 5.2)
 - [ ] Flatpak and Snap browsers: Firefox 157 and later start a host outside the sandbox through `xdg-native-messaging-proxy`; another route is a static host copied into the browser's sandbox, with a grant of the browser socket alone
 - [ ] List the browser extension on the Chrome Web Store and addons.mozilla.org, so it installs and updates from there
 - [ ] Fill HTTP authentication dialogs from the browser extension
