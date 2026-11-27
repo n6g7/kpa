@@ -10,7 +10,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -179,11 +179,56 @@ struct MockState {
 
 type Shared = Arc<Mutex<MockState>>;
 
-struct Manager(Shared);
+/// Holds back the mock's answers while closed, so a test knows kpa is in the
+/// middle of a call and can have a flood in kpa's queue before the answer.
+/// Open unless a test closes it.
+#[derive(Default)]
+struct Gate {
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    closed: bool,
+    /// How many answers are held back right now.
+    waiting: usize,
+}
+
+impl Gate {
+    /// Called by the mock before it answers. A test that never opens the
+    /// gate gets the answer after `TIMEOUT`, not a hang.
+    fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.waiting += 1;
+        self.changed.notify_all();
+        let deadline = Instant::now() + TIMEOUT;
+        while state.closed {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            state = self.changed.wait_timeout(state, left).unwrap().0;
+        }
+        state.waiting -= 1;
+    }
+
+    fn set_closed(&self, closed: bool) {
+        self.state.lock().unwrap().closed = closed;
+        self.changed.notify_all();
+    }
+
+    fn waiting(&self) -> usize {
+        self.state.lock().unwrap().waiting
+    }
+}
+
+struct Manager(Shared, Arc<Gate>);
 
 #[zbus::interface(name = "org.freedesktop.login1.Manager")]
 impl Manager {
     fn get_user(&self, _uid: u32) -> OwnedObjectPath {
+        self.1.pass();
         OwnedObjectPath::try_from(USER).unwrap()
     }
 
@@ -204,12 +249,13 @@ impl Manager {
     }
 }
 
-struct User(Shared);
+struct User(Shared, Arc<Gate>);
 
 #[zbus::interface(name = "org.freedesktop.login1.User")]
 impl User {
     #[zbus(property)]
     fn display(&self) -> (String, OwnedObjectPath) {
+        self.1.pass();
         let display = self.0.lock().unwrap().display.clone();
         (
             session_id(&display).to_string(),
@@ -220,6 +266,7 @@ impl User {
 
 struct Session {
     state: Shared,
+    gate: Arc<Gate>,
     path: &'static str,
 }
 
@@ -227,6 +274,7 @@ struct Session {
 impl Session {
     #[zbus(property)]
     fn locked_hint(&self) -> bool {
+        self.gate.pass();
         self.state
             .lock()
             .unwrap()
@@ -238,6 +286,7 @@ impl Session {
 
     #[zbus(property)]
     fn active(&self) -> bool {
+        self.gate.pass();
         self.state
             .lock()
             .unwrap()
@@ -252,10 +301,17 @@ impl Session {
 struct MockLogind {
     conn: Connection,
     state: Shared,
+    gate: Arc<Gate>,
 }
 
 impl MockLogind {
     fn start(address: &str) -> MockLogind {
+        MockLogind::start_with_gate(address, Arc::new(Gate::default()))
+    }
+
+    /// Starts with `gate` in front of every answer, so a test can close it
+    /// before kpa's first call.
+    fn start_with_gate(address: &str, gate: Arc<Gate>) -> MockLogind {
         let state: Shared = Arc::new(Mutex::new(MockState {
             display: SESSION_1.to_string(),
             ..MockState::default()
@@ -264,14 +320,15 @@ impl MockLogind {
             .unwrap()
             .name("org.freedesktop.login1")
             .unwrap()
-            .serve_at(MANAGER, Manager(state.clone()))
+            .serve_at(MANAGER, Manager(state.clone(), gate.clone()))
             .unwrap()
-            .serve_at(USER, User(state.clone()))
+            .serve_at(USER, User(state.clone(), gate.clone()))
             .unwrap()
             .serve_at(
                 SESSION_1,
                 Session {
                     state: state.clone(),
+                    gate: gate.clone(),
                     path: SESSION_1,
                 },
             )
@@ -280,13 +337,14 @@ impl MockLogind {
                 SESSION_2,
                 Session {
                     state: state.clone(),
+                    gate: gate.clone(),
                     path: SESSION_2,
                 },
             )
             .unwrap()
             .build()
             .unwrap();
-        MockLogind { conn, state }
+        MockLogind { conn, state, gate }
     }
 
     fn set_hint(&self, session: &'static str, value: bool) {
@@ -920,6 +978,33 @@ impl Attacker {
         self.bus_call("GetId");
     }
 
+    /// Sends `count` signals of no meaning to every other connection but
+    /// `mock`'s, one after the other. Returns once the bus has queued them
+    /// all for their receivers, so whatever the bus sends after it arrives
+    /// behind them.
+    fn flood(&self, mock: &MockLogind, count: usize) {
+        let mine = self.conn.unique_name().unwrap().to_string();
+        let logind = mock.conn.unique_name().unwrap().to_string();
+        let names: Vec<String> = self.bus_call("ListNames").body().deserialize().unwrap();
+        for victim in names
+            .iter()
+            .filter(|name| name.starts_with(':') && **name != mine && **name != logind)
+        {
+            for _ in 0..count {
+                self.conn
+                    .emit_signal(
+                        Some(victim.as_str()),
+                        "/org/example/Junk",
+                        "org.example.Junk",
+                        "Junk",
+                        &(),
+                    )
+                    .unwrap();
+            }
+        }
+        self.bus_call("GetId");
+    }
+
     fn bus_call(&self, method: &str) -> zbus::Message {
         self.conn
             .call_method(
@@ -1036,4 +1121,87 @@ fn a_restarted_logind_is_a_lost_watch_and_the_next_one_follows_it_over_a_bus() {
     eventually("the restarted logind's changes", || {
         observed.display_session() == unlocked("31")
     });
+}
+
+/// What a lock must beat once a peer floods kpa's connection: more signals
+/// than its queue holds (64), whatever the match rules say.
+const FLOOD: usize = 1000;
+
+/// A lock arrives within this long of the flood being let through.
+const PROMPTLY: Duration = Duration::from_secs(1);
+
+/// Polls `check` for up to `PROMPTLY`.
+fn promptly(mut check: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + PROMPTLY;
+    while !check() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+/// A peer that floods kpa's connection while the watcher reads the new
+/// display session must not stop a lock: the answer logind gives is queued
+/// behind the flood, and the watcher still reads it.
+#[test]
+fn a_flood_while_the_display_session_changes_doesnt_stop_a_lock_over_a_bus() {
+    let bus = PrivateBus::with_policy(STOCK_POLICY);
+    let mock = MockLogind::start(&bus.address);
+    let (databases, display) = auto_locked(&bus.address);
+    eventually("the watcher to subscribe", || {
+        display.get() == unlocked("31")
+    });
+    unlock_all(&databases);
+
+    // The display moves to another session. The watcher asks logind about it,
+    // and logind holds the answer until the flood has been queued behind it.
+    mock.gate.set_closed(true);
+    mock.set_display(SESSION_2);
+    eventually("the watcher to ask about the new session", || {
+        mock.gate.waiting() > 0
+    });
+    Attacker::start(&bus.address).flood(&mock, FLOOD);
+    mock.gate.set_closed(false);
+
+    mock.lock_signal(SESSION_2);
+    assert!(
+        promptly(|| !databases.any_unlocked()),
+        "a flood on kpa's connection suppressed the lock"
+    );
+    assert_eq!(display.get(), unlocked("32"));
+
+    // The connection that holds the sleep inhibitor was flooded too.
+    let taken = mock.inhibitor_count();
+    unlock_all(&databases);
+    eventually("an unlock to take the sleep inhibitor", || {
+        mock.inhibitor_count() == taken + 1 && !mock.last_inhibitor_released()
+    });
+}
+
+/// The same flood while the watcher subscribes: it has asked logind for the
+/// user and waits for the answer, which comes behind the flood.
+#[test]
+fn a_flood_while_the_watch_subscribes_doesnt_stop_a_lock_over_a_bus() {
+    let bus = PrivateBus::with_policy(STOCK_POLICY);
+    let gate = Arc::new(Gate::default());
+    gate.set_closed(true);
+    let mock = MockLogind::start_with_gate(&bus.address, gate);
+    let (databases, display) = auto_locked(&bus.address);
+    eventually("the watcher to ask logind for the user", || {
+        mock.gate.waiting() > 0
+    });
+    Attacker::start(&bus.address).flood(&mock, FLOOD);
+    mock.gate.set_closed(false);
+
+    eventually("the watcher to subscribe", || {
+        display.get() == unlocked("31")
+    });
+    unlock_all(&databases);
+    mock.lock_signal(SESSION_1);
+    assert!(
+        promptly(|| !databases.any_unlocked()),
+        "a flood on kpa's connection suppressed the lock"
+    );
 }
