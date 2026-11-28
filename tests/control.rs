@@ -269,12 +269,18 @@ fn version_mismatch_is_rejected() {
     let daemon = Daemon::start(common::PASSWORD);
 
     // 1 is the version before the master password left the protocol: a
-    // client that old, even one that sends a password, is told so.
+    // client that old, even one that sends a password, is told so. So is one
+    // of version 2, whose field names (`password`, `custom:x`) name other
+    // fields now.
     for (claimed, request) in [
         (99, r#"{"v":99,"op":"status"}"#),
         (
             1,
             r#"{"v":1,"op":"unlock","db":"personal","password":"aHVudGVyMg=="}"#,
+        ),
+        (
+            2,
+            r#"{"v":2,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"password"}"#,
         ),
     ] {
         let mut stream =
@@ -988,9 +994,9 @@ fn uuid_of(daemon: &InProcessDaemon, title: &str) -> String {
         .to_string()
 }
 
-/// A field name that doesn't resolve to anything on the entry — not a
-/// built-in, not a real custom key — fails `field_empty`, the same as an
-/// empty or absent one, rather than being rejected before dispatch.
+/// A field name that doesn't resolve to anything on the entry — not one of
+/// the names `list` gives for it — fails `field_empty`, the same as an empty
+/// or absent field, rather than being rejected before dispatch.
 #[test]
 fn copy_of_an_unrecognized_field_name_is_field_empty() {
     let daemon = fields_daemon();
@@ -1002,23 +1008,23 @@ fn copy_of_an_unrecognized_field_name_is_field_empty() {
     assert_eq!(copied["error"], "field_empty");
 }
 
-/// A bare `title` never resolves to anything — not the entry's own title
-/// (never copyable) and not a same-spelled custom field (that needs
-/// `custom:title`, which this entry doesn't have anyway).
+/// The entry's title is never offered: `Title` is no name `list` gives, and
+/// `copy` answers `field_empty` for it, however it is spelled.
 #[test]
-fn copy_of_a_bare_title_is_field_empty() {
+fn copy_of_the_title_is_field_empty() {
     let daemon = fields_daemon();
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let uuid = uuid_of(&daemon, "Example");
 
-    let copied = daemon.run(&["copy", "personal", &uuid, "title"]);
-    assert_eq!(copied["ok"], false);
-    assert_eq!(copied["error"], "field_empty");
+    for field in ["Title", "title", "custom:Title"] {
+        let copied = daemon.run(&["copy", "personal", &uuid, field]);
+        assert_eq!(copied["ok"], false, "{field}: {copied}");
+        assert_eq!(copied["error"], "field_empty", "{field}: {copied}");
+    }
 }
 
-/// `totp`, a custom field by its bare key, and a custom field reached by
-/// its `custom:`-prefixed collision name all resolve to a real value and
-/// reach the clipboard handoff — never `field_empty`. Drives whatever
+/// `totp`, a custom field and a standard field all resolve to a real value
+/// and reach the clipboard handoff — never `field_empty`. Drives whatever
 /// clipboard this machine actually has (same as `tests/clipboard.rs`'s
 /// own `#[ignore]`d tests), so it stays opt-in rather than running by
 /// default:
@@ -1033,7 +1039,7 @@ fn copy_of_a_resolvable_field_reaches_the_clipboard_handoff() {
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let uuid = uuid_of(&daemon, "Example");
 
-    for field in ["totp", "api-key", "custom:PASSWORD", "password"] {
+    for field in ["totp", "api-key", "PASSWORD", "Password"] {
         let copied = daemon.run(&["copy", "personal", &uuid, field]);
         assert_ne!(
             copied["error"], "field_empty",
@@ -1042,9 +1048,9 @@ fn copy_of_a_resolvable_field_reaches_the_clipboard_handoff() {
     }
 }
 
-/// `list`'s `fields` array: built-ins present and non-empty in the
-/// documented order, then custom fields sorted by key, with the one
-/// colliding with a built-in (`PASSWORD`) `custom:`-prefixed.
+/// `list`'s `fields` array: the standard fields present and non-empty in the
+/// documented order, then `totp` when there is a seed, then the other keys
+/// sorted, each under its exact spelling; never the title or the seed.
 #[test]
 fn list_reports_copyable_field_names() {
     let daemon = fields_daemon();
@@ -1059,14 +1065,7 @@ fn list_reports_copyable_field_names() {
         .expect("Example entry");
     assert_eq!(
         example["fields"],
-        serde_json::json!([
-            "username",
-            "password",
-            "url",
-            "totp",
-            "custom:PASSWORD",
-            "api-key"
-        ])
+        serde_json::json!(["UserName", "Password", "URL", "totp", "PASSWORD", "api-key"])
     );
 
     let no_otp = entries
@@ -1075,7 +1074,7 @@ fn list_reports_copyable_field_names() {
         .expect("NoOtp entry");
     assert_eq!(
         no_otp["fields"],
-        serde_json::json!(["username", "password"])
+        serde_json::json!(["UserName", "Password"])
     );
 }
 
@@ -1115,7 +1114,7 @@ mod terminal_passed_with_the_request {
         let mut stream = UnixStream::connect(socket).expect("connect");
         kpa::socket::send_with_fd(
             &stream,
-            b"{\"v\":2,\"op\":\"unlock\",\"db\":\"personal\"}\n",
+            b"{\"v\":3,\"op\":\"unlock\",\"db\":\"personal\"}\n",
             Some(pty.open_slave().as_fd()),
         )
         .expect("send the request");

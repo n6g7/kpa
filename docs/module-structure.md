@@ -113,6 +113,7 @@ src/
       deadline.rs       reads and writes that end by one deadline
       unlock.rs         the unlock handler: begin, choose where to ask, ask, finish
       copy.rs           the copy handler, and CopyState (ends offers on lock)
+      offer.rs          what `copy` offers of an entry, and under which names: `list` and `copy` both ask it
       authz.rs          authorize_copy, choose_unlock_prompt
       proto/            the wire types
       client/           the CLI's side: mod.rs, tty.rs, ssh_keys_report.rs,

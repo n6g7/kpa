@@ -137,11 +137,12 @@ fn custom_colliding_field_is_read_by_its_literal_key() {
     );
 }
 
-/// `list`'s `fields` array against a real database: built-ins in order,
-/// custom fields sorted after them, and the collision rule applied to a
-/// custom `PASSWORD` key that collides with the real `Password` field.
+/// What an entry stores, against a real database: the exact key of every
+/// non-empty string field, sorted, except the `otp` seed, whose presence is
+/// reported apart. A key that only differs in case from a standard one is a
+/// field of its own.
 #[test]
-fn copyable_fields_against_a_real_database() {
+fn stored_fields_against_a_real_database() {
     let databases = unlocked_at(&common::fields_db(), None);
     let open = databases.open("work").expect("unlocked");
 
@@ -151,26 +152,22 @@ fn copyable_fields_against_a_real_database() {
         .find(|e| e.title.as_deref() == Some("Example"))
         .expect("fixture should have an Example entry");
 
-    // Custom keys sort by their raw key, before the collision prefix is
-    // applied: "PASSWORD" sorts ahead of "api-key" (ASCII uppercase
-    // precedes lowercase).
+    // Keys sort by their raw bytes: "PASSWORD" ahead of "Password", and
+    // "api-key" after the capitalised ones.
     assert_eq!(
-        example.fields,
-        vec![
-            "username",
-            "password",
-            "url",
-            "totp",
-            "custom:PASSWORD",
-            "api-key"
+        example.stored.keys,
+        [
+            "PASSWORD", "Password", "Title", "URL", "UserName", "api-key"
         ]
     );
+    assert!(example.stored.totp);
 
     let no_otp = entries
         .iter()
         .find(|e| e.title.as_deref() == Some("NoOtp"))
         .expect("fixture should have a NoOtp entry");
-    assert!(!no_otp.fields.contains(&"totp".to_string()));
+    assert!(!no_otp.stored.totp);
+    assert!(!no_otp.stored.keys.iter().any(|key| key == "otp"));
 }
 
 /// `Entry::totp` against the same database, end to end through the unlock

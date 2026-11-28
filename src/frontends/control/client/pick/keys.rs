@@ -1,6 +1,7 @@
 //! The keys `kpa pick` ends fzf on, and what each one copies.
 
-use crate::frontends::control::proto::Field;
+use crate::databases::fields;
+use crate::frontends::control::proto::TOTP;
 
 /// What fzf is told to end on besides Enter (`--expect`). Every key here has
 /// an [`action`].
@@ -13,7 +14,9 @@ pub(super) const HELP: &str =
 /// What a key asks for on the entry fzf ended on.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Action {
-    Copy(Field),
+    /// Copy the field of this name: the key of a standard field, or the
+    /// code. Sent as it is; the entry may have none.
+    Copy(&'static str),
     /// Pick one of the entry's own fields, custom ones included, first.
     ChooseField,
 }
@@ -22,10 +25,10 @@ pub(super) enum Action {
 /// Enter, else the key's name.
 pub(super) fn action(key: &str) -> Option<Action> {
     Some(match key {
-        "" => Action::Copy(Field::Password),
-        "ctrl-u" => Action::Copy(Field::Username),
-        "ctrl-l" => Action::Copy(Field::Url),
-        "ctrl-t" => Action::Copy(Field::Totp),
+        "" => Action::Copy(fields::PASSWORD),
+        "ctrl-u" => Action::Copy(fields::USERNAME),
+        "ctrl-l" => Action::Copy(fields::URL),
+        "ctrl-t" => Action::Copy(TOTP),
         "ctrl-o" => Action::ChooseField,
         _ => return None,
     })
@@ -37,10 +40,10 @@ mod tests {
 
     #[test]
     fn each_key_copies_its_field() {
-        assert_eq!(action(""), Some(Action::Copy(Field::Password)));
-        assert_eq!(action("ctrl-u"), Some(Action::Copy(Field::Username)));
-        assert_eq!(action("ctrl-l"), Some(Action::Copy(Field::Url)));
-        assert_eq!(action("ctrl-t"), Some(Action::Copy(Field::Totp)));
+        assert_eq!(action(""), Some(Action::Copy("Password")));
+        assert_eq!(action("ctrl-u"), Some(Action::Copy("UserName")));
+        assert_eq!(action("ctrl-l"), Some(Action::Copy("URL")));
+        assert_eq!(action("ctrl-t"), Some(Action::Copy("totp")));
         assert_eq!(action("ctrl-o"), Some(Action::ChooseField));
         assert_eq!(action("ctrl-x"), None);
     }

@@ -16,8 +16,7 @@ use kpa::frontends::control::client::{
     self, Format, ssh_grants_report, ssh_keys_report, ssh_requests_report,
 };
 use kpa::frontends::control::proto::{
-    CopyRequest, Field, ListRequest, LockRequest, Op, SshApproveRequest, SshKeysReport,
-    SshKeysRequest,
+    CopyRequest, ListRequest, LockRequest, Op, SshApproveRequest, SshKeysReport, SshKeysRequest,
 };
 use kpa::log::{self, Level};
 use kpa::output::report_error;
@@ -76,15 +75,15 @@ enum Command {
     #[command(visible_alias = "ls")]
     List { db: Option<String> },
     /// Copy one field of one entry to the clipboard; the daemon drops it
-    /// again after `clipboard_timeout`. `field` is `username`, `password`,
-    /// `url`, `notes`, a custom field's bare key, or `custom:<key>` for a
-    /// custom key that collides with one of those (`docs/protocol.md`'s
-    /// collision rule).
+    /// again after `clipboard_timeout`. `field` is one of the names `list`
+    /// gives for the entry, spelled exactly as it shows: `Password`,
+    /// `UserName`, `URL`, `Notes`, `totp` (the current code) or the key of
+    /// any other field the entry stores (`docs/protocol.md`).
     #[command(visible_alias = "cp")]
     Copy {
         db: String,
         uuid: Uuid,
-        field: Field,
+        field: String,
     },
     /// Choose an entry of the unlocked databases in fzf, which has to be on
     /// PATH, and copy one of its fields: Enter the password, Ctrl+U the

@@ -980,7 +980,7 @@ mod pending {
     }
 
     fn pending(daemon: &InProcessDaemon) -> Vec<Value> {
-        let listed = request(daemon, &json!({"v": 2, "op": "ssh_pending"}));
+        let listed = request(daemon, &json!({"v": 3, "op": "ssh_pending"}));
         assert_eq!(listed["ok"], true, "{listed}");
         listed["pending"].as_array().expect("a list").clone()
     }
@@ -1005,7 +1005,7 @@ mod pending {
         assert_eq!(listed[0]["request"]["namespace"], "test");
         assert!(listed[0]["request"]["command"].is_string(), "{listed:?}");
         // The key is the object `ssh_keys` reports for it.
-        let reported = request(&daemon, &json!({"v": 2, "op": "ssh_keys"}));
+        let reported = request(&daemon, &json!({"v": 3, "op": "ssh_keys"}));
         let reported = reported["keys"]
             .as_array()
             .expect("a list")
@@ -1015,7 +1015,7 @@ mod pending {
         assert_eq!(reported, key);
 
         let id = listed[0]["id"].clone();
-        let approved = request(&daemon, &json!({"v": 2, "op": "ssh_approve", "id": id}));
+        let approved = request(&daemon, &json!({"v": 3, "op": "ssh_approve", "id": id}));
         assert_eq!(approved["ok"], true, "{approved}");
         assert!(pending(&daemon).is_empty());
 
@@ -1053,12 +1053,12 @@ mod pending {
 
         let none = request(
             &daemon,
-            &json!({"v": 2, "op": "ssh_approve", "id": "00000000-0000-4000-8000-000000000000"}),
+            &json!({"v": 3, "op": "ssh_approve", "id": "00000000-0000-4000-8000-000000000000"}),
         );
         assert_eq!(none["error"], "not_pending");
         let malformed = request(
             &daemon,
-            &json!({"v": 2, "op": "ssh_approve", "id": "not an id"}),
+            &json!({"v": 3, "op": "ssh_approve", "id": "not an id"}),
         );
         assert_eq!(malformed["error"], "malformed_request");
     }

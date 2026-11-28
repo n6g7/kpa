@@ -18,8 +18,7 @@ use std::process::{ExitCode, ExitStatus};
 use self::keys::Action;
 use super::{ClientError, parse_response, report_client_error, send_request};
 use crate::frontends::control::proto::{
-    CopyOutcome, CopyRequest, Field, ListRequest, ListResponse, Op, Request, StatusResponse,
-    WireEntry,
+    CopyOutcome, CopyRequest, ListRequest, ListResponse, Op, Request, StatusResponse, WireEntry,
 };
 use crate::output::{print_escaped, report_error};
 
@@ -130,7 +129,7 @@ fn pick_with(socket_path: &Path, fzf: &OsStr, query: &[String]) -> Result<String
         .ok_or(PickError::UnreadableChoice)?;
 
     let field = match action {
-        Action::Copy(field) => field,
+        Action::Copy(field) => field.to_string(),
         Action::ChooseField => choose_field(fzf, entry)?,
     };
     let request = Request::new(Op::Copy(CopyRequest {
@@ -152,7 +151,7 @@ fn pick_with(socket_path: &Path, fzf: &OsStr, query: &[String]) -> Result<String
 }
 
 /// A second fzf over the names of `entry`'s own fields.
-fn choose_field(fzf: &OsStr, entry: &WireEntry) -> Result<Field, PickError> {
+fn choose_field(fzf: &OsStr, entry: &WireEntry) -> Result<String, PickError> {
     if entry.fields.is_empty() {
         return Err(PickError::NoFields);
     }
@@ -164,8 +163,7 @@ fn choose_field(fzf: &OsStr, entry: &WireEntry) -> Result<Field, PickError> {
     )
     .map(|index| &entry.fields[index])
     .ok_or(PickError::UnreadableChoice)?;
-    let Ok(field) = name.parse::<Field>();
-    Ok(field)
+    Ok(name.clone())
 }
 
 #[cfg(test)]

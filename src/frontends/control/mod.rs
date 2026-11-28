@@ -9,6 +9,7 @@ pub mod proto;
 mod authz;
 mod copy;
 mod deadline;
+mod offer;
 mod serve;
 #[cfg(test)]
 mod testing;
@@ -383,7 +384,7 @@ fn wire_entries(db_name: &str, entries: &[EntrySummary]) -> Vec<WireEntry> {
             username: entry.username.clone(),
             url: entry.url.clone(),
             group: entry.group.clone(),
-            fields: entry.fields.clone(),
+            fields: offer::names(&entry.stored),
         })
         .collect()
 }

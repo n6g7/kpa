@@ -154,7 +154,7 @@ fn copy_fails_cleanly_without_a_wayland_compositor() {
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let uuid = fixture_entry_uuid(&daemon);
 
-    let copied = daemon.run(&["copy", "personal", &uuid, "password"]);
+    let copied = daemon.run(&["copy", "personal", &uuid, "Password"]);
     assert_eq!(copied["ok"], false, "got {copied}");
     assert_eq!(copied["error"], "io");
     assert_eq!(copied["db"], "personal");
@@ -189,7 +189,7 @@ fn copy_from_outside_the_desktop_is_refused() {
         "copy",
         "personal",
         &uuid::Uuid::nil().to_string(),
-        "password",
+        "Password",
     ]);
     assert_eq!(copied["ok"], false, "got {copied}");
     assert_eq!(copied["error"], "no_display");
@@ -225,7 +225,7 @@ fn copy_from_the_desktop_is_refused_without_an_active_unlocked_display_session()
             "copy",
             "personal",
             &uuid::Uuid::nil().to_string(),
-            "password",
+            "Password",
         ]);
         assert_eq!(
             copied["error"], "no_display",
@@ -260,9 +260,9 @@ fn copy_reaches_a_reachable_compositor() {
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let uuid = fixture_entry_uuid(&daemon);
 
-    let copied = daemon.run(&["copy", "personal", &uuid, "password"]);
+    let copied = daemon.run(&["copy", "personal", &uuid, "Password"]);
     assert_eq!(copied["ok"], true, "got {copied}");
-    assert_eq!(copied["copied"], "password");
+    assert_eq!(copied["copied"], "Password");
 
     let pasted = Command::new("wl-paste")
         .arg("--no-newline")
@@ -319,7 +319,7 @@ fn surviving_a_takeover_past_the_timeout() {
     let listed = run(&["list"]);
     let uuid = listed["entries"][0]["uuid"].as_str().expect("has a uuid");
 
-    assert_eq!(run(&["copy", "personal", uuid, "password"])["ok"], true);
+    assert_eq!(run(&["copy", "personal", uuid, "Password"])["ok"], true);
 
     // Immediately take the clipboard with something else, until the end of
     // the test.
@@ -361,7 +361,7 @@ fn a_lock_ends_the_offer() {
     assert_eq!(daemon.run(&["unlock", "personal"])["ok"], true);
     let uuid = fixture_entry_uuid(&daemon);
     assert_eq!(
-        daemon.run(&["copy", "personal", &uuid, "password"])["ok"],
+        daemon.run(&["copy", "personal", &uuid, "Password"])["ok"],
         true
     );
 

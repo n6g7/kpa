@@ -151,7 +151,7 @@ fn ctrl_o_chooses_among_the_entrys_own_fields_custom_ones_included() {
 
     assert_eq!(offered(&fx), ["key-github"]);
     let fields = fzf.stdin(2);
-    for name in ["username", "password", "url", "totp", "api-key"] {
+    for name in ["UserName", "Password", "URL", "totp", "api-key"] {
         assert!(
             fields.iter().any(|line| line.ends_with(name)),
             "{name} in {fields:?}"
@@ -448,9 +448,9 @@ fn canned_daemon(replies: Vec<String>) -> (TempDir, PathBuf, thread::JoinHandle<
 #[test]
 fn a_status_without_can_copy_is_not_a_refusal() {
     let (_dir, socket, server) = canned_daemon(vec![
-        r#"{"v":2,"ok":true,"databases":[{"name":"personal","locked":false,"entries":1}],"version":"0.2.0"}"#.to_string(),
-        r#"{"v":2,"ok":true,"entries":[{"db":"personal","uuid":"00000000-0000-0000-0000-000000000000","title":"GitHub","group":"Dev","fields":["password"]}]}"#.to_string(),
-        r#"{"v":2,"ok":true,"copied":"password","expires_in":30}"#.to_string(),
+        r#"{"v":3,"ok":true,"databases":[{"name":"personal","locked":false,"entries":1}],"version":"0.2.0"}"#.to_string(),
+        r#"{"v":3,"ok":true,"entries":[{"db":"personal","uuid":"00000000-0000-0000-0000-000000000000","title":"GitHub","group":"Dev","fields":["Password"]}]}"#.to_string(),
+        r#"{"v":3,"ok":true,"copied":"Password","expires_in":30}"#.to_string(),
     ]);
     let fzf = FakeFzf::new(&[&choosing("", "GitHub")]);
 
@@ -460,17 +460,17 @@ fn a_status_without_can_copy_is_not_a_refusal() {
     assert_eq!(requests.len(), 3);
     assert!(requests[2].contains(r#""op":"copy""#), "{}", requests[2]);
     assert!(
-        requests[2].contains(r#""field":"password""#),
+        requests[2].contains(r#""field":"Password""#),
         "{}",
         requests[2]
     );
-    assert!(said.contains("password") && said.contains("30s"), "{said}");
+    assert!(said.contains("Password") && said.contains("30s"), "{said}");
 }
 
 #[test]
 fn a_status_saying_no_stops_after_that_one_request() {
     let (_dir, socket, server) = canned_daemon(vec![
-        r#"{"v":2,"ok":true,"databases":[{"name":"personal","locked":false,"entries":1}],"version":"1","can_copy":false}"#.to_string(),
+        r#"{"v":3,"ok":true,"databases":[{"name":"personal","locked":false,"entries":1}],"version":"1","can_copy":false}"#.to_string(),
     ]);
     let fzf = FakeFzf::new(&[&choosing("", "x")]);
 
