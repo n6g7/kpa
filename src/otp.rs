@@ -2,9 +2,9 @@
 //! stores in its `otp` field (`docs/threat-model.md` G-3).
 //!
 //! The seed comes out of `databases` only as a derive-only value, and this is
-//! the one place that reads it, as `ssh` is the one that reads an attachment
-//! (`clippy.toml` allows nothing else): a code leaves the process, the seed
-//! never does.
+//! the one place outside tests that reads it, as `ssh` is the one that reads
+//! an attachment (`clippy.toml` allows nothing else): a code leaves the
+//! process, the seed never does.
 //!
 //! Only the de-facto-standard `otp` field is read. The legacy KeeOtp
 //! `TimeOtp-Seed`, `-Length` and `-Period` fields are a different, older

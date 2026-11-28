@@ -134,10 +134,12 @@ decides that by KeePass's convention alone: the field keyed `otp` (the TOTP
 seed) and every attachment are `DeriveOnly`, and the rest are `Shareable`. A
 `DeriveOnly` value is a `Secret`, which is not a reference to its contents and
 has no `Debug`, `Display`, `Serialize` or `Clone`: the contents come out through
-`Secret::reveal`, which `clippy.toml` disallows. The two places that derive
-carry an `#[allow]` with their reason, `otp` (making a code) and `ssh` (parsing
-a key and signing), so any other reader fails `clippy -D warnings` in CI, and
-the audit of what reads a seed or a key is those two allows. The core makes no
+`Secret::reveal`, which `clippy.toml` disallows. Outside tests, two places
+derive and carry an `#[allow]` with their reason: `otp` (making a code) and
+`ssh::keys` (parsing a key and signing, through one private helper that every
+read of an attachment goes through). Any other reader fails `clippy -D
+warnings` in CI, so the audit of what reads a seed or a key is those two allows
+and the callers of the helper in `ssh::keys`. The core makes no
 code and applies no rule about what a front end may show: which entries and
 fields `list` names, what `copy` offers, and that a protected title is not
 shown are the control front end's, and the SSH agent's title rule is `ssh`'s.

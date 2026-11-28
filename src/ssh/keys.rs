@@ -5,9 +5,9 @@
 //!
 //! Pure: nothing here touches a mutex or an epoch. Callers run `scan` at
 //! unlock and `read_private_key` at a key's first signature, under their
-//! own locking. This is one of the two places that read an attachment's bytes
-//! (`clippy.toml` allows nothing else): a key is parsed and signed with here,
-//! and never handed out.
+//! own locking. This is the one place outside tests that reads an attachment's
+//! bytes (`clippy.toml` allows nothing else, and the allow is on `bytes`): a
+//! key is parsed and signed with here, and never handed out.
 
 use std::collections::HashSet;
 use std::io::Write as _;
