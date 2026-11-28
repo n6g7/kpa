@@ -3,11 +3,11 @@
 //! question, and the pieces it is made of, for a prompt program that wants
 //! them (`KPA_PROMPT_DATA`, `docs/design.md`).
 //!
-//! Each prompt's [`Pieces`] are filled first, with every piece escaped and
-//! cut to its budget, and the message is formatted from those pieces and
-//! nothing else, so the two can't disagree. The pieces that come from outside
-//! kpa (the key's name, a login's user, a signature's namespace) are quoted
-//! in the message.
+//! Each prompt's [`Pieces`] are filled first, and the message and the data are
+//! both made from those pieces and nothing else, so the two can't disagree.
+//! Every piece that comes from outside kpa is cut to its budget, and the
+//! pieces a vault author or a requester writes freely (the key's name, a
+//! login's user, a signature's namespace) are also quoted in the message.
 
 use serde_json::{Map, Value, json};
 use ssh_key::HashAlg;
@@ -70,9 +70,12 @@ impl HostPiece {
     }
 }
 
-/// The pieces of a prompt about a key and a request for it, each escaped and
-/// cut to its budget. The message is formatted from them, and they are the
-/// data a prompt program gets.
+/// The pieces of a prompt about a key and a request for it. The message is
+/// formatted from them, and they are the data a prompt program gets. The
+/// database and the hosts are escaped and cut to their budgets here. The key's
+/// name, the user and the namespace are kept as they came: the data escapes
+/// and cuts them, and the message quotes and cuts them ([`quoted`]), which
+/// can't be done from the escaped text.
 struct Pieces {
     database: String,
     key_name: String,
@@ -84,21 +87,10 @@ struct Pieces {
     user: Option<String>,
     /// The namespace of an `SSHSIG` request.
     namespace: Option<String>,
-    /// The key's name, the user and the namespace as the message writes them
-    /// between its quotes.
-    quoted: Quoted,
     destination: Option<HostPiece>,
     /// The hosts the agent was forwarded through, in order, the forwarding
     /// host first.
     forwarding_chain: Vec<HostPiece>,
-}
-
-/// The text of a message between a pair of quotes: [`quoted`] of the raw
-/// text, which can't end the quotation or carry on the sentence.
-struct Quoted {
-    key_name: String,
-    user: Option<String>,
-    namespace: Option<String>,
 }
 
 impl Pieces {
@@ -110,25 +102,18 @@ impl Pieces {
         forwarding: &[NamedHost],
     ) -> Pieces {
         let (user, namespace) = match purpose {
-            Purpose::Login(login) => (Some(login.user.as_str()), None),
-            Purpose::SshSig { namespace } => (None, Some(namespace.as_str())),
+            Purpose::Login(login) => (Some(login.user.clone()), None),
+            Purpose::SshSig { namespace } => (None, Some(namespace.clone())),
             Purpose::Other => (None, None),
         };
-        let escaped = |text: &str| escape_one_line(text, MAX_REQUESTED_LEN);
-        let quote = |text: &str| quoted(text, MAX_REQUESTED_LEN);
         Pieces {
             database: escape_one_line(&served.database, MAX_DATABASE_LEN),
-            key_name: escape_one_line(&served.name, MAX_KEY_NAME_LEN),
+            key_name: served.name.clone(),
             key_fingerprint: served.fingerprint.to_string(),
             key_type: served.public_key.algorithm().to_string(),
             purpose: purpose.label(),
-            user: user.map(escaped),
-            namespace: namespace.map(escaped),
-            quoted: Quoted {
-                key_name: quoted(&served.name, MAX_KEY_NAME_LEN),
-                user: user.map(quote),
-                namespace: namespace.map(quote),
-            },
+            user,
+            namespace,
             destination: destination.map(piece),
             forwarding_chain: forwarding.iter().map(piece).collect(),
         }
@@ -141,17 +126,17 @@ impl Pieces {
             .with(
                 "key",
                 json!({
-                    "name": self.key_name,
+                    "name": escape_one_line(&self.key_name, MAX_KEY_NAME_LEN),
                     "fingerprint": self.key_fingerprint,
                     "type": self.key_type,
                 }),
             )
             .with("purpose", self.purpose);
         if let Some(user) = &self.user {
-            question = question.with("user", user.as_str());
+            question = question.with("user", escape_one_line(user, MAX_REQUESTED_LEN));
         }
         if let Some(namespace) = &self.namespace {
-            question = question.with("namespace", namespace.as_str());
+            question = question.with("namespace", escape_one_line(namespace, MAX_REQUESTED_LEN));
         }
         if let Some(destination) = &self.destination {
             question = question.with("destination", destination.value());
@@ -209,7 +194,7 @@ pub(super) fn unlock(
 
 /// `key "github"`, the key's name quoted.
 fn key(pieces: &Pieces) -> String {
-    format!("key \"{}\"", pieces.quoted.key_name)
+    format!("key \"{}\"", quoted(&pieces.key_name, MAX_KEY_NAME_LEN))
 }
 
 /// `lead`, then which host the request is forwarded through, then what the
@@ -221,7 +206,9 @@ fn message(lead: &str, pieces: &Pieces) -> String {
         Some((first, further)) => (on(Some(first)), further),
         None => (String::new(), &[][..]),
     };
-    let user = pieces.quoted.user.as_deref().unwrap_or_default();
+    let quote =
+        |text: &Option<String>| quoted(text.as_deref().unwrap_or_default(), MAX_REQUESTED_LEN);
+    let user = quote(&pieces.user);
     let what = match (pieces.purpose, pieces.destination.as_ref()) {
         ("login", Some(dest)) => match &dest.name {
             Some(_) => format!(" to log in to \"{user}\"@{}", shown(dest)),
@@ -230,7 +217,7 @@ fn message(lead: &str, pieces: &Pieces) -> String {
         ("login", None) => format!(" to log in as \"{user}\""),
         ("sshsig", destination) => format!(
             " to sign for namespace \"{}\"{}",
-            pieces.quoted.namespace.as_deref().unwrap_or_default(),
+            quote(&pieces.namespace),
             on(destination)
         ),
         (_, destination) => on(destination),
