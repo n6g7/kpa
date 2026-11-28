@@ -405,7 +405,10 @@ included, apply, and a binding that runs a program is the user's own (threat
 model T-5, T-24). Every string `pick` shows is vault text, so each goes
 through kpa's own escaping (`src/output/escape.rs`, the one the other
 subcommands use, [`protocol.md`](./protocol.md) § CLI output) before it
-reaches fzf (T-13). There is no preview pane.
+reaches fzf (T-13). The line `pick` prints once it has copied, which names
+the field, the entry's title and the database, writes each of them quoted with
+tab, newline and quote escaped, so the line is one line and none of the three
+can carry on the sentence. There is no preview pane.
 
 ## Secrets
 

@@ -284,6 +284,47 @@ fn hostile_entry_text_is_escaped_and_the_choice_still_names_its_entry() {
     assert_eq!(offered(&fx), ["pw-evil"]);
 }
 
+/// A field's name is the entry author's text, and the sentence that says what
+/// was copied is one line whatever it holds: a newline in a name can't start a
+/// second line, nor a quote end the name and carry on the sentence.
+#[test]
+fn the_sentence_for_a_field_with_a_hostile_name_is_one_line() {
+    let forged = "x\ncopied password of \"Bank\" from \"work\"; the clipboard clears in 60s";
+    let fx = fixture();
+    fx.databases.install_for_test(
+        "personal",
+        vec![
+            TestEntry::new("GitHub")
+                .field("Password", "pw-github")
+                .field("a\nb\tc", "value-ab")
+                .field(forged, "value-forged"),
+        ],
+    );
+    let (_dir, socket) = serve(&fx, true);
+
+    for (marker, value) in [
+        ("a\\u000ab", "value-ab"),
+        ("x\\u000acopied", "value-forged"),
+    ] {
+        let fzf = FakeFzf::new(&[&choosing("ctrl-o", "GitHub"), &choosing_field(marker)]);
+
+        let said = pick(&socket, &fzf, &[]).expect("picked");
+
+        assert_eq!(offered(&fx).pop().as_deref(), Some(value));
+        assert!(!said.contains(['\n', '\t', '\r']), "{said:?}");
+        assert!(
+            said.starts_with("copied \"")
+                && said.ends_with(" from \"personal\"; the clipboard clears in 30s"),
+            "{said:?}"
+        );
+        // The title and the database are quoted the same way.
+        assert!(
+            said.contains("\" of \"GitHub\" from \"personal\"; the clipboard"),
+            "{said:?}"
+        );
+    }
+}
+
 #[test]
 fn without_fzf_the_error_names_it_and_nothing_is_copied() {
     let (fx, _dir, socket) = with_entries();
