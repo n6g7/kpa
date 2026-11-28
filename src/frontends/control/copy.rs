@@ -12,7 +12,7 @@ use super::{Api, authz};
 use crate::authn::Requester;
 use crate::cancel::CancelToken;
 use crate::clipboard::{Backend, Offer};
-use crate::databases::{Databases, Entry, Observer, OpenError, fields};
+use crate::databases::{Databases, Entry, Observer, OpenError};
 use crate::display_session::DisplaySession;
 use crate::log;
 
@@ -178,16 +178,7 @@ impl Api {
 /// What `field` names on `entry`; `None` where there is nothing to copy:
 /// absent, empty, or a bare `title`, which is never copyable.
 fn field_value(entry: &Entry<'_>, field: &Field) -> Option<Zeroizing<String>> {
-    match field {
-        Field::Username => entry.field(fields::USERNAME),
-        Field::Password => entry.field(fields::PASSWORD),
-        Field::Url => entry.field(fields::URL),
-        Field::Notes => entry.field(fields::NOTES),
-        // Generated now from the `otp` field's seed, which is never returned.
-        Field::Totp => entry.totp(),
-        Field::Custom(key) => entry.field(key),
-        Field::ReservedTitle => None,
-    }
+    entry.read(&field.entry_field()?)
 }
 
 #[cfg(test)]
@@ -203,6 +194,7 @@ mod tests {
     use crate::frontends::control::testing::{
         Fixture, SESSION, desktop, fixture, fixture_with, outside,
     };
+    use crate::frontends::control::wire_entries;
     use uuid::Uuid;
 
     /// Unlocks `name` with one entry holding a password, and returns the
@@ -256,7 +248,7 @@ mod tests {
         }
         fx.databases.install_for_test("personal", vec![entry]);
         let open = fx.databases.open("personal").ok().unwrap();
-        let listed = open.entries()[0].fields.clone();
+        let listed = wire_entries("personal", &open.entries())[0].fields.clone();
         let read = open.entry(open.entries()[0].uuid).unwrap();
 
         assert_eq!(
@@ -264,21 +256,27 @@ mod tests {
             keys.len() + 1,
             "one name per field: {listed:?}"
         );
-        for key in keys {
-            let name = crate::databases::custom_field_wire_name(key);
-            assert!(listed.contains(&name), "{key:?} is listed as {name:?}");
+        let mut seen = Vec::new();
+        for name in &listed {
             let field: Field = name.parse().unwrap();
-            assert_eq!(
-                field_value(&read, &field).as_deref().map(String::as_str),
-                Some(format!("value-of-{key}").as_str()),
-                "{name:?} reads the field keyed {key:?}"
-            );
+            let value = field_value(&read, &field).expect("a listed name reads a value");
+            seen.push(value.to_string());
+            // The built-in is `password`; any other name is its key, bare or
+            // behind exactly one prefix.
+            match value.strip_prefix("value-of-") {
+                Some(key) => assert!(
+                    name == key || *name == format!("custom:{key}"),
+                    "{name:?} reads the field keyed {key:?}"
+                ),
+                None => assert_eq!(
+                    (name.as_str(), value.as_str()),
+                    ("password", "the-real-password")
+                ),
+            }
         }
-        let password: Field = "password".parse().unwrap();
-        assert_eq!(
-            field_value(&read, &password).as_deref().map(String::as_str),
-            Some("the-real-password")
-        );
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), keys.len() + 1, "every field is read by a name");
     }
 
     fn live(fx: &Fixture, index: usize) -> bool {

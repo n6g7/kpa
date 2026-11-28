@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::error::{ErrorCode, ErrorFields};
-use crate::databases::{CUSTOM_PREFIX, custom_field_wire_name};
+use crate::databases::EntryField;
 
 /// What `{"op":"copy", ...}` carries; `Op::Copy` wraps it. `field` accepts
 /// any name a KeePass client wrote for this entry — see [`Field`].
@@ -20,6 +20,10 @@ pub struct CopyRequest {
     pub uuid: Uuid,
     pub field: Field,
 }
+
+/// The prefix that makes a field name mean a custom field by its literal
+/// key, whatever the key is spelled like.
+const CUSTOM_PREFIX: &str = "custom:";
 
 /// The fields `copy` can be asked for: the four it always could, `totp`
 /// (the code generated at copy time from the entry's `otp` field), and
@@ -59,6 +63,20 @@ pub enum Field {
 }
 
 impl Field {
+    /// The field of an entry this names; `None` for a bare `title`, which
+    /// names none.
+    pub fn entry_field(&self) -> Option<EntryField> {
+        match self {
+            Field::Username => Some(EntryField::Username),
+            Field::Password => Some(EntryField::Password),
+            Field::Url => Some(EntryField::Url),
+            Field::Notes => Some(EntryField::Notes),
+            Field::Totp => Some(EntryField::Totp),
+            Field::Custom(key) => Some(EntryField::Custom(key.clone())),
+            Field::ReservedTitle => None,
+        }
+    }
+
     /// The wire name for this field — what [`decode`](Field::decode) of
     /// this exact string produces again, so encoding and decoding agree.
     fn encode(&self) -> String {
@@ -69,7 +87,17 @@ impl Field {
             Field::Notes => "notes".to_string(),
             Field::Totp => "totp".to_string(),
             Field::ReservedTitle => "title".to_string(),
-            Field::Custom(key) => custom_field_wire_name(key),
+            // Bare when decoding the bare key gives this field back; behind
+            // the prefix otherwise: a key that collides with a built-in or
+            // `title` (in any case) or that itself begins with the prefix.
+            // Derived from `decode`, so no name can decode to another field.
+            Field::Custom(key) => {
+                if Field::decode(key) == *self {
+                    key.clone()
+                } else {
+                    format!("{CUSTOM_PREFIX}{key}")
+                }
+            }
         }
     }
 
@@ -100,6 +128,20 @@ impl Field {
             Field::ReservedTitle
         } else {
             Field::Custom(raw.to_string())
+        }
+    }
+}
+
+/// The wire spelling of a field of an entry, as `list`'s `fields` names it.
+impl From<&EntryField> for Field {
+    fn from(field: &EntryField) -> Field {
+        match field {
+            EntryField::Username => Field::Username,
+            EntryField::Password => Field::Password,
+            EntryField::Url => Field::Url,
+            EntryField::Notes => Field::Notes,
+            EntryField::Totp => Field::Totp,
+            EntryField::Custom(key) => Field::Custom(key.clone()),
         }
     }
 }
@@ -347,6 +389,33 @@ mod tests {
             let field = Field::Custom(key.to_string());
             assert_eq!(Field::decode(&field.encode()), field, "key {key:?}");
         }
+    }
+
+    /// A field of an entry is spelled on the wire as `list` names it, and
+    /// the name parses back to that same field of the entry: for the
+    /// standard fields, the code made from `otp`, and custom keys spelled
+    /// like any of them or like the prefix.
+    #[test]
+    fn an_entry_field_round_trips_through_its_wire_name() {
+        let custom = |key: &str| EntryField::Custom(key.to_string());
+        let fields = [
+            (EntryField::Username, "username"),
+            (EntryField::Password, "password"),
+            (EntryField::Url, "url"),
+            (EntryField::Notes, "notes"),
+            (EntryField::Totp, "totp"),
+            (custom("api-key"), "api-key"),
+            (custom("PASSWORD"), "custom:PASSWORD"),
+            (custom("totp"), "custom:totp"),
+            (custom("Title"), "custom:Title"),
+            (custom("custom:Password"), "custom:custom:Password"),
+        ];
+        for (field, name) in fields {
+            let wire = Field::from(&field).to_string();
+            assert_eq!(wire, name);
+            assert_eq!(Field::decode(&wire).entry_field(), Some(field));
+        }
+        assert_eq!(Field::ReservedTitle.entry_field(), None);
     }
 
     /// A bare `title` is reserved but never copyable, and round-trips as

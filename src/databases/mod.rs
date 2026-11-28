@@ -45,7 +45,7 @@ pub mod fields {
     pub use keepass::db::fields::{NOTES, PASSWORD, URL, USERNAME};
 }
 pub use kdf::KdfCeiling;
-pub use vault::{CUSTOM_PREFIX, EntrySummary, VaultError, VaultFile, custom_field_wire_name};
+pub use vault::{EntryField, EntrySummary, VaultError, VaultFile};
 
 /// Every configured database and the lifecycle around it. `Send + Sync`,
 /// built once, shared as an `Arc`.
@@ -364,6 +364,20 @@ impl Entry<'_> {
     /// the `otp` field holds the TOTP seed, which only [`Entry::totp`] uses.
     pub fn field(&self, key: &str) -> Option<Zeroizing<String>> {
         vault::entry_field(self.db, self.uuid, key).flatten()
+    }
+
+    /// What `field` names on this entry: a standard field, the code made from
+    /// `otp`, or a custom field by its key. None where there is nothing to
+    /// give, as for [`Entry::field`] and [`Entry::totp`].
+    pub fn read(&self, field: &EntryField) -> Option<Zeroizing<String>> {
+        match field {
+            EntryField::Username => self.field(fields::USERNAME),
+            EntryField::Password => self.field(fields::PASSWORD),
+            EntryField::Url => self.field(fields::URL),
+            EntryField::Notes => self.field(fields::NOTES),
+            EntryField::Totp => self.totp(),
+            EntryField::Custom(key) => self.field(key),
+        }
     }
 
     /// The current code of the entry's `otp` field. None: no such field, or

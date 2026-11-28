@@ -54,10 +54,10 @@ pub struct WireEntry {
     pub group: String,
     /// Field names `copy` can be asked for on this entry: the built-ins
     /// present and non-empty on it, in the fixed order `username`,
-    /// `password`, `url`, `notes`, then its custom (user-defined) fields
-    /// by their KeePass key — `custom:`-prefixed when that key collides
-    /// case-insensitively with a built-in name or with `title`
-    /// (`docs/protocol.md`'s collision rule). Omitted from the
+    /// `password`, `url`, `notes`, `totp`, then its custom (user-defined)
+    /// fields by their KeePass key — `custom:`-prefixed when a bare request
+    /// for that key would mean something else (`docs/protocol.md`'s
+    /// collision rule; `Field::encode` spells them). Omitted from the
     /// wire when empty, like the `Option` fields above.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<String>,

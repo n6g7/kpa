@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use kpa::config::DatabaseConfig;
 use kpa::databases::{
-    Begin, Databases, KdfCeiling, OpenError, UnlockFailure, Unlocking, VaultError, VaultFile,
+    Begin, Databases, EntryField, KdfCeiling, OpenError, UnlockFailure, Unlocking, VaultError,
+    VaultFile,
 };
 use zeroize::Zeroizing;
 
@@ -137,9 +138,10 @@ fn custom_colliding_field_is_read_by_its_literal_key() {
     );
 }
 
-/// `list`'s `fields` array against a real database: built-ins in order,
-/// custom fields sorted after them, and the collision rule applied to a
-/// custom `PASSWORD` key that collides with the real `Password` field.
+/// An entry's fields against a real database: standard ones in order, the
+/// code made from `otp`, then custom fields sorted by key. A custom key that
+/// only differs in case from a standard one is a custom field, listed under
+/// its exact key.
 #[test]
 fn copyable_fields_against_a_real_database() {
     let databases = unlocked_at(&common::fields_db(), None);
@@ -151,18 +153,17 @@ fn copyable_fields_against_a_real_database() {
         .find(|e| e.title.as_deref() == Some("Example"))
         .expect("fixture should have an Example entry");
 
-    // Custom keys sort by their raw key, before the collision prefix is
-    // applied: "PASSWORD" sorts ahead of "api-key" (ASCII uppercase
-    // precedes lowercase).
+    // Custom keys sort by their raw key: "PASSWORD" sorts ahead of "api-key"
+    // (ASCII uppercase precedes lowercase).
     assert_eq!(
         example.fields,
         vec![
-            "username",
-            "password",
-            "url",
-            "totp",
-            "custom:PASSWORD",
-            "api-key"
+            EntryField::Username,
+            EntryField::Password,
+            EntryField::Url,
+            EntryField::Totp,
+            EntryField::Custom("PASSWORD".to_string()),
+            EntryField::Custom("api-key".to_string()),
         ]
     );
 
@@ -170,7 +171,7 @@ fn copyable_fields_against_a_real_database() {
         .iter()
         .find(|e| e.title.as_deref() == Some("NoOtp"))
         .expect("fixture should have a NoOtp entry");
-    assert!(!no_otp.fields.contains(&"totp".to_string()));
+    assert!(!no_otp.fields.contains(&EntryField::Totp));
 }
 
 /// `Entry::totp` against the same database, end to end through the unlock
