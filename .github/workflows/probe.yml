@@ -1,0 +1,44 @@
+name: probe
+
+on:
+  pull_request:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+        with:
+          use-gha-cache: disabled
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-nodebug-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: build the tests
+        run: nix develop -c cargo test --no-run
+      - name: loop the control tests
+        run: |
+          nproc
+          fails=0
+          for i in $(seq 1 12); do
+            if ! nix develop -c cargo test --test control > "run-$i.log" 2>&1; then
+              fails=$((fails + 1))
+              echo "=== run $i failed"
+              grep -E "FAILED|timed out" "run-$i.log" | head -5
+              sed -n '/^---- /,/^failures:/p' "run-$i.log" | head -80
+            else
+              echo "run $i ok"
+            fi
+          done
+          echo "failures: $fails of 12"

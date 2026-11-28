@@ -500,7 +500,8 @@ impl Pty {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             assert!(
                 !left.is_zero(),
-                "timed out waiting for {needle:?}; read so far: {out:?}"
+                "timed out waiting for {needle:?}; read so far: {out:?}\n{}",
+                dump_processes()
             );
             let mut fds = [PollFd::new(&self.master, PollFlags::IN)];
             let ts = Timespec {
@@ -523,4 +524,106 @@ impl Pty {
             }
         }
     }
+}
+
+/// Where every thread of this process and every child of it is, for a test
+/// that timed out.
+pub fn dump_processes() -> String {
+    use std::fmt::Write as _;
+    use std::fs;
+
+    fn read(path: &str) -> String {
+        fs::read_to_string(path)
+            .map(|text| text.trim().replace('\0', " "))
+            .unwrap_or_else(|err| format!("<{err}>"))
+    }
+
+    fn describe(out: &mut String, pid: u32) {
+        let _ = writeln!(
+            out,
+            "pid {pid}: cmd={:?}",
+            read(&format!("/proc/{pid}/cmdline"))
+        );
+        let _ = writeln!(
+            out,
+            "  stat={}",
+            read(&format!("/proc/{pid}/stat"))
+                .chars()
+                .take(120)
+                .collect::<String>()
+        );
+        if let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) {
+            for task in tasks.flatten() {
+                let tid = task.file_name().to_string_lossy().to_string();
+                let base = format!("/proc/{pid}/task/{tid}");
+                let state = read(&format!("{base}/stat"));
+                let state = state
+                    .rsplit_once(") ")
+                    .map(|(_, rest)| rest.chars().take(1).collect::<String>())
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    out,
+                    "  task {tid} comm={} state={state} syscall={} wchan={}",
+                    read(&format!("{base}/comm")),
+                    read(&format!("{base}/syscall")),
+                    read(&format!("{base}/wchan")),
+                );
+            }
+        }
+        if let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) {
+            let mut links: Vec<String> = fds
+                .flatten()
+                .map(|fd| {
+                    format!(
+                        "{}->{}",
+                        fd.file_name().to_string_lossy(),
+                        fs::read_link(fd.path())
+                            .map(|l| l.display().to_string())
+                            .unwrap_or_default()
+                    )
+                })
+                .collect();
+            links.sort();
+            let _ = writeln!(out, "  fds={}", links.join(" "));
+        }
+    }
+
+    let mut out = String::new();
+    let me = std::process::id();
+    let _ = writeln!(out, "--- processes at {:?}", std::time::SystemTime::now());
+    describe(&mut out, me);
+    let mut ppids = Vec::new();
+    if let Ok(entries) = fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let stat = read(&format!("/proc/{pid}/stat"));
+            if let Some((_, rest)) = stat.rsplit_once(") ") {
+                if let Some(ppid) = rest
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|p| p.parse::<u32>().ok())
+                {
+                    ppids.push((pid, ppid));
+                }
+            }
+        }
+    }
+    let mut children = Vec::new();
+    let mut frontier = vec![me];
+    while let Some(parent) = frontier.pop() {
+        for &(pid, ppid) in &ppids {
+            if ppid == parent && !children.contains(&pid) {
+                children.push(pid);
+                frontier.push(pid);
+            }
+        }
+    }
+    children.sort();
+    for pid in children {
+        describe(&mut out, pid);
+    }
+    let _ = writeln!(out, "--- load: {}", read("/proc/loadavg"));
+    out
 }
