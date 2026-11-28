@@ -19,7 +19,8 @@ pub(crate) const PASSWORD: &str = "hunter2";
 /// One entry of an in-memory database.
 pub(crate) struct TestEntry {
     title: String,
-    fields: Vec<(String, String)>,
+    /// Key, value, and whether the user marked it protected.
+    fields: Vec<(String, String, bool)>,
     attachments: Vec<(String, Vec<u8>)>,
     in_recycle_bin: bool,
 }
@@ -35,7 +36,15 @@ impl TestEntry {
     }
 
     pub(crate) fn field(mut self, key: &str, value: &str) -> TestEntry {
-        self.fields.push((key.to_string(), value.to_string()));
+        self.fields
+            .push((key.to_string(), value.to_string(), false));
+        self
+    }
+
+    /// A field the user marked protected in their KeePass client. One keyed
+    /// `Title` replaces the title.
+    pub(crate) fn protected_field(mut self, key: &str, value: &str) -> TestEntry {
+        self.fields.push((key.to_string(), value.to_string(), true));
         self
     }
 
@@ -65,8 +74,12 @@ pub(super) fn build(entries: Vec<TestEntry>) -> keepass::Database {
             };
             let mut added = group.add_entry();
             added.set_unprotected(fields::TITLE, entry.title);
-            for (key, value) in entry.fields {
-                added.set_unprotected(key, value);
+            for (key, value, protected) in entry.fields {
+                if protected {
+                    added.set_protected(key, value);
+                } else {
+                    added.set_unprotected(key, value);
+                }
             }
             for (name, data) in entry.attachments {
                 added.add_attachment(name, Value::unprotected(data));
@@ -80,6 +93,22 @@ pub(super) fn build(entries: Vec<TestEntry>) -> keepass::Database {
 }
 
 impl Databases {
+    /// A core with one database, `personal`, unlocked and holding `entries`.
+    pub(crate) fn with_entries_for_test(entries: Vec<TestEntry>) -> Databases {
+        let databases = Databases::for_test(
+            vec![DatabaseConfig {
+                name: "personal".to_string(),
+                path: std::path::PathBuf::new(),
+                keyfile: None,
+                serve_ssh_keys: false,
+                ssh_keys: Vec::new(),
+            }],
+            Duration::from_secs(3600),
+        );
+        databases.install_for_test("personal", entries);
+        databases
+    }
+
     /// Like `new`, with each path pointed at a placeholder file in a temp
     /// directory that a field of `Databases` keeps alive.
     pub(crate) fn for_test(mut configs: Vec<DatabaseConfig>, idle_timeout: Duration) -> Databases {

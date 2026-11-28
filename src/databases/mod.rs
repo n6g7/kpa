@@ -14,9 +14,11 @@
 //! - What must die with a lock lives in the front ends, which register an
 //!   [`Observer`] and are told after the core's lock is released.
 
+mod entry;
 mod freshness;
 mod kdf;
 mod observer;
+mod secret;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]
@@ -28,7 +30,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
 use crate::cancel::{CancelSource, CancelToken};
 use crate::clock::Moment;
@@ -36,16 +37,18 @@ use crate::config::DatabaseConfig;
 use crate::log;
 use vault::Fingerprint;
 
+pub use entry::{Attachment, Entry, Field};
 pub use observer::Observer;
+pub use secret::{Secret, Value};
 pub use unlock::{Begin, BeginError, UnlockFailure, Unlocking};
-pub use vault::AttachmentView as Attachment;
 
-/// The names of the fields every entry has, as `Entry::field` takes them.
+/// The keys of the fields KeePass names: the standard ones every entry can
+/// have, and the one-time-password seed.
 pub mod fields {
-    pub use keepass::db::fields::{NOTES, PASSWORD, TITLE, URL, USERNAME};
+    pub use keepass::db::fields::{NOTES, OTP, PASSWORD, TITLE, URL, USERNAME};
 }
 pub use kdf::KdfCeiling;
-pub use vault::{EntrySummary, StoredFields, VaultError, VaultFile};
+pub use vault::{VaultError, VaultFile};
 
 /// Every configured database and the lifecycle around it. `Send + Sync`,
 /// built once, shared as an `Arc`.
@@ -176,10 +179,7 @@ impl Databases {
             .zip(slots.iter())
             .map(|(config, slot)| Snapshot {
                 name: config.name.clone(),
-                entries: slot
-                    .loaded
-                    .as_ref()
-                    .map(|loaded| vault::entry_count(&loaded.db)),
+                entries: slot.loaded.as_ref().map(|loaded| entry::count(&loaded.db)),
             })
             .collect()
     }
@@ -325,60 +325,17 @@ impl Open<'_> {
         }
     }
 
-    /// Every entry, index only: a protected title, username or URL is
-    /// omitted rather than revealed.
-    pub fn entries(&self) -> Vec<EntrySummary> {
-        vault::list_entries(&self.loaded().db)
+    /// Every entry, the recycle bin's included, in tree order.
+    pub fn entries(&self) -> impl Iterator<Item = Entry<'_>> {
+        entry::entries(&self.loaded().db)
     }
 
     pub fn entry_count(&self) -> usize {
-        vault::entry_count(&self.loaded().db)
+        entry::count(&self.loaded().db)
     }
 
     /// None: no such entry.
     pub fn entry(&self, uuid: Uuid) -> Option<Entry<'_>> {
-        let db = &self.loaded().db;
-        vault::entry_exists(db, uuid).then_some(Entry { db, uuid })
-    }
-
-    /// Every attachment of every current entry (the SSH key scan).
-    pub fn for_each_attachment(&self, visit: impl FnMut(Attachment<'_>)) {
-        vault::for_each_attachment(&self.loaded().db, visit);
-    }
-}
-
-/// One entry of an open database.
-pub struct Entry<'a> {
-    db: &'a keepass::Database,
-    uuid: Uuid,
-}
-
-impl Entry<'_> {
-    /// None: absent, empty or protected (a log line must not reveal what the
-    /// user marked protected).
-    pub fn title(&self) -> Option<String> {
-        vault::entry_title(self.db, self.uuid)
-    }
-
-    /// One field's value, protected or not. None: absent, empty, or withheld:
-    /// the `otp` field holds the TOTP seed, which only [`Entry::totp`] uses.
-    pub fn field(&self, key: &str) -> Option<Zeroizing<String>> {
-        vault::entry_field(self.db, self.uuid, key).flatten()
-    }
-
-    /// The string fields this entry stores, by key.
-    pub fn stored_fields(&self) -> StoredFields {
-        vault::entry_stored_fields(self.db, self.uuid).unwrap_or_default()
-    }
-
-    /// The current code of the entry's `otp` field. None: no such field, or
-    /// it doesn't parse.
-    pub fn totp(&self) -> Option<Zeroizing<String>> {
-        vault::entry_totp(self.db, self.uuid).flatten()
-    }
-
-    /// The entry's attachments; none for an entry in the recycle bin.
-    pub fn for_each_attachment(&self, visit: impl FnMut(Attachment<'_>)) {
-        vault::for_each_entry_attachment(self.db, self.uuid, visit);
+        entry::find(&self.loaded().db, uuid)
     }
 }

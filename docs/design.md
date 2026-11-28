@@ -121,11 +121,26 @@ starts are listed in `daemon.rs`.
 
 `Databases` is one mutex over a slot per configured database, `Send + Sync`,
 shared as an `Arc`. An unlocked database is read through the `Open` guard,
-which holds the core's lock and carries the reads the front ends need (the
-index, one entry's field, TOTP and attachments, `touch` for activity) and never
-hands out the `keepass` database. No public signature names a `keepass` type
-and no other subsystem imports the crate, so the audit of what reads vault
-content is the call sites of those methods.
+which holds the core's lock and carries the reads the front ends need (every
+entry, one entry by uuid, `touch` for activity) and never hands out the
+`keepass` database. An entry hands out its string fields that have a value and
+its attachments, borrowed from the open database while the guard lives, so
+nothing is copied until a front end copies the one value it serves. No public
+signature names a `keepass` type and no other subsystem imports the crate.
+
+Each value comes out as `Shareable`, which may leave the process as it is, or
+`DeriveOnly`, which may only be used to derive something new from it. The core
+decides that by KeePass's convention alone: the field keyed `otp` (the TOTP
+seed) and every attachment are `DeriveOnly`, and the rest are `Shareable`. A
+`DeriveOnly` value is a `Secret`, which is not a reference to its contents and
+has no `Debug`, `Display`, `Serialize` or `Clone`: the contents come out through
+`Secret::reveal`, which `clippy.toml` disallows. The two places that derive
+carry an `#[allow]` with their reason, `otp` (making a code) and `ssh` (parsing
+a key and signing), so any other reader fails `clippy -D warnings` in CI, and
+the audit of what reads a seed or a key is those two allows. The core makes no
+code and applies no rule about what a front end may show: which entries and
+fields `list` names, what `copy` offers, and that a protected title is not
+shown are the control front end's, and the SSH agent's title rule is `ssh`'s.
 
 Per database it owns the `Database` while unlocked, the file's fingerprint
 taken when it was read, the idle timer, an unlock-in-progress flag, and a

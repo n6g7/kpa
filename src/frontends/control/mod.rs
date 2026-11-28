@@ -29,7 +29,7 @@ use self::proto::{
 use crate::authn::Requester;
 use crate::clock::Moment;
 use crate::config::Config;
-use crate::databases::{Databases, EntrySummary, Open, OpenError, UnknownDb};
+use crate::databases::{Databases, Entry, Open, OpenError, UnknownDb, fields};
 use crate::display_session::DisplayHandle;
 use crate::log;
 use crate::prompt::{self, PromptQueue};
@@ -180,13 +180,13 @@ impl Api {
                 OpenError::Stale => ListError::Stale { db: db() },
             })?;
             open.touch();
-            return Ok(wire_entries(name, &open.entries()));
+            return Ok(wire_entries(name, &open));
         }
         self.each_open(
             &self.names(),
             |name, mut open| {
                 open.touch();
-                entries.extend(wire_entries(name, &open.entries()));
+                entries.extend(wire_entries(name, &open));
             },
             |_| {},
         )
@@ -371,22 +371,36 @@ fn unix_seconds(at: SystemTime) -> u64 {
     at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-/// `EntrySummary` implements `Drop` (via `ZeroizeOnDrop`), which forbids
-/// moving individual fields out of it, hence the clones. Both it and
-/// `WireEntry` zeroize on drop, so neither copy outlives the response.
-fn wire_entries(db_name: &str, entries: &[EntrySummary]) -> Vec<WireEntry> {
-    entries
-        .iter()
+/// The index `list` answers for every entry of `open`: no password, no
+/// notes, and a title, username or URL the user marked protected in their
+/// KeePass client is left out rather than shown (`docs/protocol.md` § What
+/// `list` returns). The names are what `copy` takes (`offer`), never a value.
+/// `WireEntry` zeroizes on drop, so what is copied here doesn't outlive the
+/// response.
+fn wire_entries(db_name: &str, open: &Open<'_>) -> Vec<WireEntry> {
+    open.entries()
         .map(|entry| WireEntry {
             db: db_name.to_string(),
-            uuid: entry.uuid,
-            title: entry.title.clone(),
-            username: entry.username.clone(),
-            url: entry.url.clone(),
-            group: entry.group.clone(),
-            fields: offer::names(&entry.stored),
+            uuid: entry.uuid(),
+            title: unprotected(&entry, fields::TITLE).map(str::to_owned),
+            username: unprotected(&entry, fields::USERNAME).map(str::to_owned),
+            url: unprotected(&entry, fields::URL).map(str::to_owned),
+            group: entry.group().to_string(),
+            fields: offer::names(&entry),
         })
         .collect()
+}
+
+/// The value of the entry's field `key`, unless the user marked it protected
+/// in their KeePass client: a protected field is treated as absent, not
+/// de-protected. What an index or a log line shows of an entry goes through
+/// this. (`copy` is not an index: it is a request for exactly one named
+/// field of one named entry, which it serves protected or not.)
+fn unprotected<'a>(entry: &'a Entry<'_>, key: &str) -> Option<&'a str> {
+    entry
+        .fields()
+        .find(|field| field.key == key && !field.protected)
+        .and_then(|field| field.value.shareable())
 }
 
 #[cfg(test)]
@@ -399,6 +413,59 @@ mod tests {
     use crate::ssh::testing::{approval, requested, test_key};
 
     const HOUR: Duration = Duration::from_secs(3600);
+
+    /// `list` shows a title, username and URL as they are, and leaves out one
+    /// the user marked protected in their KeePass client rather than reveal
+    /// it. A protected field is still named among the fields `copy` takes:
+    /// its name carries no value.
+    #[test]
+    fn list_leaves_out_a_protected_title_username_and_url() {
+        let fx = fixture();
+        fx.databases.install_for_test(
+            "personal",
+            vec![
+                TestEntry::new("shown")
+                    .field("UserName", "alice")
+                    .field("URL", "https://example.test"),
+                TestEntry::new("")
+                    .protected_field("Title", "SECRET-TITLE")
+                    .protected_field("UserName", "SECRET-USERNAME")
+                    .protected_field("URL", "SECRET-URL"),
+            ],
+        );
+        let open = fx.databases.open("personal").ok().unwrap();
+
+        let listed = wire_entries("personal", &open);
+
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].title.as_deref(), Some("shown"));
+        assert_eq!(listed[0].username.as_deref(), Some("alice"));
+        assert_eq!(listed[0].url.as_deref(), Some("https://example.test"));
+        assert_eq!(listed[1].title, None);
+        assert_eq!(listed[1].username, None);
+        assert_eq!(listed[1].url, None);
+        assert_eq!(listed[1].fields, ["UserName", "URL"]);
+    }
+
+    /// What an index or a log line shows of an entry is its field, unless it
+    /// is protected, absent or empty.
+    #[test]
+    fn an_unprotected_field_is_shown_and_a_protected_or_missing_one_is_not() {
+        let databases = Databases::with_entries_for_test(vec![
+            TestEntry::new("top"),
+            TestEntry::new("")
+                .protected_field("Title", "SECRET-TITLE")
+                .field("URL", ""),
+        ]);
+        let open = databases.open("personal").expect("unlocked");
+        let mut entries = open.entries();
+        let (top, hidden) = (entries.next().unwrap(), entries.next().unwrap());
+
+        assert_eq!(unprotected(&top, fields::TITLE), Some("top"));
+        assert_eq!(unprotected(&hidden, fields::TITLE), None);
+        assert_eq!(unprotected(&hidden, fields::URL), None);
+        assert_eq!(unprotected(&top, fields::USERNAME), None);
+    }
 
     fn list(db: Option<&str>) -> ListRequest {
         ListRequest {

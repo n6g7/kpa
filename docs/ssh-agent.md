@@ -337,7 +337,11 @@ scans it:
    config order.
 
 The private key is read again at its first signature and cached in the
-database's `SshState` until lock.
+database's `SshState` until lock. An attachment comes out of the database only
+as a derive-only value, read where it lies: `ssh` parses a key from its bytes
+and signs with it, and nothing else reads one (`threat-model.md` G-3). The title
+a key goes by is the entry's `Title` field, and `ssh` leaves it out when the
+user marked it protected in their KeePass client.
 
 **The key cache.** After each scan, kpa writes the database's public keys
 to `$XDG_CACHE_HOME/kpa/ssh-keys/<database>`, where `<database>` is the

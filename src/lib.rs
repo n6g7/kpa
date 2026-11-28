@@ -15,6 +15,7 @@ pub mod databases;
 pub mod display_session;
 pub mod frontends;
 pub mod log;
+pub mod otp;
 pub mod output;
 pub mod paths;
 mod prompt;

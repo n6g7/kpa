@@ -28,18 +28,17 @@ pub struct ListResponse {
     pub entries: Vec<WireEntry>,
 }
 
-/// A `vault::EntrySummary` plus the database it came from. `list` can span
-/// every unlocked database at once (`docs/protocol.md`'s example response
-/// tags each entry with `"db"`), but `vault::EntrySummary` itself has no
-/// notion of which database it came from.
+/// One entry of the index `list` answers, with the database it came from:
+/// `list` can span every unlocked database at once (`docs/protocol.md`'s
+/// example response tags each entry with `"db"`).
 ///
-/// Carries no secret: no password, no notes, and any field the user marked
-/// protected is absent rather than de-protected — `vault::list_entries`
-/// does that filtering, per `docs/protocol.md` § What `list` returns ("`list` never
-/// returns secrets"). `fields` is the one exception to "no secret-shaped
-/// content": it carries *names* only, never values, and a field's
-/// protectedness never hides its name here — only `title`/`username`/`url`
-/// above stay filtered by it, because those three carry values.
+/// Carries no secret: no password, no notes, and any title, username or URL
+/// the user marked protected is absent rather than de-protected, per
+/// `docs/protocol.md` § What `list` returns ("`list` never returns
+/// secrets"); the control front end does that filtering. `fields` is the one
+/// exception to "no secret-shaped content": it carries *names* only, never
+/// values, and a field's protectedness never hides its name here, because
+/// only `title`/`username`/`url` above carry values.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct WireEntry {
     pub db: String,

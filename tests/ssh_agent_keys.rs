@@ -4,7 +4,7 @@
 
 mod common;
 
-use kpa::databases::Databases;
+use kpa::databases::{Databases, Value};
 use kpa::ssh::keys::{self, SkipReason};
 
 /// The ssh fixture, unlocked.
@@ -50,37 +50,50 @@ fn scan_finds_the_three_usable_keys_and_skips_the_encrypted_and_pem_ones() {
     }
 }
 
-/// History and the recycle bin are ignored at the
-/// `Open::for_each_attachment` level already — `"Historical"` and
-/// `"Recycled"` contribute no attachments at all to scan.
+/// History and the recycle bin are ignored at the `Entry::attachments`
+/// level already: `"Historical"` and `"Recycled"` have no attachments at all
+/// to scan.
 #[test]
 fn history_and_recycle_bin_attachments_are_never_visited() {
-    let mut names = Vec::new();
-    fixture()
-        .open("fixture")
-        .expect("unlocked")
-        .for_each_attachment(|a| {
-            if matches!(a.entry_title, Some("Historical" | "Recycled")) {
-                names.push(a.name.to_string());
-            }
-        });
-    assert!(names.is_empty(), "unexpected attachments: {names:?}");
+    let databases = fixture();
+    let open = databases.open("fixture").expect("unlocked");
+    let mut checked = 0;
+    for entry in open.entries() {
+        let title = entry
+            .fields()
+            .find(|field| field.key == "Title")
+            .and_then(|field| field.value.shareable());
+        if matches!(title, Some("Historical" | "Recycled")) {
+            checked += 1;
+            assert_eq!(entry.attachments().count(), 0, "{title:?}");
+        }
+    }
+    assert_eq!(checked, 2, "the fixture's Historical and Recycled entries");
 }
 
 /// `parse_private_key` reads every served key type, and refuses the
 /// encrypted one.
 #[test]
+#[allow(clippy::disallowed_methods)] // The test parses the keys of its own fixture.
 fn parse_private_key_reads_every_found_key_type() {
     let databases = fixture();
     let db = databases.open("fixture").expect("unlocked");
     let parses = |attachment_name: &str| {
-        let mut parsed = None;
-        db.for_each_attachment(|a| {
-            if a.name == attachment_name {
-                parsed = Some(keys::parse_private_key(a.data).is_some());
-            }
-        });
-        parsed.unwrap_or_else(|| panic!("no attachment named {attachment_name}"))
+        db.entries()
+            .flat_map(|entry| {
+                entry
+                    .attachments()
+                    .filter(|a| a.name == attachment_name)
+                    .map(|a| match a.value {
+                        Value::DeriveOnly(secret) => {
+                            keys::parse_private_key(secret.reveal()).is_some()
+                        }
+                        Value::Shareable(_) => panic!("an attachment only derives"),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .next()
+            .unwrap_or_else(|| panic!("no attachment named {attachment_name}"))
     };
 
     for name in ["id_ed25519", "id_rsa", "id_ecdsa"] {

@@ -250,9 +250,24 @@ for a channel and G-4 for anything persistent:
      one kpa generates codes from: `list` never names it and `copy` answers
      `field_empty` for `otp`. A seed stored under another name (such as
      `TimeOtp-Secret-Base32` or `TOTP Seed`) is an ordinary custom field,
-     which `copy` may offer.
+     which `copy` may offer. `databases` hands the seed out only as a
+     derive-only value, and the code that makes the code from it (`otp`) is
+     the only reader the build allows (below).
   6. SSH private keys never leave the process: only signatures do, only on
-     the agent socket, only for keys in databases that opt in.
+     the agent socket, only for keys in databases that opt in. `databases`
+     hands every attachment out only as a derive-only value, and the code
+     that parses a key from one and signs with it (`ssh`) is the only reader
+     the build allows (below).
+
+  What makes clauses 5 and 6 a rule of the build and not of review: a
+  derive-only value is a `Secret`, which is not a reference to its contents
+  and has no `Debug`, `Display`, `Serialize` or `Clone`. Its contents come
+  out through `Secret::reveal` alone, which `clippy.toml` disallows, so
+  `clippy -D warnings`, which CI runs, fails on any call that does not carry
+  an `#[allow(clippy::disallowed_methods)]` with a comment saying what it
+  derives. `databases` decides only what KeePass's own convention decides
+  (the field keyed `otp` and every attachment are derive-only), and applies
+  no rule about what a front end may show.
 
   **Known gap (keepass 0.15.0).** The `ProtectInMemory="True"` marker is
   part of A-2, but the pinned `keepass` crate cannot see it. Its XML
