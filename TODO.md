@@ -32,7 +32,15 @@ Per `docs/ssh-agent.md`.
 
 ### 0.8.0: Android
 
-- [ ] Design: the read-only app, its autofill and its passkeys
+- [ ] Design: the app, its fill service and its credential service, per `docs/android.md` (in review)
+- [ ] Split the crate into a workspace: `kpa-core`, `kpa` and `kpa-android`
+- [ ] `databases` reads through a `Source`, with the file source in `kpa-core`
+- [ ] `kpa-android`: the document source, the exported API, and the Gradle project that builds the app
+- [ ] The app: databases and their documents, unlock, lock, quick unlock
+- [ ] The fill service
+- [ ] The credential service: passwords, then passkeys
+- [ ] CI: emulator tests, and a signed APK on each release
+- [ ] Threat model: cover the Android app (`docs/android.md` § 10)
 
 ### Unscheduled
 
