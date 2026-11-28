@@ -527,7 +527,7 @@ the pieces it is made of in `KPA_PROMPT_DATA`, see
 | Login, no binding | `Approve use of key "github" to log in as git?` |
 | Login, bound to a host `known_hosts` names | `Approve use of key "github" to log in to git@github.com?` |
 | Login, bound to any other host | `Approve use of key "github" to log in as git to host key SHA256:…?` |
-| `SSHSIG` | `Approve use of key "github" to sign for namespace git?`, with `on github.com` or `on host key SHA256:…` after the namespace for a bound connection |
+| `SSHSIG` | `Approve use of key "github" to sign for namespace "git"?`, with `on github.com` or `on host key SHA256:…` after the namespace for a bound connection |
 | Anything else | `Approve use of key "github"?`, with the same `on …` for a bound connection |
 | Forwarded login, through a host `known_hosts` names, to a host it names | `Approve use of key "github" on build-box to log in to git@github.com?` |
 | Forwarded login, through a host it doesn't name | `Approve use of key "github" on host key SHA256:… to log in to git@github.com?`, the destination worded as above |
@@ -544,8 +544,21 @@ name, the database name, the remote user, the namespace, the host name)
 passes through the escaping the CLI uses for terminal output (T-13), with tab
 and newline escaped too so the message stays one line, and gets its own
 length budget, so no piece can push the destination past the prompt's cap.
-The key name's quotes are escaped, so a name can't end its quotation and
-carry on the sentence.
+The key name and the namespace are quoted, and inside the quotes a `"` is
+written `\"` and a `\` is written `\\`, so neither can end its quotation, nor
+make its closing quote look escaped, and carry on the sentence: a key name
+ending in `\"` reads as `\\\"`. A `\` that kpa's escaping wrote, the `\u000a`
+for a newline, is left as it is. The remote user is not quoted: it is shown
+bare if it is made only of the characters a user name uses (ASCII letters and
+digits, `.`, `_` and `-`), and every other character of it (a space, `@`, `?`,
+a quote, a `\`, a control character, any non-ASCII character) is written as a
+`\uXXXX` escape. So a user `root on x.example` reads as
+`root\u0020on\u0020x.example`, with no word break or host shape left in
+it to carry on the sentence, and a user `git` reads as `git`. The budgets (64
+bytes for the key name, 32 for the user and the namespace) count what the
+message shows, and it cuts a piece between whole characters and whole
+escapes. `KPA_PROMPT_DATA` holds each piece escaped for a terminal as the CLI
+does, not quoted and not escaped further, as JSON holds it.
 
 A connection forwarded through further hosts (§ 6.2, the forwarding chain)
 says the hosts it came through: the forwarding host as above, then the hosts
