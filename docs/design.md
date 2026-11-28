@@ -277,7 +277,9 @@ asked). They are different protocols with different refusals.
   display session, a lock request, suspend and the watch itself, and holds the
   sleep inhibitor; `mod.rs` is OS-neutral and turns each event into locks. The
   inhibitor is held exactly while something is unlocked and the machine is
-  awake, and released on suspend only after everything is locked.
+  awake, and released on suspend only after everything is locked. A lost watch
+  counts as the end of a suspend whose resume it missed, so the next unlock
+  takes the inhibitor again.
 - **`ssh`** is what `control` and `ssh_agent` share: `ssh::keys` finds the keys
   in an open database and keeps the public-key cache; `ssh::approvals` holds
   approvals and pending requests per database and unlock, behind its own lock,

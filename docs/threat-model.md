@@ -499,7 +499,8 @@ the session's `LockedHint` is already true at subscription time, lock
 at once. `PrepareForSleep(true)` locks every database, then releases a
 `delay` sleep inhibitor. kpa holds that inhibitor while any database is
 unlocked, takes it again on each successful unlock and after
-`PrepareForSleep(false)`, and does not hold it while sleeping. If the
+`PrepareForSleep(false)`, and does not hold it while sleeping; a lost
+subscription ends a sleep whose `PrepareForSleep(false)` it missed. If the
 signal subscription drops, every database locks, and the subscription is
 retried every 5 s until it is back. A per-database idle timer, reset only by the
 activity G-5 names; a per-database lock signal, so a lock beats an
