@@ -114,7 +114,7 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use crate::databases::{Begin, BeginError, FileKind};
+    use crate::databases::{Begin, BeginError, VaultFile};
     use crate::display_session::DisplaySession;
     use crate::frontends::control::testing::{
         Fixture, SESSION, desktop, fixture, outside, requester_in,
@@ -168,11 +168,11 @@ mod tests {
     fn a_file_kpa_refuses_to_read_says_which_and_why() {
         for (err, detail) in [
             (
-                VaultError::NotRegular(FileKind::Database),
+                VaultError::NotRegular(VaultFile::Database),
                 "database file is not a regular file",
             ),
             (
-                VaultError::TooLarge(FileKind::Keyfile),
+                VaultError::TooLarge(VaultFile::Keyfile),
                 "keyfile is larger than 16 MiB",
             ),
         ] {

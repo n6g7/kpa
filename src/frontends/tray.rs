@@ -1197,7 +1197,7 @@ mod tests {
 
     #[test]
     fn every_failure_has_a_short_label_and_never_its_text() {
-        use crate::databases::FileKind;
+        use crate::databases::VaultFile;
 
         let path = || std::path::PathBuf::from("/secret/path");
         let cases: [(UnlockFailure, &str); 10] = [
@@ -1222,11 +1222,11 @@ mod tests {
                 "corrupt",
             ),
             (
-                UnlockFailure::Vault(VaultError::NotRegular(FileKind::Database)),
+                UnlockFailure::Vault(VaultError::NotRegular(VaultFile::Database)),
                 "corrupt",
             ),
             (
-                UnlockFailure::Vault(VaultError::TooLarge(FileKind::Keyfile)),
+                UnlockFailure::Vault(VaultError::TooLarge(VaultFile::Keyfile)),
                 "corrupt",
             ),
             (

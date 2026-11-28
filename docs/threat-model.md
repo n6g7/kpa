@@ -562,18 +562,14 @@ Response: memory-safe language; parsing in the `keepass` crate; only
 KDBX3 and KDBX4 files are read, and every other format `keepass` parses
 (KeePass 1.x, whose header authenticates nothing) is refused before the key
 is used; a database file is read only if it is a regular file of at most
-128 MiB, and a keyfile only if it is one of at most 16 MiB: both are opened
-without blocking and read through a bounded read, so a FIFO or a device
-cannot hold an unlock and no more than that is read from any file
-(unlocking a database at the ceiling takes about six times its size at the
-peak; a compressed vault inflates when parsed, which the ceiling bounds
-only by the compression ratio); ceilings on KDF parameters. In scope, by
+128 MiB, and a keyfile only if it is one of at most 16 MiB, so a FIFO or a
+device can't hold an unlock; ceilings on KDF parameters. In scope, by
 severity: memory corruption or code execution; one database's file
-affecting another database's state; a tampered file that opens with
-altered content (KDBX3's header is authenticated only by `Meta/HeaderHash`,
-which `keepass` does not check); unbounded memory or time from header or
-KDF parameters (these are read before any keyed check, so ACT-3 controls
-them); hangs or panics.
+affecting another database's state; a tampered file that opens with altered
+content (KDBX3's header is authenticated only by `Meta/HeaderHash`, which
+`keepass` does not check); unbounded memory or time from header or KDF
+parameters (these are read before any keyed check, so ACT-3 controls them);
+hangs or panics.
 
 **T-12 · Stale data after the file changes** (T) — ACT-3 · TB-2 · A-2, A-3, A-6 → G-8  
 Response: `(dev, ino, size, mtime, ctime)`, with nanoseconds, recorded by
@@ -634,7 +630,9 @@ keys a database that opts in serves, and what they are called, so a title
 can imitate another key's. Config's `name` and `serve = false` are the
 user's answer. An entry's title can imitate an entry of another database
 the same way: in `kpa pick` the database's name ends each line, and a
-long enough title pushes it out of view.
+long enough title pushes it out of view. Another residual: `keepass`
+decompresses without a limit, so a compressed vault's inflated size is
+bounded only by the file ceiling (T-11) times its compression ratio.
 
 **T-14 · Socket abuse** (D) — ACT-5 · TB-1 · — → G-11  
 Response: 64 KiB line cap, 5 s total deadline per request and per

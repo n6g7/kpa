@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kpa::config::DatabaseConfig;
-use kpa::databases::{Begin, Databases, FileKind, OpenError, UnlockFailure, Unlocking, VaultError};
+use kpa::databases::{
+    Begin, Databases, OpenError, UnlockFailure, Unlocking, VaultError, VaultFile,
+};
 use zeroize::Zeroizing;
 
 /// The one database, `work`, at `path`, locked.
@@ -368,7 +370,7 @@ fn a_fifo_at_the_database_path_is_refused_at_once_and_frees_the_claim() {
 
     let err = vault_error_at_once(&path, Some(common::PASSWORD), None);
     assert!(
-        matches!(err, VaultError::NotRegular(FileKind::Database)),
+        matches!(err, VaultError::NotRegular(VaultFile::Database)),
         "{err}"
     );
 
@@ -383,13 +385,13 @@ fn a_directory_or_a_device_is_not_a_database() {
     let dir = tempfile::tempdir().expect("failed to create tempdir");
     let err = vault_error_at_once(dir.path(), Some(common::PASSWORD), None);
     assert!(
-        matches!(err, VaultError::NotRegular(FileKind::Database)),
+        matches!(err, VaultError::NotRegular(VaultFile::Database)),
         "{err}"
     );
 
     let err = vault_error_at_once(Path::new("/dev/zero"), Some(common::PASSWORD), None);
     assert!(
-        matches!(err, VaultError::NotRegular(FileKind::Database)),
+        matches!(err, VaultError::NotRegular(VaultFile::Database)),
         "{err}"
     );
 }
@@ -400,12 +402,12 @@ fn a_directory_or_a_device_is_not_a_database() {
 fn a_database_file_over_the_ceiling_is_refused_unread() {
     let dir = tempfile::tempdir().expect("failed to create tempdir");
     let path = dir.path().join("big.kdbx");
-    let limit = FileKind::Database.limit();
+    let limit = VaultFile::Database.limit();
 
     sparse_file(&path, limit + 1);
     let err = vault_error_at_once(&path, Some(common::PASSWORD), None);
     assert!(
-        matches!(err, VaultError::TooLarge(FileKind::Database)),
+        matches!(err, VaultError::TooLarge(VaultFile::Database)),
         "{err}"
     );
 
@@ -426,15 +428,15 @@ fn a_keyfile_that_is_not_a_regular_file_or_over_the_ceiling_is_refused() {
     fifo_at(&keyfile);
     let err = vault_error_at_once(&db, None, Some(keyfile.clone()));
     assert!(
-        matches!(err, VaultError::NotRegular(FileKind::Keyfile)),
+        matches!(err, VaultError::NotRegular(VaultFile::Keyfile)),
         "{err}"
     );
     fs::remove_file(&keyfile).expect("remove the fifo");
 
-    sparse_file(&keyfile, FileKind::Keyfile.limit() + 1);
+    sparse_file(&keyfile, VaultFile::Keyfile.limit() + 1);
     let err = vault_error_at_once(&db, None, Some(keyfile.clone()));
     assert!(
-        matches!(err, VaultError::TooLarge(FileKind::Keyfile)),
+        matches!(err, VaultError::TooLarge(VaultFile::Keyfile)),
         "{err}"
     );
 }

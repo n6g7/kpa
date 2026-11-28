@@ -60,12 +60,12 @@ pub enum VaultError {
     /// The path is something other than a regular file: a FIFO, a device, a
     /// directory. Refused before anything is read from it.
     #[error("{0} is not a regular file")]
-    NotRegular(FileKind),
+    NotRegular(VaultFile),
 
-    /// The file is larger than kpa reads (see [`FileKind::limit`]). Refused
+    /// The file is larger than kpa reads (see [`VaultFile::limit`]). Refused
     /// as soon as that is known, so no more than the limit is ever held.
     #[error("{} is larger than {} MiB", .0, .0.limit() >> 20)]
-    TooLarge(FileKind),
+    TooLarge(VaultFile),
 
     /// The file was readable but isn't a valid (or isn't a supported)
     /// KeePass database: truncated, garbage bytes, bad checksum, etc. (a
@@ -100,14 +100,15 @@ pub enum VaultError {
     Changed,
 }
 
-/// Which of the two files `open` reads a refusal is about.
+/// Which of the two files `open` reads: the database, or the keyfile that
+/// goes with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileKind {
+pub enum VaultFile {
     Database,
     Keyfile,
 }
 
-impl FileKind {
+impl VaultFile {
     /// The most kpa reads of the file, in bytes. A real vault is tens of MiB
     /// at most and a keyfile a few KiB, so no honest file meets these; they
     /// are small enough that a file's writer (ACT-3) can't make the daemon
@@ -115,17 +116,17 @@ impl FileKind {
     /// takes about six times its size in memory at its peak.
     pub const fn limit(self) -> u64 {
         match self {
-            FileKind::Database => 128 << 20,
-            FileKind::Keyfile => 16 << 20,
+            VaultFile::Database => 128 << 20,
+            VaultFile::Keyfile => 16 << 20,
         }
     }
 }
 
-impl std::fmt::Display for FileKind {
+impl std::fmt::Display for VaultFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            FileKind::Database => "database file",
-            FileKind::Keyfile => "keyfile",
+            VaultFile::Database => "database file",
+            VaultFile::Keyfile => "keyfile",
         })
     }
 }
@@ -257,7 +258,7 @@ pub struct EntrySummary {
 /// Reads KDBX3 and KDBX4 only; any other format `keepass` can parse comes
 /// back as `UnsupportedFormat` before the key is used.
 ///
-/// Reads regular files only, a database up to [`FileKind::limit`] and a
+/// Reads regular files only, a database up to [`VaultFile::limit`] and a
 /// keyfile up to its own: the path is opened without blocking and checked
 /// before anything is read, so a FIFO, a device or an oversized file is
 /// refused (`NotRegular`, `TooLarge`) without holding the caller or memory.
@@ -296,11 +297,11 @@ pub fn open(
     password: Option<&Zeroizing<String>>,
     keyfile: Option<&Path>,
 ) -> Result<(Database, Fingerprint), VaultError> {
-    let mut file = open_regular(path, FileKind::Database, VaultError::NotFound)?;
+    let mut file = open_regular(path, VaultFile::Database, VaultError::NotFound)?;
     // The whole file is read here, not inside `keepass`, so the fstat calls
     // can bracket the read. The fd is closed before key derivation.
     let before = Fingerprint::from_metadata(&file.metadata()?);
-    let data = read_bounded(&mut file, FileKind::Database)?;
+    let data = read_bounded(&mut file, VaultFile::Database)?;
     let after = Fingerprint::from_metadata(&file.metadata()?);
     drop(file);
     if !before.matches(after) {
@@ -315,14 +316,16 @@ pub fn open(
             key = key.with_password(password);
         }
         if let Some(keyfile_path) = keyfile {
-            let mut keyfile_handle =
-                open_regular(keyfile_path, FileKind::Keyfile, VaultError::KeyfileNotFound)?;
+            let mut keyfile_handle = open_regular(
+                keyfile_path,
+                VaultFile::Keyfile,
+                VaultError::KeyfileNotFound,
+            )?;
             // `keepass` reads a keyfile to its end whatever its size, so the
             // bounded read is done here and it is handed the bytes.
             // io::Error here (e.g. a permissions error mid-read) maps to
             // VaultError::Io via the #[from] impl above.
-            let keyfile_bytes =
-                Zeroizing::new(read_bounded(&mut keyfile_handle, FileKind::Keyfile)?);
+            let keyfile_bytes = read_bounded(&mut keyfile_handle, VaultFile::Keyfile)?;
             //
             // Upstream leak: `keepass` zeroizes its own copy of the raw keyfile,
             // but its XML keyfile parser makes about six unzeroized
@@ -445,15 +448,17 @@ fn between<'a>(haystack: &'a [u8], open: &[u8], close: &[u8]) -> Option<&'a [u8]
 /// The open is non-blocking, so a FIFO at the path doesn't hold the caller
 /// (and the database's unlock claim with it) until some writer turns up:
 /// it opens at once, and the `fstat` that follows refuses it, as it does a
-/// device or a directory. A symlink is followed.
+/// device or a directory. `O_NOCTTY` keeps a terminal device at the path
+/// from becoming the daemon's controlling terminal, whose hangup would
+/// signal it. A symlink is followed.
 fn open_regular(
     path: &Path,
-    kind: FileKind,
+    kind: VaultFile,
     not_found: impl FnOnce(PathBuf) -> VaultError,
 ) -> Result<File, VaultError> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)
         .map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
@@ -476,15 +481,16 @@ fn open_regular(
 /// than `kind`'s limit: the read stops one byte past it, so a file that grew
 /// since the `fstat`, or lies about its size, is refused instead of read to
 /// its end. The buffer starts at the file's size, so a read that doesn't
-/// grow the file never reallocates (and leaves no stray copy behind).
-fn read_bounded(file: &mut File, kind: FileKind) -> Result<Vec<u8>, VaultError> {
+/// grow the file never reallocates (and leaves no stray copy behind), and
+/// it wipes itself on every exit, a failed read included: what is read can
+/// be a keyfile.
+fn read_bounded(file: &mut File, kind: VaultFile) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let size = usize::try_from(file.metadata()?.len().min(kind.limit())).unwrap_or(0);
-    let mut data = Vec::with_capacity(size);
+    let mut data = Zeroizing::new(Vec::with_capacity(size));
     file.by_ref()
         .take(kind.limit() + 1)
         .read_to_end(&mut data)?;
     if data.len() as u64 > kind.limit() {
-        data.zeroize();
         return Err(VaultError::TooLarge(kind));
     }
     Ok(data)
