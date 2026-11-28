@@ -5,6 +5,8 @@
 //! its keyfile; a corrupt file errors rather than panicking.
 
 mod common;
+#[path = "databases/kdb.rs"]
+mod kdb;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -252,34 +254,69 @@ fn malformed_file_errors_without_panicking() {
     }
 }
 
-/// A legacy KDB file whose header parses far enough to reach `keepass`'s
-/// short-field reads, which index past the end of the buffer and panic
-/// (`keepass` indexes past the end of a short header field). The unlock must turn
-/// that into `Corrupt` rather than unwinding into its caller. Generated
-/// here, so no committed fixture: a 124-byte header (KDB signatures, flags
-/// = 2) plus 16 zero bytes, with a keyfile and no password.
+/// A KDBX4 file whose outer header carries a compression field shorter
+/// than the four bytes `keepass` reads from it, which indexes past the end
+/// of the field and panics. The unlock must turn that into `Corrupt` rather
+/// than unwinding into its caller. Generated here, so no committed fixture:
+/// the 12-byte version header, then one header field of type 3 and length 0.
 #[test]
 fn a_panicking_parse_is_reported_as_corrupt() {
     let dir = tempfile::tempdir().expect("failed to create tempdir");
 
-    let mut kdb = Vec::with_capacity(140);
-    kdb.extend_from_slice(&0x9AA2_D903u32.to_le_bytes());
-    kdb.extend_from_slice(&0xB54B_FB65u32.to_le_bytes());
-    kdb.extend_from_slice(&2u32.to_le_bytes());
-    kdb.resize(140, 0);
-    let db_path = dir.path().join("legacy.kdb");
-    fs::write(&db_path, &kdb).expect("failed to write kdb");
+    let mut kdbx = vec![0x03, 0xd9, 0xa2, 0x9a];
+    kdbx.extend_from_slice(&0xB54B_FB67u32.to_le_bytes());
+    kdbx.extend_from_slice(&1u16.to_le_bytes());
+    kdbx.extend_from_slice(&4u16.to_le_bytes());
+    kdbx.push(3);
+    kdbx.extend_from_slice(&0u32.to_le_bytes());
+    let db_path = dir.path().join("short-field.kdbx");
+    fs::write(&db_path, &kdbx).expect("failed to write kdbx");
 
-    let keyfile = dir.path().join("key.xml");
-    fs::write(
-        &keyfile,
-        "<KeyFile><Meta><Version>1.00</Version></Meta><Key><Data>AAAA</Data></Key></KeyFile>",
-    )
-    .expect("failed to write keyfile");
-
-    match vault_error(&db_path, None, Some(keyfile)) {
+    match vault_error(&db_path, Some(common::PASSWORD), None) {
         VaultError::Corrupt(_) => {}
         other => panic!("expected Corrupt, got a different error: {other}"),
+    }
+}
+
+/// `keepass` also reads KeePass 1.x (KDB) files, whose header, with the
+/// group and entry counts, is authenticated by nothing: a file whose count
+/// was lowered still opens, minus the entries past it. kpa reads KDBX3 and
+/// KDBX4 only, so a KDB file is refused whether or not its header was
+/// edited, before the password is tried.
+#[test]
+fn a_kdb_file_is_refused_whatever_its_header_says() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    for entries_in_header in [3, 1, 0] {
+        let path = dir.path().join(format!("{entries_in_header}.kdb"));
+        fs::write(
+            &path,
+            kdb::kdb_with_three_entries(common::PASSWORD, entries_in_header),
+        )
+        .expect("failed to write kdb");
+
+        for password in [common::PASSWORD, "wrong password"] {
+            match vault_error(&path, Some(password), None) {
+                VaultError::UnsupportedFormat => {}
+                other => panic!("expected UnsupportedFormat, got a different error: {other}"),
+            }
+        }
+    }
+}
+
+/// The pre-release KeePass 2 format is the other version `keepass` parses
+/// the header of; it has no reader, and is refused like KDB.
+#[test]
+fn a_pre_release_kdbx_file_is_refused() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let mut header = vec![0x03, 0xd9, 0xa2, 0x9a];
+    header.extend_from_slice(&0xB54B_FB66u32.to_le_bytes());
+    header.extend_from_slice(&[0; 4]);
+    let path = dir.path().join("prerelease.kdbx");
+    fs::write(&path, &header).expect("failed to write file");
+
+    match vault_error(&path, Some(common::PASSWORD), None) {
+        VaultError::UnsupportedFormat => {}
+        other => panic!("expected UnsupportedFormat, got a different error: {other}"),
     }
 }
 

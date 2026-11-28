@@ -92,6 +92,7 @@ fn unlock_error(name: &str, err: VaultError) -> UnlockError {
         VaultError::NotFound(_) | VaultError::KeyfileNotFound(_) => UnlockError::NotFound { db },
         VaultError::WrongCredentials => UnlockError::WrongCredentials { db },
         VaultError::Corrupt(_) => UnlockError::Corrupt { db },
+        VaultError::UnsupportedFormat => UnlockError::UnsupportedFormat { db },
         VaultError::Io(_) => UnlockError::Io { db },
         VaultError::Changed => UnlockError::Stale { db },
     }
@@ -145,6 +146,14 @@ mod tests {
         Err(UnlockError::Corrupt {
             db: "personal".to_string(),
         })
+    }
+
+    #[test]
+    fn a_format_kpa_does_not_read_is_reported_as_such() {
+        assert!(matches!(
+            unlock_error("personal", VaultError::UnsupportedFormat),
+            UnlockError::UnsupportedFormat { db } if db == "personal"
+        ));
     }
 
     fn cancelled() -> Result<String, UnlockError> {

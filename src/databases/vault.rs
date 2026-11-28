@@ -58,8 +58,8 @@ pub enum VaultError {
     WrongCredentials,
 
     /// The file was readable but isn't a valid (or isn't a supported)
-    /// KeePass database: truncated, garbage bytes, unsupported version,
-    /// bad checksum, etc.
+    /// KeePass database: truncated, garbage bytes, bad checksum, etc. (a
+    /// format kpa doesn't read is `UnsupportedFormat`).
     ///
     /// Deliberately content-free in `Display`: `keepass`'s own error text
     /// can embed raw bytes out of the decrypted database (e.g. its
@@ -71,6 +71,11 @@ pub enum VaultError {
     /// prints.
     #[error("database file is malformed or corrupt")]
     Corrupt(String),
+
+    /// The file is a KeePass format kpa doesn't read. kpa reads KDBX3 and
+    /// KDBX4 and refuses every other format `keepass` parses (see `open`).
+    #[error("unsupported database format: kpa reads only KDBX3 and KDBX4 files")]
+    UnsupportedFormat,
 
     /// Any other I/O error reading the database or keyfile (permissions,
     /// I/O failure mid-read, ...) — deliberately not `NotFound`, which is
@@ -209,6 +214,9 @@ pub struct EntrySummary {
 /// `sha256(password)`, which is password-equivalent, survives a lock
 /// (the fix is upstream).
 ///
+/// Reads KDBX3 and KDBX4 only; any other format `keepass` can parse comes
+/// back as `UnsupportedFormat` before the key is used.
+///
 /// **Never panics.** `keepass` indexes past the end of short header fields
 /// in several places and panics on them (the fix is upstream), so the parse
 /// runs under `catch_unwind` and a panic comes back as `Corrupt`. See the
@@ -279,10 +287,18 @@ pub fn open(
         Ok(key)
     };
 
+    // Only the formats whose header kpa authenticates are read. `keepass`
+    // also parses KeePass 1.x (KDB), whose header, with the group and entry
+    // counts that decide how much of the payload is read, is covered by no
+    // hash or MAC: whoever can write the file could drop entries and it
+    // would still open. Any other version, including one a later `keepass`
+    // adds, is refused here before the key is used.
     let version =
         DatabaseVersion::parse(&data).map_err(|err| VaultError::Corrupt(err.to_string()))?;
-    if let DatabaseVersion::KDB3(_) = version {
-        verify_kdbx3_header(&data, make_key()?)?;
+    match version {
+        DatabaseVersion::KDB3(_) => verify_kdbx3_header(&data, make_key()?)?,
+        DatabaseVersion::KDB4(_) => {}
+        _ => return Err(VaultError::UnsupportedFormat),
     }
 
     // Sound because `Database::open` touches no state shared with anything

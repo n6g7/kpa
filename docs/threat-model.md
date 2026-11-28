@@ -558,13 +558,16 @@ steering a `copy` to a socket T-6's checks should refuse. Out of scope: a
 spoofed or bus-reachable lock (NG-7).
 
 **T-11 · Crafted `.kdbx` or keyfile** (T, D, E) — ACT-3 · TB-2 · all → G-9  
-Response: memory-safe language; parsing in the `keepass` crate; ceilings
-on KDF parameters and file size. In scope, by severity: memory corruption
-or code execution; one database's file affecting another database's
-state; a tampered file that opens with altered content (KDBX3's header is
-authenticated only by `Meta/HeaderHash`, which `keepass` does not check);
-unbounded memory or time from header or KDF parameters (these are read
-before any keyed check, so ACT-3 controls them); hangs or panics.
+Response: memory-safe language; parsing in the `keepass` crate; only
+KDBX3 and KDBX4 files are read, and every other format `keepass` parses
+(KeePass 1.x, whose header authenticates nothing) is refused before the key
+is used; ceilings on KDF parameters and file size. In scope, by severity:
+memory corruption or code execution; one database's file affecting
+another database's state; a tampered file that opens with altered content
+(KDBX3's header is authenticated only by `Meta/HeaderHash`, which `keepass`
+does not check); unbounded memory or time from header or KDF parameters
+(these are read before any keyed check, so ACT-3 controls them); hangs or
+panics.
 
 **T-12 · Stale data after the file changes** (T) — ACT-3 · TB-2 · A-2, A-3, A-6 → G-8  
 Response: `(dev, ino, size, mtime, ctime)`, with nanoseconds, recorded by

@@ -195,7 +195,7 @@ derived from a database file's contents.
 | `prompt_cancelled` | the prompt ended without a password: dismissed, timed out, the terminal hung up or the requester left |
 | `wrong_credentials` | the password or keyfile didn't open the file |
 | `not_found` | the file or its keyfile isn't where the config says |
-| `corrupt` | the file isn't a database `keepass` can read |
+| `corrupt` | the file isn't a database kpa can read: malformed, or a format kpa doesn't read (only KDBX3 and KDBX4 are; `detail` says so for the latter) |
 | `io` | the file couldn't be read, the prompt couldn't be shown, or the clipboard couldn't take a secret (`detail` says which) |
 | `unknown_uuid` | `copy`'s uuid names no entry |
 | `field_empty` | the field is absent, empty or doesn't resolve |

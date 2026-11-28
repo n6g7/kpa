@@ -22,6 +22,12 @@ the doc or the module that owns it:
 
 **Is:** a read-only index and secret-copier for `.kdbx` files, an SSH agent
 that signs with the keys stored in them, and a tray icon showing lock state.
+It reads KDBX3 and KDBX4 files and no other format. `keepass` also parses
+KeePass 1.x (KDB), but that format's header, with the counts of groups and
+entries that decide how much of the file is read, is covered by no hash or
+MAC, so a file whose header was edited without the key would open with
+entries missing; kpa refuses it (`unlock` answers `corrupt`, with a `detail`
+that says the format is not read) before the key is used.
 
 **Is not:** a vault editor, a Secret Service provider (an unlocked Secret
 Service collection takes new items from any app, ungated), a browser backend,

@@ -8,7 +8,7 @@
 > I'm doing my best to review its work and make sure it is secure and bug free,
 > but I cannot guarantee that this isn't fundamentally flawed. Be warned.
 
-A small, read-only KeePass agent: holds `.kdbx` files (KDBX3 and KDBX4)
+A small, read-only KeePass agent: holds `.kdbx` files (KDBX3 and KDBX4 only)
 unlocked in memory and serves free-text search plus secret-copy-to-clipboard
 to a launcher and a CLI over a Unix socket. Read-only by design — no code
 path can write to a database — so it's meant to be safe to run alongside a
