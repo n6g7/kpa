@@ -139,9 +139,12 @@ fn pick_with(socket_path: &Path, fzf: &OsStr, query: &[String]) -> Result<String
         field,
     }));
     let copied: CopyOutcome = ask(socket_path, &request)?;
+    // The field, the title and the database are all vault text, so each is
+    // written the same way: quoted, with a tab, a newline and a quote escaped,
+    // so none can add a line or carry on the sentence.
     Ok(format!(
-        "copied {} of {:?} from {:?}; the clipboard clears in {}s",
-        copied.copied,
+        "copied {:?} of {:?} from {:?}; the clipboard clears in {}s",
+        copied.copied.to_string(),
         lines::title_of(entry),
         entry.db,
         copied.expires_in
