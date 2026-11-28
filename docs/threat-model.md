@@ -564,13 +564,16 @@ KDBX3 and KDBX4 files are read, and every other format `keepass` parses
 (KeePass 1.x, whose header authenticates nothing) is refused before the key
 is used; a database file is read only if it is a regular file of at most
 128 MiB, and a keyfile only if it is one of at most 16 MiB, so a FIFO or a
-device can't hold an unlock; ceilings on KDF parameters. In scope, by
-severity: memory corruption or code execution; one database's file
-affecting another database's state; a tampered file that opens with altered
-content (KDBX3's header is authenticated only by `Meta/HeaderHash`, which
-`keepass` does not check); unbounded memory or time from header or KDF
-parameters (these are read before any keyed check, so ACT-3 controls them);
-hangs or panics.
+device can't hold an unlock; a header that asks for more than 2^30 AES
+rounds, 1 GiB of Argon2 memory, 256 Argon2 lanes or 32 GiB of Argon2 memory
+passes (memory times iterations) is refused before any key derivation. In
+scope, by severity: memory corruption or code execution; one database's
+file affecting another database's state; a tampered file that opens with
+altered content (KDBX3's header is authenticated only by `Meta/HeaderHash`,
+which `keepass` does not check); unbounded memory or time from header or
+KDF parameters (these are read before any keyed check, so ACT-3 controls
+them); hangs or panics.
+
 
 **T-12 · Stale data after the file changes** (T) — ACT-3 · TB-2 · A-2, A-3, A-6 → G-8  
 Response: `(dev, ino, size, mtime, ctime)`, with nanoseconds, recorded by

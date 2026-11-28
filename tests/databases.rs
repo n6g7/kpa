@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use kpa::config::DatabaseConfig;
 use kpa::databases::{
-    Begin, Databases, OpenError, UnlockFailure, Unlocking, VaultError, VaultFile,
+    Begin, Databases, KdfCeiling, OpenError, UnlockFailure, Unlocking, VaultError, VaultFile,
 };
 use zeroize::Zeroizing;
 
@@ -439,6 +439,135 @@ fn a_keyfile_that_is_not_a_regular_file_or_over_the_ceiling_is_refused() {
         matches!(err, VaultError::TooLarge(VaultFile::Keyfile)),
         "{err}"
     );
+}
+
+/// The version header and outer header of a vault that asks for the key
+/// derivation given, and nothing else: enough for `open` to read what it
+/// would run, not for it to open anything. KDBX3 has a `TransformRounds`
+/// entry; KDBX4 a KDF parameter dictionary.
+mod kdf_header {
+    const IDENTIFIER: [u8; 4] = [0x03, 0xd9, 0xa2, 0x9a];
+    const LATEST: [u8; 4] = [0x67, 0xfb, 0x4b, 0xb5];
+
+    pub fn kdbx3_aes(rounds: u64) -> Vec<u8> {
+        let mut data = [IDENTIFIER, LATEST].concat();
+        data.extend([0, 0, 3, 0]);
+        data.extend([6, 8, 0]);
+        data.extend(rounds.to_le_bytes());
+        data.extend([0, 0, 0]);
+        data
+    }
+
+    fn entry(kind: u8, key: &str, value: &[u8]) -> Vec<u8> {
+        let mut out = vec![kind];
+        out.extend((key.len() as u32).to_le_bytes());
+        out.extend(key.as_bytes());
+        out.extend((value.len() as u32).to_le_bytes());
+        out.extend(value);
+        out
+    }
+
+    fn kdbx4(entries: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut dictionary = 0x100u16.to_le_bytes().to_vec();
+        dictionary.extend(entries.concat());
+        dictionary.push(0);
+        let mut data = [IDENTIFIER, LATEST].concat();
+        data.extend([1, 0, 4, 0]);
+        data.push(11);
+        data.extend((dictionary.len() as u32).to_le_bytes());
+        data.extend(dictionary);
+        data.extend([0; 5]);
+        data
+    }
+
+    pub fn kdbx4_aes(rounds: u64) -> Vec<u8> {
+        kdbx4(vec![
+            entry(
+                0x42,
+                "$UUID",
+                &[
+                    0x7c, 0x02, 0xbb, 0x82, 0x79, 0xa7, 0x4a, 0xc0, 0x92, 0x7d, 0x11, 0x4a, 0x00,
+                    0x64, 0x82, 0x38,
+                ],
+            ),
+            entry(0x05, "R", &rounds.to_le_bytes()),
+        ])
+    }
+
+    pub fn kdbx4_argon2d(memory: u64, iterations: u64, lanes: u32) -> Vec<u8> {
+        kdbx4(vec![
+            entry(
+                0x42,
+                "$UUID",
+                &[
+                    0xef, 0x63, 0x6d, 0xdf, 0x8c, 0x29, 0x44, 0x4b, 0x91, 0xf7, 0xa9, 0xa4, 0x03,
+                    0xe3, 0x0a, 0x0c,
+                ],
+            ),
+            entry(0x05, "M", &memory.to_le_bytes()),
+            entry(0x05, "I", &iterations.to_le_bytes()),
+            entry(0x04, "P", &lanes.to_le_bytes()),
+            entry(0x04, "V", &0x13u32.to_le_bytes()),
+        ])
+    }
+}
+
+/// A header that asks for more key derivation than kpa runs is refused
+/// before any key derivation: at once, whatever the claim, and the database
+/// can be unlocked again (a hung unlock would keep its claim for good).
+/// The same header at the ceiling gets past the check and fails later, on
+/// the rest of the file.
+#[test]
+fn a_key_derivation_above_the_ceiling_is_refused_at_once() {
+    use kdf_header::*;
+
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let path = dir.path().join("vault.kdbx");
+    let one_tib = 1u64 << 40;
+    let cases = [
+        (kdbx3_aes(u64::MAX), KdfCeiling::AesRounds),
+        (kdbx4_aes(u64::MAX), KdfCeiling::AesRounds),
+        (kdbx4_argon2d(one_tib, 1, 1), KdfCeiling::Argon2Memory),
+        (
+            kdbx4_argon2d(64 << 20, u64::from(u32::MAX), 2),
+            KdfCeiling::Argon2Work,
+        ),
+        (
+            kdbx4_argon2d(1 << 20, 1, 1 << 24),
+            KdfCeiling::Argon2Parallelism,
+        ),
+    ];
+    for (header, ceiling) in cases {
+        fs::write(&path, &header).expect("failed to write the header");
+        let start = std::time::Instant::now();
+        match vault_error(&path, Some(common::PASSWORD), None) {
+            VaultError::KdfAboveCeiling(found) => assert_eq!(found, ceiling),
+            other => panic!("expected {ceiling:?}, got a different error: {other}"),
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "{ceiling:?}");
+        // The claim is free: the next unlock starts.
+        let databases = databases_at(&path, None);
+        assert!(matches!(
+            databases.begin_unlock("work"),
+            Ok(Begin::Started(_))
+        ));
+    }
+
+    // At the ceilings the header is read on, and it is the rest that fails.
+    for header in [
+        kdbx3_aes(1 << 30),
+        kdbx4_aes(1 << 30),
+        kdbx4_argon2d(1 << 30, 32, 256),
+    ] {
+        fs::write(&path, &header).expect("failed to write the header");
+        assert!(
+            matches!(
+                vault_error(&path, Some(common::PASSWORD), None),
+                VaultError::Corrupt(_)
+            ),
+            "a header at the ceilings is not refused for them"
+        );
+    }
 }
 
 /// Copies the password fixture into `dir` with one bit flipped in the

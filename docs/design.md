@@ -313,9 +313,12 @@ through a temp file and a rename, and there is no per-database lock file. So:
 1. **Never create a lock file. Never hold an fd.** Open without blocking,
    refuse anything but a regular file of at most 128 MiB (a keyfile: 16 MiB),
    read it whole, close, parse. A FIFO at the path is refused at once instead
-   of holding the database's unlock until someone opens its other end.
-   (Upstream, a file with pathological KDF parameters can make `keepass`
-   hang mid-unlock, holding its fd.)
+   of holding the database's unlock until someone opens its other end. The
+   key derivation a header asks for is checked first and refused above
+   ceilings (threat model T-11): a thread stuck in a KDF can't be cancelled
+   and keeps the database's unlock claim as long as it runs, and an Argon2
+   memory the machine can't give aborts the daemon with every database it
+   holds.
 2. **Never write.** Guaranteed by the shape of `Op` and the agent's wire layer.
 3. **Freshness guard** (threat model T-12, G-8). The core records the file's
    `(dev, ino, size, mtime, ctime)` when it reads it, and before each use of an

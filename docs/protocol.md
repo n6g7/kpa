@@ -196,7 +196,7 @@ derived from a database file's contents.
 | `prompt_cancelled` | the prompt ended without a password: dismissed, timed out, the terminal hung up or the requester left |
 | `wrong_credentials` | the password or keyfile didn't open the file |
 | `not_found` | the file or its keyfile isn't where the config says |
-| `corrupt` | the file isn't a database kpa can read: malformed, a format kpa doesn't read (only KDBX3 and KDBX4 are), or a database file or keyfile that is not a regular file or is larger than kpa reads (128 MiB, a keyfile 16 MiB); `detail` says which for all but the first |
+| `corrupt` | the file isn't a database kpa can read: malformed, a format kpa doesn't read (only KDBX3 and KDBX4 are), a database file or keyfile that is not a regular file or is larger than kpa reads (128 MiB, a keyfile 16 MiB), or a header that asks for more key derivation than kpa runs; `detail` says which for all but the first |
 | `io` | the file couldn't be read, the prompt couldn't be shown, or the clipboard couldn't take a secret (`detail` says which) |
 | `unknown_uuid` | `copy`'s uuid names no entry |
 | `field_empty` | the field is absent, empty or doesn't resolve |

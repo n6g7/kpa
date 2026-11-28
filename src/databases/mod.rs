@@ -15,6 +15,7 @@
 //!   [`Observer`] and are told after the core's lock is released.
 
 mod freshness;
+mod kdf;
 mod observer;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -43,6 +44,7 @@ pub use vault::AttachmentView as Attachment;
 pub mod fields {
     pub use keepass::db::fields::{NOTES, PASSWORD, URL, USERNAME};
 }
+pub use kdf::KdfCeiling;
 pub use vault::{EntrySummary, VaultError, VaultFile};
 
 /// Every configured database and the lifecycle around it. `Send + Sync`,
