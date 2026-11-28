@@ -612,7 +612,11 @@ parsed, by `ssh-key`, when a database that serves SSH keys unlocks and on
 `ssh_keys`; other formats, passphrase-protected keys, old versions of
 entries and the recycle bin are left alone. Per-entry agent settings a
 KeePass client stores in the vault are ignored: policy is config's
-(G-13). In scope:
+(G-13). An entry's `otp` field is entry content too: a code is made from
+it only if its period is 1 to 86400 seconds and its number of digits 1 to
+10, and a field outside those answers as one with nothing to copy
+(`field_empty`), so the code library is never run on a period of 0 or on a
+digit count that overflows it. In scope:
 terminal escape or control sequences reaching the CLI's terminal output,
 an identity comment or a prompt unescaped; a field breaking framing; a
 title or UUID collision across databases that makes a `copy` resolve to a

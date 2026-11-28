@@ -600,14 +600,28 @@ pub fn entry_exists(db: &Database, uuid: Uuid) -> bool {
     with_entry(db, uuid, |_| ()).is_some()
 }
 
+/// The longest period, in seconds, an `otp` field may ask for: a day.
+const MAX_TOTP_PERIOD: u64 = 86_400;
+/// The most digits an `otp` field may ask a code to have.
+const MAX_TOTP_DIGITS: u32 = 10;
+
 /// The current code for this entry's `otp` field, generated now — the
 /// field itself only ever holds the seed (an `otpauth://` URL), and kpa
 /// never returns that, logs it, or holds it longer than this call needs
 /// to. `None` if no entry with this uuid exists; `Some(None)` if it exists
 /// but has no `otp` field, the field doesn't parse as a valid `otpauth://`
-/// URL, or the system clock can't be read — `copy` reports all of these
-/// the same as any other field with nothing to give (`FieldEmpty`), never
-/// the parse error, which could otherwise echo back raw seed bytes.
+/// URL, its period or its number of digits is outside what a code can be
+/// made with ([`MAX_TOTP_PERIOD`], [`MAX_TOTP_DIGITS`]), or the system clock
+/// can't be read — `copy` reports all of these the same as any other field
+/// with nothing to give (`FieldEmpty`), never the parse error, which could
+/// otherwise echo back raw seed bytes.
+///
+/// The period and the digits are the entry author's, and the code library
+/// divides by the period and raises 10 to the digits without checking
+/// either, so a period of 0 or a large number of digits would panic it.
+/// Both are checked before it runs: with a period of 1 to 86400 and 1 to 10
+/// digits (a code is under 2^31, so more digits add only zeros) nothing in
+/// it can divide by zero or overflow.
 ///
 /// Only the de-facto-standard `otp` field (`keepass`'s `fields::OTP`) is
 /// read. The legacy KeeOtp `TimeOtp-Seed`/`-Length`/`-Period` fields are
@@ -620,6 +634,10 @@ pub fn entry_totp(db: &Database, uuid: Uuid) -> Option<Option<Zeroizing<String>>
         entry
             .get_otp()
             .ok()
+            .filter(|totp| {
+                (1..=MAX_TOTP_PERIOD).contains(&totp.period)
+                    && (1..=MAX_TOTP_DIGITS).contains(&totp.digits)
+            })
             .and_then(|totp| totp.value_now().ok())
             .map(|code| Zeroizing::new(code.code))
     })
@@ -1159,6 +1177,53 @@ mod tests {
         assert_eq!(entry_totp(&db, no_field), Some(None));
         assert_eq!(entry_totp(&db, bad_field), Some(None));
         assert_eq!(entry_totp(&db, Uuid::new_v4()), None);
+    }
+
+    /// An `otp` field's period and number of digits are the entry author's: a
+    /// period of 0 or a huge number of digits would panic the code library
+    /// (audit finding F-16), so such a field has no code, as an unparsable one
+    /// has none, and the bounds themselves still give one.
+    #[test]
+    fn entry_totp_is_absent_for_a_period_or_digit_count_a_code_cannot_be_made_with() {
+        let url = |query: &str| format!("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&{query}");
+        let mut db = Database::new();
+        let mut add = |query: &str| {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_protected(fields::OTP, url(query));
+            entry.id().uuid()
+        };
+        let refused = [
+            "period=0&digits=6",
+            "period=86401&digits=6",
+            "period=18446744073709551615&digits=6",
+            "period=30&digits=0",
+            "period=30&digits=11",
+            "period=30&digits=19",
+            "period=30&digits=20",
+            "period=30&digits=100",
+            "period=0&digits=100",
+        ]
+        .map(|query| (query, add(query)));
+        let allowed = [
+            ("period=1&digits=1", 1),
+            ("period=30&digits=6", 6),
+            ("period=86400&digits=10", 10),
+            ("digits=8", 8),
+            ("", 8),
+        ]
+        .map(|(query, length)| (query, length, add(query)));
+
+        for (query, uuid) in refused {
+            assert_eq!(entry_totp(&db, uuid), Some(None), "{query}");
+        }
+        for (query, length, uuid) in allowed {
+            let code = entry_totp(&db, uuid)
+                .expect("entry exists")
+                .unwrap_or_else(|| panic!("a code for {query:?}"));
+            assert_eq!(code.len(), length, "{query}");
+            assert!(code.chars().all(|c| c.is_ascii_digit()), "{query}");
+        }
     }
 
     /// What `for_each_attachment` shows, owned for comparing: entry uuid,
