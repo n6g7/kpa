@@ -1102,15 +1102,12 @@ mod terminal_passed_with_the_request {
     use std::os::fd::AsFd;
     use std::os::unix::net::UnixStream;
     use std::path::Path;
-    use std::time::Duration;
 
     use kpa::config::Config;
     use serde_json::Value;
 
     use super::{InProcessDaemon, common};
-    use crate::common::{Pty, config_toml};
-
-    const TIMEOUT: Duration = common::PTY_TIMEOUT;
+    use crate::common::{PTY_TIMEOUT, Pty, config_toml};
 
     /// Sends an `unlock` of `personal` with `pty`'s terminal attached, and
     /// reads the reply on another thread while `during` plays the user.
@@ -1150,7 +1147,7 @@ mod terminal_passed_with_the_request {
         let pty = Pty::open();
 
         let reply = unlock_passing(&daemon.socket, &pty, || {
-            let screen = pty.read_until("Unlock personal: ", TIMEOUT);
+            let screen = pty.read_until("Unlock personal: ", PTY_TIMEOUT);
             assert!(!pty.echoing(), "echo is off while the daemon reads");
             pty.type_text(&format!("{}\n", common::PASSWORD));
             assert!(!screen.contains(common::PASSWORD));
@@ -1168,7 +1165,7 @@ mod terminal_passed_with_the_request {
         let pty = Pty::open();
 
         let reply = unlock_passing(&daemon.socket, &pty, || {
-            pty.read_until("Unlock personal: ", TIMEOUT);
+            pty.read_until("Unlock personal: ", PTY_TIMEOUT);
             pty.type_text("not-the-real-password\n");
         });
 
@@ -1202,9 +1199,7 @@ mod terminal_unlock {
     use std::time::{Duration, Instant};
 
     use super::{failing_prompt_daemon, in_process_with_prompt};
-    use crate::common::{self, Pty};
-
-    const TIMEOUT: Duration = common::PTY_TIMEOUT;
+    use crate::common::{self, PTY_TIMEOUT, Pty};
 
     /// Spawns `kpa --socket <socket> unlock [args]` attached to `pty` as
     /// its controlling terminal, stdin/stdout/stderr included, so
@@ -1262,7 +1257,7 @@ mod terminal_unlock {
         let pty = Pty::open();
         let mut child = spawn_unlock(&daemon.socket, &["--tty", "personal"], &pty);
 
-        pty.read_until("Unlock personal: ", TIMEOUT);
+        pty.read_until("Unlock personal: ", PTY_TIMEOUT);
         assert!(
             !pty.echoing(),
             "echo should be off while reading the password"
@@ -1270,7 +1265,7 @@ mod terminal_unlock {
 
         pty.type_text(&format!("{}\n", common::PASSWORD));
 
-        let output = pty.read_until(r#""ok":true"#, TIMEOUT);
+        let output = pty.read_until(r#""ok":true"#, PTY_TIMEOUT);
         assert!(output.contains(r#""db":"personal""#), "{output}");
         assert!(
             !output.contains(common::PASSWORD),
@@ -1296,12 +1291,12 @@ mod terminal_unlock {
         let pty = Pty::open();
         let mut child = spawn_unlock(&daemon.socket, &["personal"], &pty);
 
-        pty.read_until("Unlock personal: ", TIMEOUT);
+        pty.read_until("Unlock personal: ", PTY_TIMEOUT);
         assert!(!pty.echoing());
 
         pty.type_text(&format!("{}\n", common::PASSWORD));
 
-        let output = pty.read_until(r#""ok":true"#, TIMEOUT);
+        let output = pty.read_until(r#""ok":true"#, PTY_TIMEOUT);
         assert!(output.contains(r#""db":"personal""#), "{output}");
         assert!(
             child
@@ -1319,7 +1314,7 @@ mod terminal_unlock {
         let pty = Pty::open();
         let mut child = spawn_unlock(&daemon.socket, &["personal"], &pty);
 
-        let output = pty.read_until(r#""ok":true"#, TIMEOUT);
+        let output = pty.read_until(r#""ok":true"#, PTY_TIMEOUT);
         assert!(
             !output.contains("Unlock personal"),
             "the terminal was asked: {output}"
@@ -1338,10 +1333,10 @@ mod terminal_unlock {
         let pty = Pty::open();
         let mut child = spawn_unlock(&daemon.socket, &["--tty", "personal"], &pty);
 
-        pty.read_until("Unlock personal: ", TIMEOUT);
+        pty.read_until("Unlock personal: ", PTY_TIMEOUT);
         pty.type_text("not-the-real-password\n");
 
-        let output = pty.read_until(r#""error""#, TIMEOUT);
+        let output = pty.read_until(r#""error""#, PTY_TIMEOUT);
         assert!(output.contains("wrong_credentials"), "{output}");
         assert!(
             !child
@@ -1360,7 +1355,7 @@ mod terminal_unlock {
         let pty = Pty::open();
         let mut child = spawn_unlock(&daemon.socket, &["--tty", "personal"], &pty);
 
-        pty.read_until("Unlock personal: ", TIMEOUT);
+        pty.read_until("Unlock personal: ", PTY_TIMEOUT);
         assert!(!pty.echoing());
         pty.type_text("\u{3}");
 
@@ -1372,7 +1367,7 @@ mod terminal_unlock {
             started.elapsed() < Duration::from_secs(1),
             "the CLI waited for the daemon's timeout instead of its answer"
         );
-        let output = pty.read_until("prompt_cancelled", TIMEOUT);
+        let output = pty.read_until("prompt_cancelled", PTY_TIMEOUT);
         assert!(output.contains("prompt_cancelled"), "{output}");
         assert_eq!(
             daemon.run(&["status"])["databases"][0]["locked"],
