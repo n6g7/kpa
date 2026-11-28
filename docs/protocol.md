@@ -27,7 +27,7 @@ connection that sends nothing, or too slowly, is dropped. Only the daemon's own 
 
 ## Version
 
-Both requests and responses carry `"v": 2`. On the request side, a mismatch
+Both requests and responses carry `"v": 3`. On the request side, a mismatch
 is rejected rather than negotiated — the daemon's response still carries its
 own `v`, which is how the client learns which version the daemon is
 actually running without a separate pair of fields for it. This is
@@ -49,18 +49,18 @@ always exits `0`.
 ## Requests
 
 ```json
-{"v":2,"op":"status"}
-{"v":2,"op":"unlock","db":"personal"}
-{"v":2,"preferred_prompt":"terminal","op":"unlock","db":"personal"}
-{"v":2,"op":"lock","db":"personal"}          // db omitted = lock all
-{"v":2,"op":"list"}                          // db omitted = all unlocked
-{"v":2,"op":"copy","db":"personal","uuid":"…","field":"password"}
-{"v":2,"op":"copy","db":"personal","uuid":"…","field":"custom:Password"}
-{"v":2,"op":"ssh_keys"}                     // db omitted = all unlocked
-{"v":2,"op":"ssh_keys","db":"personal"}     // the SSH keys the vault holds
-{"v":2,"op":"ssh_pending"}
-{"v":2,"op":"ssh_approve","id":"6f1c0a52-3d8e-4c11-9a4b-0e5d2f7b8a31"}
-{"v":2,"op":"ssh_grants"}
+{"v":3,"op":"status"}
+{"v":3,"op":"unlock","db":"personal"}
+{"v":3,"preferred_prompt":"terminal","op":"unlock","db":"personal"}
+{"v":3,"op":"lock","db":"personal"}          // db omitted = lock all
+{"v":3,"op":"list"}                          // db omitted = all unlocked
+{"v":3,"op":"copy","db":"personal","uuid":"…","field":"Password"}
+{"v":3,"op":"copy","db":"personal","uuid":"…","field":"totp"}
+{"v":3,"op":"ssh_keys"}                     // db omitted = all unlocked
+{"v":3,"op":"ssh_keys","db":"personal"}     // the SSH keys the vault holds
+{"v":3,"op":"ssh_pending"}
+{"v":3,"op":"ssh_approve","id":"6f1c0a52-3d8e-4c11-9a4b-0e5d2f7b8a31"}
+{"v":3,"op":"ssh_grants"}
 ```
 
 No request carries the master password. An `unlock` is asked for it by the
@@ -101,66 +101,64 @@ terminal. The daemon answers `no_prompt` when it has nowhere to ask
 
 ### `copy`'s `field`
 
-`field` accepts any name `list`'s `fields` array returns for that entry:
-`username`, `password`, `url`, `notes`, `totp`, or a custom (user-defined)
-field by its KeePass key. Decoding never rejects a `field` value: any string
-is accepted, and one that doesn't resolve to anything on the entry asked
-about fails with `field_empty`, the same as an empty or absent field.
+`field` is one of the names `list`'s `fields` array gives for that entry, and
+it is matched exactly, case included: `Password` is not `password`. Any
+string is accepted, and one the entry doesn't offer fails with `field_empty`,
+the same as an empty or absent field.
 
-**Collision rule.** `username`, `password`, `url`, `notes`, `totp`, and
-KeePass's own reserved `title` are matched case-insensitively and always
-mean the built-in (`title` has no built-in `copy` serves, so a bare request
-for it never resolves to anything). A name that begins `custom:` always
-means the custom field whose key is the rest of the name, with that one
-prefix removed. A custom field is legal in KeePass even when its key
-collides with a reserved name only in case (e.g. a custom `Password` field
-alongside the real one), or when its key itself begins `custom:`. Such a
-field is still listed and copyable, but only under its key behind one more
-`custom:`: `custom:Password` for the key `Password`, and
-`custom:custom:Password` for the key `custom:Password`. Any other custom
-field is addressed by its bare key. So every name `list` shows for an entry
-is the name `copy` resolves to that same field, whatever the entry's keys
-say: a key spelled like a built-in or like the prefix cannot make its name
-mean another field.
+What an entry offers is worked out from the entry when the request arrives,
+the same way `list` does it:
+
+- **Every field it stores that has a non-empty value, by its exact KeePass
+  key.** The standard keys (`UserName`, `Password`, `URL`, `Notes`) are keys
+  like any other, and so is whatever else the entry holds: `PASSWORD`,
+  `api-key`, `custom:x`. A key is only ever what it is spelled, so no key
+  can stand in for another field.
+- **`totp`, when the entry has an `otp` field:** the current code made from
+  its seed. The name is the code's alone: a field stored under exactly
+  `totp` is not offered and cannot be copied. `TOTP` and `Totp` are keys of
+  their own and are offered like any other.
+- **Never `Title`.** The title is the entry's name, not something `copy`
+  serves; `Title` fails with `field_empty`. A field stored under `title` is a
+  key of its own.
 
 **The `otp` field.** The entry's `otp` field holds the TOTP seed, so it is
-never addressable: `copy` offers only the code made from it, as `totp`. `otp`
-and `custom:otp` fail with `field_empty`, and `list` never names the field.
-A custom field whose key differs only in case (`OTP`) is a different field
-and is addressed like any other custom field.
+never offered: `copy` serves only the code made from it, as `totp`. `otp`
+fails with `field_empty`, and `list` never names the field. A field keyed
+`OTP` is a different field and is offered like any other.
 
 ## Responses
 
 ```json
-{"ok":true,"v":2,"databases":[{"name":"personal","locked":false,"entries":341},
+{"ok":true,"v":3,"databases":[{"name":"personal","locked":false,"entries":341},
                               {"name":"work","locked":true}],"version":"1.2.3",
                 "can_copy":true}
 
-{"ok":true,"v":2,"entries":[{"db":"personal","uuid":"…","title":"GitHub",
+{"ok":true,"v":3,"entries":[{"db":"personal","uuid":"…","title":"GitHub",
                              "username":"alice","url":"https://github.com",
                              "group":"Dev",
-                             "fields":["username","password","totp","custom:Password"]}]}
+                             "fields":["UserName","Password","totp","PASSWORD"]}]}
 
-{"ok":true,"v":2,"copied":"password","expires_in":30}
+{"ok":true,"v":3,"copied":"Password","expires_in":30}
 
-{"ok":true,"v":2,"keys":[{"db":"personal","type":"ssh-ed25519",
+{"ok":true,"v":3,"keys":[{"db":"personal","type":"ssh-ed25519",
                           "fingerprint":"SHA256:…","title":"Deploy",
                           "attachment":"id_ed25519"}],
                 "skipped":[{"db":"personal","title":"Old","attachment":"id_rsa",
                             "reason":"PEM format; …"}],
                 "locked":["work"]}
 
-{"ok":false,"v":2,"error":"locked","db":"personal"}
-{"ok":false,"v":2,"error":"unlock_in_progress","db":"personal"}
-{"ok":false,"v":2,"error":"stale","db":"personal","detail":"database changed on disk"}
-{"ok":false,"v":2,"error":"no_prompt","detail":"no screen or terminal to prompt on"}
-{"ok":false,"v":2,"error":"no_display","detail":"no active, unlocked display session for the requester to paste into"}
+{"ok":false,"v":3,"error":"locked","db":"personal"}
+{"ok":false,"v":3,"error":"unlock_in_progress","db":"personal"}
+{"ok":false,"v":3,"error":"stale","db":"personal","detail":"database changed on disk"}
+{"ok":false,"v":3,"error":"no_prompt","detail":"no screen or terminal to prompt on"}
+{"ok":false,"v":3,"error":"no_display","detail":"no active, unlocked display session for the requester to paste into"}
 
-{"ok":false,"v":2,"error":"version_mismatch","detail":"client sent v1; restart the daemon or upgrade the client"}
+{"ok":false,"v":3,"error":"version_mismatch","detail":"client sent v1; restart the daemon or upgrade the client"}
 ```
 
 The last one is the version-skew rejection: the client sent `"v":1`, the
-daemon is actually on `2`, and its own `v` in the response is what makes that
+daemon is actually on `3`, and its own `v` in the response is what makes that
 visible — no extra `client_v` and `daemon_v` fields needed.
 
 `ssh_pending` lists, for each pending request, its id, `refused_at` (when it
@@ -170,7 +168,7 @@ scope until lock) and the `request` that was refused; the shape is in
 [`ssh-agent.md`](./ssh-agent.md) § 6.8. A host in the `scope` (`destination`,
 `forwarding_host`) is an object, `{"fingerprint": "SHA256:…", "name": "…"}`,
 whose `name` is there when the daemon found one. `ssh_approve` answers
-`{"ok":true,"v":2}`. `ssh_grants` answers `{"ok":true,"v":2,"grants":[…]}`,
+`{"ok":true,"v":3}`. `ssh_grants` answers `{"ok":true,"v":3,"grants":[…]}`,
 each grant as `ssh-agent.md` § 6.8 shows it; like `ssh_pending` it has no
 failure, and nothing is logged for it.
 
@@ -205,7 +203,7 @@ derived from a database file's contents.
 | `corrupt` | the file isn't a database kpa can read: malformed, a format kpa doesn't read (only KDBX3 and KDBX4 are), a database file or keyfile that is not a regular file or is larger than kpa reads (128 MiB, a keyfile 16 MiB), or a header that asks for more key derivation than kpa runs; `detail` says which for all but the first |
 | `io` | the file couldn't be read, the prompt couldn't be shown, or the clipboard couldn't take a secret (`detail` says which) |
 | `unknown_uuid` | `copy`'s uuid names no entry |
-| `field_empty` | the field is absent, empty or doesn't resolve |
+| `field_empty` | `copy`'s `field` is not a name the entry offers: absent, empty, `Title`, `otp`, or no such field |
 | `no_display` | `copy` has no clipboard to put a secret on: the requester isn't on the desktop, or the display session isn't active and unlocked ([`headless.md`](./headless.md) § 5) |
 | `not_pending` | `ssh_approve` names no pending request: it expired or a lock dropped it |
 
@@ -238,16 +236,15 @@ this as a known gap. The launcher does its own fuzzy matching; kpa stays dumb
 and returns everything else.
 
 **`fields` is the one exception, because it carries names, never values.**
-Each entry's `fields` array names every field `copy` can be asked for on it:
-the built-ins present and non-empty on the entry, in the order `username`,
-`password`, `url`, `notes`, `totp`, then its custom fields by their KeePass
-key (sorted: `keepass`'s own field storage is an unordered map, so the
-database's own field order isn't recoverable), named per the collision rule
-(`custom:`-prefixed where the bare key would mean something else). Protectedness never hides a field's *name* here, unlike
-`title`, `username` and `url`: a protected `Password` still lists `password`,
-and a custom field colliding with a protected built-in still lists
-`custom:<key>`. `fields` is omitted from the wire when empty, like the other
-optional fields.
+Each entry's `fields` array names every field `copy` can be asked for on it,
+spelled exactly as `copy` takes them: the standard fields present and
+non-empty in the order `UserName`, `Password`, `URL`, `Notes`, then `totp`
+when the entry has a seed, then every other stored key, sorted (`keepass`'s
+own field storage is an unordered map, so the database's own field order
+isn't recoverable). It never holds `Title` or `otp`. Protectedness never
+hides a field's *name* here, unlike `title`, `username` and `url`: a
+protected `Password` still lists `Password`. `fields` is omitted from the
+wire when empty, like the other optional fields.
 
 `ssh_keys` is `list` for SSH keys. Like `list`, a request with no `db` covers
 every unlocked database, and each key and skipped attachment says which
@@ -270,5 +267,5 @@ print the response line with or without it. Because the protocol is plain
 lines, it stays hand-debuggable with `socat`:
 
 ```sh
-echo '{"v":2,"op":"status"}' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/kpa/sock"
+echo '{"v":3,"op":"status"}' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/kpa/sock"
 ```

@@ -302,7 +302,7 @@ asked for, never a value.
 A `list` or `ssh keys` for every database reads each one under its own guard of
 the core, one after another, so a lock can land between two of them.
 
-Requests, responses, errors, the field collision rule and version skew are in
+Requests, responses, errors, the names `copy` takes and version skew are in
 [`protocol.md`](./protocol.md).
 
 ## Files and freshness
@@ -393,9 +393,9 @@ and `copy`. `QUERY` is fzf's initial query.
 
 | Key | Copies |
 |---|---|
-| Enter | `password` |
-| Ctrl+U | `username` |
-| Ctrl+L | `url` |
+| Enter | `Password` |
+| Ctrl+U | `UserName` |
+| Ctrl+L | `URL` |
 | Ctrl+T | `totp` |
 | Ctrl+O | a field chosen in a second fzf over the entry's own `fields`, custom ones included, headed by the entry's title: the first line of the list on the pipe, which fzf shows and can't choose (`--header-lines=1`), cut to 64 bytes. No text of an entry is ever on fzf's command line |
 

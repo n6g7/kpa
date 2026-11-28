@@ -23,7 +23,7 @@ mod ssh_pending;
 mod status;
 mod unlock;
 
-pub use copy::{CopyError, CopyOutcome, CopyRequest, Field};
+pub use copy::{CopyError, CopyOutcome, CopyRequest, TOTP};
 pub use error::ErrorCode;
 pub use list::{ListError, ListRequest, ListResponse, WireEntry};
 pub use lock::{LockError, LockRequest};
@@ -46,7 +46,7 @@ use error::serialize_error;
 /// regardless of what the request asked for or which version it claimed —
 /// see `decode_request` and `docs/protocol.md` § Version's "skew impossible to
 /// ignore" rationale.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// One response, one variant per `Op`. Each variant carries a `Result`
 /// whose error type names *exactly* what that op can fail with: `lock` can
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&status).expect("status should serialize"),
             json!({
-                "v": 2,
+                "v": 3,
                 "ok": true,
                 "databases": [
                     {"name": "personal", "locked": false, "entries": 341},
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&list).expect("list should serialize"),
             json!({
-                "v": 2,
+                "v": 3,
                 "ok": true,
                 "entries": [{
                     "db": "personal",
@@ -230,18 +230,18 @@ mod tests {
         // Locking everything names no database.
         assert_eq!(
             serde_json::to_value(Response::Lock(Ok(None))).expect("lock should serialize"),
-            json!({"v": 2, "ok": true})
+            json!({"v": 3, "ok": true})
         );
 
         // `copy`'s success carries no secret and no `db` — just which field,
         // and for how long.
         let copy = Response::Copy(Ok(CopyOutcome {
-            copied: Field::Password,
+            copied: "Password".to_string(),
             expires_in: 30,
         }));
         assert_eq!(
             serde_json::to_value(&copy).expect("copy should serialize"),
-            json!({"v": 2, "ok": true, "copied": "password", "expires_in": 30})
+            json!({"v": 3, "ok": true, "copied": "Password", "expires_in": 30})
         );
 
         // A key without a title leaves the field out, like `list`'s.
@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&ssh_keys).expect("ssh_keys should serialize"),
             json!({
-                "v": 2,
+                "v": 3,
                 "ok": true,
                 "keys": [
                     {
@@ -323,7 +323,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&unlocked).expect("unlock should serialize"),
-            json!({"v": 2, "ok": true, "db": "personal"})
+            json!({"v": 3, "ok": true, "db": "personal"})
         );
     }
 
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<ListResponse>(&wire).unwrap(), list);
 
         let outcome = CopyOutcome {
-            copied: Field::Custom("api-key".to_string()),
+            copied: "api-key".to_string(),
             expires_in: 30,
         };
         let wire = serde_json::to_string(&Response::Copy(Ok(outcome.clone()))).unwrap();
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn a_status_without_can_copy_reads_as_one_that_may_copy() {
         let status: StatusResponse = serde_json::from_str(
-            r#"{"v":2,"ok":true,"databases":[{"name":"personal","locked":true}],"version":"1.0.0"}"#,
+            r#"{"v":3,"ok":true,"databases":[{"name":"personal","locked":true}],"version":"1.0.0"}"#,
         )
         .unwrap();
         assert!(status.can_copy);
@@ -389,7 +389,7 @@ mod tests {
                 entries: Vec::new(),
             })))
             .expect("should serialize"),
-            json!({"v": 2, "ok": true, "entries": []})
+            json!({"v": 3, "ok": true, "entries": []})
         );
     }
 
@@ -658,7 +658,7 @@ mod tests {
         }));
         assert_eq!(
             serde_json::to_value(&response).expect("should serialize"),
-            json!({"v": 2, "ok": false, "error": "corrupt", "db": "personal"})
+            json!({"v": 3, "ok": false, "error": "corrupt", "db": "personal"})
         );
     }
 
@@ -673,6 +673,6 @@ mod tests {
         assert_eq!(value["error"], json!("version_mismatch"));
         let detail = value["detail"].as_str().expect("detail should be a string");
         assert!(detail.contains("99"), "should name the client's: {detail}");
-        assert!(detail.contains("v2"), "should name the daemon's: {detail}");
+        assert!(detail.contains("v3"), "should name the daemon's: {detail}");
     }
 }

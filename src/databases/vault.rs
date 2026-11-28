@@ -235,29 +235,27 @@ pub struct EntrySummary {
     /// Name of the immediate parent group (not a full path — the design
     /// doc's example response uses a bare name like `"Dev"`).
     pub group: String,
-    /// The fields of this entry that can be read as a value — see
-    /// `copyable_fields`. Never a value themselves, so protectedness never
-    /// hides one here the way it hides `title`/`username`/`url` above.
-    pub fields: Vec<EntryField>,
+    /// What this entry stores, by key — see [`StoredFields`]. Never a value,
+    /// so protectedness never hides a key here the way it hides
+    /// `title`/`username`/`url` above.
+    pub stored: StoredFields,
 }
 
-/// A field of an entry that can be read as a value, in KeePass's own
-/// vocabulary: a standard field (`UserName`, `Password`, `URL`, `Notes`),
-/// the code made from the entry's `otp` field, or a user-defined field by
-/// its exact key. How a front end spells these to its clients, and how it
-/// tells a custom key from a standard name, is its own business.
-#[derive(Debug, Clone, PartialEq, Eq, Zeroize)]
-pub enum EntryField {
-    Username,
-    Password,
-    Url,
-    Notes,
-    /// The code generated now from the `otp` field, never the seed in it.
-    Totp,
-    /// A user-defined field. Its key is none of the standard keys and none
-    /// of the withheld ones (`otp`); a key that only differs from one in
-    /// case is a custom field, as in KeePass.
-    Custom(String),
+/// The string fields an entry stores, in KeePass's own terms: the exact
+/// keys, whatever they are spelled like, and whether the entry holds a TOTP
+/// seed a code can be made from. What a front end offers of them, and under
+/// which names, is its own business.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Zeroize)]
+pub struct StoredFields {
+    /// The exact key of every field that has a non-empty value, `Title`
+    /// and the standard keys (`UserName`, `Password`, `URL`, `Notes`)
+    /// included, sorted: `keepass` keeps them in an unordered map, so the
+    /// database's own order is not recoverable. A key in [`WITHHELD_KEYS`]
+    /// is never among them.
+    pub keys: Vec<String>,
+    /// Whether the `otp` field, the TOTP seed, has a non-empty value. Not
+    /// whether it parses: [`entry_totp`] decides that, when a code is made.
+    pub totp: bool,
 }
 
 /// Open a `.kdbx` file with a password and/or a keyfile.
@@ -714,10 +712,9 @@ pub fn entry_field(db: &Database, uuid: Uuid, key: &str) -> Option<Option<Zeroiz
     })
 }
 
-/// Whether an entry with this uuid exists, regardless of its fields.
-/// `copy`'s bare `title` request needs exactly this and nothing more: it
-/// never resolves to any field (`proto::copy::Field::ReservedTitle`), but
-/// still has to distinguish `UnknownUuid` from `FieldEmpty`.
+/// Whether an entry with this uuid exists, regardless of its fields. What
+/// tells `UnknownUuid` from `FieldEmpty` when a `copy` names a field the
+/// entry doesn't offer.
 pub fn entry_exists(db: &Database, uuid: Uuid) -> bool {
     with_entry(db, uuid, |_| ()).is_some()
 }
@@ -818,7 +815,7 @@ fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
                 username: unprotected_field(&entry, fields::USERNAME).map(str::to_owned),
                 url: unprotected_field(&entry, fields::URL).map(str::to_owned),
                 group: group.name.clone(),
-                fields: copyable_fields(&entry),
+                stored: stored_fields(&entry),
             });
         }
         stack.extend(group.groups().map(|child| child.id()));
@@ -826,80 +823,37 @@ fn collect_entries(db: &Database, out: &mut Vec<EntrySummary>) {
 }
 
 /// Exact keys of the fields whose value is never served, only something
-/// derived from it: `entry_field` answers nothing for them and `list` never
-/// names them as custom fields. Today that is `otp`, the TOTP seed, of which
-/// only the code made from it leaves. Another such field is one more key
-/// here.
+/// derived from it: `entry_field` answers nothing for them and
+/// [`StoredFields`] never lists them. Today that is `otp`, the TOTP seed, of
+/// which only the code made from it leaves. Another such field is one more
+/// key here.
 const WITHHELD_KEYS: [&str; 1] = [keepass::db::fields::OTP];
 
-/// Exact KeePass key spellings that are never "custom": the four built-ins
-/// `copy` supports and `Title` — kpa never makes `Title` copyable itself,
-/// but it is still KeePass's own reserved key, not a user-defined one.
-/// [`WITHHELD_KEYS`] are reserved too, see [`is_reserved_entry_key`].
-/// Exact-case: a differently-cased key (e.g. a custom `USERNAME`) is a
-/// distinct `HashMap` entry and *is* a custom field — see
-/// `copyable_fields`.
-const RESERVED_ENTRY_KEYS: [&str; 5] = [
-    keepass::db::fields::TITLE,
-    keepass::db::fields::USERNAME,
-    keepass::db::fields::PASSWORD,
-    keepass::db::fields::URL,
-    keepass::db::fields::NOTES,
-];
+/// What this entry stores, by key. Protectedness never hides a key here,
+/// unlike `list`'s own `title`/`username`/`url`: this reads straight through
+/// `Value::get()`, the same as `entry_field` does for `copy` — knowing a
+/// field is there carries nothing a protected value does.
+fn stored_fields(entry: &keepass::db::Entry) -> StoredFields {
+    let has_value = |value: &keepass::db::Value<String>| !value.get().is_empty();
 
-fn is_reserved_entry_key(key: &str) -> bool {
-    RESERVED_ENTRY_KEYS.contains(&key) || WITHHELD_KEYS.contains(&key)
-}
-
-/// The fields of this entry that can be read as a value — never the values.
-/// The standard fields in the fixed order `username`, `password`, `url`,
-/// `notes`, then the code made from `otp`, each listed only when present and
-/// non-empty; then this entry's custom (user-defined) string fields, by
-/// their exact KeePass key.
-///
-/// `keepass`'s `Entry::fields` is an unordered `HashMap`
-/// (`db/types/entry.rs`), so the database's own field order is not
-/// recoverable here; custom keys are sorted instead, which is at least
-/// deterministic.
-///
-/// Protectedness never hides a field here, unlike `list`'s own
-/// `title`/`username`/`url`: this reads straight through `Value::get()`,
-/// the same as `entry_field` does for `copy` — knowing a field is there
-/// carries nothing a protected value does. `Totp` is listed whenever the
-/// `otp` field is present and non-empty, regardless of whether it actually
-/// parses as a valid `otpauth://` URL — `entry_totp` is what validates
-/// that, at copy time.
-fn copyable_fields(entry: &keepass::db::Entry) -> Vec<EntryField> {
-    use keepass::db::fields;
-
-    let has_value = |key: &str| entry.fields.get(key).is_some_and(|v| !v.get().is_empty());
-
-    let mut listed: Vec<EntryField> = [
-        (EntryField::Username, fields::USERNAME),
-        (EntryField::Password, fields::PASSWORD),
-        (EntryField::Url, fields::URL),
-        (EntryField::Notes, fields::NOTES),
-        (EntryField::Totp, fields::OTP),
-    ]
-    .into_iter()
-    .filter(|(_, key)| has_value(key))
-    .map(|(field, _)| field)
-    .collect();
-
-    let mut custom: Vec<&String> = entry
+    let mut keys: Vec<String> = entry
         .fields
         .iter()
-        .filter(|(key, value)| !is_reserved_entry_key(key) && !value.get().is_empty())
-        .map(|(key, _)| key)
+        .filter(|(key, value)| !WITHHELD_KEYS.contains(&key.as_str()) && has_value(value))
+        .map(|(key, _)| key.clone())
         .collect();
-    custom.sort();
+    keys.sort();
 
-    listed.extend(
-        custom
-            .into_iter()
-            .map(|key| EntryField::Custom(key.clone())),
-    );
-    listed
+    let totp = entry
+        .fields
+        .get(keepass::db::fields::OTP)
+        .is_some_and(has_value);
+    StoredFields { keys, totp }
+}
+
+/// What the entry with `uuid` stores. `None` if there is no such entry.
+pub fn entry_stored_fields(db: &Database, uuid: Uuid) -> Option<StoredFields> {
+    with_entry(db, uuid, stored_fields)
 }
 
 #[cfg(test)]
@@ -909,13 +863,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        EntryField, entry_count, entry_exists, entry_field, entry_title, entry_totp,
-        for_each_attachment, for_each_entry_attachment, list_entries,
+        entry_count, entry_exists, entry_field, entry_title, entry_totp, for_each_attachment,
+        for_each_entry_attachment, list_entries,
     };
-
-    fn custom(key: &str) -> EntryField {
-        EntryField::Custom(key.to_string())
-    }
 
     /// `entry_count` must agree with `list_entries` everywhere, including
     /// in nested groups and when fields are protected — it's what `status`
@@ -1123,35 +1073,49 @@ mod tests {
         assert!(!entry_exists(&db, Uuid::new_v4()));
     }
 
-    /// Built-ins appear in the fixed, documented order, and only when
-    /// present and non-empty — an absent or empty one is skipped, not
-    /// listed with nothing to copy.
+    /// The keys an entry stores are its fields' exact keys, sorted, whatever
+    /// they are spelled like; one with an empty value is left out.
     #[test]
-    fn copyable_fields_lists_present_builtins_in_order() {
+    fn stored_fields_are_the_exact_keys_of_the_non_empty_fields() {
         let mut db = Database::new();
         let uuid = {
             let mut root = db.root_mut();
             let mut entry = root.add_entry();
+            entry.set_unprotected(fields::TITLE, "site");
             entry.set_unprotected(fields::URL, "https://example.com");
             entry.set_unprotected(fields::USERNAME, "alice");
             entry.set_unprotected(fields::PASSWORD, "hunter2");
             entry.set_unprotected(fields::NOTES, "");
+            entry.set_unprotected("PASSWORD", "one");
+            entry.set_unprotected("password", "two");
+            entry.set_unprotected("totp", "three");
+            entry.set_unprotected("custom:x", "four");
+            entry.set_unprotected("", "five");
+            entry.set_unprotected("empty", "");
             entry.id().uuid()
         };
 
         let entries = list_entries(&db);
         let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
         assert_eq!(
-            entry.fields,
-            vec![EntryField::Username, EntryField::Password, EntryField::Url]
+            entry.stored.keys,
+            [
+                "", "PASSWORD", "Password", "Title", "URL", "UserName", "custom:x", "password",
+                "totp"
+            ]
         );
+        assert!(!entry.stored.totp, "no `otp` field: no code");
+        assert_eq!(
+            super::entry_stored_fields(&db, uuid),
+            Some(entry.stored.clone())
+        );
+        assert_eq!(super::entry_stored_fields(&db, Uuid::new_v4()), None);
     }
 
-    /// A protected built-in's *name* still appears — only `list`'s own
-    /// `title`/`username`/`url` values stay filtered by protection, not
-    /// `fields`.
+    /// Protectedness never hides a key: only `list`'s own
+    /// `title`/`username`/`url` values stay filtered by protection.
     #[test]
-    fn copyable_fields_includes_protected_builtins_by_name() {
+    fn stored_fields_include_protected_keys() {
         let mut db = Database::new();
         let uuid = {
             let mut root = db.root_mut();
@@ -1162,98 +1126,39 @@ mod tests {
 
         let entries = list_entries(&db);
         let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
-        assert_eq!(entry.fields, vec![EntryField::Password]);
+        assert_eq!(entry.stored.keys, ["Password"]);
     }
 
-    /// Custom fields are listed by their key, sorted (since `keepass`
-    /// stores them in an unordered `HashMap`), after every built-in.
+    /// The `otp` field holds the TOTP seed: its key is never listed, and
+    /// that the entry has one is `totp`, whether or not the seed parses
+    /// (`entry_totp` is what validates that, when a code is made). A key
+    /// that differs from `otp` only in case is an ordinary field.
     #[test]
-    fn copyable_fields_lists_custom_keys_sorted_after_builtins() {
-        let mut db = Database::new();
-        let uuid = {
-            let mut root = db.root_mut();
-            let mut entry = root.add_entry();
-            entry.set_unprotected(fields::USERNAME, "alice");
-            entry.set_unprotected("zeta", "z");
-            entry.set_unprotected("api-key", "k");
-            entry.id().uuid()
-        };
-
-        let entries = list_entries(&db);
-        let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
-        assert_eq!(
-            entry.fields,
-            vec![EntryField::Username, custom("api-key"), custom("zeta")]
-        );
-    }
-
-    /// A custom field keyed like a standard field only in case (`keepass`'s
-    /// keys are exact-case) is a distinct, genuine field, and is listed
-    /// as a custom one under its exact key, as is a key spelled like the
-    /// `copy` protocol's names or its prefix: what a name on the wire means
-    /// is that protocol's rule, not this module's.
-    #[test]
-    fn a_custom_key_is_listed_under_its_exact_spelling() {
-        let mut db = Database::new();
-        let uuid = {
-            let mut root = db.root_mut();
-            let mut entry = root.add_entry();
-            entry.set_unprotected(fields::PASSWORD, "hunter2");
-            entry.set_unprotected("PASSWORD", "one");
-            entry.set_unprotected("password", "two");
-            entry.set_unprotected("totp", "three");
-            entry.set_unprotected("custom:Password", "four");
-            entry.set_unprotected("custom:x", "five");
-            entry.id().uuid()
-        };
-
-        let entries = list_entries(&db);
-        let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
-        assert_eq!(
-            entry.fields,
-            vec![
-                EntryField::Password,
-                custom("PASSWORD"),
-                custom("custom:Password"),
-                custom("custom:x"),
-                custom("password"),
-                custom("totp"),
-            ]
-        );
-    }
-
-    /// An empty custom value is skipped, same rule as the built-ins.
-    #[test]
-    fn copyable_fields_skips_empty_custom_values() {
-        let mut db = Database::new();
-        let uuid = {
-            let mut root = db.root_mut();
-            let mut entry = root.add_entry();
-            entry.set_unprotected("empty", "");
-            entry.id().uuid()
-        };
-
-        let entries = list_entries(&db);
-        let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
-        assert!(entry.fields.is_empty());
-    }
-
-    /// `totp` is listed as copyable only when the `otp` field is present
-    /// and non-empty — `copyable_fields` doesn't itself validate that
-    /// it parses (that's `entry_totp`'s job, at copy time).
-    #[test]
-    fn copyable_fields_lists_totp_when_otp_is_present() {
+    fn stored_fields_withhold_the_otp_key_and_report_the_seed() {
         let mut db = Database::new();
         let uuid = {
             let mut root = db.root_mut();
             let mut entry = root.add_entry();
             entry.set_unprotected(fields::OTP, "otpauth://totp/x?secret=ABC");
+            entry.set_unprotected("OTP", "not the seed");
+            entry.id().uuid()
+        };
+        let empty_seed = {
+            let mut root = db.root_mut();
+            let mut entry = root.add_entry();
+            entry.set_unprotected(fields::OTP, "");
             entry.id().uuid()
         };
 
         let entries = list_entries(&db);
         let entry = entries.iter().find(|e| e.uuid == uuid).expect("entry");
-        assert_eq!(entry.fields, vec![EntryField::Totp]);
+        assert_eq!(entry.stored.keys, ["OTP"]);
+        assert!(entry.stored.totp);
+        let entry = entries
+            .iter()
+            .find(|e| e.uuid == empty_seed)
+            .expect("entry");
+        assert_eq!(entry.stored, super::StoredFields::default());
     }
 
     /// `entry_totp` generates the current code from a valid `otpauth://`

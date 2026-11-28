@@ -247,8 +247,8 @@ for a channel and G-4 for anything persistent:
      either.
   5. A TOTP seed never leaves the process: what `copy` offers for `totp` is
      the code of the moment. "TOTP seed" means the entry's `otp` field, the
-     one kpa generates codes from, and `copy` answers `field_empty` for that
-     key, asked as `otp` or `custom:otp`. A seed stored under another name (such as
+     one kpa generates codes from: `list` never names it and `copy` answers
+     `field_empty` for `otp`. A seed stored under another name (such as
      `TimeOtp-Secret-Base32` or `TOTP Seed`) is an ordinary custom field,
      which `copy` may offer.
   6. SSH private keys never leave the process: only signatures do, only on
@@ -604,11 +604,13 @@ and Unicode bidi/format characters before writing to a terminal (JSON
 escaping covers only C0). `kpa pick` gives `fzf` one line per entry,
 escaped the same way with tab and newline escaped too, and reads the
 answer back through an index it put in front of the line, never out of
-the text shown. A custom field's key is entry content too: the
-collision rule (`docs/protocol.md`) makes a bare name that spells
-a built-in case-insensitively always mean the built-in, by type rather than
-by convention, so a custom key crafted to spell `password` or `title`
-cannot stand in for the real field or intercept a `copy` meant for it. A
+the text shown. A field's key is entry content too: `copy` offers an entry's
+fields under their exact keys, from one list that `list` prints and `copy`
+matches a name against exactly (`docs/protocol.md`), so a key crafted to
+spell `Password`, `totp` or `title` in another case or another way is a
+field of its own and cannot stand in for the real field or intercept a
+`copy` meant for it; `totp` is reserved for the code, `Title` and `otp`
+are never offered. A
 title that names an SSH key is escaped the same way wherever it is shown
 (an identity comment, a prompt's message and data, a listing), with tab
 and newline escaped too and a length cap of its own (T-25). An attachment
@@ -625,9 +627,9 @@ digit count that overflows it. In scope:
 terminal escape or control sequences reaching the CLI's terminal output,
 an identity comment or a prompt unescaped; a field breaking framing; a
 title or UUID collision across databases that makes a `copy` resolve to a
-different entry than the one listed; a custom field's key reaching a
-built-in's `copy` target or vice versa; entry text that adds a line to
-`kpa pick`'s list, or makes it copy from an entry or field other than
+different entry than the one listed; a field's key reaching another
+field's `copy` target, or a name `list` shows copying another field; entry
+text that adds a line to `kpa pick`'s list, or makes it copy from an entry or field other than
 those of the line chosen; entry content that panics or hangs a request,
 an unlock or the key scan, or makes an unlock take memory out of
 proportion to its file (an attachment the scan parses, a field `copy`

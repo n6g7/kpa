@@ -42,10 +42,10 @@ pub use vault::AttachmentView as Attachment;
 
 /// The names of the fields every entry has, as `Entry::field` takes them.
 pub mod fields {
-    pub use keepass::db::fields::{NOTES, PASSWORD, URL, USERNAME};
+    pub use keepass::db::fields::{NOTES, PASSWORD, TITLE, URL, USERNAME};
 }
 pub use kdf::KdfCeiling;
-pub use vault::{EntryField, EntrySummary, VaultError, VaultFile};
+pub use vault::{EntrySummary, StoredFields, VaultError, VaultFile};
 
 /// Every configured database and the lifecycle around it. `Send + Sync`,
 /// built once, shared as an `Arc`.
@@ -366,18 +366,9 @@ impl Entry<'_> {
         vault::entry_field(self.db, self.uuid, key).flatten()
     }
 
-    /// What `field` names on this entry: a standard field, the code made from
-    /// `otp`, or a custom field by its key. None where there is nothing to
-    /// give, as for [`Entry::field`] and [`Entry::totp`].
-    pub fn read(&self, field: &EntryField) -> Option<Zeroizing<String>> {
-        match field {
-            EntryField::Username => self.field(fields::USERNAME),
-            EntryField::Password => self.field(fields::PASSWORD),
-            EntryField::Url => self.field(fields::URL),
-            EntryField::Notes => self.field(fields::NOTES),
-            EntryField::Totp => self.totp(),
-            EntryField::Custom(key) => self.field(key),
-        }
+    /// The string fields this entry stores, by key.
+    pub fn stored_fields(&self) -> StoredFields {
+        vault::entry_stored_fields(self.db, self.uuid).unwrap_or_default()
     }
 
     /// The current code of the entry's `otp` field. None: no such field, or

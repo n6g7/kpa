@@ -52,13 +52,11 @@ pub struct WireEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     pub group: String,
-    /// Field names `copy` can be asked for on this entry: the built-ins
-    /// present and non-empty on it, in the fixed order `username`,
-    /// `password`, `url`, `notes`, `totp`, then its custom (user-defined)
-    /// fields by their KeePass key — `custom:`-prefixed when a bare request
-    /// for that key would mean something else (`docs/protocol.md`'s
-    /// collision rule; `Field::encode` spells them). Omitted from the
-    /// wire when empty, like the `Option` fields above.
+    /// Field names `copy` can be asked for on this entry, exactly as `copy`
+    /// takes them: the standard fields present and non-empty (`UserName`,
+    /// `Password`, `URL`, `Notes`), `totp` when the entry has a seed, then
+    /// every other stored key, sorted (`docs/protocol.md`). Omitted from
+    /// the wire when empty, like the `Option` fields above.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<String>,
 }

@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-use super::proto::{CopyError, CopyOutcome, CopyRequest, Field};
-use super::{Api, authz};
+use super::proto::{CopyError, CopyOutcome, CopyRequest};
+use super::{Api, authz, offer};
 use crate::authn::Requester;
 use crate::cancel::CancelToken;
 use crate::clipboard::{Backend, Offer};
-use crate::databases::{Databases, Entry, Observer, OpenError};
+use crate::databases::{Databases, Observer, OpenError};
 use crate::display_session::DisplaySession;
 use crate::log;
 
@@ -146,7 +146,10 @@ impl Api {
             let read = open
                 .entry(request.uuid)
                 .ok_or_else(|| CopyError::UnknownUuid { db: db() })?;
-            let value = field_value(&read, &request.field)
+            // What the entry offers is worked out here, from the entry as it
+            // is now, the same way `list` does; the name must be one of them.
+            let value = offer::find(&read.stored_fields(), &request.field)
+                .and_then(|copyable| copyable.value(&read))
                 .ok_or_else(|| CopyError::FieldEmpty { db: db() })?;
             let title = read.title().unwrap_or_else(|| request.uuid.to_string());
             (value, title, open.unlock_token())
@@ -173,12 +176,6 @@ impl Api {
             expires_in: self.clipboard_timeout.as_secs(),
         })
     }
-}
-
-/// What `field` names on `entry`; `None` where there is nothing to copy:
-/// absent, empty, or a bare `title`, which is never copyable.
-fn field_value(entry: &Entry<'_>, field: &Field) -> Option<Zeroizing<String>> {
-    entry.read(&field.entry_field()?)
 }
 
 #[cfg(test)]
@@ -211,72 +208,78 @@ mod tests {
         fx.databases.open(name).ok().unwrap().entries()[0].uuid
     }
 
-    fn copy(fx: &Fixture, db: &str, uuid: Uuid, field: Field) -> Result<CopyOutcome, CopyError> {
+    fn copy(fx: &Fixture, db: &str, uuid: Uuid, field: &str) -> Result<CopyOutcome, CopyError> {
         fx.api.copy(
             &CopyRequest {
                 db: db.to_string(),
                 uuid,
-                field,
+                field: field.to_string(),
             },
             &desktop(),
         )
     }
 
-    /// Every name `list` shows for an entry reads, in `copy`, the field the
-    /// name was made from, whatever the entry's keys say: keys spelled like
-    /// built-ins, like `title` and like the `custom:` syntax included.
-    #[test]
-    fn every_listed_name_copies_the_field_it_was_listed_for() {
-        let keys = [
-            "PASSWORD",
-            "Username",
-            "TOTP",
-            "title",
-            "Title2",
-            "custom:Password",
-            "custom:PASSWORD",
-            "custom:x",
-            "custom:custom:x",
-            "Custom:x",
-            "x",
-            "api-key",
-        ];
-        let fx = fixture();
-        let mut entry = TestEntry::new("site").field("Password", "the-real-password");
+    const SEED: &str = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=6";
+
+    /// An entry with a title, a TOTP seed and a stored field under each of
+    /// `keys`, whose value is `value-of-<key>`.
+    fn entry_with(keys: &[&str]) -> TestEntry {
+        let mut entry = TestEntry::new("value-of-Title").field("otp", SEED);
         for key in keys {
             entry = entry.field(key, &format!("value-of-{key}"));
         }
-        fx.databases.install_for_test("personal", vec![entry]);
-        let open = fx.databases.open("personal").ok().unwrap();
-        let listed = wire_entries("personal", &open.entries())[0].fields.clone();
-        let read = open.entry(open.entries()[0].uuid).unwrap();
+        entry
+    }
 
-        assert_eq!(
-            listed.len(),
-            keys.len() + 1,
-            "one name per field: {listed:?}"
-        );
-        let mut seen = Vec::new();
+    /// Every name `list` shows for an entry copies, in `copy`, the field it
+    /// was listed for, whatever the entry's keys are spelled like: a stored
+    /// field by its exact key, the code for `totp`. The title and the seed
+    /// are never among them.
+    #[test]
+    fn every_listed_name_copies_the_field_it_was_listed_for() {
+        let keys = [
+            "UserName",
+            "Password",
+            "PASSWORD",
+            "password",
+            "totp",
+            "TOTP",
+            "title",
+            "custom:x",
+            "custom:Password",
+            "OTP",
+            "",
+            "é",
+            "api-key",
+        ];
+        let fx = fixture();
+        fx.databases
+            .install_for_test("personal", vec![entry_with(&keys)]);
+        let open = fx.databases.open("personal").ok().unwrap();
+        let uuid = open.entries()[0].uuid;
+        let listed = wire_entries("personal", &open.entries())[0].fields.clone();
+        drop(open);
+
+        // `totp` the stored field is not offered; `totp` the code is.
+        let mut expected: Vec<&str> = keys.to_vec();
+        expected.sort();
         for name in &listed {
-            let field: Field = name.parse().unwrap();
-            let value = field_value(&read, &field).expect("a listed name reads a value");
-            seen.push(value.to_string());
-            // The built-in is `password`; any other name is its key, bare or
-            // behind exactly one prefix.
-            match value.strip_prefix("value-of-") {
-                Some(key) => assert!(
-                    name == key || *name == format!("custom:{key}"),
-                    "{name:?} reads the field keyed {key:?}"
-                ),
-                None => assert_eq!(
-                    (name.as_str(), value.as_str()),
-                    ("password", "the-real-password")
-                ),
+            copy(&fx, "personal", uuid, name).expect("a listed name copies");
+            let offered = fx.offered.lock().unwrap().last().unwrap().clone();
+            if name == "totp" {
+                assert_eq!(offered.len(), 6, "the code, not the stored field");
+                assert!(offered.chars().all(|c| c.is_ascii_digit()));
+            } else {
+                assert_eq!(offered, format!("value-of-{name}"), "{name:?}");
             }
         }
-        seen.sort();
-        seen.dedup();
-        assert_eq!(seen.len(), keys.len() + 1, "every field is read by a name");
+        let mut names: Vec<&str> = listed.iter().map(String::as_str).collect();
+        names.sort();
+        assert_eq!(names, expected, "every key is offered under its own name");
+        let offered = fx.offered.lock().unwrap().clone();
+        for secret in [SEED, "value-of-Title", "value-of-totp"] {
+            assert!(!offered.iter().any(|value| value == secret), "{secret}");
+        }
     }
 
     fn live(fx: &Fixture, index: usize) -> bool {
@@ -287,20 +290,20 @@ mod tests {
     fn copy_of_an_unknown_db_a_locked_db_and_an_unknown_uuid() {
         let fx = fixture();
         assert_eq!(
-            copy(&fx, "nope", Uuid::nil(), Field::Password),
+            copy(&fx, "nope", Uuid::nil(), "Password"),
             Err(CopyError::UnknownDb {
                 db: "nope".to_string()
             })
         );
         assert_eq!(
-            copy(&fx, "personal", Uuid::nil(), Field::Password),
+            copy(&fx, "personal", Uuid::nil(), "Password"),
             Err(CopyError::Locked {
                 db: "personal".to_string()
             })
         );
         unlock_with_entry(&fx, "personal");
         assert_eq!(
-            copy(&fx, "personal", Uuid::new_v4(), Field::Password),
+            copy(&fx, "personal", Uuid::new_v4(), "Password"),
             Err(CopyError::UnknownUuid {
                 db: "personal".to_string()
             })
@@ -308,16 +311,64 @@ mod tests {
     }
 
     #[test]
-    fn copy_of_an_absent_empty_or_title_field_is_field_empty() {
+    fn copy_of_an_absent_empty_or_unlisted_field_is_field_empty() {
         let fx = fixture();
         let uuid = unlock_with_entry(&fx, "personal");
         for field in [
-            Field::Url,
-            Field::Username,
-            Field::Totp,
-            Field::Custom("nothing".to_string()),
-            Field::ReservedTitle,
+            "URL", "UserName", "totp", "nothing", "password", "PASSWORD", "",
         ] {
+            assert_eq!(
+                copy(&fx, "personal", uuid, field),
+                Err(CopyError::FieldEmpty {
+                    db: "personal".to_string()
+                }),
+                "{field:?}"
+            );
+        }
+        assert!(fx.offered.lock().unwrap().is_empty());
+    }
+
+    /// `Title` is never offered, not even when named exactly, and not as
+    /// another spelling of a field either.
+    #[test]
+    fn the_title_is_never_copied() {
+        let fx = fixture();
+        fx.databases.install_for_test(
+            "personal",
+            vec![TestEntry::new("the-title").field("title", "a field of its own")],
+        );
+        let open = fx.databases.open("personal").ok().unwrap();
+        let uuid = open.entries()[0].uuid;
+        assert_eq!(
+            wire_entries("personal", &open.entries())[0].fields,
+            ["title"]
+        );
+        drop(open);
+
+        for field in ["Title", "custom:Title"] {
+            assert_eq!(
+                copy(&fx, "personal", uuid, field),
+                Err(CopyError::FieldEmpty {
+                    db: "personal".to_string()
+                }),
+                "{field:?}"
+            );
+        }
+        copy(&fx, "personal", uuid, "title").expect("a field keyed `title` is its own");
+        assert_eq!(*fx.offered.lock().unwrap(), ["a field of its own"]);
+    }
+
+    /// The entry's `otp` field holds the TOTP seed: `totp` offers the code
+    /// made from it, and no name reaches the seed itself. A field keyed
+    /// `OTP` is a different field and copies.
+    #[test]
+    fn the_otp_field_is_never_copied_only_its_code() {
+        let fx = fixture();
+        fx.databases
+            .install_for_test("personal", vec![entry_with(&["OTP"])]);
+        let uuid = fx.databases.open("personal").ok().unwrap().entries()[0].uuid;
+
+        for field in ["otp", "custom:otp"] {
             assert_eq!(
                 copy(&fx, "personal", uuid, field),
                 Err(CopyError::FieldEmpty {
@@ -326,39 +377,69 @@ mod tests {
             );
         }
         assert!(fx.offered.lock().unwrap().is_empty());
-    }
 
-    /// The entry's `otp` field holds the TOTP seed: `totp` offers the code
-    /// made from it, and no name reaches the seed itself. A custom field that
-    /// differs from `otp` only in case is a different field and copies.
-    #[test]
-    fn the_otp_field_is_never_copied_only_its_code() {
-        let fx = fixture();
-        fx.databases.install_for_test(
-            "personal",
-            vec![
-                TestEntry::new("site")
-                    .field("otp", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=6")
-                    .field("OTP", "custom-value"),
-            ],
-        );
-        let uuid = fx.databases.open("personal").ok().unwrap().entries()[0].uuid;
-
-        assert_eq!(
-            copy(&fx, "personal", uuid, Field::Custom("otp".to_string())),
-            Err(CopyError::FieldEmpty {
-                db: "personal".to_string()
-            })
-        );
-        assert!(fx.offered.lock().unwrap().is_empty());
-
-        copy(&fx, "personal", uuid, Field::Totp).expect("the code is offered");
-        copy(&fx, "personal", uuid, Field::Custom("OTP".to_string())).expect("copied");
+        copy(&fx, "personal", uuid, "totp").expect("the code is offered");
+        copy(&fx, "personal", uuid, "OTP").expect("copied");
         let offered = fx.offered.lock().unwrap().clone();
         assert_eq!(offered.len(), 2);
         assert_eq!(offered[0].len(), 6);
         assert!(offered[0].chars().all(|c| c.is_ascii_digit()));
-        assert_eq!(offered[1], "custom-value");
+        assert_eq!(offered[1], "value-of-OTP");
+    }
+
+    /// `totp` is the code's name: a field stored under exactly that key is
+    /// not offered, and `copy … totp` gives the code, or nothing when the
+    /// entry has no seed. `TOTP` and `Totp` are fields of their own.
+    #[test]
+    fn a_stored_totp_field_is_not_the_code() {
+        let fx = fixture();
+        fx.databases.install_for_test(
+            "personal",
+            vec![
+                TestEntry::new("with seed")
+                    .field("otp", SEED)
+                    .field("totp", "stored")
+                    .field("TOTP", "upper")
+                    .field("Totp", "mixed"),
+                TestEntry::new("no seed").field("totp", "stored"),
+            ],
+        );
+        let open = fx.databases.open("personal").ok().unwrap();
+        let entries = open.entries();
+        let uuid = |title: &str| {
+            entries
+                .iter()
+                .find(|e| e.title.as_deref() == Some(title))
+                .expect("entry")
+                .uuid
+        };
+        let (with_seed, no_seed) = (uuid("with seed"), uuid("no seed"));
+        let listed = wire_entries("personal", &entries);
+        drop(open);
+        for entry in &listed {
+            let expected: &[&str] = if entry.uuid == with_seed {
+                &["totp", "TOTP", "Totp"]
+            } else {
+                &[]
+            };
+            assert_eq!(entry.fields, expected);
+        }
+
+        copy(&fx, "personal", with_seed, "totp").expect("the code");
+        copy(&fx, "personal", with_seed, "TOTP").expect("upper");
+        copy(&fx, "personal", with_seed, "Totp").expect("mixed");
+        let offered = fx.offered.lock().unwrap().clone();
+        assert_eq!(offered[0].len(), 6);
+        assert!(offered[0].chars().all(|c| c.is_ascii_digit()));
+        assert_eq!(offered[1..], ["upper", "mixed"]);
+
+        assert_eq!(
+            copy(&fx, "personal", no_seed, "totp"),
+            Err(CopyError::FieldEmpty {
+                db: "personal".to_string()
+            })
+        );
+        assert_eq!(fx.offered.lock().unwrap().len(), 3);
     }
 
     #[test]
@@ -368,7 +449,7 @@ mod tests {
         let request = CopyRequest {
             db: "personal".to_string(),
             uuid,
-            field: Field::Password,
+            field: "Password".to_string(),
         };
 
         assert_eq!(fx.api.copy(&request, &outside()), Err(CopyError::NoDisplay));
@@ -399,7 +480,7 @@ mod tests {
         let request = CopyRequest {
             db: "personal".to_string(),
             uuid,
-            field: Field::Password,
+            field: "Password".to_string(),
         };
         let session = |locked: bool, active: bool| {
             let id = SESSION.to_string();
@@ -436,10 +517,10 @@ mod tests {
         let fx = fixture();
         let uuid = unlock_with_entry(&fx, "personal");
 
-        let outcome = copy(&fx, "personal", uuid, Field::Password).expect("copied");
+        let outcome = copy(&fx, "personal", uuid, "Password").expect("copied");
 
         assert_eq!(*fx.offered.lock().unwrap(), ["entrypass1"]);
-        assert_eq!(outcome.copied, Field::Password);
+        assert_eq!(outcome.copied, "Password");
     }
 
     /// The log says which field of which entry left which database, and
@@ -450,11 +531,11 @@ mod tests {
         let uuid = unlock_with_entry(&fx, "personal");
 
         let log = capture_stderr(|| {
-            copy(&fx, "personal", uuid, Field::Password).expect("copied");
+            copy(&fx, "personal", uuid, "Password").expect("copied");
         });
 
         assert!(
-            log.contains(" INFO  copied Password of \"site\" from \"personal\"\n"),
+            log.contains(" INFO  copied \"Password\" of \"site\" from \"personal\"\n"),
             "{log}"
         );
         assert!(!log.contains("entrypass1"), "{log}");
@@ -494,7 +575,7 @@ mod tests {
         let fx = fixture();
         let uuid = unlock_with_entry(&fx, "personal");
         unlock_with_entry(&fx, "work");
-        copy(&fx, "personal", uuid, Field::Password).expect("copied");
+        copy(&fx, "personal", uuid, "Password").expect("copied");
         assert!(live(&fx, 0), "sanity: nothing has ended it yet");
 
         fx.databases.lock("work").unwrap();
@@ -509,7 +590,7 @@ mod tests {
         for kind in ["lock_all", "idle", "stale", "request"] {
             let fx = fixture();
             let uuid = unlock_with_entry(&fx, "personal");
-            copy(&fx, "personal", uuid, Field::Password).expect("copied");
+            copy(&fx, "personal", uuid, "Password").expect("copied");
             match kind {
                 "lock_all" => fx.databases.lock_all(),
                 "idle" => fx
@@ -536,7 +617,7 @@ mod tests {
         for entry_point in ["status", "list", "list all", "unlock", "copy", "ssh keys"] {
             let fx = fixture();
             let uuid = unlock_with_entry(&fx, "personal");
-            copy(&fx, "personal", uuid, Field::Password).expect("copied");
+            copy(&fx, "personal", uuid, "Password").expect("copied");
             fx.databases.change_file_for_test("personal");
             match entry_point {
                 "status" => drop(fx.api.status()),
@@ -553,7 +634,7 @@ mod tests {
                     },
                     &outside(),
                 )),
-                "copy" => drop(copy(&fx, "personal", uuid, Field::Password)),
+                "copy" => drop(copy(&fx, "personal", uuid, "Password")),
                 _ => drop(
                     fx.api
                         .ssh_keys(&crate::frontends::control::proto::SshKeysRequest { db: None }),
@@ -761,7 +842,7 @@ mod tests {
             let _ = uuid;
             unlock_with_entry(&fx, "personal")
         };
-        copy(&fx, "personal", uuid, Field::Password).expect("copied");
+        copy(&fx, "personal", uuid, "Password").expect("copied");
 
         fx.api.copies.locked(&fx.databases, "personal", &old);
 
@@ -776,7 +857,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(20));
         let before = Moment::now();
-        assert!(copy(&fx, "personal", Uuid::new_v4(), Field::Password).is_err());
+        assert!(copy(&fx, "personal", Uuid::new_v4(), "Password").is_err());
         // The refusal did not reset the timer, so the install's activity,
         // which is older than `before`, is what is measured.
         fx.databases.expire_idle(before + timeout);
@@ -786,7 +867,7 @@ mod tests {
         let _ = uuid;
         std::thread::sleep(Duration::from_millis(20));
         let before = Moment::now();
-        copy(&fx, "personal", uuid2, Field::Password).expect("copied");
+        copy(&fx, "personal", uuid2, "Password").expect("copied");
         fx.databases
             .expire_idle(before + timeout - Duration::from_millis(10));
         assert!(fx.databases.any_unlocked(), "the copy reset the timer");

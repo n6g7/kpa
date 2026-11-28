@@ -14,8 +14,7 @@ use std::time::Duration;
 
 use kpa::config::DatabaseConfig;
 use kpa::databases::{
-    Begin, Databases, EntryField, KdfCeiling, OpenError, UnlockFailure, Unlocking, VaultError,
-    VaultFile,
+    Begin, Databases, KdfCeiling, OpenError, UnlockFailure, Unlocking, VaultError, VaultFile,
 };
 use zeroize::Zeroizing;
 
@@ -138,12 +137,12 @@ fn custom_colliding_field_is_read_by_its_literal_key() {
     );
 }
 
-/// An entry's fields against a real database: standard ones in order, the
-/// code made from `otp`, then custom fields sorted by key. A custom key that
-/// only differs in case from a standard one is a custom field, listed under
-/// its exact key.
+/// What an entry stores, against a real database: the exact key of every
+/// non-empty string field, sorted, except the `otp` seed, whose presence is
+/// reported apart. A key that only differs in case from a standard one is a
+/// field of its own.
 #[test]
-fn copyable_fields_against_a_real_database() {
+fn stored_fields_against_a_real_database() {
     let databases = unlocked_at(&common::fields_db(), None);
     let open = databases.open("work").expect("unlocked");
 
@@ -153,25 +152,22 @@ fn copyable_fields_against_a_real_database() {
         .find(|e| e.title.as_deref() == Some("Example"))
         .expect("fixture should have an Example entry");
 
-    // Custom keys sort by their raw key: "PASSWORD" sorts ahead of "api-key"
-    // (ASCII uppercase precedes lowercase).
+    // Keys sort by their raw bytes: "PASSWORD" ahead of "Password", and
+    // "api-key" after the capitalised ones.
     assert_eq!(
-        example.fields,
-        vec![
-            EntryField::Username,
-            EntryField::Password,
-            EntryField::Url,
-            EntryField::Totp,
-            EntryField::Custom("PASSWORD".to_string()),
-            EntryField::Custom("api-key".to_string()),
+        example.stored.keys,
+        [
+            "PASSWORD", "Password", "Title", "URL", "UserName", "api-key"
         ]
     );
+    assert!(example.stored.totp);
 
     let no_otp = entries
         .iter()
         .find(|e| e.title.as_deref() == Some("NoOtp"))
         .expect("fixture should have a NoOtp entry");
-    assert!(!no_otp.fields.contains(&EntryField::Totp));
+    assert!(!no_otp.stored.totp);
+    assert!(!no_otp.stored.keys.iter().any(|key| key == "otp"));
 }
 
 /// `Entry::totp` against the same database, end to end through the unlock

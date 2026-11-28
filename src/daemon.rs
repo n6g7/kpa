@@ -191,7 +191,7 @@ mod tests {
     use crate::databases::testing::TestEntry;
     use crate::display_session::DisplaySession;
     use crate::frontends::control::proto::{
-        CopyRequest, Field, Op, Request, UnlockRequest, encode_request,
+        CopyRequest, Op, Request, UnlockRequest, encode_request,
     };
     use crate::prompt::{PromptOutcome, Scripted, Step};
 
@@ -311,7 +311,7 @@ mod tests {
             Op::Copy(CopyRequest {
                 db: "personal".to_string(),
                 uuid,
-                field: Field::Password,
+                field: "Password".to_string(),
             }),
         );
         assert!(reply.contains("\"ok\":true"), "the copy failed: {reply}");

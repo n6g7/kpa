@@ -9,6 +9,7 @@ pub mod proto;
 mod authz;
 mod copy;
 mod deadline;
+mod offer;
 mod serve;
 #[cfg(test)]
 mod testing;
@@ -20,10 +21,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 use self::proto::{
-    DatabaseStatus, Field, ListError, ListRequest, ListResponse, LockError, LockRequest, Op,
-    Request, Response, SshApproveError, SshApproveRequest, SshKeysError, SshKeysReport,
-    SshKeysRequest, StatusResponse, WireEntry, WireGrant, WireHost, WirePending,
-    WireRequestDetails, WireScope, WireSkippedKey, WireSshKey,
+    DatabaseStatus, ListError, ListRequest, ListResponse, LockError, LockRequest, Op, Request,
+    Response, SshApproveError, SshApproveRequest, SshKeysError, SshKeysReport, SshKeysRequest,
+    StatusResponse, WireEntry, WireGrant, WireHost, WirePending, WireRequestDetails, WireScope,
+    WireSkippedKey, WireSshKey,
 };
 use crate::authn::Requester;
 use crate::clock::Moment;
@@ -383,11 +384,7 @@ fn wire_entries(db_name: &str, entries: &[EntrySummary]) -> Vec<WireEntry> {
             username: entry.username.clone(),
             url: entry.url.clone(),
             group: entry.group.clone(),
-            fields: entry
-                .fields
-                .iter()
-                .map(|field| Field::from(field).to_string())
-                .collect(),
+            fields: offer::names(&entry.stored),
         })
         .collect()
 }

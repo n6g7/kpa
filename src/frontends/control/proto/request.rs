@@ -18,7 +18,7 @@ use super::unlock::UnlockRequest;
 use crate::prompt::PromptOn;
 
 /// One request. `op` is `#[serde(flatten)]`ed so the wire shape is a single
-/// flat object (`{"v":2,"op":"unlock","db":"personal"}`) rather than
+/// flat object (`{"v":3,"op":"unlock","db":"personal"}`) rather than
 /// `op` nesting its own sub-object.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Request {
@@ -144,7 +144,6 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::super::copy::Field;
     use super::*;
 
     /// The nil uuid, used everywhere below a request needs one — these
@@ -161,56 +160,56 @@ mod tests {
     #[test]
     fn requests_match_the_documented_wire_shape() {
         let cases = [
-            (Op::Status, json!({"v": 2, "op": "status"})),
+            (Op::Status, json!({"v": 3, "op": "status"})),
             (
                 Op::Unlock(UnlockRequest {
                     db: "personal".to_string(),
                 }),
-                json!({"v": 2, "op": "unlock", "db": "personal"}),
+                json!({"v": 3, "op": "unlock", "db": "personal"}),
             ),
             (
                 Op::Lock(LockRequest {
                     db: Some("personal".to_string()),
                 }),
-                json!({"v": 2, "op": "lock", "db": "personal"}),
+                json!({"v": 3, "op": "lock", "db": "personal"}),
             ),
             // Omitted, not null: the doc's "db omitted = lock all".
             (
                 Op::Lock(LockRequest { db: None }),
-                json!({"v": 2, "op": "lock"}),
+                json!({"v": 3, "op": "lock"}),
             ),
             (
                 Op::List(ListRequest {
                     db: Some("personal".to_string()),
                 }),
-                json!({"v": 2, "op": "list", "db": "personal"}),
+                json!({"v": 3, "op": "list", "db": "personal"}),
             ),
             (
                 Op::List(ListRequest { db: None }),
-                json!({"v": 2, "op": "list"}),
+                json!({"v": 3, "op": "list"}),
             ),
             (
                 Op::SshKeys(SshKeysRequest {
                     db: Some("personal".to_string()),
                 }),
-                json!({"v": 2, "op": "ssh_keys", "db": "personal"}),
+                json!({"v": 3, "op": "ssh_keys", "db": "personal"}),
             ),
             (
                 Op::SshKeys(SshKeysRequest { db: None }),
-                json!({"v": 2, "op": "ssh_keys"}),
+                json!({"v": 3, "op": "ssh_keys"}),
             ),
             (
                 Op::Copy(CopyRequest {
                     db: "personal".to_string(),
                     uuid: uuid(),
-                    field: Field::Password,
+                    field: "Password".to_string(),
                 }),
                 json!({
-                    "v": 2,
+                    "v": 3,
                     "op": "copy",
                     "db": "personal",
                     "uuid": uuid(),
-                    "field": "password",
+                    "field": "Password",
                 }),
             ),
         ];
@@ -244,7 +243,7 @@ mod tests {
             assert_eq!(
                 serde_json::to_value(&request).expect("request should serialize"),
                 json!({
-                    "v": 2,
+                    "v": 3,
                     "preferred_prompt": wire,
                     "op": "unlock",
                     "db": "personal",
@@ -259,49 +258,49 @@ mod tests {
     #[test]
     fn decodes_each_documented_request() {
         let cases = [
-            (r#"{"v":2,"op":"status"}"#, Op::Status),
+            (r#"{"v":3,"op":"status"}"#, Op::Status),
             (
-                r#"{"v":2,"op":"unlock","db":"personal"}"#,
+                r#"{"v":3,"op":"unlock","db":"personal"}"#,
                 Op::Unlock(UnlockRequest {
                     db: "personal".to_string(),
                 }),
             ),
             (
-                r#"{"v":2,"op":"lock","db":"personal"}"#,
+                r#"{"v":3,"op":"lock","db":"personal"}"#,
                 Op::Lock(LockRequest {
                     db: Some("personal".to_string()),
                 }),
             ),
-            (r#"{"v":2,"op":"lock"}"#, Op::Lock(LockRequest { db: None })),
+            (r#"{"v":3,"op":"lock"}"#, Op::Lock(LockRequest { db: None })),
             // An explicit null reads the same as omitting it, so a client
             // that spells out its empty fields is still understood.
             (
-                r#"{"v":2,"op":"lock","db":null}"#,
+                r#"{"v":3,"op":"lock","db":null}"#,
                 Op::Lock(LockRequest { db: None }),
             ),
             (
-                r#"{"v":2,"op":"list","db":"personal"}"#,
+                r#"{"v":3,"op":"list","db":"personal"}"#,
                 Op::List(ListRequest {
                     db: Some("personal".to_string()),
                 }),
             ),
-            (r#"{"v":2,"op":"list"}"#, Op::List(ListRequest { db: None })),
+            (r#"{"v":3,"op":"list"}"#, Op::List(ListRequest { db: None })),
             (
-                r#"{"v":2,"op":"ssh_keys","db":"personal"}"#,
+                r#"{"v":3,"op":"ssh_keys","db":"personal"}"#,
                 Op::SshKeys(SshKeysRequest {
                     db: Some("personal".to_string()),
                 }),
             ),
             (
-                r#"{"v":2,"op":"ssh_keys"}"#,
+                r#"{"v":3,"op":"ssh_keys"}"#,
                 Op::SshKeys(SshKeysRequest { db: None }),
             ),
             (
-                r#"{"v":2,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"password"}"#,
+                r#"{"v":3,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"Password"}"#,
                 Op::Copy(CopyRequest {
                     db: "personal".to_string(),
                     uuid: uuid(),
-                    field: Field::Password,
+                    field: "Password".to_string(),
                 }),
             ),
         ];
@@ -316,7 +315,7 @@ mod tests {
 
     #[test]
     fn decodes_a_preferred_prompt() {
-        let line = r#"{"v":2,"preferred_prompt":"terminal","op":"unlock","db":"personal"}"#;
+        let line = r#"{"v":3,"preferred_prompt":"terminal","op":"unlock","db":"personal"}"#;
         let request = decode_request(line).expect("should decode");
         assert_eq!(request.preferred_prompt, Some(PromptOn::Terminal));
         assert_eq!(
@@ -326,7 +325,7 @@ mod tests {
             })
         );
 
-        let line = r#"{"v":2,"op":"unlock","db":"personal","preferred_prompt":"screen"}"#;
+        let line = r#"{"v":3,"op":"unlock","db":"personal","preferred_prompt":"screen"}"#;
         let request = decode_request(line).expect("should decode");
         assert_eq!(request.preferred_prompt, Some(PromptOn::Screen));
     }
@@ -350,7 +349,7 @@ mod tests {
             Op::Copy(CopyRequest {
                 db: "personal".to_string(),
                 uuid: uuid(),
-                field: Field::Notes,
+                field: "Notes".to_string(),
             }),
             Op::SshKeys(SshKeysRequest { db: None }),
             Op::SshKeys(SshKeysRequest {
@@ -406,12 +405,12 @@ mod tests {
             "{}",
             r#"{"op":"status"}"#,                     // no `v`
             r#"{"v":"2","op":"status"}"#,             // `v` not a number
-            r#"{"v":2,"op":"teleport"}"#,             // unknown op
-            r#"{"v":2,"op":"unlock"}"#,               // `unlock` needs a `db`
-            r#"{"v":2,"op":"copy","db":"personal"}"#, // `copy` needs a `uuid` and `field`
+            r#"{"v":3,"op":"teleport"}"#,             // unknown op
+            r#"{"v":3,"op":"unlock"}"#,               // `unlock` needs a `db`
+            r#"{"v":3,"op":"copy","db":"personal"}"#, // `copy` needs a `uuid` and `field`
             // `preferred_prompt` has two values, and these aren't them.
-            r#"{"v":2,"preferred_prompt":"tty","op":"status"}"#,
-            r#"{"v":2,"preferred_prompt":true,"op":"status"}"#,
+            r#"{"v":3,"preferred_prompt":"tty","op":"status"}"#,
+            r#"{"v":3,"preferred_prompt":true,"op":"status"}"#,
         ] {
             assert!(
                 matches!(decode_request(line), Err(DecodeError::MalformedRequest)),
@@ -420,21 +419,21 @@ mod tests {
         }
     }
 
-    /// `field` is no longer a closed allow-list: any string decodes,
-    /// because any string might name a real custom field on the entry
-    /// `copy` is asked about — see `proto::copy::Field`'s own doc comment.
-    /// A name that doesn't resolve to anything fails at `copy` time
-    /// (`FieldEmpty`), not at decode time.
+    /// `field` is no closed list: any string decodes, because any string
+    /// might be a name the entry `copy` is asked about offers — see
+    /// `proto::copy::CopyRequest`'s doc comment. A name that doesn't
+    /// resolve to anything fails at `copy` time (`FieldEmpty`), not at
+    /// decode time.
     #[test]
     fn an_unrecognized_field_name_still_decodes() {
-        let line = r#"{"v":2,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"notes_dump"}"#;
+        let line = r#"{"v":3,"op":"copy","db":"personal","uuid":"00000000-0000-0000-0000-000000000000","field":"notes_dump"}"#;
         let request = decode_request(line).expect("an unrecognized field name should still decode");
         assert_eq!(
             request.op,
             Op::Copy(CopyRequest {
                 db: "personal".to_string(),
                 uuid: uuid(),
-                field: Field::Custom("notes_dump".to_string()),
+                field: "notes_dump".to_string(),
             })
         );
     }
