@@ -371,6 +371,12 @@ pub fn start_ssh_agent(daemon: &InProcessDaemon) -> SshAgent {
     }
 }
 
+/// How long a test waits on a pty for what a spawned `kpa` writes there. It
+/// is a hang detector, not a performance bound: an unlock of the fixture
+/// spends about half a second of CPU in its key derivation, and a loaded
+/// runner, with several of these running side by side, takes many times that.
+pub const PTY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A pseudo-terminal, for driving `kpa unlock`'s terminal prompt
 /// (`docs/headless.md` § 4) the way a real shell would: a spawned process
 /// attaches the slave as its controlling terminal (`attach`), and the test
