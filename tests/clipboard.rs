@@ -85,14 +85,41 @@ fn display_session() -> Option<String> {
     (!session.is_empty()).then_some(session)
 }
 
-/// A daemon like `start`'s, whose state names the real display session.
+/// A daemon like `start`'s, on the real display session: its state names it,
+/// and its requesters run on its desktop, which is what `copy` checks them
+/// against (`start` puts both on a made-up session).
 fn start_on_the_display_session(config: &str, session: String) -> InProcessDaemon {
     let daemon = InProcessDaemon::start(config);
+    kpa::authn::assume_cgroup(&daemon.socket, &common::cgroup_on(true, &session));
     daemon.set_display(DisplaySession::Unlocked {
         id: session,
         active: true,
     });
     daemon
+}
+
+/// A `wl-copy` that owns the clipboard until it is dropped, which ends it.
+struct Owner(std::process::Child);
+
+impl Owner {
+    /// Starts `wl-copy --foreground text` on `display`, so it stays a child
+    /// of the test to end, instead of forking away to serve until something
+    /// else takes the clipboard.
+    fn start(display: &str, text: &str) -> Owner {
+        let child = Command::new("wl-copy")
+            .args(["--foreground", text])
+            .env("WAYLAND_DISPLAY", display)
+            .spawn()
+            .expect("spawn wl-copy");
+        Owner(child)
+    }
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 /// The uuid `tests/fixture.sh`'s password-only database's one entry was
@@ -294,13 +321,9 @@ fn surviving_a_takeover_past_the_timeout() {
 
     assert_eq!(run(&["copy", "personal", uuid, "password"])["ok"], true);
 
-    // Immediately take the clipboard with something else.
-    let status = Command::new("wl-copy")
-        .arg("hello")
-        .env("WAYLAND_DISPLAY", &display)
-        .status()
-        .expect("spawn wl-copy");
-    assert!(status.success());
+    // Immediately take the clipboard with something else, until the end of
+    // the test.
+    let _owner = Owner::start(&display, "hello");
 
     // Wait past clipboard_timeout.
     std::thread::sleep(Duration::from_millis(1500));
