@@ -8,6 +8,7 @@ pub mod authn;
 pub mod authz;
 mod cancel;
 pub mod clipboard;
+pub mod clock;
 pub mod config;
 pub mod daemon;
 pub mod databases;

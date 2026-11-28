@@ -25,6 +25,7 @@ use self::proto::{
     WireSkippedKey, WireSshKey,
 };
 use crate::authn::Requester;
+use crate::clock::Moment;
 use crate::config::Config;
 use crate::databases::{Databases, EntrySummary, Open, OpenError, UnknownDb};
 use crate::display_session::DisplayHandle;
@@ -290,7 +291,7 @@ impl Api {
             let Ok(open) = self.databases.open(&config.name) else {
                 continue;
             };
-            let idle_lock_in = open.idle_left(now).as_secs();
+            let idle_lock_in = open.idle_left(Moment::now()).as_secs();
             for grant in self.approvals.granted(&open, now) {
                 let by = match grant.by {
                     GrantSource::OnScreen => "on_screen",
@@ -405,7 +406,7 @@ mod tests {
 
     /// Whether `name` is still unlocked after the idle timer would have run
     /// from `at`.
-    fn survives_idle_at(fx: &Fixture, name: &str, at: Instant) -> bool {
+    fn survives_idle_at(fx: &Fixture, name: &str, at: Moment) -> bool {
         fx.databases.expire_idle(at);
         fx.databases
             .snapshot()
@@ -505,7 +506,7 @@ mod tests {
         fx.databases.install_for_test("personal", vec![]);
         fx.databases.install_for_test("work", vec![]);
         std::thread::sleep(Duration::from_millis(20));
-        let before = Instant::now();
+        let before = Moment::now();
 
         fx.api.list(&list(Some("personal"))).expect("listed");
 
@@ -519,7 +520,7 @@ mod tests {
         let fx = fixture_with(&["personal", "work"], "idle_timeout = \"1h\"");
         fx.databases.install_for_test("personal", vec![]);
         std::thread::sleep(Duration::from_millis(20));
-        let before = Instant::now();
+        let before = Moment::now();
 
         fx.api.status();
         let _ = fx.api.list(&list(Some("work")));

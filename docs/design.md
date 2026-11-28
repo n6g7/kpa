@@ -242,7 +242,7 @@ Triggers:
 | Screen lock | logind session `Lock` signal, or `LockedHint` becoming true, on the user's display session (`User.Display` of `Manager.GetUser(uid)`). Covers `loginctl lock-session` and `IdleAction=lock`; a locker that calls neither is invisible (threat model ASM-7) |
 | Suspend | logind `PrepareForSleep(true)`: lock everything, then release the `delay` sleep inhibitor, which kpa holds while anything is unlocked. Logind allows `InhibitDelayMaxUSec` (5 s default) before sleeping regardless |
 | Lost watch | the connection to the bus drops, or logind's name changes owner (a restart): every database locks, and the subscription is re-established with backoff, resolving the new owner |
-| Idle | per database: no successful `list` of it (a `list` of all counts for each database it reads), and no `copy`, `ssh keys`, local signature or unlock that installed it, for `idle_timeout` (default 30m); `status` and `lock` don't count |
+| Idle | per database: no successful `list` of it (a `list` of all counts for each database it reads), and no `copy`, `ssh keys`, local signature or unlock that installed it, for `idle_timeout` (default 30m); `status` and `lock` don't count. The timer runs on a clock that counts the time the machine sleeps, so a suspend kpa wasn't told of still counts toward it |
 | Explicit | `kpa lock`, or the tray menu |
 | File changed | the freshness guard, at the next request that reads the database, `status` included (§ Files and freshness) |
 

@@ -192,12 +192,11 @@ fn field_value(entry: &Entry<'_>, field: &Field) -> Option<Zeroizing<String>> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use std::sync::mpsc;
 
     use super::*;
     use crate::clipboard::{Backend, ClipboardError, OfferHandles};
+    use crate::clock::Moment;
     use crate::config::Config;
     use crate::databases::testing::TestEntry;
     use crate::frontends::control::proto::LockRequest;
@@ -466,7 +465,7 @@ mod tests {
                 "lock_all" => fx.databases.lock_all(),
                 "idle" => fx
                     .databases
-                    .expire_idle(Instant::now() + Duration::from_secs(7200)),
+                    .expire_idle(Moment::now() + Duration::from_secs(7200)),
                 "stale" => {
                     fx.databases.change_file_for_test("personal");
                     fx.databases.drop_stale(["personal"]);
@@ -727,7 +726,7 @@ mod tests {
         let timeout = Duration::from_secs(3600);
 
         std::thread::sleep(Duration::from_millis(20));
-        let before = Instant::now();
+        let before = Moment::now();
         assert!(copy(&fx, "personal", Uuid::new_v4(), Field::Password).is_err());
         // The refusal did not reset the timer, so the install's activity,
         // which is older than `before`, is what is measured.
@@ -737,7 +736,7 @@ mod tests {
         let uuid2 = unlock_with_entry(&fx, "personal");
         let _ = uuid;
         std::thread::sleep(Duration::from_millis(20));
-        let before = Instant::now();
+        let before = Moment::now();
         copy(&fx, "personal", uuid2, Field::Password).expect("copied");
         fx.databases
             .expire_idle(before + timeout - Duration::from_millis(10));

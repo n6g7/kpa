@@ -497,9 +497,10 @@ fn build_menu(
 mod tests {
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::*;
+    use crate::clock::Moment;
     use crate::config::{Config, DatabaseConfig};
     use crate::databases::testing::{PASSWORD, TestEntry};
     use crate::display_session::{self, DisplaySession, DisplayWriter};
@@ -928,7 +929,7 @@ mod tests {
 
         databases.install_for_test("personal", vec![]);
         told();
-        databases.expire_idle(Instant::now());
+        databases.expire_idle(Moment::now());
         assert_eq!(told(), 1, "an idle lock");
 
         databases.install_for_test("work", vec![]);
