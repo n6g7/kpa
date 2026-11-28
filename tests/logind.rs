@@ -910,6 +910,39 @@ fn auto_lock_locks_everything_and_follows_the_display_session_over_a_bus() {
     assert_eq!(display.get(), DisplaySession::None);
 }
 
+/// A suspend whose `PrepareForSleep(false)` the watch never sees, because
+/// logind went away in between, still ends: the next unlock takes the sleep
+/// inhibitor from the new logind, as it would after any resume.
+#[test]
+fn a_watch_lost_during_a_suspend_still_holds_the_inhibitor_at_the_next_unlock_over_a_bus() {
+    let bus = PrivateBus::with_policy(STOCK_POLICY);
+    let mock = MockLogind::start(&bus.address);
+    let (databases, display) = auto_locked(&bus.address);
+    eventually("the first display session state", || {
+        display.get() == unlocked("31")
+    });
+
+    unlock_all(&databases);
+    eventually("the sleep inhibitor to be taken", || {
+        mock.inhibitor_count() == 1 && !mock.last_inhibitor_released()
+    });
+    mock.prepare_for_sleep(true);
+    eventually("the suspend to lock everything", || {
+        !databases.any_unlocked()
+    });
+
+    // Logind goes away before it says `PrepareForSleep(false)`.
+    drop(mock);
+    eventually("the lost watch", || display.get() == DisplaySession::None);
+    let restarted = MockLogind::start(&bus.address);
+    eventually("the watch to be back", || display.get() == unlocked("31"));
+
+    unlock_all(&databases);
+    eventually("the new logind to be given a sleep inhibitor", || {
+        restarted.inhibitor_count() == 1 && !restarted.last_inhibitor_released()
+    });
+}
+
 /// A second client of the bus. Under the stock policy it can't call anyone
 /// but the bus and logind, but it can send a signal to any connection, and
 /// the receiver's match rules don't apply to a signal sent to it.

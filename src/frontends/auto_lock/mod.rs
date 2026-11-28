@@ -113,7 +113,10 @@ impl AutoLock {
 pub struct SleepState {
     /// The last [`Event::Unlocked`].
     unlocked: bool,
-    /// Between [`Event::Sleeping`] and [`Event::Resumed`].
+    /// Between [`Event::Sleeping`] and [`Event::Resumed`], or until the
+    /// watch is lost: the [`Event::Resumed`] of a suspend that began before
+    /// the loss is never seen, and the next [`Event::Sleeping`] sets this
+    /// again.
     sleeping: bool,
 }
 
@@ -125,8 +128,8 @@ impl SleepState {
         match event {
             Event::Unlocked(unlocked) => self.unlocked = *unlocked,
             Event::Sleeping => self.sleeping = true,
-            Event::Resumed => self.sleeping = false,
-            Event::DisplayChanged(_) | Event::LockRequested | Event::WatchLost => {}
+            Event::Resumed | Event::WatchLost => self.sleeping = false,
+            Event::DisplayChanged(_) | Event::LockRequested => {}
         }
         self.unlocked && !self.sleeping
     }
@@ -414,13 +417,24 @@ mod tests {
     fn other_events_leave_the_decision_as_it_was() {
         use Event::*;
         assert_eq!(
-            holds(&[
-                Unlocked(true),
-                LockRequested,
-                WatchLost,
-                DisplayChanged(session(true))
-            ]),
-            [true; 4]
+            holds(&[Unlocked(true), LockRequested, DisplayChanged(session(true))]),
+            [true; 3]
+        );
+    }
+
+    /// A watch lost during a suspend never sees the resume. Whatever is
+    /// unlocked afterwards is held again, or logind would not wait for kpa
+    /// at the next suspend.
+    #[test]
+    fn a_lost_watch_ends_a_suspend_whose_resume_it_missed() {
+        use Event::*;
+        assert_eq!(
+            holds(&[Unlocked(true), Sleeping, WatchLost, Unlocked(true)]),
+            [true, false, true, true]
+        );
+        assert_eq!(
+            holds(&[Unlocked(true), Sleeping, WatchLost, Unlocked(false)]),
+            [true, false, true, false]
         );
     }
 
