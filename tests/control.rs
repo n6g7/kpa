@@ -1110,7 +1110,7 @@ mod terminal_passed_with_the_request {
     use super::{InProcessDaemon, common};
     use crate::common::{Pty, config_toml};
 
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const TIMEOUT: Duration = common::PTY_TIMEOUT;
 
     /// Sends an `unlock` of `personal` with `pty`'s terminal attached, and
     /// reads the reply on another thread while `during` plays the user.
@@ -1204,7 +1204,7 @@ mod terminal_unlock {
     use super::{failing_prompt_daemon, in_process_with_prompt};
     use crate::common::{self, Pty};
 
-    const TIMEOUT: Duration = Duration::from_secs(5);
+    const TIMEOUT: Duration = common::PTY_TIMEOUT;
 
     /// Spawns `kpa --socket <socket> unlock [args]` attached to `pty` as
     /// its controlling terminal, stdin/stdout/stderr included, so
