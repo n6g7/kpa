@@ -383,7 +383,7 @@ and `copy`. `QUERY` is fzf's initial query.
 | Ctrl+U | `username` |
 | Ctrl+L | `url` |
 | Ctrl+T | `totp` |
-| Ctrl+O | a field chosen in a second fzf over the entry's own `fields`, custom ones included, headed by the entry's title |
+| Ctrl+O | a field chosen in a second fzf over the entry's own `fields`, custom ones included, headed by the entry's title: the first line of the list on the pipe, which fzf shows and can't choose (`--header-lines=1`), cut to 64 bytes. No text of an entry is ever on fzf's command line |
 
 `fzf` is looked up on `PATH` when `pick` runs. It is not a dependency of the
 package, and there is no setting to point at another binary. Without it `pick`

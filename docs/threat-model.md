@@ -206,7 +206,7 @@ for a channel and G-4 for anything persistent:
 | A-1 | The daemon and nothing else, for one unlock: the password from the user's own typing, the keyfile from its configured path |
 | A-2 field values other than a TOTP seed, and TOTP codes | The clipboard offer, after a `copy` naming that entry and field |
 | A-2 TOTP seeds, attachments, SSH private keys, old versions of entries | Nothing outside the process |
-| A-3 | The answers to `list`, `ssh_keys`, `ssh_pending` and `ssh_grants`, and what the CLI prints of them; the list `kpa pick` pipes to `fzf`, and the line it prints of the entry it copied from; an SSH key's name, in identity comments and in a prompt's message and data; a copied entry's title, in the log |
+| A-3 | The answers to `list`, `ssh_keys`, `ssh_pending` and `ssh_grants`, and what the CLI prints of them; the lists `kpa pick` pipes to its `fzf`s, and the line it prints of the entry it copied from; an SSH key's name, in identity comments and in a prompt's message and data; a copied entry's title, in the log |
 | A-6 | Signatures on the agent socket, under G-13 and G-14 |
 
 - **G-1 Read-only.** kpa never writes, creates, renames, truncates, or locks
@@ -816,8 +816,10 @@ fingerprints of the key and the hosts. The key's name is its entry's
 title unless config gives it one. Response: kpa hands both to the prompt
 program in its environment (`KPA_PROMPT_MESSAGE`, `KPA_PROMPT_DATA`),
 which other uids cannot read, and never touches its argv. `kpa pick`
-hands `fzf` its list on a pipe, and turns off the preview a user's `fzf`
-options may name, which would put each line on a program's command line.
+hands each of its two `fzf`s their list on a pipe, the entry's title
+for the field chooser included, as the first line of its list, and turns
+off the preview a user's `fzf` options may name, which would put each line
+on a program's command line.
 Residual: a prompt program that only takes its text as an argument needs
 a wrapper that copies it onto a command line (the built-in default
 `prompt` is one), and for as long as such a prompt is up, other uids can

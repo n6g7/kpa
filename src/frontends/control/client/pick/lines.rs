@@ -14,6 +14,10 @@ use crate::output::escape_one_line;
 /// What fzf is told to treat as the field delimiter.
 pub(super) const DELIMITER: &str = "\t";
 
+/// The most bytes (escaped) of an entry's title the field list's header line
+/// takes: the budget a prompt gives a key's name.
+const MAX_HEADER_LEN: usize = 64;
+
 fn line(index: usize, text: &str) -> String {
     format!("{index}{DELIMITER}{}", escape_one_line(text, usize::MAX))
 }
@@ -40,13 +44,24 @@ pub(super) fn entry_lines(entries: &[WireEntry]) -> Vec<String> {
         .collect()
 }
 
-/// One line per field name, in the order given.
-pub(super) fn field_lines(fields: &[String]) -> Vec<String> {
-    fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| line(index, field))
-        .collect()
+/// The lines of the list for choosing one of the `fields` of the entry titled
+/// `title`: first a header line, which fzf shows and can't choose (it is
+/// started with `--header-lines=1`), holding the title cut to
+/// [`MAX_HEADER_LEN`], then one line per field name, in the order given. The
+/// header has no index, only the delimiter, so what is shown is the title and
+/// the indexes of the lines after it are those of `fields`.
+pub(super) fn field_lines(title: &str, fields: &[String]) -> Vec<String> {
+    std::iter::once(format!(
+        "{DELIMITER}{}",
+        escape_one_line(title, MAX_HEADER_LEN)
+    ))
+    .chain(
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| line(index, field)),
+    )
+    .collect()
 }
 
 /// The index at the front of `answer`, a line fzf printed, if it is one of
@@ -122,7 +137,25 @@ mod tests {
 
     #[test]
     fn a_field_line_carries_its_index_and_the_escaped_name() {
-        let lines = field_lines(&["password".to_string(), "custom:a\tb".to_string()]);
-        assert_eq!(lines, ["0\tpassword", "1\tcustom:a\\u0009b"]);
+        let lines = field_lines(
+            "GitHub",
+            &["password".to_string(), "custom:a\tb".to_string()],
+        );
+        assert_eq!(lines, ["\tGitHub", "0\tpassword", "1\tcustom:a\\u0009b"]);
+    }
+
+    /// The title heading the field list is one line with no tab but the
+    /// delimiter, and is cut to its budget between whole escapes.
+    #[test]
+    fn the_header_line_is_the_escaped_title_cut_to_its_budget() {
+        let lines = field_lines("a\tb\nc\u{1b}", &[]);
+        assert_eq!(lines, ["\ta\\u0009b\\u000ac\\u001b"]);
+
+        let long = field_lines(&"w".repeat(200_000), &[]);
+        assert_eq!(long, [format!("\t{}", "w".repeat(MAX_HEADER_LEN))]);
+
+        let escapes = field_lines(&"\u{1b}".repeat(100), &[]);
+        assert_eq!(escapes[0].len(), 1 + 60);
+        assert!(escapes[0][1..].split("\\u001b").all(str::is_empty));
     }
 }

@@ -157,19 +157,17 @@ fn ctrl_o_chooses_among_the_entrys_own_fields_custom_ones_included() {
             "{name} in {fields:?}"
         );
     }
-    // The second fzf is headed by the entry's title and keeps no history or
-    // preview either.
+    // The second fzf is headed by the entry's title, the first line of its
+    // list, which it can't choose, and keeps no history or preview either.
+    assert_eq!(fields[0], "\tGitHub");
     let args = fzf.args(2);
     let at = args
         .iter()
         .position(|arg| arg == "--prompt")
         .expect("--prompt");
     assert_eq!(args[at + 1], "field> ");
-    let at = args
-        .iter()
-        .position(|arg| arg == "--header")
-        .expect("--header");
-    assert_eq!(args[at + 1], "GitHub");
+    assert!(args.contains(&"--header-lines=1".to_string()), "{args:?}");
+    assert!(!args.contains(&"--header".to_string()), "{args:?}");
     for flag in [
         "--no-history",
         "--no-preview",
@@ -177,6 +175,52 @@ fn ctrl_o_chooses_among_the_entrys_own_fields_custom_ones_included() {
         "--layout=reverse",
     ] {
         assert!(args.contains(&flag.to_string()), "{flag} in {args:?}");
+    }
+}
+
+/// No vault text is on either fzf's command line, which another uid can read
+/// while the chooser is open: not an entry's title, of whatever length, nor
+/// its username, nor the name of a field. The entry's title reaches the field
+/// chooser on its list, cut to its budget, with the fields after it.
+#[test]
+fn no_entry_text_is_on_either_fzfs_command_line() {
+    let long = format!("TITLEMARK{}", "x".repeat(200_000));
+    for title in ["TITLEMARK", long.as_str()] {
+        let fx = fixture();
+        fx.databases.install_for_test(
+            "personal",
+            vec![
+                TestEntry::new(title)
+                    .field("UserName", "USERMARK")
+                    .field("Password", "pw-mark")
+                    .field("FIELDMARK", "value-mark"),
+            ],
+        );
+        let (_dir, socket) = serve(&fx, true);
+        let fzf = FakeFzf::new(&[
+            &choosing("ctrl-o", "TITLEMARK"),
+            &choosing_field("FIELDMARK"),
+        ]);
+
+        pick(&socket, &fzf, &[]).expect("picked");
+
+        assert_eq!(offered(&fx), ["value-mark"]);
+        for run in [1, 2] {
+            for arg in fzf.args(run) {
+                assert!(arg.len() < 1000, "run {run}: {} bytes", arg.len());
+                for text in ["TITLEMARK", "USERMARK", "FIELDMARK", "mark"] {
+                    assert!(!arg.contains(text), "run {run}: {text} in {arg}");
+                }
+            }
+        }
+        let list = fzf.stdin(2);
+        assert_eq!(list.len(), 1 + 3, "{list:?}");
+        assert!(
+            list[0].starts_with("\tTITLEMARK") && list[0].len() <= 1 + 64,
+            "{}",
+            list[0]
+        );
+        assert!(list[1..].iter().any(|line| line.ends_with("FIELDMARK")));
     }
 }
 
