@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use kpa::config::DatabaseConfig;
 use kpa::databases::{
-    Begin, Ceiling, Databases, OpenError, UnlockFailure, Unlocking, VaultError, VaultFile,
+    Begin, Databases, KdfCeiling, OpenError, UnlockFailure, Unlocking, VaultError, VaultFile,
 };
 use zeroize::Zeroizing;
 
@@ -525,16 +525,16 @@ fn a_key_derivation_above_the_ceiling_is_refused_at_once() {
     let path = dir.path().join("vault.kdbx");
     let one_tib = 1u64 << 40;
     let cases = [
-        (kdbx3_aes(u64::MAX), Ceiling::AesRounds),
-        (kdbx4_aes(u64::MAX), Ceiling::AesRounds),
-        (kdbx4_argon2d(one_tib, 1, 1), Ceiling::Argon2Memory),
+        (kdbx3_aes(u64::MAX), KdfCeiling::AesRounds),
+        (kdbx4_aes(u64::MAX), KdfCeiling::AesRounds),
+        (kdbx4_argon2d(one_tib, 1, 1), KdfCeiling::Argon2Memory),
         (
             kdbx4_argon2d(64 << 20, u64::from(u32::MAX), 2),
-            Ceiling::Argon2Work,
+            KdfCeiling::Argon2Work,
         ),
         (
             kdbx4_argon2d(1 << 20, 1, 1 << 24),
-            Ceiling::Argon2Parallelism,
+            KdfCeiling::Argon2Parallelism,
         ),
     ];
     for (header, ceiling) in cases {

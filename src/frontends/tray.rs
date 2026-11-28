@@ -1199,7 +1199,7 @@ mod tests {
 
     #[test]
     fn every_failure_has_a_short_label_and_never_its_text() {
-        use crate::databases::{Ceiling, VaultFile};
+        use crate::databases::{KdfCeiling, VaultFile};
 
         let path = || std::path::PathBuf::from("/secret/path");
         let cases: [(UnlockFailure, &str); 11] = [
@@ -1232,7 +1232,7 @@ mod tests {
                 "corrupt",
             ),
             (
-                UnlockFailure::Vault(VaultError::KdfAboveCeiling(Ceiling::AesRounds)),
+                UnlockFailure::Vault(VaultError::KdfAboveCeiling(KdfCeiling::AesRounds)),
                 "corrupt",
             ),
             (

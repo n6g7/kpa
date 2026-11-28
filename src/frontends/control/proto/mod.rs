@@ -442,7 +442,7 @@ mod tests {
         let owned = || db.to_string();
 
         // (response, expected code, expected `db`, expected `detail`)
-        let cases: [(Response, &str, Option<&str>, Option<&str>); 30] = [
+        let cases: [(Response, &str, Option<&str>, Option<&str>); 28] = [
             (
                 Response::Unlock(Err(UnlockError::InProgress { db: owned() })),
                 "unlock_in_progress",
@@ -509,34 +509,22 @@ mod tests {
                 None,
             ),
             (
-                Response::Unlock(Err(UnlockError::Corrupt { db: owned() })),
+                Response::Unlock(Err(UnlockError::Corrupt {
+                    db: owned(),
+                    detail: None,
+                })),
                 "corrupt",
                 Some(db),
                 None,
             ),
             (
-                Response::Unlock(Err(UnlockError::UnsupportedFormat { db: owned() })),
+                Response::Unlock(Err(UnlockError::Corrupt {
+                    db: owned(),
+                    detail: Some("not a KDBX3 or KDBX4 file; kpa reads only those".to_string()),
+                })),
                 "corrupt",
                 Some(db),
                 Some("not a KDBX3 or KDBX4 file; kpa reads only those"),
-            ),
-            (
-                Response::Unlock(Err(UnlockError::FileRefused {
-                    db: owned(),
-                    detail: "database file is not a regular file".to_string(),
-                })),
-                "corrupt",
-                Some(db),
-                Some("database file is not a regular file"),
-            ),
-            (
-                Response::Unlock(Err(UnlockError::KdfRefused {
-                    db: owned(),
-                    detail: "key derivation above kpa's ceiling".to_string(),
-                })),
-                "corrupt",
-                Some(db),
-                Some("key derivation above kpa's ceiling"),
             ),
             (
                 Response::Unlock(Err(UnlockError::Io { db: owned() })),
@@ -660,11 +648,13 @@ mod tests {
 
     /// A parser message must never ride out on `detail` — it can embed
     /// raw bytes from the decrypted database (see `vault::VaultError::Corrupt`).
-    /// `Corrupt` carries only the database name, so there is nothing to leak.
+    /// A malformed file's `Corrupt` carries only the database name, so there
+    /// is nothing to leak.
     #[test]
     fn a_corrupt_database_reports_no_parser_text() {
         let response = Response::Unlock(Err(UnlockError::Corrupt {
             db: "personal".to_string(),
+            detail: None,
         }));
         assert_eq!(
             serde_json::to_value(&response).expect("should serialize"),

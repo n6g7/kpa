@@ -91,20 +91,15 @@ fn unlock_error(name: &str, err: VaultError) -> UnlockError {
     match err {
         VaultError::NotFound(_) | VaultError::KeyfileNotFound(_) => UnlockError::NotFound { db },
         VaultError::WrongCredentials => UnlockError::WrongCredentials { db },
-        VaultError::Corrupt(_) => UnlockError::Corrupt { db },
-        VaultError::UnsupportedFormat => UnlockError::UnsupportedFormat { db },
-        // The text names which file and the ceiling, never anything from
-        // inside it.
-        refused @ (VaultError::NotRegular(_) | VaultError::TooLarge(_)) => {
-            UnlockError::FileRefused {
-                db,
-                detail: refused.to_string(),
-            }
-        }
-        // The text names which ceiling, never a value from the file.
-        refused @ VaultError::KdfAboveCeiling(_) => UnlockError::KdfRefused {
+        VaultError::Corrupt(_) => UnlockError::Corrupt { db, detail: None },
+        // These say what is wrong in words kpa wrote: which file, which
+        // ceiling, which formats it reads; nothing from inside the file.
+        refused @ (VaultError::UnsupportedFormat
+        | VaultError::NotRegular(_)
+        | VaultError::TooLarge(_)
+        | VaultError::KdfAboveCeiling(_)) => UnlockError::Corrupt {
             db,
-            detail: refused.to_string(),
+            detail: Some(refused.to_string()),
         },
         VaultError::Io(_) => UnlockError::Io { db },
         VaultError::Changed => UnlockError::Stale { db },
@@ -119,7 +114,7 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use crate::databases::{Begin, BeginError, Ceiling, VaultFile};
+    use crate::databases::{Begin, BeginError, KdfCeiling, VaultFile};
     use crate::display_session::DisplaySession;
     use crate::frontends::control::testing::{
         Fixture, SESSION, desktop, fixture, outside, requester_in,
@@ -158,52 +153,39 @@ mod tests {
     fn corrupt() -> Result<String, UnlockError> {
         Err(UnlockError::Corrupt {
             db: "personal".to_string(),
+            detail: None,
         })
     }
 
+    /// A malformed file says nothing of why; a refusal kpa words itself says
+    /// which, and never anything from inside the file.
     #[test]
-    fn a_format_kpa_does_not_read_is_reported_as_such() {
-        assert!(matches!(
-            unlock_error("personal", VaultError::UnsupportedFormat),
-            UnlockError::UnsupportedFormat { db } if db == "personal"
-        ));
-    }
-
-    #[test]
-    fn a_file_kpa_refuses_to_read_says_which_and_why() {
+    fn a_refusal_says_why_and_a_malformed_file_does_not() {
+        let corrupt = |detail: Option<&str>| UnlockError::Corrupt {
+            db: "personal".to_string(),
+            detail: detail.map(str::to_string),
+        };
         for (err, detail) in [
+            (VaultError::Corrupt("secret stuff".to_string()), None),
+            (
+                VaultError::UnsupportedFormat,
+                Some("not a KDBX3 or KDBX4 file; kpa reads only those"),
+            ),
             (
                 VaultError::NotRegular(VaultFile::Database),
-                "database file is not a regular file",
+                Some("database file is not a regular file"),
             ),
             (
                 VaultError::TooLarge(VaultFile::Keyfile),
-                "keyfile is larger than 16 MiB",
+                Some("keyfile is larger than 16 MiB"),
+            ),
+            (
+                VaultError::KdfAboveCeiling(KdfCeiling::Argon2Memory),
+                Some("key derivation above kpa's ceiling: more than 1024 MiB of Argon2 memory"),
             ),
         ] {
-            assert_eq!(
-                unlock_error("personal", err),
-                UnlockError::FileRefused {
-                    db: "personal".to_string(),
-                    detail: detail.to_string()
-                }
-            );
+            assert_eq!(unlock_error("personal", err), corrupt(detail));
         }
-    }
-
-    #[test]
-    fn a_key_derivation_above_the_ceiling_says_which() {
-        assert_eq!(
-            unlock_error(
-                "personal",
-                VaultError::KdfAboveCeiling(Ceiling::Argon2Memory)
-            ),
-            UnlockError::KdfRefused {
-                db: "personal".to_string(),
-                detail: "key derivation above kpa's ceiling: more than 1024 MiB of Argon2 memory"
-                    .to_string()
-            }
-        );
     }
 
     fn cancelled() -> Result<String, UnlockError> {

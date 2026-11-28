@@ -18,10 +18,9 @@ use std::collections::HashMap;
 
 use keepass::config::DatabaseVersion;
 
-/// Most AES-KDF rounds a header may ask for. Real vaults set the rounds so
-/// that an unlock takes about a second (a few million to a few tens of
-/// millions on current hardware), and some set it to ten; this is a thousand
-/// times the first.
+/// Most AES-KDF rounds a header may ask for. A vault sets its rounds for an
+/// unlock of about a second, which on current hardware is a few million to a
+/// few tens of millions of rounds; this is about 20 seconds of one fast core.
 const MAX_AES_ROUNDS: u64 = 1 << 30;
 
 /// Most memory Argon2 may be asked for, in bytes. A vault that needs more
@@ -41,28 +40,28 @@ const MAX_ARGON2_WORK: u64 = 32 << 30;
 
 /// Which ceiling a header is above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ceiling {
+pub enum KdfCeiling {
     AesRounds,
     Argon2Memory,
     Argon2Parallelism,
     Argon2Work,
 }
 
-impl std::fmt::Display for Ceiling {
+impl std::fmt::Display for KdfCeiling {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Ceiling::AesRounds => write!(f, "more than {MAX_AES_ROUNDS} AES rounds"),
-            Ceiling::Argon2Memory => {
+            KdfCeiling::AesRounds => write!(f, "more than {MAX_AES_ROUNDS} AES rounds"),
+            KdfCeiling::Argon2Memory => {
                 write!(
                     f,
                     "more than {} MiB of Argon2 memory",
                     MAX_ARGON2_MEMORY >> 20
                 )
             }
-            Ceiling::Argon2Parallelism => {
+            KdfCeiling::Argon2Parallelism => {
                 write!(f, "more than {MAX_ARGON2_PARALLELISM} Argon2 lanes")
             }
-            Ceiling::Argon2Work => write!(
+            KdfCeiling::Argon2Work => write!(
                 f,
                 "more than {} GiB of Argon2 memory passes (memory times iterations)",
                 MAX_ARGON2_WORK >> 30
@@ -73,7 +72,7 @@ impl std::fmt::Display for Ceiling {
 
 /// Fails if the header of `data`, a vault of `version`, asks for key
 /// derivation above a ceiling.
-pub(super) fn check(data: &[u8], version: &DatabaseVersion) -> Result<(), Ceiling> {
+pub(super) fn check(data: &[u8], version: &DatabaseVersion) -> Result<(), KdfCeiling> {
     match version {
         DatabaseVersion::KDB3(_) => {
             for (kind, value) in header_entries(data, 2) {
@@ -153,9 +152,9 @@ fn le_u32(value: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(value.get(..4)?.try_into().ok()?))
 }
 
-fn check_aes_rounds(rounds: Option<u64>) -> Result<(), Ceiling> {
+fn check_aes_rounds(rounds: Option<u64>) -> Result<(), KdfCeiling> {
     match rounds {
-        Some(rounds) if rounds > MAX_AES_ROUNDS => Err(Ceiling::AesRounds),
+        Some(rounds) if rounds > MAX_AES_ROUNDS => Err(KdfCeiling::AesRounds),
         _ => Ok(()),
     }
 }
@@ -163,7 +162,7 @@ fn check_aes_rounds(rounds: Option<u64>) -> Result<(), Ceiling> {
 /// A KDBX4 KDF parameter dictionary: a version, then entries of a value
 /// type byte, a key and a value (each with a 32-bit length), and a final
 /// zero type byte. A key given twice keeps its last value.
-fn check_dictionary(buffer: &[u8]) -> Result<(), Ceiling> {
+fn check_dictionary(buffer: &[u8]) -> Result<(), KdfCeiling> {
     const U32: u8 = 0x04;
     const U64: u8 = 0x05;
     const BYTES: u8 = 0x42;
@@ -188,16 +187,16 @@ fn check_dictionary(buffer: &[u8]) -> Result<(), Ceiling> {
         let iterations = typed("I", U64).and_then(le_u64);
         let lanes = typed("P", U32).and_then(le_u32);
         if memory.is_some_and(|memory| memory > MAX_ARGON2_MEMORY) {
-            return Err(Ceiling::Argon2Memory);
+            return Err(KdfCeiling::Argon2Memory);
         }
         if lanes.is_some_and(|lanes| lanes > MAX_ARGON2_PARALLELISM) {
-            return Err(Ceiling::Argon2Parallelism);
+            return Err(KdfCeiling::Argon2Parallelism);
         }
         match (memory, iterations) {
             (Some(memory), Some(iterations))
                 if memory.saturating_mul(iterations) > MAX_ARGON2_WORK =>
             {
-                Err(Ceiling::Argon2Work)
+                Err(KdfCeiling::Argon2Work)
             }
             _ => Ok(()),
         }
@@ -291,11 +290,11 @@ mod tests {
         ])
     }
 
-    fn check3(data: &[u8]) -> Result<(), Ceiling> {
+    fn check3(data: &[u8]) -> Result<(), KdfCeiling> {
         check(data, &DatabaseVersion::KDB3(0))
     }
 
-    fn check4(data: &[u8]) -> Result<(), Ceiling> {
+    fn check4(data: &[u8]) -> Result<(), KdfCeiling> {
         check(data, &DatabaseVersion::KDB4(1))
     }
 
@@ -303,44 +302,50 @@ mod tests {
     fn aes_rounds_are_capped() {
         assert_eq!(check3(&kdbx3(1_000_000)), Ok(()));
         assert_eq!(check3(&kdbx3(MAX_AES_ROUNDS)), Ok(()));
-        assert_eq!(check3(&kdbx3(MAX_AES_ROUNDS + 1)), Err(Ceiling::AesRounds));
-        assert_eq!(check3(&kdbx3(u64::MAX)), Err(Ceiling::AesRounds));
+        assert_eq!(
+            check3(&kdbx3(MAX_AES_ROUNDS + 1)),
+            Err(KdfCeiling::AesRounds)
+        );
+        assert_eq!(check3(&kdbx3(u64::MAX)), Err(KdfCeiling::AesRounds));
 
         assert_eq!(check4(&aes4(MAX_AES_ROUNDS)), Ok(()));
-        assert_eq!(check4(&aes4(u64::MAX)), Err(Ceiling::AesRounds));
+        assert_eq!(check4(&aes4(u64::MAX)), Err(KdfCeiling::AesRounds));
     }
 
     #[test]
     fn argon2_memory_lanes_and_work_are_capped() {
         assert_eq!(check4(&argon2(64 << 20, 14, 2)), Ok(()));
         assert_eq!(check4(&argon2(MAX_ARGON2_MEMORY, 1, 1)), Ok(()));
-        assert_eq!(check4(&argon2(1 << 40, 1, 1)), Err(Ceiling::Argon2Memory));
+        assert_eq!(
+            check4(&argon2(1 << 40, 1, 1)),
+            Err(KdfCeiling::Argon2Memory)
+        );
         assert_eq!(
             check4(&argon2(MAX_ARGON2_MEMORY + 1, 1, 1)),
-            Err(Ceiling::Argon2Memory)
+            Err(KdfCeiling::Argon2Memory)
         );
         assert_eq!(
             check4(&argon2(1 << 20, 1, MAX_ARGON2_PARALLELISM + 1)),
-            Err(Ceiling::Argon2Parallelism)
+            Err(KdfCeiling::Argon2Parallelism)
         );
         assert_eq!(
             check4(&argon2(1 << 20, 1, 1 << 24)),
-            Err(Ceiling::Argon2Parallelism)
+            Err(KdfCeiling::Argon2Parallelism)
         );
         assert_eq!(
             check4(&argon2(64 << 20, u64::from(u32::MAX), 2)),
-            Err(Ceiling::Argon2Work)
+            Err(KdfCeiling::Argon2Work)
         );
         assert_eq!(
             check4(&argon2(1 << 20, u64::MAX, 2)),
-            Err(Ceiling::Argon2Work)
+            Err(KdfCeiling::Argon2Work)
         );
         // A small memory with many iterations is as long as a large one with
         // few: the work is what is capped.
         assert_eq!(check4(&argon2(1 << 20, 1000, 4)), Ok(()));
         assert_eq!(
             check4(&argon2(1 << 20, (MAX_ARGON2_WORK >> 20) + 1, 4)),
-            Err(Ceiling::Argon2Work)
+            Err(KdfCeiling::Argon2Work)
         );
     }
 
@@ -354,7 +359,7 @@ mod tests {
         }
         assert_eq!(
             check4(&whole[..whole.len() - 5]),
-            Err(Ceiling::Argon2Memory)
+            Err(KdfCeiling::Argon2Memory)
         );
         assert_eq!(check4(&[]), Ok(()));
         assert_eq!(check3(&[1, 2, 3]), Ok(()));
@@ -382,6 +387,6 @@ mod tests {
             entry(0x05, "R", &1u64.to_le_bytes()),
             entry(0x05, "R", &u64::MAX.to_le_bytes()),
         ]);
-        assert_eq!(check4(&data), Err(Ceiling::AesRounds));
+        assert_eq!(check4(&data), Err(KdfCeiling::AesRounds));
     }
 }

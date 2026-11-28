@@ -44,26 +44,14 @@ pub enum UnlockError {
     NotFound {
         db: String,
     },
+    /// The file isn't a database kpa can read. `detail` is `None` for a
+    /// malformed file: its text can come from inside the file and is never
+    /// sent. It is `Some` for a refusal whose reason kpa knows and words
+    /// itself: a format it doesn't read, a database file or keyfile that is
+    /// not a regular file or too large, a key derivation above its ceilings.
     Corrupt {
         db: String,
-    },
-    /// The file is a KeePass format kpa doesn't read (KeePass 1.x, say).
-    /// Reported as `corrupt`, with a `detail` that names the cause.
-    UnsupportedFormat {
-        db: String,
-    },
-    /// The database file or its keyfile isn't a regular file, or is larger
-    /// than kpa reads. Reported as `corrupt`, with a `detail` that says
-    /// which and why.
-    FileRefused {
-        db: String,
-        detail: String,
-    },
-    /// The vault's header asks for more key derivation than kpa runs.
-    /// Reported as `corrupt`, with a `detail` that names the ceiling.
-    KdfRefused {
-        db: String,
-        detail: String,
+        detail: Option<String>,
     },
     Io {
         db: String,
@@ -109,16 +97,13 @@ impl UnlockError {
                 ErrorFields::new(ErrorCode::WrongCredentials).db(db)
             }
             UnlockError::NotFound { db } => ErrorFields::new(ErrorCode::NotFound).db(db),
-            UnlockError::Corrupt { db } => ErrorFields::new(ErrorCode::Corrupt).db(db),
-            UnlockError::FileRefused { db, detail } => ErrorFields::new(ErrorCode::Corrupt)
-                .db(db)
-                .detail(detail.as_str()),
-            UnlockError::KdfRefused { db, detail } => ErrorFields::new(ErrorCode::Corrupt)
-                .db(db)
-                .detail(detail.as_str()),
-            UnlockError::UnsupportedFormat { db } => ErrorFields::new(ErrorCode::Corrupt)
-                .db(db)
-                .detail("not a KDBX3 or KDBX4 file; kpa reads only those"),
+            UnlockError::Corrupt { db, detail } => {
+                let fields = ErrorFields::new(ErrorCode::Corrupt).db(db);
+                match detail {
+                    Some(detail) => fields.detail(detail.as_str()),
+                    None => fields,
+                }
+            }
             UnlockError::Io { db } => ErrorFields::new(ErrorCode::Io).db(db),
             UnlockError::InProgress { db } => ErrorFields::new(ErrorCode::UnlockInProgress).db(db),
             UnlockError::LockedDuringUnlock { db } => ErrorFields::new(ErrorCode::Locked).db(db),

@@ -25,11 +25,11 @@ use keepass::config::DatabaseVersion;
 use keepass::db::DatabaseOpenError;
 use keepass::error::{CryptographyError, DatabaseKeyError};
 use keepass::{Database, DatabaseKey};
-
-use super::kdf::{self, Ceiling};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+use super::kdf::{self, KdfCeiling};
 
 /// Errors opening or reading a `.kdbx` file.
 ///
@@ -73,7 +73,7 @@ pub enum VaultError {
     /// before any key derivation, which no file may be able to make hang or
     /// abort the daemon.
     #[error("key derivation above kpa's ceiling: {0}")]
-    KdfAboveCeiling(Ceiling),
+    KdfAboveCeiling(KdfCeiling),
 
     /// The file was readable but isn't a valid (or isn't a supported)
     /// KeePass database: truncated, garbage bytes, bad checksum, etc. (a
@@ -92,7 +92,7 @@ pub enum VaultError {
 
     /// The file is a KeePass format kpa doesn't read. kpa reads KDBX3 and
     /// KDBX4 and refuses every other format `keepass` parses (see `open`).
-    #[error("unsupported database format: kpa reads only KDBX3 and KDBX4 files")]
+    #[error("not a KDBX3 or KDBX4 file; kpa reads only those")]
     UnsupportedFormat,
 
     /// Any other I/O error reading the database or keyfile (permissions,
@@ -356,9 +356,9 @@ pub fn open(
         DatabaseVersion::KDB3(_) | DatabaseVersion::KDB4(_) => {}
         _ => return Err(VaultError::UnsupportedFormat),
     }
-    // Before any key derivation, `verify_kdbx3_header`'s included: its
-    // parameters are the file writer's, and `keepass` runs them as they
-    // stand.
+    // Before any key derivation, including the one `verify_kdbx3_header`
+    // runs: the parameters are the file writer's, and `keepass` runs them
+    // as they stand.
     kdf::check(&data, &version).map_err(VaultError::KdfAboveCeiling)?;
     if let DatabaseVersion::KDB3(_) = version {
         verify_kdbx3_header(&data, make_key()?)?;
