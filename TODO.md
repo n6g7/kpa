@@ -19,7 +19,7 @@ Per `docs/ssh-agent.md`.
 
 ### 0.5.0: Login autofill in browsers
 
-- [ ] Design: the browser extension and its native messaging host
+- [ ] Design: the browser extension and its native messaging host, per `docs/browser.md` (in review)
 
 ### 0.6.0: Passkey sign-in on Linux
 
@@ -40,6 +40,12 @@ Per `docs/ssh-agent.md`.
 - [ ] A desktop notification on each `copy` and SSH signature, so a read you didn't make gets noticed (`docs/threat-model.md` T-16)
 - [ ] YubiKey challenge-response as a vault credential, without reusing the key's PIN as one
 - [ ] The legacy KeeOtp `TimeOtp-*` fields, which `keepass`'s `totp` feature doesn't parse
+- [ ] A browser autofill menu under a page's login fields, defended against clickjacking (`docs/browser.md` § 3)
+- [ ] Filling login forms in frames of another origin than the page's, which needs a host permission per site
+- [ ] Choosing the fields by hand on a page the browser extension reads wrong, remembered per site (`docs/browser.md` § 5.2)
+- [ ] Flatpak and Snap browsers: Firefox 157 and later start a host outside the sandbox through `xdg-native-messaging-proxy`; another route is a static host copied into the browser's sandbox, with a grant of the browser socket alone
+- [ ] List the browser extension on the Chrome Web Store and addons.mozilla.org, so it installs and updates from there
+- [ ] Fill HTTP authentication dialogs from the browser extension
 - [ ] Refactor the other existing commands to use the new output/reply system
 - [ ] Consider PGP agent support
 - [ ] Passkey support via credentialsd, once it has a provider interface a password manager can implement
