@@ -395,8 +395,8 @@ mod tests {
                 handle_connection(&fx.api, theirs, owner, SHORT);
                 started.elapsed()
             });
-            for byte in STATUS {
-                if (&ours).write_all(&[*byte]).is_err() {
+            for byte in status() {
+                if (&ours).write_all(&[byte]).is_err() {
                     break;
                 }
                 thread::sleep(SHORT / 2);
@@ -417,49 +417,65 @@ mod tests {
         );
     }
 
+    /// Entries in the response the next test reads, and the length of each
+    /// title: a few, long ones, so the response is far bigger than a
+    /// socket's buffers while building and serializing it costs almost
+    /// nothing. That work can't be cut short by any I/O deadline, so it
+    /// must not be what the test measures.
+    const ENTRIES: usize = 64;
+    const TITLE_LEN: usize = 32 * 1024;
+
     /// A client that reads its response a little at a time, never stalling
     /// for a whole `io_timeout`, can't hold the connection past the deadline
-    /// either, however big the response is.
+    /// either, however big the response is. The deadline runs from when the
+    /// response starts to be written, which is when its first bytes reach
+    /// the client.
     #[test]
     fn a_client_trickling_its_response_is_dropped_at_the_deadline() {
         let fx = fixture_with(&["personal"], "");
         fx.databases.install_for_test(
             "personal",
-            (0..20_000)
-                .map(|n| TestEntry::new(&format!("entry number {n}")))
+            (0..ENTRIES)
+                .map(|n| TestEntry::new(&format!("{n:04}{}", "t".repeat(TITLE_LEN))))
                 .collect(),
         );
         let owner = crate::authn::process_uid();
         let (ours, theirs) = UnixStream::pair().expect("socket pair");
         (&ours)
-            .write_all(b"{\"v\":2,\"op\":\"list\",\"db\":\"personal\"}\n")
+            .write_all(&line("\"op\":\"list\",\"db\":\"personal\""))
             .expect("send");
-        let started = Instant::now();
+        ours.set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("a read timeout");
 
         let (held, read) = thread::scope(|scope| {
             let handler = scope.spawn(|| {
                 handle_connection(&fx.api, theirs, owner, SHORT);
-                started.elapsed()
+                Instant::now()
             });
-            let mut read = 0;
             let mut chunk = [0u8; 128 * 1024];
+            let mut read = (&ours).read(&mut chunk).expect("the response begins");
+            let began = Instant::now();
             // A little every half deadline, for long enough that a handler
             // that doesn't stop is seen not to.
-            while started.elapsed() < SHORT + MARGIN * 4 {
+            while began.elapsed() < SHORT + MARGIN * 4 {
                 thread::sleep(SHORT / 2);
                 match (&ours).read(&mut chunk) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => read += n,
                 }
             }
-            (handler.join().expect("the handler"), read)
+            let ended = handler.join().expect("the handler");
+            (ended.saturating_duration_since(began), read)
         });
 
         assert!(
             held < SHORT + MARGIN,
             "the connection was held for {held:?}"
         );
-        assert!(read < 1 << 20, "{read} bytes were read before the cut");
+        assert!(
+            read < ENTRIES * TITLE_LEN,
+            "{read} bytes were read before the cut"
+        );
     }
 
     #[test]
@@ -474,14 +490,22 @@ mod tests {
         assert!(reply.contains("malformed_request"), "got {reply:?}");
     }
 
-    const STATUS: &[u8] = b"{\"v\":2,\"op\":\"status\"}\n";
+    /// A request line carrying `fields`, at the protocol version this
+    /// build speaks.
+    fn line(fields: &str) -> Vec<u8> {
+        format!("{{\"v\":{},{fields}}}\n", proto::VERSION).into_bytes()
+    }
+
+    fn status() -> Vec<u8> {
+        line("\"op\":\"status\"")
+    }
 
     #[test]
     fn a_request_may_come_with_a_terminal() {
         let (_master, slave) = pty();
 
         let reply = exchange_with(|ours| {
-            socket::send_with_fd(ours, STATUS, Some(slave.as_fd())).expect("send");
+            socket::send_with_fd(ours, &status(), Some(slave.as_fd())).expect("send");
         });
 
         assert!(reply.contains("\"ok\":true"), "got {reply:?}");
@@ -492,7 +516,7 @@ mod tests {
         let (not_a_terminal, _other) = UnixStream::pair().expect("socket pair");
 
         let reply = exchange_with(|ours| {
-            socket::send_with_fd(ours, STATUS, Some(not_a_terminal.as_fd())).expect("send");
+            socket::send_with_fd(ours, &status(), Some(not_a_terminal.as_fd())).expect("send");
         });
 
         assert!(reply.contains("malformed_request"), "got {reply:?}");
@@ -505,10 +529,11 @@ mod tests {
 
         // In one message, and in two.
         let together = exchange_with(|ours| {
-            socket::send_with_fds(ours, STATUS, &[first.as_fd(), second.as_fd()]);
+            socket::send_with_fds(ours, &status(), &[first.as_fd(), second.as_fd()]);
         });
         let apart = exchange_with(|ours| {
-            let (start, end) = STATUS.split_at(8);
+            let status = status();
+            let (start, end) = status.split_at(8);
             socket::send_with_fd(ours, start, Some(first.as_fd())).expect("send");
             socket::send_with_fd(ours, end, Some(second.as_fd())).expect("send");
         });
@@ -537,11 +562,15 @@ mod tests {
 
     #[test]
     fn read_request_stops_at_the_first_newline() {
-        let (read, buf) = read_written(&[b"{\"v\":2,", b"\"op\":\"status\"}\nrest\n"], 64);
+        let request = status();
+        let (first, second) = request.split_at(8);
+        let mut then = second.to_vec();
+        then.extend_from_slice(b"rest\n");
+        let (read, buf) = read_written(&[first, &then], 64);
         let Ok(RequestLine::Line { len, .. }) = read else {
             panic!("expected a line");
         };
-        assert_eq!(&buf[..len], b"{\"v\":2,\"op\":\"status\"}");
+        assert_eq!(&buf[..len], &request[..request.len() - 1]);
     }
 
     #[test]
@@ -562,11 +591,12 @@ mod tests {
 
     #[test]
     fn a_valid_request_is_still_answered() {
-        let reply = exchange(b"{\"v\":2,\"op\":\"status\"}\n");
+        let reply = exchange(&status());
         assert_eq!(
             reply,
             format!(
-                "{{\"v\":2,\"ok\":true,\"databases\":[],\"version\":{:?},\"can_copy\":false}}\n",
+                "{{\"v\":{},\"ok\":true,\"databases\":[],\"version\":{:?},\"can_copy\":false}}\n",
+                proto::VERSION,
                 crate::VERSION
             )
         );
@@ -576,8 +606,7 @@ mod tests {
     fn handle_connection_drops_a_peer_of_another_uid() {
         let fx = fixture_with(&[], "");
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
-        ours.write_all(b"{\"v\":2,\"op\":\"status\"}\n")
-            .expect("write");
+        ours.write_all(&status()).expect("write");
         // Any uid other than ours stands in for a peer we must refuse.
         let other = crate::authn::process_uid().wrapping_add(1);
 
@@ -595,8 +624,7 @@ mod tests {
     fn handle_connection_answers_a_peer_of_our_uid() {
         let fx = fixture_with(&[], "");
         let (mut ours, theirs) = UnixStream::pair().expect("socket pair");
-        ours.write_all(b"{\"v\":2,\"op\":\"status\"}\n")
-            .expect("write");
+        ours.write_all(&status()).expect("write");
         let owner = crate::authn::process_uid();
 
         thread::scope(|scope| {
