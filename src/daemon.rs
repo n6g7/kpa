@@ -302,7 +302,15 @@ mod tests {
             "personal",
             vec![TestEntry::new("site").field("Password", "secret")],
         );
-        let uuid = daemon.databases.open("personal").ok().unwrap().entries()[0].uuid;
+        let uuid = daemon
+            .databases
+            .open("personal")
+            .ok()
+            .unwrap()
+            .entries()
+            .next()
+            .unwrap()
+            .uuid();
         let databases = Arc::clone(&daemon.databases);
         let socket = serve_on_the_desktop(Arc::clone(&daemon.api), dir.path());
 

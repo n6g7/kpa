@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use kpa::config::DatabaseConfig;
 use kpa::databases::{
-    Begin, Databases, KdfCeiling, OpenError, UnlockFailure, Unlocking, VaultError, VaultFile,
+    Begin, Databases, Entry, KdfCeiling, Open, OpenError, UnlockFailure, Unlocking, VaultError,
+    VaultFile,
 };
 use zeroize::Zeroizing;
 
@@ -64,6 +65,21 @@ fn vault_error(path: &Path, password: Option<&str>, keyfile: Option<PathBuf>) ->
     }
 }
 
+/// The text of the entry's field `key`, if it has one that may be shared.
+fn text(entry: &Entry<'_>, key: &str) -> Option<String> {
+    entry
+        .fields()
+        .find(|field| field.key == key)
+        .and_then(|field| field.value.shareable().map(str::to_string))
+}
+
+/// The entry titled `title`.
+fn titled<'a>(open: &'a Open<'_>, title: &str) -> Entry<'a> {
+    open.entries()
+        .find(|entry| text(entry, "Title").as_deref() == Some(title))
+        .unwrap_or_else(|| panic!("an entry titled {title}"))
+}
+
 #[test]
 fn finish_with_the_right_password_unlocks_and_the_guard_reads() {
     let databases = databases();
@@ -76,13 +92,14 @@ fn finish_with_the_right_password_unlocks_and_the_guard_reads() {
         1,
         "expected exactly the one seeded entry"
     );
-    let entries = open.entries();
-    assert_eq!(entries[0].title.as_deref(), Some("Example"));
-    assert_eq!(entries[0].username.as_deref(), Some("alice"));
-    assert_eq!(entries[0].url.as_deref(), Some("https://example.com"));
-    assert_eq!(entries[0].group, "Web");
+    let entry = open.entries().next().expect("the seeded entry");
+    assert_eq!(text(&entry, "Title").as_deref(), Some("Example"));
+    assert_eq!(text(&entry, "UserName").as_deref(), Some("alice"));
+    assert_eq!(text(&entry, "URL").as_deref(), Some("https://example.com"));
+    assert_eq!(entry.group(), "Web");
     assert_eq!(
-        open.entry(entries[0].uuid).and_then(|entry| entry.title()),
+        open.entry(entry.uuid())
+            .and_then(|entry| text(&entry, "Title")),
         Some("Example".to_string())
     );
 }
@@ -114,83 +131,68 @@ fn a_lock_during_the_key_derivation_cannot_be_undone() {
 }
 
 /// A custom field colliding case-insensitively with a built-in is a
-/// genuine, distinct field: `Entry::field` reads it by its own literal key,
-/// separate from the real `Password`.
+/// genuine, distinct field: it is read by its own literal key, separate from
+/// the real `Password`.
 #[test]
 fn custom_colliding_field_is_read_by_its_literal_key() {
     let databases = unlocked_at(&common::fields_db(), None);
     let open = databases.open("work").expect("unlocked");
-    let entries = open.entries();
-    let example = entries
-        .iter()
-        .find(|e| e.title.as_deref() == Some("Example"))
-        .expect("Example entry");
-    let entry = open.entry(example.uuid).expect("entry exists");
+    let entry = titled(&open, "Example");
 
+    assert_eq!(text(&entry, "Password").as_deref(), Some("entrypass1"));
     assert_eq!(
-        entry.field("Password").as_deref().map(String::as_str),
-        Some("entrypass1")
-    );
-    assert_eq!(
-        entry.field("PASSWORD").as_deref().map(String::as_str),
+        text(&entry, "PASSWORD").as_deref(),
         Some("not-the-real-password")
     );
 }
 
 /// What an entry stores, against a real database: the exact key of every
-/// non-empty string field, sorted, except the `otp` seed, whose presence is
-/// reported apart. A key that only differs in case from a standard one is a
-/// field of its own.
+/// non-empty string field, with the `otp` seed among them as a value that only
+/// derives. A key that only differs in case from a standard one is a field of
+/// its own.
 #[test]
-fn stored_fields_against_a_real_database() {
+fn fields_against_a_real_database() {
     let databases = unlocked_at(&common::fields_db(), None);
     let open = databases.open("work").expect("unlocked");
 
-    let entries = open.entries();
-    let example = entries
-        .iter()
-        .find(|e| e.title.as_deref() == Some("Example"))
-        .expect("fixture should have an Example entry");
+    let keys = |entry: &Entry<'_>| {
+        let mut keys: Vec<String> = entry.fields().map(|field| field.key.to_string()).collect();
+        keys.sort();
+        keys
+    };
 
     // Keys sort by their raw bytes: "PASSWORD" ahead of "Password", and
     // "api-key" after the capitalised ones.
+    let example = titled(&open, "Example");
     assert_eq!(
-        example.stored.keys,
+        keys(&example),
         [
-            "PASSWORD", "Password", "Title", "URL", "UserName", "api-key"
+            "PASSWORD", "Password", "Title", "URL", "UserName", "api-key", "otp"
         ]
     );
-    assert!(example.stored.totp);
+    assert_eq!(text(&example, "otp"), None, "the seed only derives");
+    assert!(kpa::otp::has_seed(&example));
 
-    let no_otp = entries
-        .iter()
-        .find(|e| e.title.as_deref() == Some("NoOtp"))
-        .expect("fixture should have a NoOtp entry");
-    assert!(!no_otp.stored.totp);
-    assert!(!no_otp.stored.keys.iter().any(|key| key == "otp"));
+    let no_otp = titled(&open, "NoOtp");
+    assert!(!kpa::otp::has_seed(&no_otp));
+    assert!(!keys(&no_otp).iter().any(|key| key == "otp"));
 }
 
-/// `Entry::totp` against the same database, end to end through the unlock
-/// rather than an in-process `Database::new()`: the real decode/parse path.
+/// The code made from an entry's seed, against the same database, end to end
+/// through the unlock rather than an in-process `Database::new()`: the real
+/// decode and parse path.
 #[test]
 fn totp_against_a_real_database() {
     let databases = unlocked_at(&common::fields_db(), None);
     let open = databases.open("work").expect("unlocked");
-    let entries = open.entries();
-    let totp = |title: &str| {
-        let entry = entries
-            .iter()
-            .find(|e| e.title.as_deref() == Some(title))
-            .unwrap_or_else(|| panic!("{title} entry"));
-        open.entry(entry.uuid).expect("entry exists").totp()
-    };
 
-    let code = totp("Example").expect("a valid otp field should produce a code");
+    let code =
+        kpa::otp::code(&titled(&open, "Example")).expect("a valid otp field should produce a code");
     assert_eq!(code.len(), 6);
     assert!(code.chars().all(|c| c.is_ascii_digit()));
 
-    assert!(totp("BadOtp").is_none());
-    assert!(totp("NoOtp").is_none());
+    assert!(kpa::otp::code(&titled(&open, "BadOtp")).is_none());
+    assert!(kpa::otp::code(&titled(&open, "NoOtp")).is_none());
 }
 
 #[test]
@@ -206,11 +208,11 @@ fn opens_a_genuine_kdbx4_database() {
     let databases = unlocked_at(&common::kdbx4_db(), None);
     let open = databases.open("work").expect("unlocked");
 
-    let entries = open.entries();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].title.as_deref(), Some("Example"));
-    assert_eq!(entries[0].username.as_deref(), Some("alice"));
-    assert_eq!(entries[0].group, "Web");
+    assert_eq!(open.entries().count(), 1);
+    let entry = open.entries().next().expect("the entry");
+    assert_eq!(text(&entry, "Title").as_deref(), Some("Example"));
+    assert_eq!(text(&entry, "UserName").as_deref(), Some("alice"));
+    assert_eq!(entry.group(), "Web");
 }
 
 #[test]
@@ -223,7 +225,7 @@ fn keyfile_only_fixture_opens_via_keyfile() {
     // This fixture has no groups or entries seeded: opening cleanly with
     // an empty list is the actual assertion here.
     let open = databases.open("work").expect("unlocked");
-    assert!(open.entries().is_empty());
+    assert!(open.entries().next().is_none());
 }
 
 #[test]

@@ -4,8 +4,10 @@
 //! database's keys.
 //!
 //! Pure: nothing here touches a mutex or an epoch. Callers run `scan` at
-//! unlock and `parse_private_key` at a key's first signature, under their
-//! own locking.
+//! unlock and `read_private_key` at a key's first signature, under their
+//! own locking. This is the one place outside tests that reads an attachment's
+//! bytes (`clippy.toml` allows nothing else, and the allow is on `bytes`): a
+//! key is parsed and signed with here, and never handed out.
 
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -17,7 +19,7 @@ use ssh_key::{Algorithm, EcdsaCurve, Fingerprint, HashAlg, PrivateKey, PublicKey
 use uuid::Uuid;
 
 use crate::config::{DatabaseConfig, SshKeyConfirm};
-use crate::databases::{Attachment, Open};
+use crate::databases::{Attachment, Entry, Open, Value, fields};
 use crate::paths::Paths;
 
 /// Marks the one private-key format kpa reads (`docs/ssh-agent.md` § 6.4).
@@ -109,24 +111,64 @@ pub struct ScanResult {
     pub skipped: Vec<SkippedAttachment>,
 }
 
-/// Scans the open database's current-entry attachments, in tree order
-/// (`Open::for_each_attachment`), for OpenSSH private keys, per
-/// `docs/ssh-agent.md` § 6.4. Each is parsed straight from the database's
-/// own bytes, never copied. An attachment that doesn't start with either
-/// the OpenSSH or a PEM marker isn't a key at all and is silently ignored,
-/// rather than reported skipped — most attachments in a vault are not SSH
-/// keys.
+/// Scans the open database's current-entry attachments, in tree order, for
+/// OpenSSH private keys, per `docs/ssh-agent.md` § 6.4. Each is parsed
+/// straight from the database's own bytes, never copied. An attachment that
+/// doesn't start with either the OpenSSH or a PEM marker isn't a key at all
+/// and is silently ignored, rather than reported skipped: most attachments in
+/// a vault are not SSH keys.
 pub fn scan(open: &Open) -> ScanResult {
     let mut result = ScanResult::default();
-    open.for_each_attachment(|attachment| classify(attachment, &mut result));
+    for entry in open.entries() {
+        let mut attachments = entry.attachments().peekable();
+        if attachments.peek().is_none() {
+            continue;
+        }
+        let title = shown_title(&entry);
+        for attachment in attachments {
+            let origin = Origin {
+                entry_uuid: entry.uuid(),
+                entry_title: title,
+                attachment_name: attachment.name,
+            };
+            classify(&origin, bytes(&attachment), &mut result);
+        }
+    }
     result
 }
 
-fn classify(attachment: Attachment<'_>, result: &mut ScanResult) {
-    let data = attachment.data;
+/// The entry's title as kpa shows it, in a key's name and in a log or a
+/// listing: absent when the user marked it protected in their KeePass
+/// client, so a title they protected is never shown.
+fn shown_title<'a>(entry: &'a Entry<'_>) -> Option<&'a str> {
+    entry
+        .fields()
+        .find(|field| field.key == fields::TITLE && !field.protected)
+        .and_then(|field| field.value.shareable())
+}
+
+/// An attachment's bytes, to parse a key from. An attachment only derives
+/// something, and a key's reading is that: the bytes are parsed and signed
+/// with here, and never handed out.
+#[allow(clippy::disallowed_methods)]
+fn bytes<'a>(attachment: &Attachment<'a>) -> &'a [u8] {
+    match &attachment.value {
+        Value::Shareable(bytes) => bytes,
+        Value::DeriveOnly(secret) => secret.reveal(),
+    }
+}
+
+/// Where an attachment came from.
+struct Origin<'a> {
+    entry_uuid: Uuid,
+    entry_title: Option<&'a str>,
+    attachment_name: &'a str,
+}
+
+fn classify(origin: &Origin<'_>, data: &[u8], result: &mut ScanResult) {
     if !data.starts_with(OPENSSH_MARKER) {
         if PEM_MARKERS.iter().any(|marker| data.starts_with(marker)) {
-            result.skipped.push(skipped(attachment, SkipReason::Pem));
+            result.skipped.push(skipped(origin, SkipReason::Pem));
         }
         return;
     }
@@ -139,21 +181,19 @@ fn classify(attachment: Attachment<'_>, result: &mut ScanResult) {
             } else {
                 SkipReason::Unparseable
             };
-            result.skipped.push(skipped(attachment, reason));
+            result.skipped.push(skipped(origin, reason));
             return;
         }
     };
 
     if private_key.is_encrypted() {
-        result
-            .skipped
-            .push(skipped(attachment, SkipReason::Encrypted));
+        result.skipped.push(skipped(origin, SkipReason::Encrypted));
         return;
     }
 
     let public_key = private_key.public_key();
     if let Some(reason) = unsupported(private_key.algorithm(), public_key.key_data()) {
-        result.skipped.push(skipped(attachment, reason));
+        result.skipped.push(skipped(origin, reason));
         return;
     }
 
@@ -162,17 +202,17 @@ fn classify(attachment: Attachment<'_>, result: &mut ScanResult) {
     result.found.push(FoundKey {
         public_key,
         fingerprint,
-        entry_uuid: attachment.entry_uuid,
-        entry_title: attachment.entry_title.map(str::to_owned),
-        attachment_name: attachment.name.to_string(),
+        entry_uuid: origin.entry_uuid,
+        entry_title: origin.entry_title.map(str::to_owned),
+        attachment_name: origin.attachment_name.to_string(),
     });
 }
 
-fn skipped(attachment: Attachment<'_>, reason: SkipReason) -> SkippedAttachment {
+fn skipped(origin: &Origin<'_>, reason: SkipReason) -> SkippedAttachment {
     SkippedAttachment {
-        entry_uuid: attachment.entry_uuid,
-        entry_title: attachment.entry_title.map(str::to_owned),
-        attachment_name: attachment.name.to_string(),
+        entry_uuid: origin.entry_uuid,
+        entry_title: origin.entry_title.map(str::to_owned),
+        attachment_name: origin.attachment_name.to_string(),
         reason,
     }
 }
@@ -357,6 +397,23 @@ pub fn dedupe_by_config_order(per_database: Vec<Vec<ServedKey>>) -> Vec<ServedKe
         .collect()
 }
 
+/// The private key of the key `fingerprint` on entry `entry_uuid`: the one
+/// attachment that parses to a key with it, read at the key's first
+/// signature. `None` if the entry or the attachment is gone, or the
+/// attachment doesn't parse.
+pub fn read_private_key(
+    open: &Open<'_>,
+    entry_uuid: Uuid,
+    fingerprint: Fingerprint,
+) -> Option<PrivateKey> {
+    open.entry(entry_uuid)?
+        .attachments()
+        .find_map(|attachment| {
+            parse_private_key(bytes(&attachment))
+                .filter(|key| key.public_key().fingerprint(HashAlg::Sha256) == fingerprint)
+        })
+}
+
 /// The private key in an OpenSSH attachment `scan` found, read at its first
 /// signature. `None` if it doesn't parse or is encrypted. The key material
 /// zeroizes when the returned key drops.
@@ -522,16 +579,90 @@ Pj3iwEnp4QT2MH74lDAAAAAAEC
         let mut result = ScanResult::default();
         for attachment in attachments {
             classify(
-                Attachment {
+                &Origin {
                     entry_uuid: attachment.entry_uuid,
                     entry_title: Some(&attachment.entry_title),
-                    name: &attachment.name,
-                    data: &attachment.data,
+                    attachment_name: &attachment.name,
                 },
+                &attachment.data,
                 &mut result,
             );
         }
         result
+    }
+
+    /// A scan of a database whose one entry holds `ED25519`, titled `title`,
+    /// protected or not: the title the found key carries.
+    fn scanned_title(protected: bool) -> Option<String> {
+        use crate::databases::Databases;
+        use crate::databases::testing::TestEntry;
+
+        let entry = TestEntry::new("untitled").attachment("id_ed25519", ED25519);
+        let entry = if protected {
+            entry.protected_field("Title", "SECRET-TITLE")
+        } else {
+            entry.field("Title", "github")
+        };
+        let databases = Databases::with_entries_for_test(vec![entry]);
+        let open = databases.open("personal").expect("unlocked");
+        let mut result = super::scan(&open);
+        assert_eq!(result.found.len(), 1);
+        result.found.remove(0).entry_title
+    }
+
+    /// The title a key carries is its entry's, and a title the user marked
+    /// protected in their KeePass client is never shown: the key has none.
+    #[test]
+    fn a_protected_title_is_not_the_keys_title() {
+        assert_eq!(scanned_title(false).as_deref(), Some("github"));
+        assert_eq!(scanned_title(true), None);
+    }
+
+    /// The private key a first signature needs is the entry's attachment
+    /// that parses to the key with the fingerprint asked for; another key's
+    /// fingerprint, or an entry that is gone, finds none.
+    #[test]
+    fn read_private_key_finds_the_attachment_for_a_fingerprint() {
+        use crate::databases::Databases;
+        use crate::databases::testing::TestEntry;
+
+        let databases = Databases::with_entries_for_test(vec![
+            TestEntry::new("keys")
+                .attachment("notes.txt", "not a key")
+                .attachment("id_ed25519", ED25519)
+                .attachment("id_rsa", RSA_3072),
+        ]);
+        let open = databases.open("personal").expect("unlocked");
+        let entry_uuid = open.entries().next().expect("the entry").uuid();
+        let found = super::scan(&open).found;
+        let fingerprint_of = |algorithm: Algorithm| {
+            found
+                .iter()
+                .find(|key| key.public_key.algorithm() == algorithm)
+                .expect("the key")
+                .fingerprint
+        };
+
+        let ed25519 = read_private_key(&open, entry_uuid, fingerprint_of(Algorithm::Ed25519))
+            .expect("the Ed25519 key");
+        assert_eq!(ed25519.algorithm(), Algorithm::Ed25519);
+        let rsa = read_private_key(
+            &open,
+            entry_uuid,
+            fingerprint_of(Algorithm::Rsa { hash: None }),
+        )
+        .expect("the RSA key");
+        assert_eq!(rsa.algorithm(), Algorithm::Rsa { hash: None });
+        let other = test_public_fingerprint();
+        assert!(read_private_key(&open, entry_uuid, other).is_none());
+        assert!(read_private_key(&open, Uuid::new_v4(), other).is_none());
+    }
+
+    /// The fingerprint of a key no entry holds.
+    fn test_public_fingerprint() -> Fingerprint {
+        crate::ssh::testing::test_key(99)
+            .public_key()
+            .fingerprint(HashAlg::Sha256)
     }
 
     #[test]

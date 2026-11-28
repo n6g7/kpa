@@ -7,11 +7,9 @@ use std::collections::hash_map::Entry;
 use ssh_key::encoding::{Decode, Encode, Reader};
 use ssh_key::public::KeyData;
 use ssh_key::{Fingerprint, HashAlg, PrivateKey};
-use uuid::Uuid;
 
 use super::hold::Hold;
 use super::sign::Refused;
-use crate::databases::Open;
 use crate::frontends::ssh_agent::wire::SignFlags;
 use crate::ssh::keys;
 
@@ -51,29 +49,11 @@ pub(super) fn sign(
     let (open, scanned) = hold.unlocked_mut().ok_or(Refused::Locked)?;
     let private_key = match scanned.private_keys.entry(fingerprint) {
         Entry::Occupied(cached) => cached.into_mut(),
-        Entry::Vacant(vacant) => vacant
-            .insert(read_private_key(open, entry_uuid, fingerprint).ok_or(Refused::SigningFailed)?),
+        Entry::Vacant(vacant) => vacant.insert(
+            keys::read_private_key(open, entry_uuid, fingerprint).ok_or(Refused::SigningFailed)?,
+        ),
     };
     sign_with(private_key, data, flags).ok_or(Refused::SigningFailed)
-}
-
-/// The private key on entry `entry_uuid`: the one attachment that parses to
-/// a key with `fingerprint`. Each attachment is parsed once, straight from
-/// the database's bytes.
-fn read_private_key(
-    open: &Open<'_>,
-    entry_uuid: Uuid,
-    fingerprint: Fingerprint,
-) -> Option<PrivateKey> {
-    let mut found = None;
-    open.entry(entry_uuid)?.for_each_attachment(|attachment| {
-        if found.is_some() {
-            return;
-        }
-        found = keys::parse_private_key(attachment.data)
-            .filter(|key| key.public_key().fingerprint(HashAlg::Sha256) == fingerprint);
-    });
-    found
 }
 
 /// The hash an RSA signature uses: `rsa-sha2-512` or `rsa-sha2-256`,
@@ -107,6 +87,7 @@ fn sign_with(key: &PrivateKey, data: &[u8], flags: SignFlags) -> Option<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use ssh_key::{Algorithm, Signature};
+    use uuid::Uuid;
 
     use super::*;
     use crate::config::SshKeyConfirm;

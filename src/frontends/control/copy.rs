@@ -8,11 +8,11 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 use super::proto::{CopyError, CopyOutcome, CopyRequest};
-use super::{Api, authz, offer};
+use super::{Api, authz, offer, unprotected};
 use crate::authn::Requester;
 use crate::cancel::CancelToken;
 use crate::clipboard::{Backend, Offer};
-use crate::databases::{Databases, Observer, OpenError};
+use crate::databases::{Databases, Observer, OpenError, fields};
 use crate::display_session::DisplaySession;
 use crate::log;
 
@@ -148,10 +148,12 @@ impl Api {
                 .ok_or_else(|| CopyError::UnknownUuid { db: db() })?;
             // What the entry offers is worked out here, from the entry as it
             // is now, the same way `list` does; the name must be one of them.
-            let value = offer::find(&read.stored_fields(), &request.field)
+            let value = offer::find(&read, &request.field)
                 .and_then(|copyable| copyable.value(&read))
                 .ok_or_else(|| CopyError::FieldEmpty { db: db() })?;
-            let title = read.title().unwrap_or_else(|| request.uuid.to_string());
+            let title = unprotected(&read, fields::TITLE)
+                .map(str::to_owned)
+                .unwrap_or_else(|| request.uuid.to_string());
             (value, title, open.unlock_token())
             // The guard is released here: the clipboard handoff is a round
             // trip to the compositor, and must not stall every other request.
@@ -205,7 +207,14 @@ mod tests {
                     .field("UserName", ""),
             ],
         );
-        fx.databases.open(name).ok().unwrap().entries()[0].uuid
+        fx.databases
+            .open(name)
+            .ok()
+            .unwrap()
+            .entries()
+            .next()
+            .unwrap()
+            .uuid()
     }
 
     fn copy(fx: &Fixture, db: &str, uuid: Uuid, field: &str) -> Result<CopyOutcome, CopyError> {
@@ -256,8 +265,8 @@ mod tests {
         fx.databases
             .install_for_test("personal", vec![entry_with(&keys)]);
         let open = fx.databases.open("personal").ok().unwrap();
-        let uuid = open.entries()[0].uuid;
-        let listed = wire_entries("personal", &open.entries())[0].fields.clone();
+        let uuid = open.entries().next().unwrap().uuid();
+        let listed = wire_entries("personal", &open)[0].fields.clone();
         drop(open);
 
         // `totp` the stored field is not offered; `totp` the code is.
@@ -338,11 +347,8 @@ mod tests {
             vec![TestEntry::new("the-title").field("title", "a field of its own")],
         );
         let open = fx.databases.open("personal").ok().unwrap();
-        let uuid = open.entries()[0].uuid;
-        assert_eq!(
-            wire_entries("personal", &open.entries())[0].fields,
-            ["title"]
-        );
+        let uuid = open.entries().next().unwrap().uuid();
+        assert_eq!(wire_entries("personal", &open)[0].fields, ["title"]);
         drop(open);
 
         for field in ["Title", "custom:Title"] {
@@ -366,7 +372,15 @@ mod tests {
         let fx = fixture();
         fx.databases
             .install_for_test("personal", vec![entry_with(&["OTP"])]);
-        let uuid = fx.databases.open("personal").ok().unwrap().entries()[0].uuid;
+        let uuid = fx
+            .databases
+            .open("personal")
+            .ok()
+            .unwrap()
+            .entries()
+            .next()
+            .unwrap()
+            .uuid();
 
         for field in ["otp", "custom:otp"] {
             assert_eq!(
@@ -405,16 +419,15 @@ mod tests {
             ],
         );
         let open = fx.databases.open("personal").ok().unwrap();
-        let entries = open.entries();
+        let listed = wire_entries("personal", &open);
         let uuid = |title: &str| {
-            entries
+            listed
                 .iter()
                 .find(|e| e.title.as_deref() == Some(title))
                 .expect("entry")
                 .uuid
         };
         let (with_seed, no_seed) = (uuid("with seed"), uuid("no seed"));
-        let listed = wire_entries("personal", &entries);
         drop(open);
         for entry in &listed {
             let expected: &[&str] = if entry.uuid == with_seed {

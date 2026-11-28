@@ -28,9 +28,10 @@ are the dependency graph; there is no arrow between two front ends.
 | `authz` | the checks every front end shares: `may_connect`, `on_desktop`, `display_allows_prompt`, `may_prompt_on_screen` | `authn`, `display_session` |
 | `socket` | the owner-only bind, the socket directory check, a request with a file descriptor attached | `authn` |
 | `clipboard` | the clipboard, with its Wayland backend inside | `authn`, `authz`, `display_session` |
-| `databases` | the databases and their lifecycle, `Observer`; `vault` (reading a `.kdbx`) inside | `config` |
+| `databases` | the databases and their lifecycle, `Observer`; the entries an unlocked database hands out (`Entry`, `Field`, `Attachment`, and `Value` and `Secret`, which say what may be done with one); `vault` (reading a `.kdbx`) inside | `config` |
+| `otp` | the code of the moment, made from the seed an entry stores | `databases` (reads only) |
 | `ssh` | what `control` and `ssh_agent` share about SSH: `keys` (finding keys in a database, their config, the public-key cache) and `approvals` (approvals and pending requests, per database and per unlock) | `databases` (reads only), `config`, `paths` |
-| `frontends::control` | kpa's own socket: transport, handlers, `CopyState`, the wire types (`proto`) and the CLI's client | `databases`, `ssh`, `authz`, `authn`, `prompt`, `clipboard`, `display_session`, `socket`, `config` |
+| `frontends::control` | kpa's own socket: transport, handlers, `CopyState`, the wire types (`proto`) and the CLI's client | `databases`, `otp`, `ssh`, `authz`, `authn`, `prompt`, `clipboard`, `display_session`, `socket`, `config` |
 | `frontends::ssh_agent` | the SSH agent's socket: protocol, policy, the sign flow, `SshState` | `databases`, `ssh`, `authz`, `authn`, `prompt`, `display_session`, `config` |
 | `frontends::tray` | the status icon and its menu | `databases`, `authz`, `prompt`, `display_session` |
 | `frontends::auto_lock` | what locks without a request: the logind watcher, the sleep inhibitor, the idle tick, `SleepHold` | `databases`, `authn`, `display_session` |
@@ -49,8 +50,9 @@ are the dependency graph; there is no arrow between two front ends.
   and approvals. Only `main` and the daemon's wiring import `frontends::`.
 - **Only front ends drive the core.** Only a front end unlocks or locks a
   `databases` database. `ssh/` may read it through a guard a front end hands
-  it and hear of a lock, and the daemon's wiring builds it. `authz`,
-  `clipboard`, `prompt` and the rest never see it.
+  it and hear of a lock, `otp` reads an entry a front end hands it, and the
+  daemon's wiring builds it. `authz`, `clipboard`, `prompt` and the rest never
+  see it.
 - **A type's behaviour stays in its subsystem.** No `impl` blocks for
   another subsystem's types. No blanket impl whose only real implementor
   is one concrete type from another subsystem; wrap that type in one of
@@ -99,6 +101,8 @@ src/
   daemon.rs             wiring: builds everything, starts the threads
   databases/            the core
     mod.rs              Databases and its slots; Open, the guard with the read methods
+    entry.rs            Entry, Field, Attachment: an entry's fields and attachments, borrowed from the open database
+    secret.rs           Value (shareable, or derive-only) and Secret
     unlock.rs           begin_unlock, Unlocking, finish
     observer.rs         Observer, and telling observers in their order
     freshness.rs        the freshness guard: a changed file locks the database
@@ -126,6 +130,7 @@ src/
     auto_lock/
       mod.rs            react, watch_idle, SleepHold (OS-neutral)
       logind.rs         the logind watcher and the sleep inhibitor
+  otp.rs                the code of the moment from an entry's seed
   ssh/                  what control and ssh_agent share about SSH
     keys.rs             finding keys, their config, the public-key cache
     approvals/          approvals and pending requests, and their state per unlock

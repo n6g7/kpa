@@ -1,0 +1,7 @@
+# What `databases` hands out of an entry as derive-only (a one-time-password
+# seed, an attachment) comes out of its `Secret` only through `reveal`. Each
+# place that derives from one allows the call with a comment that says what it
+# derives; any other caller fails `clippy -D warnings`.
+disallowed-methods = [
+    { path = "kpa::databases::Secret::reveal", reason = "a seed or a key only derives something (a code, a signature): derive from it, never hand it out" },
+]

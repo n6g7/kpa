@@ -30,7 +30,11 @@ subsystem or a dependency between two.
 - Front ends (`src/frontends/*`) don't use each other: what two of them
   share lives in a subsystem below them (`src/ssh/`).
 - Only front ends drive `databases` (unlock, lock). `src/ssh/` may read it
-  through a guard it is handed; `src/daemon.rs` builds and wires it.
+  through a guard it is handed, and `src/otp.rs` an entry it is handed;
+  `src/daemon.rs` builds and wires it.
+- A `DeriveOnly` value is read only through `Secret::reveal`, under an
+  `#[allow(clippy::disallowed_methods)]` that says what it derives; anything
+  else is handed `Shareable` values only.
 - No `impl` blocks for another subsystem's types, and no blanket impl whose
   only real implementor is one of them.
 - Export a small API. `pub(crate)` added to reach into another

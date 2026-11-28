@@ -11,8 +11,8 @@ use std::time::Duration;
 use super::testing::{PASSWORD, TestEntry, build};
 use super::vault::{self, Fingerprint};
 use super::{
-    Begin, BeginError, Databases, Observer, OpenError, UnknownDb, UnlockFailure, Unlocking,
-    VaultError,
+    Begin, BeginError, Databases, Entry, Observer, OpenError, UnknownDb, UnlockFailure, Unlocking,
+    Value, VaultError,
 };
 use zeroize::Zeroizing;
 
@@ -435,6 +435,7 @@ fn observers_are_told_before_the_call_returns_in_every_kind_of_lock() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // The test reads the bytes it just stored.
 fn open_reads_entries_fields_and_attachments() {
     let databases = databases(&["work"]);
     databases.install_for_test(
@@ -452,33 +453,44 @@ fn open_reads_entries_fields_and_attachments() {
 
     assert_eq!(open.name(), "work");
     assert_eq!(open.entry_count(), 2);
-    let entries = open.entries();
+    assert_eq!(open.entries().count(), 2);
+    let text = |entry: &Entry<'_>, key: &str| {
+        entry
+            .fields()
+            .find(|field| field.key == key)
+            .and_then(|field| field.value.shareable().map(str::to_string))
+    };
     let uuid = |title: &str| {
-        entries
-            .iter()
-            .find(|entry| entry.title.as_deref() == Some(title))
+        open.entries()
+            .find(|entry| text(entry, "Title").as_deref() == Some(title))
             .unwrap()
-            .uuid
+            .uuid()
     };
 
     let site = open.entry(uuid("site")).unwrap();
-    assert_eq!(site.title().as_deref(), Some("site"));
-    assert_eq!(site.field("Password").unwrap().as_str(), "hunter2");
-    assert!(site.field("Missing").is_none());
-    assert!(site.totp().is_none());
+    assert_eq!(text(&site, "Password").as_deref(), Some("hunter2"));
+    assert_eq!(text(&site, "Missing"), None);
     assert!(open.entry(uuid::Uuid::new_v4()).is_none());
 
-    let mut names = Vec::new();
-    open.for_each_attachment(|a| names.push(a.name.to_string()));
-    assert_eq!(names, ["id_ed25519"], "the recycle bin is skipped");
-    let mut one = Vec::new();
-    site.for_each_attachment(|a| one.push(a.data.to_vec()));
+    let names: Vec<String> = open
+        .entries()
+        .flat_map(|entry| {
+            entry
+                .attachments()
+                .map(|a| a.name.to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(names, ["id_ed25519"], "the recycle bin has no attachments");
+    let one: Vec<Vec<u8>> = site
+        .attachments()
+        .map(|a| match a.value {
+            Value::DeriveOnly(secret) => secret.reveal().to_vec(),
+            Value::Shareable(_) => panic!("an attachment only derives"),
+        })
+        .collect();
     assert_eq!(one, [b"KEY".to_vec()]);
-    let mut none = 0;
-    open.entry(uuid("old"))
-        .unwrap()
-        .for_each_attachment(|_| none += 1);
-    assert_eq!(none, 0);
+    assert_eq!(open.entry(uuid("old")).unwrap().attachments().count(), 0);
 }
 
 /// A database written for a test is read by `finish` as any file is: the
