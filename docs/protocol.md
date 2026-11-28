@@ -228,12 +228,13 @@ daemon has put the terminal back before the shell takes it
 the user marked protected in their KeePass client, not just `Password`: a
 protected `Title`, `UserName` or `URL` is omitted, not de-protected —
 protection is a property of the field, not of which field name it happens to
-be. An empty `Title`, `UserName` or `URL` is omitted like an absent one. A field counts as protected when its XML carries `Protected="True"` or
+be. An empty `Title`, `UserName` or `URL` is omitted like an absent one. A
+field counts as protected when its XML carries `Protected="True"` or
 `ProtectInMemory="True"`. The pinned `keepass` crate (0.15.0) reads only
 `Protected`, so until it reads `ProtectInMemory` too, `list` can return a
-field that carries only that marker; the threat model (A-2, G-3) records
-this as a known gap. The launcher does its own fuzzy matching; kpa stays dumb
-and returns everything else.
+field that carries only that marker; the threat model (A-2, G-3) records this
+as a known gap. The launcher does its own fuzzy matching; kpa stays dumb and
+returns everything else.
 
 **`fields` is the one exception, because it carries names, never values.**
 Each entry's `fields` array names every field `copy` can be asked for on it,
