@@ -61,7 +61,7 @@ impl CopyState {
         }
         let offer = self
             .clipboard
-            .start(value, session)
+            .start(value, session, unlock)
             .map_err(|err| CopyError::Clipboard {
                 db: db.to_string(),
                 detail: err.to_string(),
@@ -564,6 +564,7 @@ mod tests {
             &self,
             _secret: Zeroizing<String>,
             _display_session: &DisplaySession,
+            _unlock: &CancelToken,
         ) -> Result<Arc<Offer>, ClipboardError> {
             let offer = Arc::new(Offer::detached());
             let previous = self.last.lock().unwrap().replace(Arc::clone(&offer));

@@ -8,6 +8,14 @@
 //! - [`Offer`] is one secret being served: live until [`Offer::end`] or
 //!   until something else takes the clipboard.
 //!
+//! **A lock stops the serving itself.** Every offer is started with the
+//! [`CancelToken`] of the unlock its secret came from, and checks it before
+//! answering each paste. A lock cancels the token before it returns, so a
+//! paste asked after a lock gets nothing, even while the offer is still
+//! being handed to the compositor and nobody has had the chance to
+//! [`Offer::end`] it yet. A paste whose answer had already begun when the
+//! lock landed may finish: the lock doesn't wait for the offer's thread.
+//!
 //! **Why `clipboard_timeout` isn't enforced inside this module.** Driving a
 //! timeout needs a sleep somewhere, and a backend that slept would make
 //! every test either wait out a real timeout or inject a fake clock.
@@ -30,6 +38,7 @@ use std::sync::Mutex;
 
 use zeroize::Zeroizing;
 
+use crate::cancel::CancelToken;
 use crate::display_session::DisplaySession;
 
 pub use wayland::Offer;
@@ -56,10 +65,16 @@ pub trait Backend: Send + Sync {
     /// alongside it. Blocks only long enough to know whether the backend
     /// accepted the offer — the actual serving runs on a thread of the
     /// backend's own.
+    ///
+    /// `unlock` is the unlock `secret` was read from. Once it is cancelled
+    /// the offer answers no paste asked after that with the secret, whether
+    /// or not the offer has been handed back yet. A paste whose answer had
+    /// already begun may finish.
     fn start(
         &self,
         secret: Zeroizing<String>,
         display_session: &DisplaySession,
+        unlock: &CancelToken,
     ) -> Result<Arc<Offer>, ClipboardError>;
 }
 
@@ -74,10 +89,11 @@ impl Backend for WaylandBackend {
         &self,
         secret: Zeroizing<String>,
         display_session: &DisplaySession,
+        unlock: &CancelToken,
     ) -> Result<Arc<Offer>, ClipboardError> {
         let failed = |err: wayland::Error| ClipboardError(err.0);
         let stream = wayland::connect(display_session).map_err(failed)?;
-        let offer = wayland::offer(stream, secret).map_err(failed)?;
+        let offer = wayland::offer(stream, secret, unlock.clone()).map_err(failed)?;
         Ok(Arc::new(offer))
     }
 }
@@ -127,6 +143,7 @@ impl Backend for RecordingBackend {
         &self,
         secret: Zeroizing<String>,
         _display_session: &DisplaySession,
+        _unlock: &CancelToken,
     ) -> Result<Arc<Offer>, ClipboardError> {
         self.offered
             .lock()
