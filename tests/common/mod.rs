@@ -599,14 +599,13 @@ pub fn dump_processes() -> String {
                 continue;
             };
             let stat = read(&format!("/proc/{pid}/stat"));
-            if let Some((_, rest)) = stat.rsplit_once(") ") {
-                if let Some(ppid) = rest
+            if let Some((_, rest)) = stat.rsplit_once(") ")
+                && let Some(ppid) = rest
                     .split_whitespace()
                     .nth(1)
                     .and_then(|p| p.parse::<u32>().ok())
-                {
-                    ppids.push((pid, ppid));
-                }
+            {
+                ppids.push((pid, ppid));
             }
         }
     }
@@ -625,5 +624,19 @@ pub fn dump_processes() -> String {
         describe(&mut out, pid);
     }
     let _ = writeln!(out, "--- load: {}", read("/proc/loadavg"));
+    if let Ok(ps) = Command::new("ps")
+        .args(["-eo", "pid,ppid,stat,pcpu,etime,args", "--sort=-pcpu"])
+        .output()
+    {
+        let _ = writeln!(
+            out,
+            "--- ps\n{}",
+            String::from_utf8_lossy(&ps.stdout)
+                .lines()
+                .take(40)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
     out
 }
