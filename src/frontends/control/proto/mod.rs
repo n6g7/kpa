@@ -442,7 +442,7 @@ mod tests {
         let owned = || db.to_string();
 
         // (response, expected code, expected `db`, expected `detail`)
-        let cases: [(Response, &str, Option<&str>, Option<&str>); 28] = [
+        let cases: [(Response, &str, Option<&str>, Option<&str>); 29] = [
             (
                 Response::Unlock(Err(UnlockError::InProgress { db: owned() })),
                 "unlock_in_progress",
@@ -519,6 +519,15 @@ mod tests {
                 "corrupt",
                 Some(db),
                 Some("not a KDBX3 or KDBX4 file; kpa reads only those"),
+            ),
+            (
+                Response::Unlock(Err(UnlockError::FileRefused {
+                    db: owned(),
+                    detail: "database file is not a regular file".to_string(),
+                })),
+                "corrupt",
+                Some(db),
+                Some("database file is not a regular file"),
             ),
             (
                 Response::Unlock(Err(UnlockError::Io { db: owned() })),

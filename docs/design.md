@@ -308,8 +308,10 @@ Requests, responses, errors, the field collision rule and version skew are in
 A KeePass client and kpa can both have the file open at once. Clients write
 through a temp file and a rename, and there is no per-database lock file. So:
 
-1. **Never create a lock file. Never hold an fd.** Open, read the whole file,
-   close, parse. (Upstream, a file with pathological KDF parameters can make
+1. **Never create a lock file. Never hold an fd.** Open without blocking,
+   refuse anything but a regular file of at most 128 MiB (a keyfile: 16 MiB),
+   read it whole, close, parse. A FIFO at the path is refused at once instead
+   of holding the database's unlock until someone opens its other end. (Upstream, a file with pathological KDF parameters can make
    `keepass` hang mid-unlock, holding its fd.)
 2. **Never write.** Guaranteed by the shape of `Op` and the agent's wire layer.
 3. **Freshness guard** (threat model T-12, G-8). The core records the file's

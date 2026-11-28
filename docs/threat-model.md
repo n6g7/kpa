@@ -561,13 +561,19 @@ spoofed or bus-reachable lock (NG-7).
 Response: memory-safe language; parsing in the `keepass` crate; only
 KDBX3 and KDBX4 files are read, and every other format `keepass` parses
 (KeePass 1.x, whose header authenticates nothing) is refused before the key
-is used; ceilings on KDF parameters and file size. In scope, by severity:
-memory corruption or code execution; one database's file affecting
-another database's state; a tampered file that opens with altered content
-(KDBX3's header is authenticated only by `Meta/HeaderHash`, which `keepass`
-does not check); unbounded memory or time from header or KDF parameters
-(these are read before any keyed check, so ACT-3 controls them); hangs or
-panics.
+is used; a database file is read only if it is a regular file of at most
+128 MiB, and a keyfile only if it is one of at most 16 MiB: both are opened
+without blocking and read through a bounded read, so a FIFO or a device
+cannot hold an unlock and no more than that is read from any file
+(unlocking a database at the ceiling takes about six times its size at the
+peak; a compressed vault inflates when parsed, which the ceiling bounds
+only by the compression ratio); ceilings on KDF parameters. In scope, by
+severity: memory corruption or code execution; one database's file
+affecting another database's state; a tampered file that opens with
+altered content (KDBX3's header is authenticated only by `Meta/HeaderHash`,
+which `keepass` does not check); unbounded memory or time from header or
+KDF parameters (these are read before any keyed check, so ACT-3 controls
+them); hangs or panics.
 
 **T-12 · Stale data after the file changes** (T) — ACT-3 · TB-2 · A-2, A-3, A-6 → G-8  
 Response: `(dev, ino, size, mtime, ctime)`, with nanoseconds, recorded by

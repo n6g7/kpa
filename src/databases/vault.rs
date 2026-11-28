@@ -13,9 +13,9 @@
 //! `totp`, `save_kdbx4` and `serialization` are real feature names, and v1
 //! needs none of them.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
@@ -57,6 +57,16 @@ pub enum VaultError {
     #[error("wrong password or keyfile, or the file has been modified")]
     WrongCredentials,
 
+    /// The path is something other than a regular file: a FIFO, a device, a
+    /// directory. Refused before anything is read from it.
+    #[error("{0} is not a regular file")]
+    NotRegular(FileKind),
+
+    /// The file is larger than kpa reads (see [`FileKind::limit`]). Refused
+    /// as soon as that is known, so no more than the limit is ever held.
+    #[error("{} is larger than {} MiB", .0, .0.limit() >> 20)]
+    TooLarge(FileKind),
+
     /// The file was readable but isn't a valid (or isn't a supported)
     /// KeePass database: truncated, garbage bytes, bad checksum, etc. (a
     /// format kpa doesn't read is `UnsupportedFormat`).
@@ -88,6 +98,36 @@ pub enum VaultError {
     /// that were read may not match the fingerprint taken around them.
     #[error("database file changed while it was being read")]
     Changed,
+}
+
+/// Which of the two files `open` reads a refusal is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Database,
+    Keyfile,
+}
+
+impl FileKind {
+    /// The most kpa reads of the file, in bytes. A real vault is tens of MiB
+    /// at most and a keyfile a few KiB, so no honest file meets these; they
+    /// are small enough that a file's writer (ACT-3) can't make the daemon
+    /// hold more than a few times that: unlocking a vault at the ceiling
+    /// takes about six times its size in memory at its peak.
+    pub const fn limit(self) -> u64 {
+        match self {
+            FileKind::Database => 128 << 20,
+            FileKind::Keyfile => 16 << 20,
+        }
+    }
+}
+
+impl std::fmt::Display for FileKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            FileKind::Database => "database file",
+            FileKind::Keyfile => "keyfile",
+        })
+    }
 }
 
 /// The file identity the freshness guard compares.
@@ -217,6 +257,11 @@ pub struct EntrySummary {
 /// Reads KDBX3 and KDBX4 only; any other format `keepass` can parse comes
 /// back as `UnsupportedFormat` before the key is used.
 ///
+/// Reads regular files only, a database up to [`FileKind::limit`] and a
+/// keyfile up to its own: the path is opened without blocking and checked
+/// before anything is read, so a FIFO, a device or an oversized file is
+/// refused (`NotRegular`, `TooLarge`) without holding the caller or memory.
+///
 /// **Never panics.** `keepass` indexes past the end of short header fields
 /// in several places and panics on them (the fix is upstream), so the parse
 /// runs under `catch_unwind` and a panic comes back as `Corrupt`. See the
@@ -251,12 +296,11 @@ pub fn open(
     password: Option<&Zeroizing<String>>,
     keyfile: Option<&Path>,
 ) -> Result<(Database, Fingerprint), VaultError> {
-    let mut file = open_file(path, VaultError::NotFound)?;
+    let mut file = open_regular(path, FileKind::Database, VaultError::NotFound)?;
     // The whole file is read here, not inside `keepass`, so the fstat calls
     // can bracket the read. The fd is closed before key derivation.
     let before = Fingerprint::from_metadata(&file.metadata()?);
-    let mut data = Vec::new();
-    file.read_to_end(&mut data)?;
+    let data = read_bounded(&mut file, FileKind::Database)?;
     let after = Fingerprint::from_metadata(&file.metadata()?);
     drop(file);
     if !before.matches(after) {
@@ -271,9 +315,14 @@ pub fn open(
             key = key.with_password(password);
         }
         if let Some(keyfile_path) = keyfile {
-            let mut keyfile_handle = open_file(keyfile_path, VaultError::KeyfileNotFound)?;
+            let mut keyfile_handle =
+                open_regular(keyfile_path, FileKind::Keyfile, VaultError::KeyfileNotFound)?;
+            // `keepass` reads a keyfile to its end whatever its size, so the
+            // bounded read is done here and it is handed the bytes.
             // io::Error here (e.g. a permissions error mid-read) maps to
             // VaultError::Io via the #[from] impl above.
+            let keyfile_bytes =
+                Zeroizing::new(read_bounded(&mut keyfile_handle, FileKind::Keyfile)?);
             //
             // Upstream leak: `keepass` zeroizes its own copy of the raw keyfile,
             // but its XML keyfile parser makes about six unzeroized
@@ -282,7 +331,7 @@ pub fn open(
             // keyfile here would remove most of those at the cost of
             // duplicating `keepass`'s format detection; the fix belongs
             // upstream.
-            key = key.with_keyfile(&mut keyfile_handle)?;
+            key = key.with_keyfile(&mut Cursor::new(&keyfile_bytes[..]))?;
         }
         Ok(key)
     };
@@ -388,20 +437,57 @@ fn between<'a>(haystack: &'a [u8], open: &[u8], close: &[u8]) -> Option<&'a [u8]
     Some(&rest[..len])
 }
 
-/// `File::open` with the not-found case mapped to a caller-supplied
-/// `VaultError` variant, so the same helper serves both the database path
-/// and the keyfile path with different error variants.
-fn open_file(
+/// Opens `path` for reading, as a regular file of at most `kind`'s limit.
+/// The not-found case maps to a caller-supplied `VaultError` variant, so the
+/// same helper serves both the database path and the keyfile path with
+/// different error variants.
+///
+/// The open is non-blocking, so a FIFO at the path doesn't hold the caller
+/// (and the database's unlock claim with it) until some writer turns up:
+/// it opens at once, and the `fstat` that follows refuses it, as it does a
+/// device or a directory. A symlink is followed.
+fn open_regular(
     path: &Path,
+    kind: FileKind,
     not_found: impl FnOnce(PathBuf) -> VaultError,
 ) -> Result<File, VaultError> {
-    File::open(path).map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
-            not_found(path.to_path_buf())
-        } else {
-            VaultError::Io(err)
-        }
-    })
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                not_found(path.to_path_buf())
+            } else {
+                VaultError::Io(err)
+            }
+        })?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(VaultError::NotRegular(kind));
+    }
+    if meta.len() > kind.limit() {
+        return Err(VaultError::TooLarge(kind));
+    }
+    Ok(file)
+}
+
+/// Reads the rest of `file`, which [`open_regular`] vetted, holding no more
+/// than `kind`'s limit: the read stops one byte past it, so a file that grew
+/// since the `fstat`, or lies about its size, is refused instead of read to
+/// its end. The buffer starts at the file's size, so a read that doesn't
+/// grow the file never reallocates (and leaves no stray copy behind).
+fn read_bounded(file: &mut File, kind: FileKind) -> Result<Vec<u8>, VaultError> {
+    let size = usize::try_from(file.metadata()?.len().min(kind.limit())).unwrap_or(0);
+    let mut data = Vec::with_capacity(size);
+    file.by_ref()
+        .take(kind.limit() + 1)
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > kind.limit() {
+        data.zeroize();
+        return Err(VaultError::TooLarge(kind));
+    }
+    Ok(data)
 }
 
 /// List every entry in the database, recursing into all groups. Always
