@@ -442,7 +442,7 @@ mod tests {
         let owned = || db.to_string();
 
         // (response, expected code, expected `db`, expected `detail`)
-        let cases: [(Response, &str, Option<&str>, Option<&str>); 29] = [
+        let cases: [(Response, &str, Option<&str>, Option<&str>); 30] = [
             (
                 Response::Unlock(Err(UnlockError::InProgress { db: owned() })),
                 "unlock_in_progress",
@@ -528,6 +528,15 @@ mod tests {
                 "corrupt",
                 Some(db),
                 Some("database file is not a regular file"),
+            ),
+            (
+                Response::Unlock(Err(UnlockError::KdfRefused {
+                    db: owned(),
+                    detail: "key derivation above kpa's ceiling".to_string(),
+                })),
+                "corrupt",
+                Some(db),
+                Some("key derivation above kpa's ceiling"),
             ),
             (
                 Response::Unlock(Err(UnlockError::Io { db: owned() })),

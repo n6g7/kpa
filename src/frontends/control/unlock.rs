@@ -101,6 +101,11 @@ fn unlock_error(name: &str, err: VaultError) -> UnlockError {
                 detail: refused.to_string(),
             }
         }
+        // The text names which ceiling, never a value from the file.
+        refused @ VaultError::KdfAboveCeiling(_) => UnlockError::KdfRefused {
+            db,
+            detail: refused.to_string(),
+        },
         VaultError::Io(_) => UnlockError::Io { db },
         VaultError::Changed => UnlockError::Stale { db },
     }
@@ -114,7 +119,7 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use crate::databases::{Begin, BeginError, VaultFile};
+    use crate::databases::{Begin, BeginError, Ceiling, VaultFile};
     use crate::display_session::DisplaySession;
     use crate::frontends::control::testing::{
         Fixture, SESSION, desktop, fixture, outside, requester_in,
@@ -184,6 +189,21 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn a_key_derivation_above_the_ceiling_says_which() {
+        assert_eq!(
+            unlock_error(
+                "personal",
+                VaultError::KdfAboveCeiling(Ceiling::Argon2Memory)
+            ),
+            UnlockError::KdfRefused {
+                db: "personal".to_string(),
+                detail: "key derivation above kpa's ceiling: more than 1024 MiB of Argon2 memory"
+                    .to_string()
+            }
+        );
     }
 
     fn cancelled() -> Result<String, UnlockError> {

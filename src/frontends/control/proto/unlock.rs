@@ -59,6 +59,12 @@ pub enum UnlockError {
         db: String,
         detail: String,
     },
+    /// The vault's header asks for more key derivation than kpa runs.
+    /// Reported as `corrupt`, with a `detail` that names the ceiling.
+    KdfRefused {
+        db: String,
+        detail: String,
+    },
     Io {
         db: String,
     },
@@ -105,6 +111,9 @@ impl UnlockError {
             UnlockError::NotFound { db } => ErrorFields::new(ErrorCode::NotFound).db(db),
             UnlockError::Corrupt { db } => ErrorFields::new(ErrorCode::Corrupt).db(db),
             UnlockError::FileRefused { db, detail } => ErrorFields::new(ErrorCode::Corrupt)
+                .db(db)
+                .detail(detail.as_str()),
+            UnlockError::KdfRefused { db, detail } => ErrorFields::new(ErrorCode::Corrupt)
                 .db(db)
                 .detail(detail.as_str()),
             UnlockError::UnsupportedFormat { db } => ErrorFields::new(ErrorCode::Corrupt)

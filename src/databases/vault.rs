@@ -25,6 +25,8 @@ use keepass::config::DatabaseVersion;
 use keepass::db::DatabaseOpenError;
 use keepass::error::{CryptographyError, DatabaseKeyError};
 use keepass::{Database, DatabaseKey};
+
+use super::kdf::{self, Ceiling};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -66,6 +68,12 @@ pub enum VaultError {
     /// as soon as that is known, so no more than the limit is ever held.
     #[error("{} is larger than {} MiB", .0, .0.limit() >> 20)]
     TooLarge(VaultFile),
+    /// The header asks for more key derivation than kpa runs: AES rounds,
+    /// or Argon2 memory, lanes or work above a ceiling (`kdf`). Refused
+    /// before any key derivation, which no file may be able to make hang or
+    /// abort the daemon.
+    #[error("key derivation above kpa's ceiling: {0}")]
+    KdfAboveCeiling(Ceiling),
 
     /// The file was readable but isn't a valid (or isn't a supported)
     /// KeePass database: truncated, garbage bytes, bad checksum, etc. (a
@@ -268,21 +276,18 @@ pub struct EntrySummary {
 /// runs under `catch_unwind` and a panic comes back as `Corrupt`. See the
 /// comment at that call for when this stops holding.
 ///
-/// Upstream hazards this cannot catch, all in `keepass` 0.15.0:
+/// The key derivation the header asks for is checked first (`kdf::check`):
+/// `keepass` runs whatever AES rounds or Argon2 memory, lanes and
+/// iterations it finds, and an implausible one either aborts the process on
+/// allocation failure (no unwind, so `catch_unwind` doesn't help, and every
+/// unlocked database goes with it) or keeps a core busy, in a thread that
+/// can't be cancelled, for as long as the database's unlock claim stays
+/// taken. The file's descriptor is closed before then. Above the ceilings
+/// the file is refused (`KdfAboveCeiling`); within them an unlock is bounded
+/// at about a minute of one core.
 ///
-/// - **KDF parameters are unbounded.** A corrupted `TransformRounds` makes
-///   a KDBX3 open hang indefinitely (AES-KDF has no rounds ceiling), and an
-///   implausible Argon2 memory cost aborts the process on allocation
-///   failure — no unwind, so `catch_unwind` doesn't help. Random corruption
-///   reaches this for KDBX3 only; KDBX4's header HMAC rejected every
-///   mutation tried. In the daemon the stakes are higher than in a one-shot
-///   CLI: a hung unlock keeps its core busy and its file descriptor open
-///   after the client gives up, each retry stacks another, and an abort ends
-///   every unlocked session at once. Rust threads can't be cancelled, so a
-///   timeout here would not help either.
-///   The fix is ceilings in `keepass` before the KDF runs; a header
-///   pre-check in this repo is the fallback if upstream hasn't moved by
-///   the time the daemon is meant to run unattended.
+/// One more gap in `keepass` 0.15.0 that `open` closes:
+///
 /// - **KDBX3's header hash is checked here, not by `keepass`.** KDBX3
 ///   authenticates its outer header only through `Meta/HeaderHash` inside
 ///   the encrypted payload, and `keepass` 0.15 never compares it. `open`
@@ -348,9 +353,15 @@ pub fn open(
     let version =
         DatabaseVersion::parse(&data).map_err(|err| VaultError::Corrupt(err.to_string()))?;
     match version {
-        DatabaseVersion::KDB3(_) => verify_kdbx3_header(&data, make_key()?)?,
-        DatabaseVersion::KDB4(_) => {}
+        DatabaseVersion::KDB3(_) | DatabaseVersion::KDB4(_) => {}
         _ => return Err(VaultError::UnsupportedFormat),
+    }
+    // Before any key derivation, `verify_kdbx3_header`'s included: its
+    // parameters are the file writer's, and `keepass` runs them as they
+    // stand.
+    kdf::check(&data, &version).map_err(VaultError::KdfAboveCeiling)?;
+    if let DatabaseVersion::KDB3(_) = version {
+        verify_kdbx3_header(&data, make_key()?)?;
     }
 
     // Sound because `Database::open` touches no state shared with anything

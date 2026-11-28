@@ -320,7 +320,8 @@ fn failure_label(failure: UnlockFailure) -> &'static str {
             VaultError::Corrupt(_)
             | VaultError::UnsupportedFormat
             | VaultError::NotRegular(_)
-            | VaultError::TooLarge(_),
+            | VaultError::TooLarge(_)
+            | VaultError::KdfAboveCeiling(_),
         ) => "corrupt",
         UnlockFailure::Vault(VaultError::Io(_)) => "io",
         UnlockFailure::Vault(VaultError::Changed) => "stale",
@@ -1198,10 +1199,10 @@ mod tests {
 
     #[test]
     fn every_failure_has_a_short_label_and_never_its_text() {
-        use crate::databases::VaultFile;
+        use crate::databases::{Ceiling, VaultFile};
 
         let path = || std::path::PathBuf::from("/secret/path");
-        let cases: [(UnlockFailure, &str); 10] = [
+        let cases: [(UnlockFailure, &str); 11] = [
             (
                 UnlockFailure::Vault(VaultError::NotFound(path())),
                 "not_found",
@@ -1228,6 +1229,10 @@ mod tests {
             ),
             (
                 UnlockFailure::Vault(VaultError::TooLarge(VaultFile::Keyfile)),
+                "corrupt",
+            ),
+            (
+                UnlockFailure::Vault(VaultError::KdfAboveCeiling(Ceiling::AesRounds)),
                 "corrupt",
             ),
             (
