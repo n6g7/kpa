@@ -8,6 +8,7 @@ pub mod proto;
 
 mod authz;
 mod copy;
+mod deadline;
 mod serve;
 #[cfg(test)]
 mod testing;

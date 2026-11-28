@@ -12,11 +12,12 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
 use super::Api;
+use super::deadline::{readable_by, write_all_by};
 use super::proto::{self, DecodeError, ProtocolError, Response};
 use crate::authn::Requester;
 use crate::authz;
@@ -30,9 +31,11 @@ use crate::socket::{self, Received};
 /// make the daemon hold.
 const MAX_REQUEST_LEN: usize = 64 * 1024;
 
-/// How long a client gets to send its request, and to take its response.
-/// An `unlock` can take much longer end to end — the user is typing — but
-/// that time is spent between the read and the write, not inside either.
+/// How long a client gets, in all, to send its request, and again to take
+/// its response. Each is one deadline taken before the first read or write,
+/// not a timeout that restarts with every byte that moves. An `unlock` can
+/// take much longer end to end — the user is typing — but that time is
+/// spent between the read and the write, not inside either.
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Connections handled at once; past this, new ones are refused by
@@ -80,17 +83,12 @@ pub fn serve(api: Arc<Api>, listener: UnixListener) {
         let Some(slot) = ConnectionSlot::acquire(&active) else {
             continue;
         };
-        if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err()
-            || stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
-        {
-            continue;
-        }
         let api = Arc::clone(&api);
         // On failure the closure — stream and slot with it — is dropped,
         // which closes the connection and releases the slot.
         let _ = thread::Builder::new().spawn(move || {
             let _slot = slot;
-            handle_connection(&api, stream, owner);
+            handle_connection(&api, stream, owner, IO_TIMEOUT);
         });
     }
 }
@@ -167,7 +165,10 @@ fn log_response(response: &Response) {
 /// size. A `list` response holds every entry's title, username and
 /// URL, and a buffer that grows while being filled frees an unwiped copy
 /// at each reallocation, and that copy would survive a lock.
-fn write_response(stream: &mut UnixStream, response: &Response) {
+///
+/// A client that doesn't take the whole response by `deadline` loses the
+/// rest of it.
+fn write_response(stream: &UnixStream, response: &Response, deadline: Instant) {
     let mut counter = ByteCounter(0);
     if serde_json::to_writer(&mut counter, response).is_err() {
         return;
@@ -177,7 +178,7 @@ fn write_response(stream: &mut UnixStream, response: &Response) {
         return;
     }
     buf.push(b'\n');
-    let _ = stream.write_all(&buf);
+    let _ = write_all_by(stream, &buf, deadline);
 }
 
 /// What `read_request` found on the socket.
@@ -196,19 +197,25 @@ enum RequestLine {
 }
 
 /// Read one request line into `buf`, which never grows, and the file
-/// descriptor sent with it if there is one.
+/// descriptor sent with it if there is one. The line has until `deadline`
+/// to arrive in full; past it, the read fails with `TimedOut`.
 ///
 /// Read straight from the socket rather than through a `BufReader`, which
 /// can't receive the descriptor that comes with the line. Whatever is read
 /// past the newline lands in `buf` too, and is ignored: a connection carries
 /// one request.
-fn read_request(stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<RequestLine> {
+fn read_request(
+    stream: &UnixStream,
+    buf: &mut [u8],
+    deadline: Instant,
+) -> std::io::Result<RequestLine> {
     let mut len = 0;
     let mut fd = None;
     loop {
         if len == buf.len() {
             return Ok(RequestLine::TooLong);
         }
+        readable_by(stream, deadline)?;
         let received = match socket::recv_with_fd(stream, &mut buf[len..]) {
             Ok(received) => received,
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -249,9 +256,10 @@ fn read_request(stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<RequestL
 /// A request that doesn't fit — longer than `MAX_REQUEST_LEN` without a
 /// newline, or not UTF-8 — gets `malformed_request`, and so does one that
 /// comes with more than one file descriptor, or with one that isn't a
-/// terminal. A socket error, or a
-/// client that sends nothing within `IO_TIMEOUT`, just drops the
-/// connection; there's no one left to tell. The reply is written before
+/// terminal. A socket error, or a client that hasn't sent its whole line
+/// within `io_timeout`, just drops the connection; there's no
+/// one left to tell. The response has `io_timeout` too, from when it is
+/// ready. The reply is written before
 /// the event is logged, so a slow or broken stdout can't cost the client
 /// its answer.
 ///
@@ -259,7 +267,7 @@ fn read_request(stream: &UnixStream, buf: &mut [u8]) -> std::io::Result<RequestL
 /// dropped without a reply and without being read from. The socket's mode
 /// already keeps other users out; this check covers a mode that ever
 /// came out wrong.
-fn handle_connection(api: &Api, mut stream: UnixStream, owner: u32) {
+fn handle_connection(api: &Api, stream: UnixStream, owner: u32, io_timeout: Duration) {
     let mut requester = match Requester::of(&stream) {
         Ok(requester) if authz::may_connect(&requester, owner) => requester,
         Ok(requester) => {
@@ -287,7 +295,7 @@ fn handle_connection(api: &Api, mut stream: UnixStream, owner: u32) {
 
     let response = {
         let mut buf = vec![0u8; MAX_REQUEST_LEN];
-        match read_request(&stream, &mut buf) {
+        match read_request(&stream, &mut buf, Instant::now() + io_timeout) {
             Ok(RequestLine::Closed) | Err(_) => return,
             Ok(RequestLine::TooLong | RequestLine::TooManyFds) => {
                 Response::Protocol(ProtocolError::MalformedRequest)
@@ -312,7 +320,7 @@ fn handle_connection(api: &Api, mut stream: UnixStream, owner: u32) {
     // already in the log. (Logging after the write lets a client that
     // reads the log right after its reply, as the tests do, miss the line.)
     log_response(&response);
-    write_response(&mut stream, &response);
+    write_response(&stream, &response, Instant::now() + io_timeout);
 }
 
 /// The response to the request on `line`, from `requester`.
@@ -335,6 +343,7 @@ mod tests {
 
     use super::super::testing::fixture_with;
     use super::*;
+    use crate::databases::testing::TestEntry;
     use crate::prompt::testing::pty;
 
     /// Send `request` bytes to `handle_connection` over a socket pair and
@@ -354,13 +363,103 @@ mod tests {
         let owner = crate::authn::process_uid();
         let (ours, theirs) = UnixStream::pair().expect("socket pair");
         thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&fx.api, theirs, owner));
+            scope.spawn(|| handle_connection(&fx.api, theirs, owner, IO_TIMEOUT));
             send(&ours);
             let _ = ours.shutdown(std::net::Shutdown::Write);
             let mut reply = String::new();
             let _ = (&ours).read_to_string(&mut reply);
             reply
         })
+    }
+
+    /// The whole exchange, scaled down from `IO_TIMEOUT`: the tests below
+    /// feed or drain a connection at one step per half of it.
+    const SHORT: Duration = Duration::from_millis(400);
+
+    /// How far past a deadline a connection may be held before the thread
+    /// serving it is taken to have missed it.
+    const MARGIN: Duration = Duration::from_millis(500);
+
+    /// A client that sends one byte every half `io_timeout` never finishes
+    /// its request inside the deadline, and is dropped at the deadline, not
+    /// held as long as it keeps sending.
+    #[test]
+    fn a_client_trickling_its_request_is_dropped_at_the_deadline() {
+        let fx = fixture_with(&[], "");
+        let owner = crate::authn::process_uid();
+        let (ours, theirs) = UnixStream::pair().expect("socket pair");
+        let started = Instant::now();
+
+        let (held, reply) = thread::scope(|scope| {
+            let handler = scope.spawn(|| {
+                handle_connection(&fx.api, theirs, owner, SHORT);
+                started.elapsed()
+            });
+            for byte in STATUS {
+                if (&ours).write_all(&[*byte]).is_err() {
+                    break;
+                }
+                thread::sleep(SHORT / 2);
+            }
+            let held = handler.join().expect("the handler");
+            let mut reply = String::new();
+            let _ = (&ours).read_to_string(&mut reply);
+            (held, reply)
+        });
+
+        assert!(
+            held < SHORT + MARGIN,
+            "the connection was held for {held:?}"
+        );
+        assert!(
+            reply.is_empty(),
+            "a request that never arrived got {reply:?}"
+        );
+    }
+
+    /// A client that reads its response a little at a time, never stalling
+    /// for a whole `io_timeout`, can't hold the connection past the deadline
+    /// either, however big the response is.
+    #[test]
+    fn a_client_trickling_its_response_is_dropped_at_the_deadline() {
+        let fx = fixture_with(&["personal"], "");
+        fx.databases.install_for_test(
+            "personal",
+            (0..20_000)
+                .map(|n| TestEntry::new(&format!("entry number {n}")))
+                .collect(),
+        );
+        let owner = crate::authn::process_uid();
+        let (ours, theirs) = UnixStream::pair().expect("socket pair");
+        (&ours)
+            .write_all(b"{\"v\":2,\"op\":\"list\",\"db\":\"personal\"}\n")
+            .expect("send");
+        let started = Instant::now();
+
+        let (held, read) = thread::scope(|scope| {
+            let handler = scope.spawn(|| {
+                handle_connection(&fx.api, theirs, owner, SHORT);
+                started.elapsed()
+            });
+            let mut read = 0;
+            let mut chunk = [0u8; 128 * 1024];
+            // A little every half deadline, for long enough that a handler
+            // that doesn't stop is seen not to.
+            while started.elapsed() < SHORT + MARGIN * 4 {
+                thread::sleep(SHORT / 2);
+                match (&ours).read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => read += n,
+                }
+            }
+            (handler.join().expect("the handler"), read)
+        });
+
+        assert!(
+            held < SHORT + MARGIN,
+            "the connection was held for {held:?}"
+        );
+        assert!(read < 1 << 20, "{read} bytes were read before the cut");
     }
 
     #[test]
@@ -431,7 +530,7 @@ mod tests {
                     thread::sleep(Duration::from_millis(20));
                 }
             });
-            read_request(&theirs, &mut buf)
+            read_request(&theirs, &mut buf, Instant::now() + IO_TIMEOUT)
         });
         (read, buf)
     }
@@ -483,7 +582,7 @@ mod tests {
         let other = crate::authn::process_uid().wrapping_add(1);
 
         thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&fx.api, theirs, other));
+            scope.spawn(|| handle_connection(&fx.api, theirs, other, IO_TIMEOUT));
         });
         // The server closes with the request still unread, so the kernel may
         // reset the connection instead of ending it. Either way, no reply.
@@ -501,7 +600,7 @@ mod tests {
         let owner = crate::authn::process_uid();
 
         thread::scope(|scope| {
-            scope.spawn(|| handle_connection(&fx.api, theirs, owner));
+            scope.spawn(|| handle_connection(&fx.api, theirs, owner, IO_TIMEOUT));
         });
         let mut reply = String::new();
         ours.read_to_string(&mut reply).expect("read");

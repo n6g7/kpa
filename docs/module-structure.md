@@ -109,6 +109,7 @@ src/
       mod.rs            Api (what the handlers share) and the small handlers:
                         status, lock, list, ssh keys / pending / approve
       serve.rs          listener, connection cap, read one request, write one response
+      deadline.rs       reads and writes that end by one deadline
       unlock.rs         the unlock handler: begin, choose where to ask, ask, finish
       copy.rs           the copy handler, and CopyState (ends offers on lock)
       authz.rs          authorize_copy, choose_unlock_prompt

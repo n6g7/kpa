@@ -20,9 +20,10 @@ no meaningful round-trip cost) that there's no performance reason to keep a
 connection open across multiple requests either. A client that wants to
 issue several ops just opens several connections.
 
-A request line is capped at 64 KiB and must arrive within 5 seconds; a line
-over the cap is answered `malformed_request`, and a connection that sends
-nothing is dropped. Only the daemon's own uid may connect.
+A request line is capped at 64 KiB and must arrive in full within 5 seconds
+in all, however it is paced, and a client has the same 5 seconds in all to
+take the response; a line over the cap is answered `malformed_request`, and a
+connection that sends nothing, or too slowly, is dropped. Only the daemon's own uid may connect.
 
 ## Version
 
