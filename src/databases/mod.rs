@@ -43,7 +43,7 @@ pub use vault::AttachmentView as Attachment;
 pub mod fields {
     pub use keepass::db::fields::{NOTES, PASSWORD, URL, USERNAME};
 }
-pub use vault::{EntrySummary, VaultError};
+pub use vault::{EntrySummary, VaultError, VaultFile};
 
 /// Every configured database and the lifecycle around it. `Send + Sync`,
 /// built once, shared as an `Arc`.

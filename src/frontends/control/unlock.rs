@@ -93,6 +93,14 @@ fn unlock_error(name: &str, err: VaultError) -> UnlockError {
         VaultError::WrongCredentials => UnlockError::WrongCredentials { db },
         VaultError::Corrupt(_) => UnlockError::Corrupt { db },
         VaultError::UnsupportedFormat => UnlockError::UnsupportedFormat { db },
+        // The text names which file and the ceiling, never anything from
+        // inside it.
+        refused @ (VaultError::NotRegular(_) | VaultError::TooLarge(_)) => {
+            UnlockError::FileRefused {
+                db,
+                detail: refused.to_string(),
+            }
+        }
         VaultError::Io(_) => UnlockError::Io { db },
         VaultError::Changed => UnlockError::Stale { db },
     }
@@ -106,7 +114,7 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use crate::databases::{Begin, BeginError};
+    use crate::databases::{Begin, BeginError, VaultFile};
     use crate::display_session::DisplaySession;
     use crate::frontends::control::testing::{
         Fixture, SESSION, desktop, fixture, outside, requester_in,
@@ -154,6 +162,28 @@ mod tests {
             unlock_error("personal", VaultError::UnsupportedFormat),
             UnlockError::UnsupportedFormat { db } if db == "personal"
         ));
+    }
+
+    #[test]
+    fn a_file_kpa_refuses_to_read_says_which_and_why() {
+        for (err, detail) in [
+            (
+                VaultError::NotRegular(VaultFile::Database),
+                "database file is not a regular file",
+            ),
+            (
+                VaultError::TooLarge(VaultFile::Keyfile),
+                "keyfile is larger than 16 MiB",
+            ),
+        ] {
+            assert_eq!(
+                unlock_error("personal", err),
+                UnlockError::FileRefused {
+                    db: "personal".to_string(),
+                    detail: detail.to_string()
+                }
+            );
+        }
     }
 
     fn cancelled() -> Result<String, UnlockError> {

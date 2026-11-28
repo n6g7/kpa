@@ -52,6 +52,13 @@ pub enum UnlockError {
     UnsupportedFormat {
         db: String,
     },
+    /// The database file or its keyfile isn't a regular file, or is larger
+    /// than kpa reads. Reported as `corrupt`, with a `detail` that says
+    /// which and why.
+    FileRefused {
+        db: String,
+        detail: String,
+    },
     Io {
         db: String,
     },
@@ -97,6 +104,9 @@ impl UnlockError {
             }
             UnlockError::NotFound { db } => ErrorFields::new(ErrorCode::NotFound).db(db),
             UnlockError::Corrupt { db } => ErrorFields::new(ErrorCode::Corrupt).db(db),
+            UnlockError::FileRefused { db, detail } => ErrorFields::new(ErrorCode::Corrupt)
+                .db(db)
+                .detail(detail.as_str()),
             UnlockError::UnsupportedFormat { db } => ErrorFields::new(ErrorCode::Corrupt)
                 .db(db)
                 .detail("not a KDBX3 or KDBX4 file; kpa reads only those"),

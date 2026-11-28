@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kpa::config::DatabaseConfig;
-use kpa::databases::{Begin, Databases, OpenError, UnlockFailure, Unlocking, VaultError};
+use kpa::databases::{
+    Begin, Databases, OpenError, UnlockFailure, Unlocking, VaultError, VaultFile,
+};
 use zeroize::Zeroizing;
 
 /// The one database, `work`, at `path`, locked.
@@ -318,6 +320,125 @@ fn a_pre_release_kdbx_file_is_refused() {
         VaultError::UnsupportedFormat => {}
         other => panic!("expected UnsupportedFormat, got a different error: {other}"),
     }
+}
+
+/// `vault_error`, with a deadline: an unlock that blocks is a failure of the
+/// test, not a hang of the suite (the blocked thread is left behind).
+fn vault_error_at_once(
+    path: &Path,
+    password: Option<&str>,
+    keyfile: Option<PathBuf>,
+) -> VaultError {
+    let (path, password) = (path.to_path_buf(), password.map(str::to_string));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(vault_error(&path, password.as_deref(), keyfile));
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the unlock should have been refused at once")
+}
+
+fn fifo_at(path: &Path) {
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )
+    .expect("failed to make a fifo");
+}
+
+/// A sparse file of `len` bytes: it costs no disk, and reading it would cost
+/// `len` bytes of memory.
+fn sparse_file(path: &Path, len: u64) {
+    fs::File::create(path)
+        .and_then(|file| file.set_len(len))
+        .expect("failed to make a sparse file");
+}
+
+/// A FIFO at the database path is refused at once. Opened for reading, it
+/// would block until some writer turned up, holding the database's one
+/// unlock for good: the database is unlockable again once the path is a
+/// vault.
+#[test]
+fn a_fifo_at_the_database_path_is_refused_at_once_and_frees_the_claim() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let path = dir.path().join("vault.kdbx");
+    fifo_at(&path);
+
+    let err = vault_error_at_once(&path, Some(common::PASSWORD), None);
+    assert!(
+        matches!(err, VaultError::NotRegular(VaultFile::Database)),
+        "{err}"
+    );
+
+    fs::remove_file(&path).expect("remove the fifo");
+    fs::copy(common::password_db(), &path).expect("copy a vault over it");
+    let databases = unlocked_at(&path, None);
+    assert!(databases.open("work").is_ok());
+}
+
+#[test]
+fn a_directory_or_a_device_is_not_a_database() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let err = vault_error_at_once(dir.path(), Some(common::PASSWORD), None);
+    assert!(
+        matches!(err, VaultError::NotRegular(VaultFile::Database)),
+        "{err}"
+    );
+
+    let err = vault_error_at_once(Path::new("/dev/zero"), Some(common::PASSWORD), None);
+    assert!(
+        matches!(err, VaultError::NotRegular(VaultFile::Database)),
+        "{err}"
+    );
+}
+
+/// A file one byte over the ceiling is refused from its size, without being
+/// read; one at the ceiling is read (and found not to be a database).
+#[test]
+fn a_database_file_over_the_ceiling_is_refused_unread() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let path = dir.path().join("big.kdbx");
+    let limit = VaultFile::Database.limit();
+
+    sparse_file(&path, limit + 1);
+    let err = vault_error_at_once(&path, Some(common::PASSWORD), None);
+    assert!(
+        matches!(err, VaultError::TooLarge(VaultFile::Database)),
+        "{err}"
+    );
+
+    sparse_file(&path, limit);
+    match vault_error_at_once(&path, Some(common::PASSWORD), None) {
+        VaultError::Corrupt(_) => {}
+        other => panic!("a file at the ceiling is read, got: {other}"),
+    }
+}
+
+/// The same for the keyfile, which `keepass` would read to its end.
+#[test]
+fn a_keyfile_that_is_not_a_regular_file_or_over_the_ceiling_is_refused() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let keyfile = dir.path().join("key");
+    let db = common::keyfile_db();
+
+    fifo_at(&keyfile);
+    let err = vault_error_at_once(&db, None, Some(keyfile.clone()));
+    assert!(
+        matches!(err, VaultError::NotRegular(VaultFile::Keyfile)),
+        "{err}"
+    );
+    fs::remove_file(&keyfile).expect("remove the fifo");
+
+    sparse_file(&keyfile, VaultFile::Keyfile.limit() + 1);
+    let err = vault_error_at_once(&db, None, Some(keyfile.clone()));
+    assert!(
+        matches!(err, VaultError::TooLarge(VaultFile::Keyfile)),
+        "{err}"
+    );
 }
 
 /// Copies the password fixture into `dir` with one bit flipped in the
