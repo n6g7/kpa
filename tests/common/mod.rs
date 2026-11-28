@@ -299,7 +299,7 @@ impl InProcessDaemon {
                 std::thread::spawn(move || {
                     loop {
                         std::thread::sleep(tick);
-                        databases.expire_idle(std::time::Instant::now());
+                        databases.expire_idle(kpa::clock::Moment::now());
                     }
                 });
             }

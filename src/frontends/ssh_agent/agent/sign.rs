@@ -344,6 +344,7 @@ mod tests {
 
     use super::super::request::sign_line;
     use super::*;
+    use crate::clock::Moment;
     use crate::config::{SshKeyConfig, SshKeyConfirm};
     use crate::databases::testing::PASSWORD;
     use crate::display_session::DisplaySession;
@@ -1496,7 +1497,7 @@ mod tests {
         let key = test_key(1);
         let fx = Fixture::unlocked(&key, SshKeyConfirm::Never);
         fx.confirms.push(Step::allow());
-        let installed = Instant::now();
+        let installed = Moment::now();
         std::thread::sleep(Duration::from_millis(5));
 
         assert!(signed(&forwarded_login(
@@ -1591,7 +1592,7 @@ mod tests {
     fn a_local_signature_resets_the_idle_timer() {
         let key = test_key(1);
         let fx = Fixture::unlocked(&key, SshKeyConfirm::Never);
-        let installed = Instant::now();
+        let installed = Moment::now();
         std::thread::sleep(Duration::from_millis(5));
 
         assert!(signed(&sign(&fx, &key)));
@@ -1599,7 +1600,7 @@ mod tests {
         // Idle for `idle` as of the unlock; the signature came later.
         fx.databases.expire_idle(installed + IDLE);
         assert!(fx.is_unlocked(), "the signature didn't reset the timer");
-        fx.databases.expire_idle(Instant::now() + IDLE);
+        fx.databases.expire_idle(Moment::now() + IDLE);
         assert!(!fx.is_unlocked());
     }
 

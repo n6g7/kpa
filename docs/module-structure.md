@@ -13,8 +13,9 @@ exports.
 ## The subsystems
 
 Each row lists what the subsystem uses from the rest of kpa, besides `log`,
-`output` and `cancel` (logging, terminal-safe text, cancel tokens), which
-any subsystem may use and which use nothing in kpa. Read together, the rows
+`output`, `cancel` and `clock` (logging, terminal-safe text, cancel tokens,
+time that counts sleep), which any subsystem may use and which use nothing in
+kpa. Read together, the rows
 are the dependency graph; there is no arrow between two front ends.
 
 | Subsystem | Is | Uses |
@@ -133,7 +134,7 @@ src/
   display_session.rs    DisplaySession, DisplayWriter, DisplayHandle
   clipboard/            mod.rs (Backend, Offer), and wayland/
   authn.rs  authz.rs  prompt/  config.rs  paths.rs  socket.rs
-  cancel.rs  log.rs  output/
+  cancel.rs  clock.rs  log.rs  output/
 tests/                  integration tests, each named for what it drives
                         (control.rs, databases.rs, logind.rs, ssh_agent_serve.rs, ...)
 fuzz/                   the fuzz targets, their own package

@@ -6,7 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::testing::{PASSWORD, TestEntry, build};
 use super::vault::{self, Fingerprint};
@@ -17,6 +17,7 @@ use super::{
 use zeroize::Zeroizing;
 
 use crate::cancel::CancelToken;
+use crate::clock::Moment;
 use crate::config::DatabaseConfig;
 
 const HOUR: Duration = Duration::from_secs(3600);
@@ -317,7 +318,7 @@ fn idle_expiry_is_per_database_and_touch_resets_it() {
     let databases = databases(&["work", "home"]);
     databases.install_for_test("work", vec![]);
     databases.install_for_test("home", vec![]);
-    let after_install = Instant::now();
+    let after_install = Moment::now();
 
     std::thread::sleep(Duration::from_millis(20));
     databases.open("home").ok().unwrap().touch();
@@ -331,7 +332,7 @@ fn idle_expiry_is_per_database_and_touch_resets_it() {
     assert!(!is_unlocked(&databases, "work"));
     assert!(is_unlocked(&databases, "home"));
 
-    databases.expire_idle(Instant::now() + HOUR + HOUR);
+    databases.expire_idle(Moment::now() + HOUR + HOUR);
     assert!(!databases.any_unlocked());
 }
 
@@ -339,7 +340,7 @@ fn idle_expiry_is_per_database_and_touch_resets_it() {
 fn the_idle_time_left_counts_down_from_the_last_activity_and_reading_it_resets_nothing() {
     let databases = databases(&["work"]);
     databases.install_for_test("work", vec![]);
-    let after_install = Instant::now();
+    let after_install = Moment::now();
 
     let open = databases.open("work").ok().unwrap();
     assert!(open.idle_left(after_install) <= HOUR);
@@ -357,11 +358,30 @@ fn the_idle_time_left_counts_down_from_the_last_activity_and_reading_it_resets_n
     assert!(!databases.any_unlocked());
 }
 
+/// A machine that sleeps through the whole timeout wakes with no awake
+/// time spent: the clock the timer reads has jumped by `idle_timeout` and
+/// nothing else has happened. That is idle time, and it locks.
+#[test]
+fn time_the_machine_spends_asleep_counts_toward_the_idle_timeout() {
+    let databases = databases(&["work"]);
+    databases.install_for_test("work", vec![]);
+    let at_sleep = Moment::now();
+    let on_waking = at_sleep + HOUR;
+
+    assert_eq!(
+        databases.open("work").ok().unwrap().idle_left(on_waking),
+        Duration::ZERO
+    );
+    databases.expire_idle(on_waking);
+
+    assert!(!databases.any_unlocked());
+}
+
 #[test]
 fn an_unlock_still_in_progress_is_not_idle_locked() {
     let databases = databases(&["work"]);
     let unlocking = started(&databases, "work");
-    databases.expire_idle(Instant::now() + HOUR + HOUR);
+    databases.expire_idle(Moment::now() + HOUR + HOUR);
     assert!(!unlocking.unlock_token().is_cancelled());
 }
 
@@ -405,7 +425,7 @@ fn observers_are_told_before_the_call_returns_in_every_kind_of_lock() {
     assert_eq!(told(), 1);
 
     databases.install_for_test("work", vec![]);
-    databases.expire_idle(Instant::now() + HOUR + HOUR);
+    databases.expire_idle(Moment::now() + HOUR + HOUR);
     assert_eq!(told(), 2);
 
     databases.install_for_test("work", vec![]);
@@ -604,7 +624,7 @@ fn a_stalled_stat_does_not_hold_up_the_locks() {
         let d = Arc::clone(&databases);
         assert!(promptly("any_unlocked", move || d.any_unlocked()), "{name}");
         let d = Arc::clone(&databases);
-        promptly("expire_idle", move || d.expire_idle(Instant::now()));
+        promptly("expire_idle", move || d.expire_idle(Moment::now()));
         let d = Arc::clone(&databases);
         promptly("lock_all", move || d.lock_all());
         let d = Arc::clone(&databases);

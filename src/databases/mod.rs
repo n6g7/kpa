@@ -24,12 +24,13 @@ mod unlock;
 mod vault;
 
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::cancel::{CancelSource, CancelToken};
+use crate::clock::Moment;
 use crate::config::DatabaseConfig;
 use crate::log;
 use vault::Fingerprint;
@@ -73,8 +74,9 @@ struct Loaded {
     db: keepass::Database,
     /// The file's fingerprint when `db` was read.
     stamp: Fingerprint,
-    /// Where this database's idle timer runs from.
-    last_activity: Instant,
+    /// Where this database's idle timer runs from, on a clock that counts
+    /// the machine's sleep.
+    last_activity: Moment,
 }
 
 impl Slot {
@@ -97,7 +99,7 @@ impl Slot {
         self.loaded = Some(Loaded {
             db,
             stamp,
-            last_activity: Instant::now(),
+            last_activity: Moment::now(),
         });
         true
     }
@@ -208,7 +210,7 @@ impl Databases {
     }
 
     /// Locks each unlocked database idle for `idle_timeout` as of `now`.
-    pub fn expire_idle(&self, now: Instant) {
+    pub fn expire_idle(&self, now: Moment) {
         let covered: Vec<Covered> = {
             let mut slots = self.slots();
             let mut covered = Vec::new();
@@ -307,7 +309,7 @@ impl Open<'_> {
 
     /// How long, as of `now`, before the core locks this database for being
     /// idle, if nothing uses it. A read: it doesn't reset the idle timer.
-    pub fn idle_left(&self, now: Instant) -> Duration {
+    pub fn idle_left(&self, now: Moment) -> Duration {
         self.databases
             .idle_timeout
             .saturating_sub(now.saturating_duration_since(self.loaded().last_activity))
@@ -317,7 +319,7 @@ impl Open<'_> {
     pub fn touch(&mut self) {
         let index = self.index;
         if let Some(loaded) = self.slots[index].loaded.as_mut() {
-            loaded.last_activity = Instant::now();
+            loaded.last_activity = Moment::now();
         }
     }
 

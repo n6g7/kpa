@@ -18,10 +18,11 @@ pub mod logind;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use self::logind::{Bus, Inhibitor};
 use crate::cancel::CancelToken;
+use crate::clock::Moment;
 use crate::databases::{Databases, Observer};
 use crate::display_session::{DisplaySession, DisplayWriter};
 use crate::log;
@@ -201,13 +202,14 @@ fn watch_idle(databases: &Databases, idle_timeout: Duration) {
     let tick = (idle_timeout / 10).clamp(Duration::from_millis(10), Duration::from_secs(1));
     loop {
         thread::sleep(tick);
-        databases.expire_idle(Instant::now());
+        databases.expire_idle(Moment::now());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Instant;
 
     use super::*;
     use crate::config::DatabaseConfig;
