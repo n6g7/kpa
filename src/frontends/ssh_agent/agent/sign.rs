@@ -1289,7 +1289,7 @@ mod tests {
         assert!(signed(&login(1)));
         assert!(signed(&login(2)));
 
-        let ask = "Approve use of key \"github\" on build-box to log in to \"git\"@github.com?";
+        let ask = "Approve use of key \"github\" on build-box to log in to git@github.com?";
         assert_eq!(fx.confirms.shown(), [ask, ask]);
         // Neither session's approval covers local use of the key.
         assert!(!approved(&fx, &key));
@@ -1709,10 +1709,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
 
         for (trusted, to) in [
-            (true, "to log in to \"git\"@build-box.example".to_string()),
+            (true, "to log in to git@build-box.example".to_string()),
             (
                 false,
-                format!("to log in as \"git\" to host key {}", fingerprint(&dest)),
+                format!("to log in as git to host key {}", fingerprint(&dest)),
             ),
         ] {
             let known_hosts = dir.path().join(format!("known_hosts-{trusted}"));

@@ -511,9 +511,11 @@ control, bidi and zero-width characters are written as `\uXXXX`. The prompts
 that ask about a key also cut each piece to the same length budget as its piece
 in the message; the message leaves a host after the first in `forwarding_chain`
 out when it has no room for it, and the data never does. Strings are not quoted
-for the sentence: a `"` or a `\` in a name, a user or a namespace is itself, as a
-JSON string holds it, where the message writes it `\"` or `\\` so none can end
-its own quotation.
+for the sentence: a `"` or a `\` in a key's name or a namespace is itself, as a
+JSON string holds it, where the message writes it `\"` or `\\` so neither can
+end its own quotation. Nor is a login's user escaped further: the message
+writes each of its characters that isn't an ASCII letter, digit, `.`, `_` or
+`-` as an escape, and the data holds the user as the other strings are.
 
 A program knows how it is asked from the setting it is configured in (`prompt`
 asks for a value it prints, `ssh_agent.confirm_prompt` for one of the lines on
